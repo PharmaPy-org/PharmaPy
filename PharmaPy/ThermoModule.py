@@ -6,12 +6,56 @@ Created on Sun Apr  5 17:28:24 2020
 """
 
 import json
+import pathlib
+from typing import Any, Dict, Sequence, Union
+
 import numpy as np
 import pandas as pd
-import pathlib
 
 
-def ParseDatabase(path_datafile, to_arrays=True):
+_DatabasePath = Union[str, pathlib.Path]
+
+
+def ParseDatabase(
+        path_datafile: Union[_DatabasePath, Sequence[_DatabasePath]],
+        to_arrays: bool = True) -> Dict[str, Any]:
+    """Parse one or more component-property JSON databases.
+
+    Parameters
+    ----------
+    path_datafile : str, pathlib.Path, or sequence of path-like
+        JSON database path or ordered paths to merge. Property values retain
+        the units and physical basis declared by their source database.
+    to_arrays : bool, optional
+        If True, homogeneous numeric properties are returned as float arrays;
+        non-numeric properties retain their list representation.
+
+    Returns
+    -------
+    dict
+        Property names mapped to arrays or lists. Numeric arrays preserve the
+        source property's units and basis; ``name_species`` contains component
+        identifiers [-].
+
+    Raises
+    ------
+    OSError
+        If a database path cannot be opened.
+    json.JSONDecodeError
+        If a database does not contain valid JSON.
+    KeyError
+        If a structured property lacks its required ``value`` field.
+    TypeError
+        If a structured property value cannot be converted to a float array.
+    OverflowError
+        If a numeric property lies outside the representable float range.
+
+    Notes
+    -----
+    Only ``ValueError`` indicates the established non-numeric-property case.
+    Structural and range errors propagate so malformed scientific data are not
+    silently returned on a different representation or basis.
+    """
     if isinstance(path_datafile, (list, tuple)):
         with open(path_datafile[0]) as file:
             original_data = json.load(file)
@@ -79,8 +123,8 @@ def ParseDatabase(path_datafile, to_arrays=True):
                 props = vals
             try:
                 props = np.array(props, dtype=float)
-            except:
-                pass
+            except ValueError:
+                pass  # non-numeric property (e.g. strings), keep as list
 
             dd_arrays[key] = props
 

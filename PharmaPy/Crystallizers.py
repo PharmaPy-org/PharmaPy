@@ -1,9 +1,6 @@
 # -*- coding: utf-8 -*-
 
 
-# import autograd.numpy as np
-
-
 from assimulo.solvers import CVode
 from assimulo.problem import Explicit_Problem
 
@@ -32,19 +29,9 @@ from matplotlib.colors import LightSource
 from scipy.optimize import newton
 
 import copy
+import inspect
 import string
-
-# try:
-#     from jax import jacfwd
-#     import jax.numpy as jnp
-#     # from autograd import jacobian as autojac
-#     # from autograd import make_jvp
-# except:
-#     print()
-#     print(
-#         'JAX is not available to perform automatic differentiation. '
-#         'Install JAX if supported by your operating system (Linux, Mac).')
-#     print()
+import warnings
 
 import numpy as np
 
@@ -52,77 +39,118 @@ eps = np.finfo(float).eps
 gas_ct = 8.314  # J/mol/K
 
 
+def _caller_stacklevel() -> int:
+    """Return the ``warnings.warn`` stacklevel of the nearest external caller.
+
+    A fixed ``stacklevel`` cannot be correct for a class hierarchy of varying
+    depth: ``BatchCryst`` and ``MSMPR`` call ``_BaseCryst.__init__`` directly,
+    while ``SemibatchCryst`` subclasses ``MSMPR`` and so sits one frame deeper.
+    Counting frames instead keeps a warning raised inside this module pointed at
+    the user code that constructed the unit operation.
+
+    Returns
+    -------
+    int
+        Stacklevel [-] identifying the first frame executing outside this
+        module, counted from the caller of this helper. Falls back to ``1``
+        when every frame belongs to this module.
+
+    Notes
+    -----
+    Frames are matched on the module globals rather than on ``__file__`` so the
+    comparison is unaffected by relative or absolute import paths.
+    """
+    frame = inspect.currentframe()
+    if frame is None:  # pragma: no cover - no frame support on this runtime
+        return 1
+
+    module_globals = globals()
+    level = 0
+    frame = frame.f_back  # caller of this helper, i.e. stacklevel 1
+    while frame is not None:
+        level += 1
+        if frame.f_globals is not module_globals:
+            return level
+        frame = frame.f_back
+
+    return 1
+
+
 class _BaseCryst:
-    """ Construct a Crystallizer Object
+    """Store shared configuration for crystallizer balance models.
 
-    Parameters
-    ----------
-    mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations
-    method : str
-        Choice of the numerical method. Options are: 'moments', '1D-FVM'
-    target_comp : str, list of strings
-        Name of the crystallizing compound(s) from .json file.
-    scale : float
-        Scaling factor by which crystal size distribution will be
-        multiplied.
-    vol_tank : TODO - Remove, it comes from Phases module.
-    controls : dict of dicts(funcs) (optional, default = None)
-        Dictionary with keys representing the state(e.g.'Temp') which is
-        controlled and the value indicating the function to use
-        while computing the variable. Functions are of the form
-        f(time) = state_value
-    adiabatic : bool (optional, default=True)
-        Boolean value indicating whether the heat transfer of
-        the crystallization is considered.
-    rad_zero : float (optional, default=TODO)
-        TODO Size of the first bin of the CSD discretization [m]
-    reset_states : bool (optional, default = False)
-        Boolean value indicating whether the states should be reset
-        before simulation
-    h_conv : float (optional, default = TODO) (maybe remove?)
-        TODO
-    vol_ht : float (optional, default = TODO)
-        TODO Volume of the cooling jacket [m^3]
-    basis : str (optional, default = T0DO)
-        TODO Options :'massfrac', 'massconc'
-    jac_type : str
-        TODO Options: 'AD'
-    state_events : lsit of dict(s)
-        list of dictionaries, each one containing the specification of a
-        state event
-    param_wrapper : callable (optional, default = None)
-        function with the signature
-
-            param_wrapper(states, sens)
-
-        Useful when the parameter estimation problem is a function of the
-        states y -h(y)- rather than y itself.
-
-        'states' is a DynamicResult object and 'sens' is a dictionary
-        that contains N_y number of sensitivity arrays, representing
-        time-depending sensitivities. Each array in sens has dimensions
-        num_times x num_params. 'param_wrapper' has to return two outputs,
-        one array containing h(y) and list of arrays containing
-        sens(h(y))
+    Subclasses provide batch, semibatch, and continuous material and energy
+    balances. The base class retains the selected concentration basis and
+    numerical discretization and configures sensitivity callbacks when a
+    solver problem is built. Automatic-differentiation callbacks are not
+    currently implemented, so requests for them use finite differences.
     """
     np = np
-    # @decor_states
-    
+
     def __init__(self, mask_params,
                  method, target_comp, scale, vol_tank, controls,
                  adiabatic, rad_zero,
                  reset_states,
                  h_conv, vol_ht, basis, jac_type,
                  state_events, param_wrapper):
+        """Initialize crystallizer model and numerical configuration.
 
+        Parameters
+        ----------
+        mask_params : sequence of bool or None
+            Mask selecting active kinetic parameters [-].
+        method : {'moments', '1D-FVM'}
+            Crystal-size-distribution discretization method.
+        target_comp : str or sequence of str
+            Component name or names represented by the crystallizing solid.
+        scale : float
+            Crystal-size-distribution scaling factor [-].
+        vol_tank : float or None
+            Initial vessel volume [m**3], or None to obtain it from the phase.
+        controls : dict or None
+            Controlled-state callables. Each callable must return the units of
+            its controlled state, such as temperature [K].
+        adiabatic : bool
+            If True, exclude utility heat transfer while retaining the vessel
+            energy balance.
+        rad_zero : float
+            Lower boundary of the first crystal-size bin [m].
+        reset_states : bool
+            If True, reset model states before a subsequent simulation.
+        h_conv : float
+            Vessel-side convective heat-transfer coefficient [W/m**2/K].
+        vol_ht : float or None
+            Cooling-jacket volume [m**3]. Retained for constructor
+            compatibility; current subclasses derive jacket volume internally.
+        basis : {'mass_conc', 'mass_frac'}
+            Composition basis, respectively [kg/m**3] or [kg/kg].
+        jac_type : {'finite_diff', 'analytical', 'AD', None}
+            Sensitivity Jacobian mode. ``'AD'`` currently warns and selects
+            ``'finite_diff'`` because AD callbacks are unavailable.
+        state_events : sequence of dict or None
+            State-event specifications; event values use the units of their
+            associated model states.
+        param_wrapper : callable or None
+            Transformation accepting a ``DynamicResult`` and sensitivities
+            with shape ``(num_times, num_params)`` in state units per parameter
+            unit, and returning transformed states and sensitivities on the
+            same declared basis.
+
+        Warns
+        -----
+        RuntimeWarning
+            If ``jac_type='AD'`` is requested; finite-difference sensitivity
+            Jacobians are configured instead.
+        """
         if jac_type == 'AD':
-            try:
-                import jax.numpy as np
-                _BaseCryst.np = np
-            except:
-                pass
+            warnings.warn(
+                "Automatic-differentiation Jacobian callbacks are not "
+                "available; using finite-difference sensitivities with "
+                "NumPy.",
+                RuntimeWarning,
+                stacklevel=_caller_stacklevel(),
+            )
+            jac_type = 'finite_diff'
 
         self.distributed_uo = False
         self.mask_params = mask_params
@@ -680,16 +708,6 @@ class _BaseCryst:
 
         return jac_params
 
-    # def jac_states_ad(self, time, states, params):
-    #     def wrap_states(st): return self.unit_model(time, st, params)
-    #     jac_states = jacfwd(wrap_states)(states)
-
-    #     return jac_states
-
-    # def jac_params_ad(self, time, states, params):
-    #     def wrap_params(theta): return self.unit_model(time, states, theta)
-    #     jac_params = jacfwd(wrap_params)(params)
-
         return jac_params
 
     def rhs_sensitivity(self, time, states, sens, params):
@@ -706,6 +724,31 @@ class _BaseCryst:
 
     def set_ode_problem(self, eval_sens, states_init, params_mergd,
                         jacv_prod):
+        """Build the explicit Assimulo problem and sensitivity callbacks.
+
+        Parameters
+        ----------
+        eval_sens : bool
+            If True, configure state and parameter sensitivity callbacks.
+        states_init : numpy.ndarray
+            Initial model state vector [state-dependent units].
+        params_mergd : numpy.ndarray
+            Active kinetic parameter vector [parameter-dependent units].
+        jacv_prod : bool
+            If True, configure the Jacobian-vector product for a finite-volume
+            model without sensitivity evaluation.
+
+        Returns
+        -------
+        assimulo.problem.Explicit_Problem
+            ODE problem carrying the selected state and sensitivity callbacks.
+
+        Raises
+        ------
+        NameError
+            If ``jac_type`` is not ``'finite_diff'``, ``'analytical'``, or
+            None after constructor normalization.
+        """
         if eval_sens:
             problem = Explicit_Problem(self.unit_model, states_init,
                                        t0=self.elapsed_time,
@@ -714,13 +757,6 @@ class _BaseCryst:
             if self.jac_type == 'finite_diff':
                 self.jac_states_fn = self.jac_states_numerical
                 self.jac_params_fn = self.jac_params_numerical
-
-                problem.jac = self.jac_states_fn
-                problem.rhs_sens = self.rhs_sensitivity
-
-            elif self.jac_type == 'AD':
-                self.jac_states_fn = self.jac_states_ad
-                self.jac_params_fn = self.jac_params_ad
 
                 problem.jac = self.jac_states_fn
                 problem.rhs_sens = self.rhs_sensitivity

@@ -13,6 +13,7 @@ from matplotlib.patches import Ellipse, Rectangle
 import pandas as pd
 from itertools import combinations
 import time
+import warnings
 
 
 class ParallelProblem:
@@ -393,36 +394,85 @@ class StatisticsClass:
 
         return y_boot
 
-    def bootstrap_params(self, num_samples=100):
-        y_samples = self.get_bootsamples(num_samples)
+    def bootstrap_params(self, num_samples: int = 100) -> np.ndarray:
+        """Estimate parameters for residual-bootstrap response samples.
+
+        Parameters
+        ----------
+        num_samples : int, optional
+            Number of bootstrap datasets and optimization runs.
+
+        Returns
+        -------
+        numpy.ndarray
+            Estimated parameters with shape ``(num_samples, num_params)`` and
+            the physical units configured for each model parameter. A row is
+            NaN when the optimizer encounters a singular linear system.
+
+        Warns
+        -----
+        RuntimeWarning
+            If NumPy reports a singular linear-algebra system during an
+            optimization; the warning includes the sample index and original
+            diagnostic.
+
+        Raises
+        ------
+        Exception
+            Any optimizer exception other than ``numpy.linalg.LinAlgError``.
+
+        Notes
+        -----
+        The package's Levenberg-Marquardt implementation uses
+        ``numpy.linalg.solve`` and ``numpy.linalg.inv``. Their documented
+        ``LinAlgError`` is the only failure treated as a recoverable numerical
+        bootstrap sample; programming and model errors propagate unchanged.
+
+        This recovery is therefore scoped to ``opt_method='LM'``.
+        ``ParameterEstimation.optimize_fn`` also accepts ``'IPOPT'``, whose
+        numerical failures surface from cyipopt rather than as a
+        ``LinAlgError``. Under that method a failed sample aborts the whole
+        bootstrap run instead of recording a NaN row.
+        """
+        y_samples = self.get_bootsamples(
+            num_samples)  # [response-dependent units]
 
         # Run parameter estimation
-        boot_params = np.zeros((num_samples, self.inst.num_params))
+        boot_params = np.zeros(
+            (num_samples, self.inst.num_params))  # [model-parameter units]
 
-        tic = time.time()
+        tic = time.time()  # [s]
         for ind in range(num_samples):
             # Update bootstraped data for all the experimental runs
-            self.inst.y_data = [y[ind] for y in y_samples]
+            self.inst.y_data = [
+                y[ind] for y in y_samples]  # [response-dependent units]
 
             # Optimize
             try:
-                params, hess_inv, info = self.inst.optimize_fn(
+                params, _, _ = self.inst.optimize_fn(
                     method=self.inst.opt_method,
                     verbose=False, store_iter=False,
-                    optim_options=self.inst.optim_options)
-            except:
-                print('Optimization failed.')
-                params = [np.nan] * self.inst.num_params
+                    optim_options=self.inst.optim_options
+                )  # [model-parameter units]
+            except np.linalg.LinAlgError as exc:
+                warnings.warn(
+                    "Bootstrap optimization failed for sample {}: {}".format(
+                        ind, exc),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                params = [
+                    np.nan] * self.inst.num_params  # [model-parameter units]
 
             # Store
             boot_params[ind] = params
 
-        toc = time.time()
+        toc = time.time()  # [s]
 
-        self.boot_params = boot_params
+        self.boot_params = boot_params  # [model-parameter units]
         self.num_samples = num_samples
 
-        elapsed = toc - tic
+        elapsed = toc - tic  # [s]
 
         print()
         print('Bootstrap time: {:.2f} s'.format(elapsed))
