@@ -13,7 +13,7 @@ from PharmaPy.Errors import PharmaPyTypeError
 # from autograd import numpy as np
 
 gas_ct = 8.314  # J/mol/K
-eps = np.finfo(float).eps
+eps = np.finfo(float).eps  # machine-epsilon floor for singularities
 
 
 def cryst_mechanism(sup_sat, moms, temp, temp_ref, params, reformulate, kv,
@@ -177,8 +177,9 @@ class RxnKinetics:
         order of the names in 'partic_species' is that of the columns of
         'stoichiometric_matrix'. The passed names must match those
         in the pure-component json file
-    keq_params : TYPE, optional
-        DESCRIPTION. The default is None.
+    keq_params : array-like, optional
+        Equilibrium constants at ``tref_hrxn`` [-]. If provided, reversible
+        rates are evaluated as forward minus reverse terms.
     params_f : numpy array, optional
         parameters for the concentration-dependent term f\ :sub:`2`.
         If no custom model is provided through the 'kinetic_model'
@@ -199,10 +200,10 @@ class RxnKinetics:
         We recommend to use this reparametrization when performing
         parameter estimation with datasets at different temperatures.
         The default is False.
-    delta_hrxn : float, optional
-        DESCRIPTION. The default is 0.
+    delta_hrxn : float or array-like, optional
+        Heat of reaction at ``tref_hrxn`` [J/mol_rxn]. The default is 0.
     tref_hrxn : float, optional
-        DESCRIPTION. The default is 298.15.
+        Reference temperature for ``delta_hrxn`` [K]. The default is 298.15.
 
     kinetic_model : callable, optional  
         kinetic model to be used to compute f\ :sub:`2`. It must have
@@ -210,10 +211,13 @@ class RxnKinetics:
 
             >>> kin_model(conc, params, *args). The default is None.
 
-    df_dstates : TYPE, optional
-        DESCRIPTION. The default is None.
-    df_dtheta : TYPE, optional
-        DESCRIPTION. The default is None.
+    df_dstates : callable, optional
+        Derivative of a user-defined concentration term with respect to
+        concentrations. The expected units are those of ``kinetic_model``
+        divided by [mol/L]. The default is None.
+    df_dtheta : callable, optional
+        Derivative of a user-defined concentration term with respect to its
+        parameters. The default is None.
 
     Returns
     -------
@@ -521,6 +525,26 @@ class RxnKinetics:
         return f_term
 
     def equilibrium_model(self, conc, temp, deltah_rxn):
+        """Compute reversible concentration terms for each reaction.
+
+        Parameters
+        ----------
+        conc : array-like
+            Participating species molar concentrations [mol/L]. Accepts shape
+            ``(n_species,)`` or ``(n_times, n_species)``.
+        temp : float or array-like
+            Temperature [K]. Array inputs are interpreted along the same time
+            axis as 2-D ``conc``.
+        deltah_rxn : array-like
+            Heat of reaction at ``temp`` [J/mol_rxn].
+
+        Returns
+        -------
+        overall_rate : ndarray
+            Reversible concentration term, ``forward - reverse``. Multiplying
+            by ``temp_term(temp)`` gives per-reaction rates whose time basis is
+            set by ``k_params``.
+        """
         is_product = self.stoich_matrix > 0
         orders = abs(is_product * self.stoich_matrix)
         conc = np.asarray(conc)
@@ -554,12 +578,105 @@ class RxnKinetics:
         return overall_rate
 
     def elem_df_dstates(self, conc):
+        """Differentiate elementary concentration terms with respect to states.
 
+        Parameters
+        ----------
+        conc : array-like
+            Participating species molar concentrations [mol/L]. Accepts shape
+            ``(n_species,)`` or ``(n_times, n_species)``.
+
+        Returns
+        -------
+        df_dconc : ndarray
+            Derivative of the elementary concentration term for each reaction
+            with respect to each concentration. Units are concentration-term
+            units divided by [mol/L].
+
+        Notes
+        -----
+        Concentrations in derivative denominators are floored at
+        ``eps = np.finfo(float).eps``. This matches the concentration floor
+        used by ``elem_f_model`` before evaluating logarithms/powers and avoids
+        division by zero at depleted species concentrations.
+        """
+
+        conc = np.asarray(conc)
+        conc_safe = np.maximum(eps, conc)
         f_term = self.elem_f_model(conc, self.params_f)
 
-        df_dconc = f_term[..., np.newaxis] * self.params_f / (conc + eps)
+        if conc.ndim == 1:
+            conc_term = conc_safe
+        else:
+            conc_term = conc_safe[:, np.newaxis, :]
+
+        df_dconc = f_term[..., np.newaxis] * self.params_f / conc_term
 
         return df_dconc
+
+    def _reverse_df_dstates(self, conc, temp, deltah_rxn=None):
+        """Differentiate reversible reverse concentration terms.
+
+        Parameters
+        ----------
+        conc : array-like
+            Participating species molar concentrations [mol/L]. Accepts shape
+            ``(n_species,)`` or ``(n_times, n_species)``.
+        temp : float or array-like
+            Temperature [K].
+        deltah_rxn : array-like, optional
+            Heat of reaction at ``temp`` [J/mol_rxn]. If omitted, the reference
+            heat of reaction stored on the kinetics object is used.
+
+        Returns
+        -------
+        dr_dconc : ndarray
+            Derivative of the reverse concentration term with respect to each
+            concentration. Units are concentration-term units divided by
+            [mol/L].
+
+        Notes
+        -----
+        The same ``eps`` concentration floor used by ``elem_df_dstates`` is
+        applied to the reverse product term and derivative denominator. This
+        keeps depleted or slightly negative numerical states from producing
+        singular concentration derivatives.
+        """
+        is_product = self.stoich_matrix > 0
+        orders = abs(is_product * self.stoich_matrix)
+        conc = np.asarray(conc)
+        conc_safe = np.maximum(eps, conc)
+
+        if deltah_rxn is None:
+            deltah_rxn = self.delta_hrxn
+
+        keq_temp = self.equil_term(temp, deltah_rxn)
+        keq_temp[keq_temp == 0] = 1e20
+
+        if conc.ndim == 1:
+            r_term = np.zeros(self.num_rxns)
+            for ind in range(self.num_rxns):
+                r_term[ind] = np.prod(
+                    conc_safe**orders[ind]) / keq_temp[ind]
+
+            dr_dconc = r_term[:, np.newaxis] * orders / conc_safe
+        else:
+            n_conc = len(conc)
+            r_term = np.zeros((n_conc, self.num_rxns))
+            for ind in range(self.num_rxns):
+                if keq_temp.ndim == 1:
+                    keq_rxn = keq_temp[ind]
+                else:
+                    keq_rxn = keq_temp[:, ind]
+
+                r_term[:, ind] = np.prod(
+                    conc_safe**orders[ind], axis=1) / keq_rxn
+
+            dr_dconc = (
+                r_term[..., np.newaxis] * orders /
+                conc_safe[:, np.newaxis, :])
+
+        return dr_dconc
 
     def elem_df_dtheta(self, conc):
 
@@ -584,14 +701,50 @@ class RxnKinetics:
 
         return drate_dorder
 
-    def derivatives(self, conc, temp, dstates=True):
+    def derivatives(self, conc, temp, dstates=True, delta_hrxn=None):
+        """Calculate reaction-rate Jacobians.
+
+        Parameters
+        ----------
+        conc : array-like
+            Participating species molar concentrations [mol/L]. Accepts shape
+            ``(n_species,)`` or ``(n_times, n_species)``.
+        temp : float or array-like
+            Temperature [K].
+        dstates : bool, optional
+            If True, return derivatives with respect to concentrations. If
+            False, return derivatives with respect to kinetic parameters.
+            The default is True.
+        delta_hrxn : array-like, optional
+            Runtime heat of reaction [J/mol_rxn] used to evaluate reversible
+            equilibrium constants. If omitted, ``self.delta_hrxn`` is used.
+
+        Returns
+        -------
+        jac_states : ndarray
+            Species-rate Jacobian with respect to concentrations. Units are
+            species-rate units divided by [mol/L].
+        jac_params : ndarray
+            Species-rate Jacobian with respect to kinetic parameters. Returned
+            when ``dstates`` is False.
+        """
         temp_terms = self.temp_term(temp)
         f_terms = self.kinetic_model(conc, self.params_f, *self.args_kin)
 
         if dstates:  # --------------- wrt states
             df_dstates = self.df_dstates(conc, *self.args_kin)
-            dr_dstates = (temp_terms * df_dstates.T).T
-            jac_states = np.dot(self.normalized_stoich, dr_dstates)
+            if self.keq_params is not None:
+                df_dstates = df_dstates - self._reverse_df_dstates(
+                    conc, temp, delta_hrxn)
+
+            dr_dstates = df_dstates * temp_terms[..., np.newaxis]
+
+            if dr_dstates.ndim == 2:
+                jac_states = np.dot(self.normalized_stoich, dr_dstates)
+            else:
+                jac_states = np.einsum(
+                    'sr,trc->tsc', self.normalized_stoich, dr_dstates)
+
             return jac_states
         else:  # --------------- wrt parameters
             dk_dphi = self.dk_dkparams(temp).T
@@ -615,9 +768,40 @@ class RxnKinetics:
 
     def get_rxn_rates(self, conc, temp=298.15, overall_rates=True, jac=False,
                       delta_hrxn=None):
+        """Evaluate reaction rates or their concentration Jacobian.
+
+        Parameters
+        ----------
+        conc : array-like
+            Participating species molar concentrations [mol/L]. Accepts shape
+            ``(n_species,)`` or ``(n_times, n_species)``.
+        temp : float or array-like, optional
+            Temperature [K]. The default is 298.15.
+        overall_rates : bool, optional
+            If True, return species rates. If False, return per-reaction rates.
+            The default is True.
+        jac : bool, optional
+            If True, return the concentration Jacobian instead of rates. The
+            default is False.
+        delta_hrxn : array-like, optional
+            Runtime heat of reaction [J/mol_rxn] for reversible rate or
+            Jacobian evaluations.
+
+        Returns
+        -------
+        total_rates : ndarray
+            Species rates [mol/L/time] when ``overall_rates`` is True and
+            ``jac`` is False. The time unit is set by ``k_params``.
+        rxn_rates : ndarray
+            Per-reaction rates [mol/L/time] when ``overall_rates`` is False and
+            ``jac`` is False. The time unit is set by ``k_params``.
+        jac_states : ndarray
+            Species-rate Jacobian with respect to concentrations when ``jac``
+            is True. Units are species-rate units divided by [mol/L].
+        """
 
         if jac:
-            jac_states = self.derivatives(conc, temp)
+            jac_states = self.derivatives(conc, temp, delta_hrxn=delta_hrxn)
             return jac_states
 
         else:

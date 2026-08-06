@@ -428,19 +428,30 @@ class _BaseReactor:
         conc = states[:num_species]
         if self.isothermal:
             temp = self.Liquid_1.temp
-            jac_states = self.Kinetics.derivatives(conc, temp)
         else:
             temp = states[num_species]
             jac_states = np.zeros((num_states, num_states))
 
-            jac_r_kin = self.Kinetics.derivatives(conc, temp)
+        if self.Kinetics.keq_params is None:
+            deltah_rxn = None
+        else:
+            deltah_rxn = self.Liquid_1.getHeatOfRxn(
+                self.Kinetics.stoich_matrix, temp, self.mask_species,
+                self.Kinetics.delta_hrxn, self.Kinetics.tref_hrxn)
+
+        jac_r_kin = self.Kinetics.derivatives(
+            conc, temp, delta_hrxn=deltah_rxn)
+
+        if self.isothermal:
+            jac_states = jac_r_kin
+        else:
             jac_states[:num_states - 1, :num_states - 1] = jac_r_kin
 
         if wrt_states:
             return jac_states
         else:  # ---------- w.r.t params
             jac_theta_kin = self.Kinetics.derivatives(
-                conc, temp, dstates=False)
+                conc, temp, dstates=False, delta_hrxn=deltah_rxn)
 
             if self.isothermal:
                 jac_params = jac_theta_kin
