@@ -5,6 +5,8 @@ Created on Wed May 27 10:12:13 2020
 @author: dcasasor
 """
 
+from typing import Optional
+
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
 from PharmaPy.Interpolation import NewtonInterpolation
 from PharmaPy.Results import DynamicResult
@@ -239,6 +241,60 @@ class SolidStream(SolidPhase):
         # del self.mass
         # # del self.vol
         # del self.moles
+
+    def updatePhase(self, x_distrib: Optional[np.ndarray] = None,
+                    distrib: Optional[np.ndarray] = None,
+                    mass: Optional[float] = None,
+                    moments: Optional[np.ndarray] = None,
+                    mass_flow: Optional[float] = None) -> None:
+        """Update solid-stream state and synchronize flow-basis aliases.
+
+        Parameters
+        ----------
+        x_distrib : numpy.ndarray, optional
+            Crystal-size grid with shape ``(num_sizes,)`` [um].
+        distrib : numpy.ndarray, optional
+            Total-population number distribution with shape ``(num_sizes,)``
+            [#/um].
+        mass : float, optional
+            Solid mass flow represented by the inherited phase amount
+            attribute [kg/s].
+        moments : numpy.ndarray, optional
+            Total-population moments with shape ``(num_moments,)``. Entry
+            ``n`` has the inherited solid-phase unit [m**n], with order zero
+            a crystal count [-].
+        mass_flow : float, optional
+            Additive flow-oriented alias for ``mass`` [kg/s]. Specify at most
+            one of ``mass`` and ``mass_flow``.
+
+        Raises
+        ------
+        ValueError
+            If both ``mass`` and ``mass_flow`` are supplied.
+
+        Notes
+        -----
+        ``SolidStream`` preserves the historical ``SolidPhase`` amount
+        attributes as flow-rate storage. After the phase update, ``mass`` and
+        ``moles`` therefore map to ``mass_flow`` [kg/s] and ``mole_flow``
+        [mol/s], respectively. When both ``vol`` and an existing ``vol_flow``
+        alias are present, ``vol_flow`` is refreshed from ``vol`` [m**3/s].
+        """
+        if mass is not None and mass_flow is not None:
+            raise ValueError("Specify either 'mass' or 'mass_flow', not both")
+
+        resolved_mass_flow = mass if mass_flow is None else mass_flow  # [kg/s]
+        super().updatePhase(
+            x_distrib=x_distrib,
+            distrib=distrib,
+            mass=resolved_mass_flow,
+            moments=moments,
+        )
+
+        self.mass_flow = self.mass  # [kg/s]
+        self.mole_flow = self.moles  # [mol/s]
+        if hasattr(self, 'vol_flow') and hasattr(self, 'vol'):
+            self.vol_flow = self.vol  # [m**3/s]
 
 
 class VaporStream(VaporPhase):

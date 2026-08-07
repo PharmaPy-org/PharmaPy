@@ -868,9 +868,9 @@ class SolidPhase(ThermoPhysicalManager):
     grams per mole. Mole amounts are calculated from the finalized solid mass
     after converting it to grams during construction.
 
-    ``moles`` is set by the constructor only. Unlike ``LiquidPhase``,
-    ``updatePhase`` does not recompute it, so ``moles`` becomes stale when the
-    phase mass is updated.
+    ``moles`` is reconciled whenever construction or ``updatePhase`` changes
+    the solid mass, so mass-, volume-, and mole-basis amounts describe the
+    same physical inventory.
 
     """
     
@@ -943,8 +943,7 @@ class SolidPhase(ThermoPhysicalManager):
 
         mw_av = np.dot(self.mole_frac, self.mw)  # [g/mol]
         self.mw_av = mw_av  # [g/mol]
-        mass_grams = self.mass * 1000  # [g]
-        self.moles = mass_grams / mw_av  # [mol]
+        self._reconcile_moles_from_mass()
 
         if mass_frac is not None:
             sum_fracs = sum(mass_frac)
@@ -966,6 +965,18 @@ class SolidPhase(ThermoPhysicalManager):
     @name.setter
     def name(self, name):
         self._name = name
+
+    def _reconcile_moles_from_mass(self) -> None:
+        """Recalculate solid moles from the current mass.
+
+        Notes
+        -----
+        Solid mass [kg] is converted using the exact ``1000 g/kg`` SI factor
+        before division by the mixture-average molecular weight [g/mol]. The
+        resulting amount is stored in ``moles`` [mol].
+        """
+        mass_grams = self.mass * 1000  # [g]
+        self.moles = mass_grams / self.mw_av  # [mol]
 
     def updatePhase(self, x_distrib: Optional[np.ndarray] = None,
                     distrib: Optional[np.ndarray] = None,
@@ -1007,7 +1018,9 @@ class SolidPhase(ThermoPhysicalManager):
         supplied, it replaces the recalculated moments without another mass or
         volume update. Distribution updates recalculate orders zero through
         ``self.num_mom - 1``, preserving the configured moment-state size. The
-        constructor-only ``moles`` attribute is unchanged.
+        mole amount is recalculated whenever a distribution or explicit
+        mass changes the solid inventory. A moments-only update does not imply
+        an amount change and therefore leaves mass, volume, and moles intact.
         """
         if x_distrib is not None:
             self.x_distrib = x_distrib
@@ -1027,6 +1040,9 @@ class SolidPhase(ThermoPhysicalManager):
 
         if moments is not None:
             self.moments = moments
+
+        if distrib is not None or mass is not None:
+            self._reconcile_moles_from_mass()
 
     def convert_distribution(self, x_distrib=None, num_distr=None,
                              vol_distr=None, mass=0):
