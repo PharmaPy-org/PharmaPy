@@ -77,6 +77,7 @@ class _StubLiquid:
 class _StubKinetics:
     delta_hrxn = np.zeros(1)
     stoich_matrix = np.zeros((1, 2))
+    stoich_normalization = np.ones(1)  # [-]
     tref_hrxn = 298.15
 
     def get_rxn_rates(self, conc, temp, overall_rates=False, delta_hrxn=None):

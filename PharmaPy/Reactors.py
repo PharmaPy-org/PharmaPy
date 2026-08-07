@@ -263,6 +263,36 @@ class _BaseReactor:
 
         self.ind_maskpar = np.argsort(np.concatenate((ind_true, ind_false)))
 
+    def _get_rate_basis_heat_of_reaction(
+            self, heat_of_reaction: np.ndarray) -> np.ndarray:
+        """Convert reaction enthalpies to the normalized kinetic-rate basis.
+
+        Parameters
+        ----------
+        heat_of_reaction : numpy.ndarray
+            Heat of each reaction [J/mol of reaction as written]. The last
+            axis corresponds to the reactions in ``self.Kinetics``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Heat of each reaction [J/mol of normalized reaction extent], with
+            the same leading dimensions as ``heat_of_reaction``.
+
+        Notes
+        -----
+        Per-reaction rates use stoichiometry normalized by the magnitude of
+        each reaction's first reactant coefficient. Dividing the corresponding
+        raw-stoichiometry enthalpy by that same dimensionless factor puts both
+        quantities on one extent basis without changing equilibrium kinetics.
+        """
+        rate_basis_heat = (
+            np.asarray(heat_of_reaction)
+            / self.Kinetics.stoich_normalization
+        )  # [J/mol of normalized reaction extent]
+
+        return rate_basis_heat
+
     @property
     def Utility(self):
         return self._Utility
@@ -685,12 +715,12 @@ class BatchReactor(_BaseReactor):
         rates = self.Kinetics.get_rxn_rates(mole_conc, temp,
                                             overall_rates=False,
                                             delta_hrxn=deltah_rxn)
+        rate_basis_deltah_rxn = self._get_rate_basis_heat_of_reaction(
+            deltah_rxn)  # [J/mol of normalized reaction extent]
 
-        # Balance terms (W)
-        #source_term = -inner1d(deltah_rxn, rates) * vol * 1000  # vol in L
-        # TODO: Check if this is correct
-        # source_term = -np.inner(deltah_rxn, rates) * vol * 1000  # vol in L
-        source_term = -(deltah_rxn * rates).sum(axis=1) * vol * 1000  # vol in L
+        # Reaction heat source [W]
+        source_term = -(rate_basis_deltah_rxn * rates).sum(axis=1) \
+            * vol * 1000  # [W], vol converted from m**3 to L
 
         if heat_prof:
             if 'temp' in self.controls.keys():
@@ -1036,6 +1066,8 @@ class CSTR(_BaseReactor):
         rates = self.Kinetics.get_rxn_rates(mole_conc.T[self.mask_species].T,
                                             temp, overall_rates=False,
                                             delta_hrxn=deltah_rxn)
+        rate_basis_deltah_rxn = self._get_rate_basis_heat_of_reaction(
+            deltah_rxn)  # [J/mol of normalized reaction extent]
 
         # Inlet stream
         stream = self.Inlet
@@ -1051,11 +1083,9 @@ class CSTR(_BaseReactor):
 
         flow_term = inlet_flow * (h_in - h_temp)  # [W]
 
-        # Balance terms [W] - convert vol to L
-        # source_term = -inner1d(deltah_rxn, rates) * vol * 1000
-        # TODO: Check if this is correct
-        # source_term = -np.dot(deltah_rxn, rates) * vol * 1000  # vol in L
-        source_term = -(deltah_rxn * rates).sum(axis=1) * vol * 1000  # vol in L
+        # Reaction heat source [W]
+        source_term = -(rate_basis_deltah_rxn * rates).sum(axis=1) \
+            * vol * 1000  # [W], vol converted from m**3 to L
 
         if heat_prof:
             if self.isothermal:
@@ -1558,12 +1588,12 @@ class PlugFlowReactor(_BaseReactor):
 
         rates = self.Kinetics.get_rxn_rates(conc, temp, overall_rates=False,
                                             delta_hrxn=deltah_rxn)
+        rate_basis_deltah_rxn = self._get_rate_basis_heat_of_reaction(
+            deltah_rxn)  # [J/mol of normalized reaction extent]
 
-        # ---------- Balance terms (W)
-        # source_term = -inner1d(deltah_rxn, rates) * 1000  # W/m**3
-        # TODO: Check if this is correct
-        # source_term = -np.dot(deltah_rxn, rates) * 1000  # W / m**3
-        source_term = -(deltah_rxn * rates).sum(axis=1) * 1000  # W / m**3
+        # Reaction heat source [W/m**3]
+        source_term = -(rate_basis_deltah_rxn * rates).sum(axis=1) \
+            * 1000  # [W/m**3]
 
         if self.adiabatic:
             heat_transfer = 0
@@ -1671,12 +1701,12 @@ class PlugFlowReactor(_BaseReactor):
 
         deltah_rxn = self.Liquid_1.getHeatOfRxn(
             stoich, temp, self.mask_species, delta_href, tref_hrxn)  # J/mol
+        rate_basis_deltah_rxn = self._get_rate_basis_heat_of_reaction(
+            deltah_rxn)  # [J/mol of normalized reaction extent]
 
-        # ---------- Balance terms (W)
-        # source_term = -inner1d(deltah_rxn, rate_i * 1000)  # W/m**3
-        # TODO: Check if this is correct
-        # source_term = -np.dot(deltah_rxn, rate_i * 1000)  # W/m**3
-        source_term = -(deltah_rxn * rate_i * 1000).sum(axis=1)  # W/m**3
+        # Reaction heat source [W/m**3]
+        source_term = -(rate_basis_deltah_rxn * rate_i * 1000).sum(
+            axis=1)  # [W/m**3]
 
         temp_diff = np.diff(temp)
         flow_term = -flow_in * temp_diff / vol_diff  # K/s
