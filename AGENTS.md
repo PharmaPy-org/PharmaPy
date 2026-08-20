@@ -1,9 +1,11 @@
-# PharmaPy Agent Guidelines
+# PharmaPy Contributor Guidelines
 
-This file is the canonical project guidance for coding agents. Read it before
-making changes. Codex reads `AGENTS.md` natively; `CLAUDE.md` and
-`.github/copilot-instructions.md` are thin adapters so that Codex, Claude Code,
-and GitHub Copilot share one policy. A separate `CODEX.md` is not needed.
+This file is the canonical project guidance for every contributor, human or
+coding agent. Read it before making changes. The development workflow and
+integration contract live in [CONTRIBUTING.md](CONTRIBUTING.md). Codex reads
+`AGENTS.md` natively; `CLAUDE.md` and `.github/copilot-instructions.md` are thin
+adapters so that Codex, Claude Code, and GitHub Copilot share one policy. A
+separate `CODEX.md` is not needed.
 
 ## Project vision
 
