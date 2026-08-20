@@ -244,13 +244,33 @@ class DeliquoringStep:
 
         return model_eqns
 
-    def material_balance(self, theta, sat_star, conc_star):
+    def material_balance(self, theta: float, sat_star: np.ndarray,
+                         conc_star: np.ndarray) -> np.ndarray:
+        """Calculate the non-dimensional deliquoring material balances.
 
-        """
+        Parameters
+        ----------
+        theta : float
+            Non-dimensional deliquoring time [-]. The balance is autonomous.
+        sat_star : ndarray, shape (num_nodes,)
+            Reduced liquid saturation in each axial cake cell [-].
+        conc_star : ndarray, shape (num_nodes, num_species)
+            Reduced liquid-phase mass concentration in each cell and species
+            [-].
 
-        Calculate material balance for a non-dimensional version of the
-        governing equations. Based on Wakeman
+        Returns
+        -------
+        ndarray, shape (num_nodes * (num_species + 1),)
+            Interleaved reduced-saturation and concentration derivatives per
+            unit non-dimensional time [-].
 
+        Notes
+        -----
+        The underlying non-dimensional formulation follows the existing
+        Wakeman deliquoring model.
+        The first-order upwind finite-volume balance uses the same liquid flux
+        at each face for saturation and every mobile-liquid species. This makes
+        the discrete liquid-held solute inventory conservative.
         """
 
         lambd = 5
@@ -265,26 +285,26 @@ class DeliquoringStep:
 
         q_liq = -k_rl * dpliq_dz  # Non-dimensional liquid flux
 
-        sinf = self.sat_inf
-        sat_fun = (1 - sinf) / (sat_star*(1 - sinf) + sinf)
-        advection_vel = q_liq * sat_fun
+        sinf = self.sat_inf  # [-]
+        saturation = sat_star * (1 - sinf) + sinf  # [-]
 
-        conc_bound = conc_star[0]  # dC/dt|_{z=0} = 0
-        # conc_bound = np.zeros(conc_star.shape[1])  # F_{1 - 1/2} = 0
-        # conc_bound = (np.zeros(conc_star.shape[1]) - self.conc_mean_init) / \
-        #     (self.rho_j - self.conc_mean_init)
+        conc_bound = conc_star[0]  # upwind inlet-face concentration [-]
 
-        flux_sat = upwind_fvm(q_liq, boundary_cond=0)
-        # flux_conc = upwind_fvm((advection_vel * conc_star.T).T,
-        #                         boundary_cond=conc_bound)
-        flux_conc = upwind_fvm(conc_star, boundary_cond=conc_bound)
+        flux_sat = upwind_fvm(q_liq, boundary_cond=0)  # [-]
+        conc_faces = upwind_fvm(conc_star, boundary_cond=conc_bound)  # [-]
+        flux_conc = flux_sat[:, np.newaxis] * conc_faces  # [-]
 
-        numerical_fluxes = np.column_stack((flux_sat, flux_conc))
+        dsat_star_dtheta = -np.diff(flux_sat) / self.delta_z  # [-]
+        dsat_dtheta = (1 - sinf) * dsat_star_dtheta  # [-]
+        dsolute_holdup_dtheta = (
+            -(1 - sinf) * np.diff(flux_conc, axis=0)
+            / self.delta_z[:, np.newaxis]
+        )  # [-]
+        dconc_dtheta = (
+            dsolute_holdup_dtheta - conc_star * dsat_dtheta[:, np.newaxis]
+        ) / saturation[:, np.newaxis]  # [-]
 
-        dstates_dtheta = -np.diff(numerical_fluxes, axis=0).T / self.delta_z
-        dstates_dtheta[1:] = dstates_dtheta[1:] * advection_vel
-
-        return dstates_dtheta.T.ravel()
+        return np.column_stack((dsat_star_dtheta, dconc_dtheta)).ravel()
 
     def solve_unit(self, deltaP, runtime, p_atm=101325,
                    verbose=True):
