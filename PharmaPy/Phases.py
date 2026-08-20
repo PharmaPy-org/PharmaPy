@@ -3,7 +3,7 @@
 
 # import numpy as np
 # from autograd import numpy as np
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 from PharmaPy.ThermoModule import ThermoPhysicalManager
@@ -814,33 +814,74 @@ class VaporPhase(ThermoPhysicalManager):
 
         return deltahvap
 
-    def getEnthalpy(self, temp=None, temp_ref=298.15, mass_frac=None,
-                    mole_frac=None, total_h=True, basis='mass'):
-        """ Calculate vapor phase enthalpy. It assumes that the reference state
-        is a liquid at t_ref.
+    def getEnthalpy(
+            self,
+            temp: Optional[Union[float, np.ndarray]] = None,
+            temp_ref: float = 298.15,
+            mass_frac: Optional[np.ndarray] = None,
+            mole_frac: Optional[np.ndarray] = None,
+            total_h: bool = True,
+            basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Calculate vapor-phase enthalpy relative to a liquid reference.
 
         Parameters
         ----------
-        temp : float or array-like
-            Temperature for enthalpy calculation in K.   
+        temp : float or ndarray, optional
+            Temperature at which to calculate enthalpy [K]. The phase
+            temperature is used when ``temp`` is ``None``. The supported
+            forms are a scalar or a one-element array.
         temp_ref : float, optional
-            Reference temperature for enthalpy calculation. The default is 298.15.
-        mass_frac : array-like, optional
-            Fraction of the species participating in the vapor phase in mass. The default is None.
-        mole_frac : array-like, optional
-            Fraction of the species participating in the vapor phase in mole. The default is None.
+            Liquid-reference temperature for the sensible-enthalpy integral
+            [K]. The default is 298.15 K.
+        mass_frac : ndarray, optional
+            One-dimensional vapor-phase species mass fractions [-], ordered
+            according to the phase's components. The phase composition is
+            used when neither fraction vector is supplied.
+        mole_frac : ndarray, optional
+            One-dimensional vapor-phase species mole fractions [-], ordered
+            according to the phase's components. The phase composition is
+            used when neither fraction vector is supplied.
         total_h : bool, optional
-            If True, the total enthalpy is returned. If False, an array
-            of individual enthalpy for each species is returned.
-            The default is True.
+            If ``True``, return fraction-weighted mixture enthalpy. If
+            ``False``, return individual species enthalpies. The default is
+            ``True``.
         basis : {'mass', 'mole'}, optional
-            Basis for the returned enthalpy. The default is 'mass'.
+            Physical basis of the returned enthalpy. The default is ``'mass'``.
 
         Returns
         -------
-        hvapMass : J/kg
-        hvapMole : J/mol
+        float or ndarray
+            Vapor-phase enthalpy on the selected basis: [J/kg] for
+            ``basis='mass'`` and [J/mol] for ``basis='mole'``. For the
+            supported single-temperature forms, when the requested
+            temperature differs from every species critical temperature,
+            mixture enthalpy is scalar and individual species enthalpy has
+            shape ``(1, num_species)`` in the phase's component order.
 
+        Raises
+        ------
+        ValueError
+            If the Watson correlation used for a subcritical species receives
+            a negative reduced-temperature ratio.
+
+        Notes
+        -----
+        Supercritical species contribute vapor sensible heat and no latent
+        heat. Subcritical species contribute liquid sensible heat plus latent
+        heat of vaporization.
+
+        Arrays containing more than one temperature are outside the supported
+        public contract, but this boundary is not yet validated. The current
+        implementation accepts an array only when its length equals the number
+        of species; every other length raises from the elementwise
+        ``temp > t_crit`` comparison. That comparison pairs a temperature
+        index with a species index, so the split is meaningful only while each
+        species keeps one classification over the requested temperatures.
+
+        A temperature exactly equal to a species critical temperature is
+        omitted from both strict comparison subsets. The broader
+        temperature-axis validation and criticality classification contract is
+        tracked in issue #178.
         """
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
@@ -872,7 +913,8 @@ class VaporPhase(ThermoPhysicalManager):
                 if total_h:
                     hSens = sensSuper + sensSub
                 else:
-                    hSens = np.concatenate((sensSuper, sensSub))[ind_sort]
+                    hSens = np.concatenate(
+                        (sensSuper, sensSub), axis=1)[:, ind_sort]
 
             else:
                 hSens = sensSuper
