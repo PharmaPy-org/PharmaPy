@@ -11,7 +11,7 @@ from PharmaPy._assimulo import CVode, Explicit_Problem
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, classify_phases
 from PharmaPy.Streams import LiquidStream, SolidStream
-from PharmaPy.MixedPhases import Slurry, SlurryStream
+from PharmaPy.MixedPhases import Cake, Slurry, SlurryStream
 
 from PharmaPy.NameAnalysis import get_dict_states
 from PharmaPy.Crystallizers import SemibatchCryst
@@ -341,32 +341,95 @@ class Mixer:
 
         return dict_out, ind_solid
 
-    def energy_balance(self, u_inputs):
+    def energy_balance(
+            self, u_inputs: Mapping[str, np.ndarray]
+            ) -> Union[float, np.floating]:
+        """Solve the adiabatic outlet temperature for mixed-phase inlets.
 
-        massfrac_in = u_inputs['mass_frac']
-        temp_in = u_inputs['temp']
-        mass_in = u_inputs['mass_liq']
+        Parameters
+        ----------
+        u_inputs : mapping of str to numpy.ndarray
+            Inlet states from :meth:`get_inputs_solids`. ``mass_frac`` is the
+            liquid composition [-], ``temp`` is temperature [K], and
+            ``mass_liq`` and ``mass_solid`` are phase inventories [kg] for
+            batch inlets or phase flow rates [kg/s] for continuous inlets.
+            ``num_distrib`` is the particle-number distribution [#/um] used
+            by cake collaborators.
 
-        h_in = []
+        Returns
+        -------
+        float or numpy.floating
+            Adiabatic outlet temperature [K].
+
+        Raises
+        ------
+        TypeError
+            If an inlet exposes a solid phase but is neither a supported
+            :class:`Slurry` nor :class:`Cake` collaborator.
+        RuntimeError
+            If the Newton iteration cannot find the energy-balance root.
+
+        Notes
+        -----
+        Inlet and outlet enthalpies use the total-mixture mass basis [J/kg].
+        Weighting them by total slurry mass [kg], or total slurry mass flow
+        [kg/s], keeps both sides of the balance on a common energy [J], or
+        energy-rate [J/s], basis.
+        """
+        massfrac_in = u_inputs['mass_frac']  # [-]
+        temp_in = u_inputs['temp']  # [K]
+        mass_total_in = (
+            u_inputs['mass_liq'] + u_inputs['mass_solid']
+        )  # [kg] for batch inputs or [kg/s] for continuous inputs
+
+        h_in = []  # [J/kg]
         for ind, inlet in enumerate(self.Inlets):
-            if hasattr(inlet, 'Solid_1'):
-                distrib_in = u_inputs['num_distrib']
+            if isinstance(inlet, Slurry):
+                h_in.append(inlet.getEnthalpy(temp_in[ind],
+                                              volumetric=False))
+            elif isinstance(inlet, Cake):
+                distrib_in = u_inputs['num_distrib']  # [#/um]
                 h_in.append(inlet.getEnthalpy(temp_in[ind],
                                               mass_frac=massfrac_in[ind],
                                               distrib=distrib_in[ind]))
+            elif hasattr(inlet, 'Solid_1'):
+                raise TypeError(
+                    "Mixer.energy_balance supports Slurry and Cake "
+                    "solids-bearing inlets; got %s."
+                    % type(inlet).__name__
+                )
             else:
                 h_in.append(inlet.getEnthalpy(temp_in[ind],
                                               mass_frac=massfrac_in[ind]))
 
-        def temp_root(temp):
-            h_out = self.Outlet.getEnthalpy(temp)
+        def temp_root(temp: float) -> Union[float, np.floating]:
+            """Return the total enthalpy residual at an outlet temperature.
 
-            balance = mass_in.dot(h_in) - sum(mass_in) * h_out
+            Parameters
+            ----------
+            temp : float
+                Trial outlet temperature [K].
+
+            Returns
+            -------
+            float or numpy.floating
+                Inlet-minus-outlet enthalpy [J] for batch inputs or enthalpy
+                flow [J/s] for continuous inputs.
+            """
+            if isinstance(self.Outlet, Slurry):
+                h_out = self.Outlet.getEnthalpy(
+                    temp, volumetric=False)  # [J/kg]
+            else:
+                h_out = self.Outlet.getEnthalpy(temp)  # [J/kg]
+
+            balance = (
+                mass_total_in.dot(h_in) - mass_total_in.sum() * h_out
+            )  # [J] for batch inputs or [J/s] for continuous inputs
 
             return balance
 
-        temp_seed = np.mean(temp_in)
-        temp_bce = newton(temp_root, temp_seed)
+        temp_seed = np.mean(temp_in)  # [K]
+        temp_bce = newton(temp_root, temp_seed)  # [K]
 
         return temp_bce
 
