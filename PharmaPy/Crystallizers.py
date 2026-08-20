@@ -1595,7 +1595,8 @@ class BatchCryst(_BaseCryst):
         dmaterial_dt : numpy.ndarray
             stacked derivatives with mixed units, in this order:
             ``ddistr_dt`` ([#/um/s] for '1D-FVM', [um**n/s] for 'moments'),
-            ``dcomp_dt`` [kg/m**3/s] and ``dvol_liq`` [m**3/s].
+            ``dcomp_dt`` ([kg/m**3/s], or [1/s] when
+            ``basis == 'mass_frac'``) and ``dvol_liq`` [m**3/s].
         transf : numpy.ndarray
             crystallization mass rate [kg/s].
 
@@ -1607,9 +1608,9 @@ class BatchCryst(_BaseCryst):
         ``transf`` is a total rate [kg/s] rather than the volumetric
         [kg/m**3/s] rate returned by :meth:`MSMPR.material_balances`.
 
-        ``dcomp_dt`` is documented as [kg/m**3/s] because the
-        ``basis == 'mass_frac'`` rescaling below acts on a copy and never
-        reaches the returned array (tracked in issue #47).
+        For ``basis == 'mass_frac'``, ``dcomp_dt`` is the concentration rate
+        [kg/m**3/s] normalized by the tank liquid density [kg/m**3], giving a
+        mass-fraction rate [1/s]. ``dvol_liq`` remains [m**3/s].
         """
 
         # 'vol' represents liquid volume
@@ -1631,12 +1632,13 @@ class BatchCryst(_BaseCryst):
         self.Liquid_1.updatePhase(mass_conc=mass_conc, vol=vol)
 
         dvol_liq = -transf/rho_liq  # TODO: results not consistent with mu_3
-        dcomp_dt = -transf/vol * (self.kron_jtg - mass_conc/rho_liq)
-
-        dliq_dt = np.append(dcomp_dt, dvol_liq)
+        dcomp_dt = -transf/vol * (self.kron_jtg - mass_conc/rho_liq)  # [kg/m**3/s]
 
         if self.basis == 'mass_frac':
-            dcomp_dt *= 1 / rho_liq
+            dcomp_dt *= 1 / rho_liq  # [1/s]
+
+        # Composition [kg/m**3/s] or [1/s], followed by volume [m**3/s].
+        dliq_dt = np.append(dcomp_dt, dvol_liq)
 
         dmaterial_dt = np.concatenate((ddistr_dt, dliq_dt))
 
@@ -2433,7 +2435,8 @@ class SemibatchCryst(MSMPR):
         dmaterial_dt : numpy.ndarray
             stacked derivatives with mixed units, in this order:
             ``ddistr_dt`` ([#/um/s] for '1D-FVM', [um**n/s] for 'moments'),
-            ``dcomp_dt`` [kg/m**3/s] and ``dvol_dt`` [m**3/s].
+            ``dcomp_dt`` ([kg/m**3/s], or [1/s] when
+            ``basis == 'mass_frac'``) and ``dvol_dt`` [m**3/s].
         transf : numpy.ndarray
             crystallization mass rate [kg/s].
 
@@ -2445,9 +2448,9 @@ class SemibatchCryst(MSMPR):
         [#/um]), and the kinetics are evaluated with ``vol=vol_slurry``, so
         ``transf`` is a total rate [kg/s].
 
-        ``dcomp_dt`` is documented as [kg/m**3/s] because the
-        ``basis == 'mass_frac'`` rescaling below acts on a copy and never
-        reaches the returned array (tracked in issue #47).
+        For ``basis == 'mass_frac'``, ``dcomp_dt`` is the concentration rate
+        [kg/m**3/s] normalized by the tank liquid density [kg/m**3], giving a
+        mass-fraction rate [1/s]. ``dvol_dt`` remains [m**3/s].
         """
 
         rho_susp, rho_in = rhos
@@ -2496,10 +2499,11 @@ class SemibatchCryst(MSMPR):
         dvol_dt = (phi_in[0] * input_flow * rho_in_liq
                    - transf) / rho_liq  # [m**3/s]
 
-        dliq_dt = np.append(dcomp_dt, dvol_dt)
-
         if self.basis == 'mass_frac':
-            dcomp_dt *= 1 / rho_liq
+            dcomp_dt *= 1 / rho_liq  # [1/s]
+
+        # Composition [kg/m**3/s] or [1/s], followed by volume [m**3/s].
+        dliq_dt = np.append(dcomp_dt, dvol_dt)
 
         dmaterial_dt = np.concatenate((ddistr_dt, dliq_dt))
 
