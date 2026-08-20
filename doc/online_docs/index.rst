@@ -40,10 +40,10 @@ Bibtex entry::
         }
 
 Our team
-==========
+========
 
-Developers
-++++++++++
+Original developers
++++++++++++++++++++
 
 * `Daniel Casas-Orozco`_
 * Daniel J. Laky
@@ -52,6 +52,20 @@ Developers
 * Yash Barhate
 * Jung Soo Rhim
 * PharmaPy logo by Montgomery Smith
+
+Current developers and maintainers
+++++++++++++++++++++++++++++++++++
+
+* David Bernal (`@bernalde <https://github.com/bernalde>`__)
+* Andres Cabeza (`@andres9403 <https://github.com/andres9403>`__)
+* Can Li (`@CanLi1 <https://github.com/CanLi1>`__)
+* Luisdomingo Guzman Julio (`@lguzmaj <https://github.com/lguzmaj>`__)
+* Mohamed Mazhar Laljee (`@Mazhar331 <https://github.com/Mazhar331>`__)
+* Yirang Park (`@parkyr <https://github.com/parkyr>`__)
+* Sergey Gusev (`@sergey-gusev94 <https://github.com/sergey-gusev94>`__)
+* Zachary Hillman (`@ZacharyHillman18 <https://github.com/ZacharyHillman18>`__)
+* Piyush Sharma (`@Piyush1698 <https://github.com/Piyush1698>`__)
+* Quinn Huckaba (`@QHuckaba <https://github.com/QHuckaba>`__)
 
 Purdue University Staff
 +++++++++++++++++++++++
@@ -63,12 +77,19 @@ Purdue University Staff
 
 Support
 =======
-PharmaPy has been made with the collaboration and support from the following institutions:
+PharmaPy was originally developed with collaboration and support from:
 
 * The `CryPTSys Lab`_ at Purdue University
 * The U.S. Food and Drug Administration (FDA)
 
+Today, PharmaPy is a joint open-source project involving `CryPTSys`_,
+`SECQUOIA`_, `Can Li`_, and `Eli Lilly and Company`_.
+
 .. _`CryPTSys Lab`: https://engineering.purdue.edu/CryPTSys/index.html
+.. _`CryPTSys`: https://github.com/CryPTSys
+.. _`SECQUOIA`: https://github.com/SECQUOIA
+.. _`Can Li`: https://github.com/CanLi1
+.. _`Eli Lilly and Company`: https://github.com/EliLillyCo
 
 
 .. toctree::
@@ -87,4 +108,3 @@ Indices and tables
 * :ref:`genindex`
 * :ref:`modindex`
 * :ref:`search`
-

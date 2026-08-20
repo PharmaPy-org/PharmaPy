@@ -124,20 +124,16 @@ def get_stoich(di_rxn, partic_species):
 
 class RxnKinetics:
     """
-    Create a reaction kinetics object. Reaction rate r\ :sub:`i` is assumed to
-    have the following functional form: 
-        r\ :sub:`i` = f\ :sub:`1` (T) * f\ :sub:`2` ( C\ :sub:`1`, ..., C\ :sub:`n_comp`) 
-        
-    with the temperature-dependent term f\ :sub:`1` given by:
-        f\ :sub:`1` = k\ :sub:`i` * exp(- Ea\ :sub:`i`/R/T)
+    Create a reaction kinetics object. Reaction rate ``r_i`` is assumed to
+    have the functional form ``r_i = f_1(T) * f_2(C_1, ..., C_n_comp)``, with
+    the temperature-dependent term ``f_1 = k_i * exp(-Ea_i / R / T)``.
 
-    Composition-dependent term f\ :sub:`2` can be passed as a user-defined
-    function. If not given, f\ :sub:`2` is assumed to be of the form:
-        f\ :sub:`2` = prod\ :sub:`j in reactants for rxn i` C\ :sub:`j` (alpha\ :sub:`{i,j}`)
+    The composition-dependent term ``f_2`` can be passed as a user-defined
+    function. If not given, ``f_2`` is calculated from the concentrations and
+    reaction orders of the reactants.
 
-    where alpha\ :sub:`{i,j}` values are determined automatically by PharmaPy from
-    the stoichiometric matrix of the reaction system. Custom reaction
-    orders can also be passed through the 'params_f' argument
+    Reaction orders are determined automatically by PharmaPy from the
+    stoichiometric matrix. Custom orders can be passed through ``params_f``.
 
     Parameters
     ----------
@@ -148,34 +144,28 @@ class RxnKinetics:
     ea_params : list or tuple
         activation energy [J/mol] value(s) for the temperature-dependent
         term f\ :sub:`1`.
-    rxn_list: list of str, optional.
+    rxn_list : list of str, optional
         list containing reactions represented by strings, where the
         pattern '+' separates reactants or products from one another, and
         the pattern --> separates groups of reactants from groups of
-        products. Examples of reactions are
-
-            'A + B --> C'
-            '2A --> B'
-            '2 H\ :sub:`2` O --> 2 H\ :sub:`2` + O\ :sub:`2`',
-            'H\ :sub:`2` O --> H\ :sub:`2` + 0.5 O\ :sub:`2`,
-            'H\ :sub:`2` O --> H\ :sub:`2` + 0.5 O\ :sub:`2`'
-         
+        products. Examples include ``A + B --> C``, ``2A --> B``, and
+        ``2 H2O --> 2 H2 + O2``.
 
         Note that integer, float and fractional stoichiometric coefficients
         are supported.
 
         The names used for the reactions have to match those on the
-        pure-component json file. If 'rxn_list' is None, then both
-        stoichiometric_matrix' and 'partic_species' have to be passed
+        pure-component json file. If ``rxn_list`` is None, then both
+        ``stoich_matrix`` and ``partic_species`` have to be passed
         (see below). The default is None.
-    stoiciometric_matrix : numpy array, optional
+    stoich_matrix : numpy array, optional
         stoichiometric matrix for the set of reactions. It must have
         n_rxn rows and n_comp columns, so the element (i, j) represents
         the coefficient of species j in reaction i
-    partic_species : list (or tuple) of str, optional
+    partic_species : list or tuple of str, optional
         names of participating species. It will be assumed that the
-        order of the names in 'partic_species' is that of the columns of
-        'stoichiometric_matrix'. The passed names must match those
+        order of the names in ``partic_species`` is that of the columns of
+        ``stoich_matrix``. The passed names must match those
         in the pure-component json file
     keq_params : array-like, optional
         Equilibrium constant for each reaction at ``tref_hrxn``. Units are

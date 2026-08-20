@@ -13,6 +13,18 @@ license-files = ["LICENSE.md"]
 authors = [
     {name = "Daniel Casas-Orozco", email = "dcasasor@purdue.edu"},
 ]
+maintainers = [
+    {name = "David Bernal"},
+    {name = "Andres Cabeza"},
+    {name = "Can Li"},
+    {name = "Luisdomingo Guzman Julio"},
+    {name = "Mohamed Mazhar Laljee"},
+    {name = "Yirang Park"},
+    {name = "Sergey Gusev"},
+    {name = "Zachary Hillman"},
+    {name = "Piyush Sharma"},
+    {name = "Quinn Huckaba"},
+]
 keywords = [
     "chemical-engineering",
     "pharmaceutical",
@@ -43,6 +55,13 @@ assimulo = [
 test = [
     "pytest",
 ]
+docs = [
+    "ipykernel>=6",
+    "nbsphinx>=0.9",
+    "sphinx>=7.2,<9",
+    "sphinx-rtd-theme>=2,<4",
+    "sphinxcontrib-bibtex>=2.6",
+]
 
 [project.urls]
 Homepage = "https://github.com/PharmaPy-org/PharmaPy"
@@ -66,6 +85,9 @@ include = ["PharmaPy*"]
 # Two environments mirror the pytest lanes in pytest.ini:
 #   * default  -> core, Assimulo-free (matches `-m "not assimulo"`)
 #   * assimulo -> full backend        (matches `-m assimulo`)
+#
+# A third environment, `docs`, reproduces the documentation build that the
+# Sphinx docs CI job and Read the Docs run.
 #
 # linux-64 and win-64 are locked and tested. Maintainers on other systems
 # should add their platform to `[tool.pixi.workspace].platforms`, regenerate
@@ -103,9 +125,33 @@ cython = ">=0.29,<3"
 [tool.pixi.feature.test.dependencies]
 pytest = "*"
 
+# Documentation toolchain (conda-forge). Bounds mirror
+# `[project.optional-dependencies].docs` so the pixi and pip surfaces stay
+# consistent. `pandoc` is the one addition: nbsphinx shells out to it to convert
+# the example notebooks, and pip metadata cannot express a non-Python binary, so
+# CI and Read the Docs install it from apt while pixi resolves it from
+# conda-forge.
+[tool.pixi.feature.docs.dependencies]
+ipykernel = ">=6"
+nbsphinx = ">=0.9"
+pandoc = "*"
+sphinx = ">=7.2,<9"
+sphinx-rtd-theme = ">=2,<4"
+sphinxcontrib-bibtex = ">=2.6"
+
+# `pixi run docs` reproduces the warning-as-error build run by the Sphinx docs
+# CI job and by Read the Docs (`fail_on_warning: true`). Output goes to `site/`,
+# which is git-ignored.
+[tool.pixi.feature.docs.tasks]
+docs = "sphinx-build -W --keep-going -b html doc/online_docs site"
+
+# `docs` gets its own solve group so adding the documentation toolchain cannot
+# move the package versions resolved for the tested `default` and `assimulo`
+# environments.
 [tool.pixi.environments]
 default = { features = ["test"], solve-group = "default" }
 assimulo = { features = ["assimulo", "test"], solve-group = "assimulo" }
+docs = { features = ["docs"], solve-group = "docs" }
 
 # Convenience tasks. `pixi run test` is the core lane; `pixi run -e assimulo
 # test-assimulo` exercises the solver-backed integration tests.
