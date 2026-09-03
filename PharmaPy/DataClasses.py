@@ -8,13 +8,14 @@ from typing import Optional, Sequence, Any
 from types import MethodType
 from collections import OrderedDict
 from collections.abc import Callable
-from PharmaPy.MixedPhases import MixedPhase,MixedStream
+
 import PharmaPy.Kinetics as pk
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from PharmaPy.Mechanisms import Mechanism,TransferMechanism,DirectTransfer
-
+    from PharmaPy.Mechanisms import Mechanism,CrossPhaseTransferMechanism,DirectTransfer
+    from PharmaPy.Phases import BasePhase
+    from PharmaPy.MixedPhases import MixedPhase,MixedStream
 ## Dataclasses
 @dataclass(frozen=True)
 class PhaseRef:
@@ -34,7 +35,7 @@ class PhaseConnection:
     kinetics:pk.CrystKinetics|pk.RxnKinetics
     species_weights: np.ndarray | None = None
     active_condition: callable=lambda source_phase,sink_phase:True
-    mechanism:"TransferMechanism | None" = None
+    mechanism:"CrossPhaseTransferMechanism | None" = None
 
 
 
@@ -48,10 +49,17 @@ class PhaseMapping:
 @dataclass
 class StreamConnection:
 
-    stream: MixedStream
+    stream: "MixedStream"
     phase_mappings: list[PhaseMapping]
     split_fraction: float = 1.0
-    
+
+class StreamConditions:
+
+    def __init__(self, streams):
+        self.streams = streams
+
+    def __iter__(self):
+        return iter(self.streams)
 @dataclass
 class IntraPhaseProcess:
     phase:PhaseRef
@@ -67,60 +75,64 @@ class StateVariable:
     state_type: str = "post"
     index: Optional[Sequence] = None
     depends_on: tuple = ("time",)
-    stream:Optional[str]=None
-    phase: Optional[PhaseRef] = None
-    compute_history:Callable[[Any,np.ndarray, dict, Any], np.ndarray] | None = None 
-    """
-    Parameters
-    ----------
-    name
-        Name of the state variable.
-    dim
-        Number of dimensions.
-    units
-        Physical units.
-    compute_history : callable, optional
+    stream: Optional[str] = None
+    phaseref: Optional[PhaseRef] = None
 
-        Function with signature
+    compute_value: Callable[
+        [
+            Any,   # state_var
+            float, # time
+            dict,  # completed_state
+            Any,   # context
+        ],
+        Any
+    ] | None = None
 
-            compute_history(state_var,
-                            time,
-                            solver_history,
-                            context=None)
-
-        returning the complete history of the state.
-    """
     def __post_init__(self):
-        if self.compute_history is None:
-            self.compute_history = self.default_history
-        else:
-            self.compute_history = MethodType(self.compute_history, self)
+        if self.compute_value is None and self.state_type=='post':
+            self.compute_value = self.default_compute_value
+
     def as_dict(self):
         """Backward compatibility."""
         out = {
             "dim": self.dim,
             "units": self.units,
             "type": self.state_type,
-            "depends_on": list(self.depends_on)
+            "depends_on": list(self.depends_on),
         }
 
         if self.index is not None:
             out["index"] = self.index
 
         return out
-    def update_variable(self,variable_name,new_value):
-        setattr(self,variable_name,new_value)
 
-    def default_history(self,time,solver_history,context=None):
+    def update_variable(self, variable_name, new_value):
+        setattr(self, variable_name, new_value)
+    
+
+    @staticmethod
+    def default_compute_value(
+        state_var,
+        time,
+        completed_state,
+        context,
+        resolved_inlets=None,
+        resolved_outlets=None,
+        operating_conditions=None,
+    ):
         try:
-            return solver_history[self.name]
+            return completed_state[
+                StateKey(state_var.name, state_var.phase)
+            ]
         except KeyError:
-            raise KeyError(f"'{self.name}' is not present in the solver history.")
+            raise KeyError(
+                f"'{state_var.name}' is not present in the completed state."
+            )
     
 @dataclass(frozen=True)
 class StateKey:
     name: str
-    phase: PhaseRef | None = None
+    phaseref: PhaseRef | None = None
 
 @dataclass(frozen=True)
 class OperatingKey:
@@ -141,25 +153,43 @@ class OperatingKey:
 
 
 @dataclass
-class ResolvedStreamConnection:
-        
+class ResolvedPhaseTransfer:
     connection: StreamConnection
+    mapping: PhaseMapping
 
-    stream: MixedStream
+    vessel_phase: "BasePhase"
+    stream_phase: "BasePhase"
+
+    vol_flow: float
+    species_flow: np.ndarray
+
+    direction: str
+    def scale(self, factor, basis):
+
+        self.species_flow *= factor
+
+        self.stream_phase.updatePhase(**{basis:self.species_flow})
+        
+@dataclass
+class ResolvedStreamConnection:
+    connection: StreamConnection
+    transfers: list[ResolvedPhaseTransfer]
+
+    def __iter__(self):
+        return iter(self.transfers)
 
 @dataclass
-class StreamConditions:
-
-    streams: list["ResolvedStreamConnection"]
-
-
+class TransferResult:
+    state_rates: dict[StateKey]
+    aux: dict
+    net_mass_rate:float
 @dataclass
 class StateCollection:
     states: dict[StateKey, StateVariable] = field(default_factory=dict)
 
    
     def add(self, state: StateVariable,overwrite=False,error_on_conflict=False):
-        key = StateKey(state.name,state.phase)
+        key = StateKey(state.name,state.phaseref)
         existing = self.states.get(key)
 
         if existing is None:
@@ -178,7 +208,7 @@ class StateCollection:
         if error_on_conflict:
             raise ValueError(
                 f"State {state.name} already exists "
-                f"for phase {state.phase} and overwrite was False"
+                f"for phase {state.phaseref} and overwrite was False"
             )
 
     def names(self):
@@ -281,7 +311,7 @@ class StateCollection:
 
 @dataclass
 class PhaseStateVariable:
-    phase: PhaseRef
+    phaseref: PhaseRef
     state: StateVariable
 
 @dataclass
@@ -297,6 +327,17 @@ class PhaseStateCollection:
     def __getitem__(self, phase):
         return self.phasestates[phase]
     def __iter__(self):
-        for phase, collection in self.phasestates.items():
+        for phaseref, collection in self.phasestates.items():
             for state in collection.states.values():
-                yield PhaseStateVariable(phase, state)
+                yield PhaseStateVariable(phaseref, state)
+
+
+@dataclass
+class StateEvent:
+
+    name: str
+    function: Callable
+    direction: int = 0
+    terminal: bool = False
+    source: Any = None
+    callbakc: Any = None

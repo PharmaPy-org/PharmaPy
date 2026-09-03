@@ -3,7 +3,12 @@ from PharmaPy.ThermoModule import ThermoPhysicalManager
 from PharmaPy.Commons import trapezoidal_rule
 from scipy.optimize import newton
 import copy
+from functools import wraps
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from PharmaPy.Mechanisms import Mechanism
+    from PharmaPy.DataClasses import PhaseRef,StateCollection,StateKey
 import warnings
 
 eps = np.finfo(float).eps
@@ -76,7 +81,33 @@ def getPropsPhaseMix(phases, basis='mass'):
 
     return cp, rho, enthalpy, vfrac_phases, mfrac_phases
 
+def overridable(func):
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        override = self._call_override(func.__name__,*args,**kwargs)
+        if override is not None:
+            return override
+        return func(self, *args, **kwargs)
+    return wrapper
 
+def overridable_property(func):
+    return property(overridable(func))
+def overridable_setter(func):
+
+    @wraps(func)
+    def wrapper(self, value):
+
+        override = self._call_override(
+            'set_' + func.__name__,
+            value,
+        )
+
+        if override is not None:
+            return override
+
+        return func(self, value)
+
+    return wrapper
 class BasePhase(ThermoPhysicalManager):
     is_stream= False
     phase_family = None
@@ -97,7 +128,6 @@ class BasePhase(ThermoPhysicalManager):
         mole_frac=None,
         mass_conc=None,
         mole_conc=None,
-        name_solv=None,
         check_input=True,
         verbose=True,
         **kwargs,
@@ -108,10 +138,6 @@ class BasePhase(ThermoPhysicalManager):
         self.temp = float(temp)
         self.pres = pressure
 
-        if name_solv is None:
-            self.ind_solv = None
-        else:
-            self.ind_solv = self.name_species.index(name_solv)
 
 
         # ----------------------------------------------------------
@@ -136,6 +162,7 @@ class BasePhase(ThermoPhysicalManager):
 
         self._mass_frac=None
         self._mass=None
+        self._mechanisms = []
         # ----------------------------------------------------------
         # Initialize composition
         # ----------------------------------------------------------
@@ -160,6 +187,8 @@ class BasePhase(ThermoPhysicalManager):
         if self.phase_family is None:
             raise TypeError("BasePhase cannot be instantiated directly")
 
+        
+
 
     def _count_specified(self, namespace, names):
         return sum(namespace.get(name) is not None for name in names)
@@ -168,9 +197,9 @@ class BasePhase(ThermoPhysicalManager):
     # Composition truth
     # ==============================================================
 
-    @property
+    @overridable_property
     def mass_j(self):
-
+        
         if self.mass is None:
             return None
 
@@ -178,6 +207,7 @@ class BasePhase(ThermoPhysicalManager):
 
 
     @mass_j.setter
+    @overridable_setter
     def mass_j(self, value):
 
         if value is None:
@@ -204,12 +234,12 @@ class BasePhase(ThermoPhysicalManager):
                 raise RuntimeError("Cannot assign zero mass_j without an existing composition")
 
 
-    @property
+    @overridable_property
     def mass(self):
-
         return self._mass
     
     @mass.setter
+    @overridable_setter
     def mass(self, value):
 
         if value is None:
@@ -224,13 +254,13 @@ class BasePhase(ThermoPhysicalManager):
 
 
 
-    @property
+    @overridable_property
     def mass_frac(self):
-
         return self._mass_frac
 
 
     @mass_frac.setter
+    @overridable_setter
     def mass_frac(self,value):
 
         if value is None:
@@ -245,7 +275,7 @@ class BasePhase(ThermoPhysicalManager):
 
         self._mass_frac=value.copy()
 
-    @property
+    @overridable_property
     def mole_frac(self):
         if self.mass_frac is None:
             return None
@@ -256,6 +286,7 @@ class BasePhase(ThermoPhysicalManager):
 
 
     @mole_frac.setter
+    @overridable_setter
     def mole_frac(self,value):
         if value is None:
             return
@@ -267,7 +298,7 @@ class BasePhase(ThermoPhysicalManager):
 
 
 
-    @property
+    @overridable_property
     def mole_conc(self):
         if self.mass_frac is None:
             return None
@@ -279,6 +310,7 @@ class BasePhase(ThermoPhysicalManager):
 
 
     @mole_conc.setter
+    @overridable_setter
     def mole_conc(self,value):
         if value is None:
             return
@@ -291,7 +323,7 @@ class BasePhase(ThermoPhysicalManager):
 
 
 
-    @property
+    @overridable_property
     def mass_conc(self):
         if self.mass_frac is None:
             return None
@@ -303,6 +335,7 @@ class BasePhase(ThermoPhysicalManager):
 
 
     @mass_conc.setter
+    @overridable_setter
     def mass_conc(self,value):
         if value is None:return
 
@@ -316,7 +349,7 @@ class BasePhase(ThermoPhysicalManager):
     # Extensive derived quantities
     # ==============================================================
 
-    @property
+    @overridable_property
     def moles(self):
         #keep in mind these are essentially kmol since mass is kg
         if self.mass is None:
@@ -326,6 +359,7 @@ class BasePhase(ThermoPhysicalManager):
 
 
     @moles.setter
+    @overridable_setter
     def moles(self,value):
         if value is None:
             return
@@ -333,21 +367,22 @@ class BasePhase(ThermoPhysicalManager):
 
 
 
-    @property
+    @overridable_property
     def vol(self):
         if self.mass is None:
             return None
-        return self.mass/self.getDensity()
+        return self.mass/self.density
 
 
     @vol.setter
+    @overridable_setter
     def vol(self,value):
         if value is None:return
-        self.mass=value*self.getDensity()
+        self.mass=value*self.density
 
 
 
-    @property
+    @overridable_property
     def mw_av(self):
         if self.mass_frac is None:
             return None
@@ -428,7 +463,7 @@ class BasePhase(ThermoPhysicalManager):
             pres_bubble = newton(bubble_fn, pres_seed, full_output=False)
 
             return pres_bubble
-
+    @overridable
     def getProps(self, basis='mass'):
         cpmass, cpmole = self.getCpMix(self.temp, self.mass_frac)
         rhoMass, rhoMole = self.getDensityMix(self.mass_frac, temp=self.temp)
@@ -537,11 +572,11 @@ class BasePhase(ThermoPhysicalManager):
         self.mass=mass
         self.moles=moles
         self.vol=vol
-
-    @property
+    
+    @overridable_property
     def default_composition_name(self):
         return 'mass_frac'
-    @property
+    @overridable_property
     def default_quantity_name(self):
         return 'mass'
 
@@ -560,7 +595,7 @@ class BasePhase(ThermoPhysicalManager):
             "pres":self.pres,
         }
 
-
+    @overridable
     def get_state_dict(self,state_collection):
 
         return {
@@ -569,7 +604,7 @@ class BasePhase(ThermoPhysicalManager):
         }
 
 
-
+    @overridable
     def getEnthalpy(self,*args,**kwargs):
 
         if "mass_frac" not in kwargs:
@@ -581,7 +616,7 @@ class BasePhase(ThermoPhysicalManager):
             **kwargs
         )
 
-
+    @overridable
     def getCp(self,*args,**kwargs):
 
         if "mass_frac" not in kwargs:
@@ -594,10 +629,13 @@ class BasePhase(ThermoPhysicalManager):
             *args,
             **kwargs
         )
+    @overridable_property
+    def density(self):
+        return self.getDensity()
 
-
+    @overridable
     def getDensity(self,*args,**kwargs):
-
+        
         if "mass_frac" not in kwargs:
             kwargs["mass_frac"]=self.mass_frac
         if 'phase' not in kwargs:
@@ -620,6 +658,77 @@ class BasePhase(ThermoPhysicalManager):
         stream.amount_names.update({'mass_flow','mass_j_flow','vol_flow','mole_flow'})
         return stream
 
+    ######## Mechanism logic
+    @property
+    def mechanisms(self)->list["Mechanism"]:
+
+        return self._mechanisms
+    @mechanisms.setter
+    def mechanisms(self, value):
+        if value is None:
+            self._mechanisms = []
+        elif isinstance(value, (list, tuple, set)):
+            self._mechanisms = list(value)
+        else:
+            self._mechanisms = [value]
+    def get_mechanism(self,mechanismClass):
+        for m in self.mechanisms:
+            if isinstance(m,mechanismClass):
+                return m
+    def _call_override(
+        self,
+        name,
+        *args,
+        **kwargs
+    ):
+        "Lets mechanisms override properties/methods"
+        for mech in self.mechanisms:
+
+            override = mech.get_override(name)
+
+            if override is not None:
+                return override(*args, **kwargs)
+
+        return None
+
+    def _get_mechanism_attribute_owner(self, name):
+        mechanisms = self.__dict__.get("_mechanisms", ())
+        matches = []
+
+        for mechanism in mechanisms:
+            for attr in mechanism.exposed_attributes:
+                if attr == name:
+                    matches.append(mechanism)
+                    break
+
+        if len(matches) == 1:
+            return matches[0]
+
+        if len(matches) > 1:
+            raise AttributeError(
+                f"Ambiguous phase attribute {name!r}: "
+                f"multiple mechanisms own an attribute with this name."
+            )
+
+        return None
+
+    def __getattr__(self, name):
+
+        mechanism = self._get_mechanism_attribute_owner(name)
+
+        if mechanism is not None:
+            return getattr(mechanism, name)
+
+        raise AttributeError(
+            f"{type(self).__name__} has no attribute {name!r}"
+        )
+    ##### Vessel API
+    def update_from_solver_state(self,updates:dict,completed_state:dict["StateKey"],unit=None):
+        if updates:
+            self.updatePhase(**updates)
+
+        for mech in self.mechanisms:
+            mech.update_state(completed_state,unit=unit)
 
 class LiquidPhase(BasePhase):
     def __init__(

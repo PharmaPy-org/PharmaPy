@@ -7,10 +7,10 @@
   ],
   "python-envs.pythonProjects": [
     {
-        "path": ".",
-        "envManager": "ms-python.python:conda",
-        "packageManager": "ms-python.python:conda"
+      "path": ".",
+      "envManager": "ms-python.python:conda",
+      "packageManager": "ms-python.python:conda"
     }
-]
+  ]
 
 }

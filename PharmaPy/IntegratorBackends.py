@@ -57,13 +57,13 @@ class IntegratorBackend(ABC):
 
 class AssimuloBackend(IntegratorBackend):
 
-    def __init__(self):
+    def __init__(self,options={'maxh':1} ):
 
         super().__init__()
 
         self._problem = None
         self._solver = None
-        self.options = {'maxh':1}
+        self.options = options
         self.state_event_list = []
 
         self.eval_sens = False
@@ -85,7 +85,8 @@ class AssimuloBackend(IntegratorBackend):
         unit.reset()
 
         states_init = unit.create_solver_init_states()
-
+        unit.save_initial_solver_state(states_init,unit.elapsed_time)
+        
         self.set_ode_problem(unit,states_init)
 
         if unit.state_event_list:
@@ -106,10 +107,17 @@ class AssimuloBackend(IntegratorBackend):
         solver.iter = "Newton"
         solver.discr = "BDF"
 
-        if options:
+        if options: #flagged for deprecation
 
             for name,val in options.items():
 
+                setattr(solver,name,val)
+
+                if name == "time_limit":
+                    solver.report_continuously = True
+        if self.options:
+            for name,val in self.options.items():
+            
                 setattr(solver,name,val)
 
                 if name == "time_limit":

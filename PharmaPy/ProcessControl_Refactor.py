@@ -1,6 +1,6 @@
 from PharmaPy.DataClasses import (PhaseConnection,PhaseMapping,PhaseRef,PhaseStateCollection,PhaseStateVariable,
                                   IntraPhaseProcess,StateCollection,StateKey,StateVariable,StreamConnection,
-                                  OperatingKey)
+                                  OperatingKey, StateEvent)
 from typing import Any
 import numpy as np
 
@@ -94,6 +94,26 @@ class Controller:
         unit,
     ):
         pass
+    def get_events(self,unit):
+            return []
+class SimpleTemperatureController(Controller):
+    def __init__(self,temp_func,temp_0 =273.15):
+        super().__init__()
+        self.temp_func = temp_func
+        self.temp_0 = temp_0
+        self.states[StateKey('global_temp')]=temp_0
+    def reset(self):
+
+        super().reset()
+
+        self.states[
+            StateKey("global_temp")
+        ] = self.temp_0
+    def update_state(self, time, completed_state, unit):
+        statekey = StateKey('global_temp')
+        self.states[statekey] = self.temp_func(time)
+        
+    
 class DefaultContinuousVesselVolume(Controller):
 
     def __init__(
@@ -119,7 +139,7 @@ class DefaultContinuousVesselVolume(Controller):
 
         if self.target_volume is None:
             self.target_volume = unit.Phases.vol
-
+        
 
     def actuate(
         self,
@@ -134,8 +154,8 @@ class DefaultContinuousVesselVolume(Controller):
             return
 
         inlet_flow = sum(
-            stream.stream.vol_flow
-            for stream in resolved_inlets.streams
+            transfer.stream_phase.vol_flow
+            for transfer in resolved_inlets.streams[0].transfers
         )
 
         volume_error = unit.Phases.vol - self.target_volume
@@ -149,6 +169,16 @@ class DefaultContinuousVesselVolume(Controller):
                 port='outlet'
             )
         ] = max(outlet_flow,0.0)
+    def get_events(self, unit):
+
+        return [
+            StateEvent(
+                name='outlet_flow',
+                function=lambda t, state, unit: unit.Phases.vol - 2,
+                direction=0,
+                terminal=False,
+            )
+        ]
 
 class TankLevelController(Controller):
 

@@ -38,7 +38,7 @@ class _BaseReactor(MultiPhaseVessel):
         for i,rk in enumerate(RKs):
             assert len(self.Phases.Liquids)>=i-1, "The number of reaction kinetics must match or be less than the number of liquid phases or you must specify reaction_regions manually"
             region = IntraPhaseProcess(phase=PhaseRef("liquid",i),
-                                    mechanism=ReactionMechanism(rk))
+                                    mechanism=ReactionMechanism(rk,self.Phases.Liquids[i]))
             processes.append(region)
         self.intraphase_processes = processes
 
