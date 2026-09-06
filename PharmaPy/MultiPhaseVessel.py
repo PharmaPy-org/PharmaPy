@@ -5,7 +5,7 @@ Created on Fri July 10 2026
 @author: zhillma
 Refactored the code by dcasasor
 """
-from PharmaPy.Phases import classify_phases, SolidPhase, LiquidPhase, VaporPhase
+from PharmaPy.Phases import classify_phases, SolidPhase, LiquidPhase, VaporPhase, BasePhase
 from PharmaPy.Streams import LiquidStream, SolidStream, VaporStream
 from PharmaPy.MixedPhases import Slurry, SlurryStream, MixedPhase, MixedStream
 
@@ -187,8 +187,8 @@ class MultiPhaseVessel():
 
                 mappings.append(
                     PhaseMapping(
-                        source_phase=ref,
-                        sink_phase=ref
+                        source_phaseref=ref,
+                        sink_phaseref=ref
                     )
                 )
 
@@ -532,7 +532,7 @@ class MultiPhaseVessel():
         
         for process in self.intraphase_processes:
 
-            phase = self.Phases.get_phase_from_ref(process.phase)
+            phase = self.Phases.get_phase_from_ref(process.phaseref)
             process.mechanism.add_output_state_variables(
                 self.output_state_collection,
                 overwrite=overwrite,
@@ -545,7 +545,7 @@ class MultiPhaseVessel():
                     units="kmol/m3",
                     state_type="post",
                     index=phase.name_species,
-                    phase=process.phase,
+                    phaseref=process.phaseref,
                     compute_value=self.compute_mole_conc_value
                 ),
                 overwrite
@@ -635,7 +635,7 @@ class MultiPhaseVessel():
             operating_conditions=None,
         ):
 
-        phase_ref = state_var.phase
+        phase_ref = state_var.phaseref
 
         mass_key = StateKey(
             context.basis,
@@ -951,7 +951,7 @@ class MultiPhaseVessel():
         # Only phases that violated need correction
         for state_key in violations:
 
-            phase_ref = state_key.phase
+            phase_ref = state_key.phaseref
 
             phase = self.Phases.get_phase_from_ref(
                 phase_ref
@@ -1027,7 +1027,7 @@ class MultiPhaseVessel():
         for state_key, scale_vector in scales.items():
 
             phase = self.Phases.get_phase_from_ref(
-                state_key.phase
+                state_key.phaseref
             )
 
             new_mass = (
@@ -1133,7 +1133,7 @@ class MultiPhaseVessel():
 
                 contributions[term][state_key] *= scales[state_key]
         for item in aux["outlet"]:
-            phase_ref = item.mapping.sink_phase
+            phase_ref = item.mapping.sink_phaseref
             key = self.material_key(phase_ref)
 
             if key in scales:
@@ -1196,8 +1196,8 @@ class MultiPhaseVessel():
             if key.connection != connection:
                 continue
 
-            if (key.phase is not None
-                and key.phase != phase_ref):
+            if (key.phaseref is not None
+                and key.phaseref != phase_ref):
                 continue
 
             if (key.port is not None
@@ -1227,7 +1227,7 @@ class MultiPhaseVessel():
             return 0.0
 
         total_vessel_flow = sum(
-            self.Phases.get_phase_from_ref(m.sink_phase).vol
+            self.Phases.get_phase_from_ref(m.sink_phaseref).vol
             for m in connection.phase_mappings)
 
         if total_vessel_flow <= 0:
@@ -1270,8 +1270,8 @@ class MultiPhaseVessel():
             transfers=[]
             for mapping in connection.phase_mappings: #iterate over each phase in that stream
 
-                vessel_phase = self.Phases.get_phase_from_ref(mapping.sink_phase)
-                outlet_phase = outlet_stream.get_phase_from_ref(mapping.source_phase)
+                vessel_phase = self.Phases.get_phase_from_ref(mapping.sink_phaseref)
+                outlet_phase = outlet_stream.get_phase_from_ref(mapping.source_phaseref)
                 
                 # Default outlet request
                 requested_flow = self.compute_requested_phase_outlet_flow(vessel_phase,total_outlet_flow,connection)
@@ -1280,7 +1280,7 @@ class MultiPhaseVessel():
                 ops =self.get_phase_operating_conditions(
                     operating_conditions,
                     connection_num,
-                    mapping.source_phase,
+                    mapping.source_phaseref,
                     "outlet",
                 )
                 requested_flow = ops.pop("vol_flow", requested_flow)
@@ -1331,15 +1331,15 @@ class MultiPhaseVessel():
             inlet_stream = copy.deepcopy(connection.stream)
             transfers= []
             for mapping in connection.phase_mappings:
-                stream_phase = inlet_stream.get_phase_from_ref(mapping.source_phase)
+                stream_phase = inlet_stream.get_phase_from_ref(mapping.source_phaseref)
 
-                vessel_phase = self.Phases.get_phase_from_ref(mapping.sink_phase)
+                vessel_phase = self.Phases.get_phase_from_ref(mapping.sink_phaseref)
 
 
                 ops = self.get_phase_operating_conditions(
                     operating_conditions,
                     connection_num,
-                    mapping.source_phase,
+                    mapping.source_phaseref,
                     "inlet",
                 )
 
@@ -1427,7 +1427,7 @@ class MultiPhaseVessel():
                 for transfer in connection:
     
                     key = self.material_key(
-                        transfer.mapping.sink_phase
+                        transfer.mapping.sink_phaseref
                     )
     
                     rates[key] += transfer.species_flow
@@ -1464,7 +1464,7 @@ class MultiPhaseVessel():
             for transfer in connection:
 
                 key = self.material_key(
-                    transfer.mapping.sink_phase
+                    transfer.mapping.sink_phaseref
                 )
 
                 rates[key] -= transfer.species_flow
@@ -1493,7 +1493,7 @@ class MultiPhaseVessel():
             completed_state
         ):
         for process in self.intraphase_processes:
-            phase = self.Phases.get_phase_from_ref(process.phase)
+            phase = self.Phases.get_phase_from_ref(process.phaseref)
 
             intraphase_result = process.mechanism.get_solver_state_rates(
                 process=process,
@@ -1519,9 +1519,9 @@ class MultiPhaseVessel():
 
         for connection in self.phase_connections:
 
-            source = self.Phases.get_phase_from_ref(connection.source_phase)
+            source = self.Phases.get_phase_from_ref(connection.source_phaseref)
 
-            sink = self.Phases.get_phase_from_ref(connection.sink_phase)
+            sink = self.Phases.get_phase_from_ref(connection.sink_phaseref)
             if connection.mechanism is None:
                 connection.mechanism = DirectTransfer()
 
@@ -1538,6 +1538,11 @@ class MultiPhaseVessel():
 
 
             for state_key,rate in crossphase_result.state_rates.items():
+                if isinstance(state_key.phaseref,BasePhase):
+                    actual_phaseref = self.get_phase_ref(state_key.phaseref)
+                    if actual_phaseref is None:
+                        raise RuntimeError(f"Could not find mechanism's phase: {state_key.phaseref} in vessel phases ")
+                    state_key = StateKey(state_key.name,actual_phaseref)
                 rates[state_key] += rate
 
             
@@ -1943,19 +1948,12 @@ class MultiPhaseVessel():
             # -----------------------------
             # Update vessel phases
             # -----------------------------
-            pseudo.update_phases_from_state(
-                completed_state
-            )
+            pseudo.update_phases_from_state(completed_state)
 
             # -----------------------------
             # Reconstruct operating conditions
             # -----------------------------
-            resolved_inlets, operating_conditions = (
-                pseudo.get_operating_conditions(
-                    t,
-                    completed_state,
-                )
-            )
+            resolved_inlets, operating_conditions = (pseudo.get_operating_conditions(t,completed_state))
 
             resolved_outlets = pseudo._resolve_outlets(
                 completed_state,

@@ -165,7 +165,17 @@ class MechanismView:
         self.direction = direction
 
     def __getattr__(self, name):
-        return getattr(self.mechanism, name)
+        mechanism = object.__getattribute__(self, 'mechanism')
+        return getattr(mechanism, name)
+    def __deepcopy__(self, memo):
+        cls = type(self)
+        copied = cls.__new__(cls)
+        memo[id(self)] = copied
+
+        copied.mechanism = copy.deepcopy(self.mechanism, memo)
+        copied.direction = self.direction
+
+        return copied
 
     def get_solver_state_rates(
             self,
@@ -280,7 +290,7 @@ class ReactionMechanism(Mechanism):
         species_massPerVol_rates[mask] = species_rates
         species_massPerVol_rates *= phase.mw
         species_mass_rates = species_massPerVol_rates* phase.vol#*mole_adjust
-        state_rates = {StateKey('mass_j',process.phase):species_mass_rates}
+        state_rates = {StateKey('mass_j',process.phaseref):species_mass_rates}
         aux = {
                 "phase": phase,
                 "rxn_rates": reaction_rates,
@@ -386,9 +396,9 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         
         self.kv = kv
-        self.output_states=[StateVariable(name="supersat",dim=len(self.target_ind),units="-",state_type="post"),
-                    StateVariable(name="solubility",dim=len(self.target_ind),units="kg/m3",state_type="post"),
-                    StateVariable(name="mu_n",dim=4,index=[0, 1, 2, 3],units="various",state_type="post")]
+        self.output_states=[StateVariable(name="supersat",dim=len(self.target_ind),units="-",state_type="post", compute_value=self.compute_supersat_output),
+                    StateVariable(name="solubility",dim=len(self.target_ind),units="kg/m3",state_type="post",compute_value=self.compute_solubility_output),
+                    StateVariable(name="mu_n",dim=4,index=[0, 1, 2, 3],units="various",state_type="post", compute_value=self.compute_moments_output)]
         if fraction is None:
             fraction = np.zeros(self.owning_phase.num_species)
             fraction[self.target_ind] = np.full(len(self.target_components),1/len(self.target_components))
@@ -404,7 +414,6 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     def mechanism_kinetics(self,value):
         if value is not None:
             self._mechanism_kinetics = value
-        value.target_idx = self.target_ind # this is needed for the Base PharmaPy CrystKinetics, but perhaps not for arbitrary user kinetics?
 
     def getDensity(self):
         return self.density
@@ -546,7 +555,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         result= self.solve_population_balance(source_phase,sink_phase,completed_state,time,connection)
         if not hasattr(self,"liquid_phase_ref"):
-            self.liquid_phase_ref = connection.source_phase
+            self.liquid_phase_ref = connection.source_phaseref
 
         result.aux.update(
             {
@@ -584,6 +593,76 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         #we need the liquid volume since moments/csd are  per (m3_liquid)
         self.reference_vol = unit.Phases.get_phase_from_ref(self.liquid_phase_ref).vol
+    
+    def compute_supersat_output(
+        self,
+        state_var,
+        time,
+        completed_state,
+        context,
+        resolved_inlets=None,
+        resolved_outlets=None,
+        operating_conditions=None,
+    ):
+        """
+        Compute supersaturation from the current replay state.
+
+        This is the StateVariable.compute_value interface. The mechanism
+        itself is the context during replay.
+        """
+
+        liquid = context.Phases.get_phase_from_ref(
+            self.liquid_phase_ref
+        )
+
+        solubility = self.compute_solubility(liquid)
+
+        return self.compute_supersaturation(
+            liquid,
+            solubility,
+        )
+
+    def compute_solubility_output(
+        self,
+        state_var,
+        time,
+        completed_state,
+        context,
+        resolved_inlets=None,
+        resolved_outlets=None,
+        operating_conditions=None,
+    ):
+        """
+        Compute solubility from the current replay state.
+        """
+
+        liquid = context.Phases.get_phase_from_ref(
+            self.liquid_phase_ref
+        )
+
+        return self.compute_solubility(liquid)
+
+    def compute_moments_output(
+        self,
+        state_var,
+        time,
+        completed_state,
+        context,
+        resolved_inlets=None,
+        resolved_outlets=None,
+        operating_conditions=None,
+    ):
+        distribution = completed_state[
+            StateKey(
+                self.distribution_state_name,
+                self.owning_phase_ref,
+            )
+        ]
+
+        return self.compute_moments(
+            distribution,
+            self.x_grid,
+        )
     
 class OneDFVMMechanism(PopulationBalanceMechanism):
 
@@ -664,7 +743,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         time:float,
         connection:PhaseConnection
     ) -> TransferResult:
-
+        
         csd = getattr(self,self.distribution_state_name)
 
         moms = self.compute_moments(csd,self.x_grid)
@@ -748,8 +827,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         }
         species_rates_out = self.compute_species_transfer(mass_transfer,liquid)
 
-        state_rates = {StateKey(self.solver_states[0].name,self.solver_states[0].phaseref): dcsd_dt}
-        state_rates.update({StateKey('mass_j',connection.source_phase):species_rates_out})
+        state_rates = {StateKey(self.solver_states[0].name,self.owning_phase): dcsd_dt} #if phaseref is a phase instead of a PhaseRef, the vessel will determine the phaseref
+        state_rates.update({StateKey('mass_j',connection.source_phaseref):species_rates_out})
         result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer)
         return result
     def get_solid_mass(self):

@@ -30,8 +30,8 @@ class PhaseRef:
 class PhaseConnection:
     #TODO move this to connections when done
     #active_condition checks the source sink and temp and must return a boolean
-    source_phase: PhaseRef
-    sink_phase: PhaseRef
+    source_phaseref: PhaseRef
+    sink_phaseref: PhaseRef
     kinetics:pk.CrystKinetics|pk.RxnKinetics
     species_weights: np.ndarray | None = None
     active_condition: callable=lambda source_phase,sink_phase:True
@@ -42,9 +42,9 @@ class PhaseConnection:
 @dataclass
 class PhaseMapping:
 
-    source_phase: PhaseRef
+    source_phaseref: PhaseRef
 
-    sink_phase: PhaseRef
+    sink_phaseref: PhaseRef
 
 @dataclass
 class StreamConnection:
@@ -62,7 +62,7 @@ class StreamConditions:
         return iter(self.streams)
 @dataclass
 class IntraPhaseProcess:
-    phase:PhaseRef
+    phaseref:PhaseRef
     mechanism: "Mechanism"
 
 
@@ -122,7 +122,7 @@ class StateVariable:
     ):
         try:
             return completed_state[
-                StateKey(state_var.name, state_var.phase)
+                StateKey(state_var.name, state_var.phaseref)
             ]
         except KeyError:
             raise KeyError(
@@ -141,7 +141,7 @@ class OperatingKey:
 
     connection: int | None = None
 
-    phase: PhaseRef | None = None
+    phaseref: PhaseRef | None = None
 
     component: str | None = None
 
@@ -299,13 +299,13 @@ class StateCollection:
     @staticmethod
     def format_key(key):
 
-        if key.phase is None:
+        if key.phaseref is None:
             return key.name
 
         return (
             f"{key.name}_"
-            f"{key.phase.phase_type}"
-            f"{key.phase.index}"
+            f"{key.phaseref.phase_type}"
+            f"{key.phaseref.index}"
         )
         
 

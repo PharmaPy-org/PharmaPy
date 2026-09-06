@@ -50,9 +50,11 @@ class _BaseCrystallizer(MultiPhaseVessel):
                 raise IndexError("The solid phase cannot be found, did you initialize the vessel with a solid phase?")
             pbm = solidphase.get_mechanism(OneDFVMMechanism)
             pbm.liquid_phase_ref = PhaseRef("liquid",0)
+            pbm.owning_phase_ref = solidphase_ref
             weights = pbm.fraction
             if pbm._mechanism_kinetics is None:
                 try:
+                    ck.target_idx = pbm.target_ind[0]
                     pbm.mechanism_kinetics=ck
                 except AttributeError:
                     raise AttributeError("Your solid phase does not have kinetics in its mechanism. The solidphase you assign to the vessel must have a mechanism with kinetics or crystallization cannot occur")
@@ -60,8 +62,8 @@ class _BaseCrystallizer(MultiPhaseVessel):
             
             if ck.supports(['growth','nucl_prim','nucl_sec']):
                 # liquid to solid because crystallization is valid
-                connection = PhaseConnection(source_phase=PhaseRef("liquid",0),
-                                             sink_phase=solidphase_ref,
+                connection = PhaseConnection(source_phaseref=PhaseRef("liquid",0),
+                                             sink_phaseref=solidphase_ref,
                                              kinetics=ck,
                                              species_weights=weights,
                                              active_condition=lambda source,sink:True,
@@ -70,8 +72,8 @@ class _BaseCrystallizer(MultiPhaseVessel):
                 connections.append(connection)
             if ck.supports('dissolution'):
                 #solid to liquid because dissolution
-                connection = PhaseConnection(source_phase=PhaseRef("solid",0),
-                                             sink_phase=PhaseRef('liquid',0),
+                connection = PhaseConnection(source_phaseref=PhaseRef("solid",0),
+                                             sink_phaseref=PhaseRef('liquid',0),
                                              kinetics=ck,
                                              species_weights=weights,
                                              active_condition=lambda source,sink:True,
@@ -176,8 +178,8 @@ class ContinuousCrystallizer(_BaseCrystallizer):
 
             mappings.append(
                 PhaseMapping(
-                    source_phase=ref,
-                    sink_phase=ref
+                    source_phaseref=ref,
+                    sink_phaseref=ref
                 )
             )
 
