@@ -757,7 +757,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             solubility,
         )
 
-        conc = liquid.mass_conc #TODO check if these are the units expected by CrystKin
+        conc = liquid.mass_j/liquid.mass_j[-1]*liquid.getDensity() #TODO check if these are the units expected by CrystKin
 
         nucl, growth, dissol = (
             self.mechanism_kinetics.get_kinetics(

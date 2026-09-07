@@ -52,7 +52,7 @@ m = 1
 liquid1 = LiquidPhase(
     dpath,
     mass=m,
-    mass_frac=[0,0,0.4,0,0.6],
+    mass_frac=[0,0,0.01,0,0.99],
 
 )
 print("starting vol:", liquid1.vol)
@@ -79,7 +79,7 @@ rxns = ['A + B --> C', 'C + A --> D']
 kvals_rxns = np.array([1,1e-1])#, 1e2]) #psuedo instantaneous
 ea_vals = np.array([1e3,1e4])#,1e4]) #psuedo no activation energy
 Rkinetics = RxnKinetics(path=dpath,rxn_list=rxns, k_params=kvals_rxns,ea_params=ea_vals)
-fitted_kinetics = np.array([3e8, 3, 5, 1.32]) # HP volfunc big bounds
+fitted_kinetics = np.array([3e2, 3, 5e3, 1.32]) # HP volfunc big bounds
 cryst_kinetics =build_crysts(fitted_kinetics)
 Ckinetics = CrystKinetics(np.array((2.269e2,-1.88,3.89e-3)),**cryst_kinetics)
 Utility = CoolingWater(mass_flow=100, temp_in=273.55)
@@ -141,9 +141,10 @@ if True:
 
     plt.legend()
     plt.show()
-    # plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[-1],label='end')
-    # plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[0],label='start')
-    # plt.show()
-    plt.plot(vessel.result.mu_n[:,1])
+    plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[-1],label='end')
+    plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[0],label='start')
+    plt.show()
+    # plt.plot(vessel.result.mu_n[:,1])
+    plt.plot(vessel.result.supersat)
     plt.show()
     print(vessel.result.time,vessel.result.Total_m_in_vessel)
