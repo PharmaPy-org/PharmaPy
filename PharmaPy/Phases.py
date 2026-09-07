@@ -3,7 +3,7 @@
 
 # import numpy as np
 # from autograd import numpy as np
-from typing import Optional
+from typing import Optional, Sequence, Union
 
 import numpy as np
 from PharmaPy.ThermoModule import ThermoPhysicalManager
@@ -15,8 +15,22 @@ import warnings
 eps = np.finfo(float).eps
 
 
-def classify_phases(instance, names=None):
+def classify_phases(instance: object, names: Optional[Sequence[str]] = None) -> None:
+    """Name phases and install them as attributes of their container.
 
+    Parameters
+    ----------
+    instance : object
+        Container exposing its phase objects through ``Phases``.
+    names : sequence of str, optional
+        Explicit names paired with phases in order. If omitted, names are
+        generated from the Liquid, Solid, or Vapor class and a per-type count.
+
+    Notes
+    -----
+    Both each phase's ``name`` and the corresponding container attribute are
+    assigned. Explicit names retain the existing ``zip`` pairing behavior.
+    """
     phases = instance.Phases
 
     if names is None:
@@ -41,7 +55,7 @@ def classify_phases(instance, names=None):
             setattr(instance, phase_name, phase)
     else:
         for phase, name in zip(phases, names):
-            setattr(phase, 'name', phase_name)
+            setattr(phase, 'name', name)
             setattr(instance, name, phase)
 
 
@@ -966,77 +980,87 @@ class VaporPhase(ThermoPhysicalManager):
 
 
 class SolidPhase(ThermoPhysicalManager):
-    """    
+    """Represent a solid inventory with one mixture density across size bins.
 
-    Parameters
-    ----------
-    path_thermo : string
-        Directory of the physical properties .json file
-    temp : float or array-like
-        Temperature for enthalpy calculation in K.   
-    temp_ref : float, optional
-        Reference temperature for enthalpy calculation. The default is 298.15.
-    pres : float, optional
-        Pressure in atmosphere of the system in pascals. The default is 101325.
-    mass : float, optional
-        Mass of solids in kg. The default is 0.
-    mass_frac : array-like, optional
-        Fraction of the species participating in the solid phase in mass basis.
-        The default is None.
-    moments : array, optional
-        Total-population distribution moments with shape ``(num_moments,)``.
-        Moment order ``n`` has units [m**n], with order zero a crystal count
-        [-]. The default is None.
-    num_mom : integer, optional
-        Number of moments describing the solid phase [-]. This sizes the
-        classical moment-method state vector. The default is 4 (orders 0--3).
-    x_distrib : array, optional
-        Array of size N, containing the internal grid
-        size coordinate of the solids [um]. The default is None
-    distrib : array, optional
-        Initial crystal-size distribution with shape ``(num_sizes,)``. When
-        ``mass == 0``, this must be a number-based total-population
-        distribution [#/um] and is stored directly. When ``mass > 0``, the
-        values are normalized as dimensionless bin weights [-] on the
-        ``distrib_type`` basis, then converted to [#/um] consistently with the
-        specified solid mass. The default is None.
-    distrib_type : string, optional
-        Type of distribution of crystals. The option is 'mass_frac' 
-        or 'vol_perc'. The default is 'vol_perc'.
-    moisture : float, optional
-        Initial moisture content of the solids. The default is 0.
-    porosity : float, optional
-        Volume-based pore fraction out of the packed solid beds. The default is 0.
-    mole_conc : array-like, optional
-        Concentration of the species participating in the solid phase in mole basis. The default is None.
-    kv : float, optional
-        Volumetric shape factor of the solids. The default is 1.
+    Distribution moments use a total-population basis: order n has units
+    [m**n], with order zero a crystal count [-]. The volumetric shape factor
+    ``kv`` converts the third moment to physical solid volume [m**3].
 
-
-
-    Returns
-    -------
-    None.
-
-    Notes
-    -----
-    Solid mass is stored in kilograms, while molecular weight is stored in
-    grams per mole. Mole amounts are calculated from the finalized solid mass
-    after converting it to grams during construction.
-
-    ``moles`` is reconciled whenever construction or ``updatePhase`` changes
-    the solid mass, so mass-, volume-, and mole-basis amounts describe the
-    same physical inventory.
-
+    ``distrib_type`` selects the documented mass- or volume-based bin weights.
+    Under the uniform-density assumption, the normalized weights and resulting
+    number distribution are identical for both bases. See ``__init__`` for
+    the parameter reference and precedence of supplied moments.
     """
-    
+
     def __init__(self, path_thermo, temp=298.15, temp_ref=298.15, pres=101325,
                  mass=0, mass_frac=None,
                  moments=None, num_mom=4,
                  distrib=None, x_distrib=None, distrib_type='vol_perc',
                  moisture=0, porosity=0,
                  mole_conc=None, kv=1):
-        
+        """Initialize a solid inventory and its optional size distribution.
+
+        Parameters
+        ----------
+        path_thermo : str
+            Path to the thermodynamic property database.
+        temp : float or numpy.ndarray, optional
+            Temperature [K]; default 298.15 K is the reference condition.
+        temp_ref : float, optional
+            Enthalpy reference temperature [K], default 298.15 K.
+        pres : float, optional
+            Pressure [Pa], default one standard atmosphere (101325 Pa).
+        mass : float, optional
+            Solid mass [kg]. Zero derives inventory from the supplied moments
+            or raw number distribution; positive mass scales bin weights.
+        mass_frac : array-like, optional
+            Species mass fractions [-], shape ``(num_species,)``.
+        moments : numpy.ndarray, optional
+            Total-population moments, shape ``(num_moments,)``. Order n has
+            units [m**n], with order zero a crystal count [-]. Takes precedence
+            over ``distrib``; its length sets the stored moment count.
+            When supplied, ``distrib`` and the values of ``x_distrib`` are
+            stored without normalization or conversion; ``distrib_type`` is
+            unused for conversion. A supplied grid is stored as a NumPy array
+            and refreshes ``dx`` [um]; no grid leaves ``dx`` unset.
+        num_mom : int, optional
+            Number of moment orders [-]; default four covers orders zero
+            through three, including the volume-related third moment.
+        distrib : numpy.ndarray, optional
+            Shape ``(num_sizes,)``: number density [#/um] when mass is zero,
+            otherwise bin weights [-] normalized on the ``distrib_type`` basis.
+            If ``moments`` is supplied, stored as given without normalization
+            or conversion, regardless of mass or ``distrib_type``.
+        x_distrib : numpy.ndarray, optional
+            Crystal sizes [um], shape ``(num_sizes,)``. With ``moments``, values
+            are stored unchanged as a NumPy array and refresh ``dx`` [um].
+        distrib_type : {'vol_perc', 'mass_frac'}, optional
+            Basis of bin weights, default volume. One mixture density across
+            all bins makes normalized mass and volume weights equivalent.
+        moisture : float, optional
+            Stored moisture content [-], default zero for dry solids.
+        porosity : float, optional
+            Stored pore volume fraction [-], default zero for nonporous solids.
+        mole_conc : array-like, optional
+            Reserved species molar concentrations [mol/L], shape
+            ``(num_species,)``; currently unused.
+        kv : float, optional
+            Volumetric shape factor [-] in ``particle_volume = kv * size**3``;
+            default one represents cubic particles.
+
+        Raises
+        ------
+        ValueError
+            If ``distrib_type`` is not 'vol_perc' or 'mass_frac', or a supplied
+            distribution grid has fewer than two points.
+        RuntimeError
+            If the species mass fractions sum to less than the existing
+            composition threshold of 0.99 [-].
+        """
+        if distrib_type not in ('vol_perc', 'mass_frac'):
+            raise ValueError("distrib_type must be 'vol_perc' or 'mass_frac'; "
+                             f"got {distrib_type!r}")
+
         super().__init__(path_thermo)
         self.kv = kv
         self.distrib_type = distrib_type
@@ -1062,7 +1086,10 @@ class SolidPhase(ThermoPhysicalManager):
             self.num_mom = len(moments)
             self.moments = moments
 
-            self.x_distrib = x_distrib
+            self.x_distrib = None
+            if x_distrib is not None:
+                self.x_distrib = np.asarray(x_distrib)  # [um]
+                self.dx = self._get_grid_spacing(self.x_distrib)  # [um]
             self.distrib = distrib
 
             solid_spec = True
@@ -1145,8 +1172,8 @@ class SolidPhase(ThermoPhysicalManager):
         x_distrib : numpy.ndarray, optional
             Crystal-size grid with shape ``(num_sizes,)`` [um]. When supplied,
             it replaces the stored grid before distribution moments are
-            recalculated. It does not refresh the stored bin widths ``dx``;
-            that pre-existing synchronization defect is tracked in issue #162.
+            recalculated and refreshes the stored bin widths ``dx`` [um],
+            using uniform spacing or geometric bin boundaries.
         distrib : numpy.ndarray, optional
             Number-based crystal-size distribution on the total-population
             basis with shape ``(num_sizes,)`` [#/um]. It is assigned directly,
@@ -1179,7 +1206,8 @@ class SolidPhase(ThermoPhysicalManager):
         an amount change and therefore leaves mass, volume, and moles intact.
         """
         if x_distrib is not None:
-            self.x_distrib = x_distrib
+            self.x_distrib = x_distrib  # [um]
+            self.dx = self._get_grid_spacing(x_distrib)  # [um]
 
         if distrib is not None:
             self.distrib = distrib
@@ -1224,38 +1252,84 @@ class SolidPhase(ThermoPhysicalManager):
 
         return distrib_out
 
-    def getDistribution(self, x_distrib, distrib):
-        dens = self.getDensity()
+    def _get_grid_spacing(self, x_distrib: np.ndarray) -> Union[float, np.ndarray]:
+        """Calculate widths using the established crystal-grid convention.
 
-        # Crystal size dimension
-        delta_x = np.diff(x_distrib)
+        Parameters
+        ----------
+        x_distrib : numpy.ndarray
+            Crystal sizes [um], shape ``(num_sizes,)``, with at least two
+            points. Nonuniform grids are assumed to be geometric series.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Bin widths [um]: a scalar for uniform spacing, otherwise an array
+            of shape ``(num_sizes,)``.
+
+        Raises
+        ------
+        ValueError
+            If fewer than two grid points are supplied, so bin widths cannot
+            be determined.
+
+        Notes
+        -----
+        For geometric grids, interior boundaries are geometric means of
+        adjacent sizes. End boundaries extend that sequence by the grid ratio.
+        Uniform-spacing detection retains NumPy's default isclose tolerances
+        for compatibility with construction.
+        """
+        if len(x_distrib) < 2:
+            raise ValueError("x_distrib must contain at least two grid points "
+                             "to calculate bin widths")
+        delta_x = np.diff(x_distrib)  # [um]
         equal = np.isclose(delta_x[1:], delta_x[:-1]).all()
         if equal:
-            self.dx = delta_x[0]
-        else:  # assume geometric series and make adjustments
-            ratio = x_distrib[1] / x_distrib[0]
-            x_shifted = np.zeros(len(x_distrib) + 1)
-            x_gr = np.sqrt(x_distrib[1:] * x_distrib[:-1])
+            return delta_x[0]
 
-            x_shifted[0] = x_gr[0] / ratio
-            x_shifted[-1] = x_gr[-1] * ratio
+        ratio = x_distrib[1] / x_distrib[0]  # [-]
+        x_shifted = np.zeros(len(x_distrib) + 1)  # [um]
+        x_gr = np.sqrt(x_distrib[1:] * x_distrib[:-1])  # [um]
+        x_shifted[0] = x_gr[0] / ratio
+        x_shifted[-1] = x_gr[-1] * ratio
+        x_shifted[1:-1] = x_gr
+        return np.diff(x_shifted)
 
-            x_shifted[1:-1] = x_gr
+    def getDistribution(self, x_distrib: np.ndarray,
+                        distrib: np.ndarray) -> np.ndarray:
+        """Convert initial bin weights to a total-population distribution.
 
-            self.dx = np.diff(x_shifted)
+        Parameters
+        ----------
+        x_distrib : numpy.ndarray
+            Crystal-size grid [um], shape ``(num_sizes,)``; matches the stored
+            grid used by ``convert_distribution``.
+        distrib : numpy.ndarray
+            Bin weights [-] when stored mass is positive, otherwise raw number
+            density [#/um], with shape ``(num_sizes,)``.
 
-        # Distribution
-        distrib = np.asarray(distrib)
+        Returns
+        -------
+        numpy.ndarray
+            Number distribution [#/um], shape ``(num_sizes,)``.
+
+        Notes
+        -----
+        Refreshes ``dx`` [um]. Positive-mass inputs are normalized by their
+        sum. With one mixture density across bins, mass and volume fractions
+        coincide. The volume conversion divides solid mass by density [kg/m**3]
+        and each bin's volume by ``kv * size**3`` and bin width to obtain [#/um].
+        Zero-mass inputs are returned without normalization or conversion.
+        """
+        self.dx = self._get_grid_spacing(x_distrib)  # [um]
+        distrib = np.asarray(distrib)  # [-] if mass > 0, otherwise [#/um]
         if self.mass > 0:
-            distrib = distrib / distrib.sum()
-            if self.distrib_type == 'vol_perc':
-                distr = self.convert_distribution(vol_distr=distrib,
-                                                  mass=self.mass)
-            elif self.distrib_type == 'mass_perc':
-                distr = self.mass*distrib / x_distrib**3 / self.kv * 1e18
-
+            bin_weights = distrib / distrib.sum()  # [-]
+            distr = self.convert_distribution(
+                vol_distr=bin_weights, mass=self.mass)  # [#/um]
         else:
-            distr = distrib
+            distr = distrib  # [#/um]
 
         return distr
 

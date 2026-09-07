@@ -56,3 +56,11 @@ Reviewed on 2026-09-07 against branch `fix/issues` at commit `c11abed`.
 | #172 | Workshop materials as an executable regression suite | Depends on canonical case-study notebooks that must be obtained from the Nagy group (external) and on the Assimulo lane; not actionable here. |
 | #212 | Sourced non-ideal activity data for DynamicExtractor tests | Requires primary-source UNIQUAC/UNIFAC parameters that are not in the repository; AGENTS.md forbids inventing provenance, and the work is a follow-up to open PR #206. |
 | #215 | Cache reactor state Jacobians across sensitivity callbacks | Performance follow-up that builds on open PR #180; cannot be implemented until that PR lands. |
+
+## Skipped: deferred behind an open pull request
+
+Reviewed on 2026-09-07 against branch `fix/issues` at commit `dbdea97`.
+
+| Issue | Title (short) | Reason |
+| --- | --- | --- |
+| #178 | VaporPhase.getEnthalpy compares the temperature axis against the species axis | Real defect, deferred: open PR #179 rewrites the same per-species branch of `VaporPhase.getEnthalpy` for #177, so a concurrent fix on this branch would conflict with that PR. Revisit once PR #179 lands. |
