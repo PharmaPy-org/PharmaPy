@@ -14,6 +14,12 @@ import warnings
 
 eps = np.finfo(float).eps
 
+# CODATA 2018: R = 8.314462618 J/(mol K), rounded to four significant figures
+# to match the existing gas_ct = 8.314 in Kinetics, Crystallizers, Reactors,
+# Drying_Model, Evaporators, and ThermoModule, so vapor amounts agree with
+# the evaporator's own P V / (R T).
+VAPOR_GAS_CONSTANT = 8.314  # [J/mol/K]
+
 
 def classify_phases(instance: object, names: Optional[Sequence[str]] = None) -> None:
     """Name phases and install them as attributes of their container.
@@ -576,13 +582,17 @@ class VaporPhase(ThermoPhysicalManager):
 
     Exactly one composition measure must define the mixture. Material amounts
     use mass, volume, or molar bases and are kept mutually consistent with the
-    specified composition.
+    specified composition, temperature, and pressure using the ideal-gas
+    equation of state. Density uses the same ideal-gas assumption.
     """
 
-    def __init__(self, path_thermo=None, temp=298.15, pres=101325,
-                 mass=0, vol=0, moles=0,
-                 mass_frac=None, mole_frac=None, mole_conc=None,
-                 check_input=True, verbose=True):
+    def __init__(self, path_thermo: Optional[str] = None,
+                 temp: float = 298.15, pres: float = 101325,
+                 mass: float = 0, vol: float = 0, moles: float = 0,
+                 mass_frac: Optional[np.ndarray] = None,
+                 mole_frac: Optional[np.ndarray] = None,
+                 mole_conc: Optional[np.ndarray] = None,
+                 check_input: bool = True, verbose: bool = True) -> None:
         """Initialize a vapor-phase thermodynamic state.
 
         Parameters
@@ -590,9 +600,9 @@ class VaporPhase(ThermoPhysicalManager):
         path_thermo : str, optional
             Path to the species thermophysical-property JSON file.
         temp : float, optional
-            Vapor temperature [K].
+            Vapor temperature [K]; default is standard ambient temperature.
         pres : float, optional
-            Vapor pressure [Pa].
+            Vapor pressure [Pa]; default is one standard atmosphere.
         mass : float, optional
             Total vapor mass [kg].
         vol : float, optional
@@ -614,7 +624,8 @@ class VaporPhase(ThermoPhysicalManager):
         Raises
         ------
         ValueError
-            If no composition measure is provided.
+            If no composition measure is provided, an amount is negative, or
+            positive mass or volume is requested with zero mixture molar mass.
         RuntimeWarning
             If more than one composition measure is provided.
 
@@ -627,32 +638,52 @@ class VaporPhase(ThermoPhysicalManager):
         Notes
         -----
         Provide exactly one of ``mass_frac``, ``mole_frac``, or
-        ``mole_conc``. Concentration inputs use PharmaPy's [mol/L] basis.
+        ``mole_conc``. Concentration inputs use PharmaPy's [mol/L] basis and
+        are retained as supplied. Concentrations derived from fractions are
+        the converters' liquid-basis values, not gas-EOS concentrations.
+        The first positive amount in the order mass, volume, moles is
+        authoritative; the other amounts follow from the ideal-gas EOS.
+        If all amounts are zero, the stored amounts remain zero. A positive
+        molar amount with zero mole fractions has zero mass and an EOS volume.
         """
 
         super().__init__(path_thermo)
 
-        # Calculate amount of material and compositions using LiquidPhase
-        props = LiquidPhase(
-            path_thermo=path_thermo, temp=temp, pres=pres,
-            mass=mass, vol=vol, moles=moles,
-            mass_frac=mass_frac, mole_frac=mole_frac,
-            mole_conc=mole_conc,
-            check_input=check_input, verbose=verbose,
-        )
+        composition = {
+            'mass_frac': mass_frac, 'mole_frac': mole_frac,
+            'mole_conc': mole_conc,
+        }  # mass/mole fractions [-]; mole_conc [mol/L]
+        supplied = [name for name, value in composition.items()
+                    if value is not None]
+        if not supplied:
+            raise ValueError("No measure of composition was provided")
+        if len(supplied) > 1:
+            raise RuntimeWarning("More than one measure of composition was "
+                                 "provided")
 
-        self.mass = props.mass
-        self.moles = props.moles
-        self.vol = props.vol
+        name = supplied[0]
+        composition[name] = np.array(composition[name])  # [-] or [mol/L]
+        if name in ('mass_frac', 'mole_frac'):
+            fraction_sum = composition[name].sum(axis=-1)  # [-]
+            # Preserve LiquidPhase's existing composition-warning threshold.
+            warning_fraction_sum = 0.99  # [-], legacy normalization diagnostic
+            if verbose and np.any(fraction_sum < warning_fraction_sum):
+                print("PharmaPy Warning: The sum of fractions is less than "
+                      "0.99 (sum = {}) for {} object".format(
+                          fraction_sum, self.__class__.__name__))
 
-        self.mass_frac = props.mass_frac
-        self.mole_frac = props.mole_frac
-        self.mole_conc = props.mole_conc
-
-        self.mw_av = props.mw_av
-
-        self.temp = float(temp)
+        self.temp = float(temp)  # [K]
         self.pres = pres  # [Pa]
+        self.mass = 0  # [kg]
+        self.moles = 0  # [mol]
+        self.vol = 0  # [m**3]
+        # Use the phase implementation before a stream has its flow aliases.
+        VaporPhase.updatePhase(self, mass=mass, vol=vol, moles=moles,
+                               **composition)
+        if mass == vol == moles == 0 and check_input:
+            warnings.warn("'mass', 'moles' and 'vol' are all set to zero. "
+                          "Model may not perform as intended.",
+                          RuntimeWarning, stacklevel=2)
 
         self.y_upstream = None
         self._name = None
@@ -667,72 +698,137 @@ class VaporPhase(ThermoPhysicalManager):
     def name(self, name):
         self._name = name
 
-    def __set_amounts(self, mass, vol, moles, massfrac, molefrac,
-                      conc, mass_conc):
-        densMass = self.getDensityMix(massfrac)
-        mw_av = np.dot(molefrac, self.mw)
-        if mass > 0:
-            self.mass = mass
-            self.vol = mass / densMass
-            self.moles = mass / mw_av * 1000
+    def __set_amounts(self, mass: float, vol: float, moles: float,
+                      massfrac: np.ndarray, molefrac: np.ndarray,
+                      conc: np.ndarray, mass_conc: np.ndarray) -> None:
+        """Store composition and reconcile positive amounts with the gas EOS.
 
-        elif vol > 0:
-            self.vol = vol
-            self.mass = vol * densMass
-            self.moles = self.mass / mw_av * 1000
+        Parameters
+        ----------
+        mass, vol, moles : float
+            Explicit amounts [kg], [m**3], and [mol], respectively. The first
+            positive value in that order controls; zeros leave amounts alone.
+        massfrac, molefrac : ndarray
+            Species mass and mole fractions, shape ``(num_species,)`` [-].
+        conc, mass_conc : ndarray
+            Stored species concentrations, shape ``(num_species,)``, on molar
+            [mol/L] and mass [kg/m**3] bases, respectively.
 
-        elif moles > 0:
-            self.moles = moles
-            self.mass = moles * mw_av / 1000  # kg
-            self.vol = self.mass / densMass
+        Raises
+        ------
+        ValueError
+            If positive mass or volume is requested with zero mixture molar mass.
 
-        self.mass_frac = massfrac
-        self.mole_frac = molefrac
-        self.mole_conc = conc
-        self.mass_conc = mass_conc
+        Notes
+        -----
+        Stream amount storage uses the corresponding per-second units.
+        With no positive amount, no EOS or molecular-weight division occurs.
+        Positive moles with zero composition give zero mass and an EOS volume.
+        """
+        mw_av = np.dot(molefrac, self.mw)  # [g/mol]
+        if (mass > 0 or vol > 0) and mw_av == 0:
+            raise ValueError("Positive mass or volume requires a nonzero "
+                             "composition; zero mixture molar mass was given")
 
-        self.mw_av = mw_av
+        self.mass_frac = massfrac  # [-]
+        self.mole_frac = molefrac  # [-]
+        self.mole_conc = conc  # [mol/L], retained converter basis
+        self.mass_conc = mass_conc  # [kg/m**3], retained converter basis
+        self.mw_av = mw_av  # [g/mol]
 
-    def updatePhase(self, mole_conc=None, mass_conc=None,
-                    mass_frac=None, mole_frac=None,
-                    vol=0, mass=0, moles=0):
+        if mass > 0 or vol > 0 or moles > 0:
+            molar_volume = VAPOR_GAS_CONSTANT * self.temp / self.pres  # [m**3/mol]
+            if mass > 0:
+                self.moles = mass * 1000 / self.mw_av  # [mol], 1000 g/kg
+            elif vol > 0:
+                self.moles = vol / molar_volume  # [mol]
+            else:
+                self.moles = moles  # [mol]
+            self.mass = self.moles * self.mw_av / 1000  # [kg], 1000 g/kg
+            self.vol = self.moles * molar_volume  # [m**3]
+
+    def updatePhase(self, mole_conc: Optional[np.ndarray] = None,
+                    mass_conc: Optional[np.ndarray] = None,
+                    mass_frac: Optional[np.ndarray] = None,
+                    mole_frac: Optional[np.ndarray] = None,
+                    vol: float = 0, mass: float = 0, moles: float = 0,
+                    temp: Optional[float] = None,
+                    pres: Optional[float] = None) -> None:
+        """Update vapor composition, intensive state, and ideal-gas amounts.
+
+        Parameters
+        ----------
+        mole_conc, mass_conc : ndarray, optional
+            Species concentrations, shape ``(num_species,)``, on molar
+            [mol/L] and mass [kg/m**3] bases, respectively. No solvent is
+            inferred. Supplied concentrations are retained on their basis.
+        mass_frac, mole_frac : ndarray, optional
+            Species mass and mole fractions, shape ``(num_species,)`` [-].
+        vol, mass, moles : float, optional
+            Explicit volume [m**3], mass [kg], and amount [mol]. Zero means
+            no amount was supplied. The first positive amount in the order
+            mass, volume, moles controls the other two amounts.
+        temp, pres : float, optional
+            New temperature [K] and pressure [Pa]. ``None`` retains the
+            corresponding stored value.
+
+        Raises
+        ------
+        ValueError
+            If an explicit amount is negative, or positive mass or volume is
+            requested with zero mixture molar mass.
+
+        Notes
+        -----
+        Positive moles with zero composition give zero mass and an EOS volume.
+        With no positive amount, a composition, temperature, or pressure
+        update conserves stored moles and recomputes mass and gas volume.
+        A no-argument update leaves all amounts unchanged. Composition inputs
+        take precedence in the order mole_conc, mass_conc, mass_frac, mole_frac.
+        Concentrations derived from fractions are the converters' liquid-basis
+        values, not gas-EOS values. Stream amounts use per-second units.
+        """
+        for name, amount in (('mass', mass), ('vol', vol), ('moles', moles)):
+            # amount uses [kg], [m**3], or [mol], respectively (rates on streams).
+            if amount < 0:
+                raise ValueError(f"{name} must be nonnegative")
+
+        state_changed = any(value is not None for value in
+                            (mole_conc, mass_conc, mass_frac, mole_frac,
+                             temp, pres))
+        if not state_changed and mass == vol == moles == 0:
+            return
+        if temp is not None:
+            self.temp = float(temp)  # [K]
+        if pres is not None:
+            self.pres = pres  # [Pa]
+        if mass == vol == moles == 0 and state_changed:
+            moles = self.moles  # [mol], conserved inventory
 
         if mole_conc is not None:
-            frac_out = self.conc_to_frac(mole_conc,
-                                         solv_ind=self.ind_solv)
-            if self.ind_solv:
-                mass_frac, mole_frac, mole_conc = frac_out
-            else:
-                mass_frac, mole_frac = frac_out
-
-            mass_conc = mole_conc * self.mw
-
+            mass_frac, mole_frac = self.conc_to_frac(mole_conc)  # [-]
+            mass_conc = mole_conc * self.mw  # [kg/m**3], g/L equals kg/m**3
         elif mass_conc is not None:
-            frac_out = self.mass_conc_to_frac(mass_conc,
-                                              solv_ind=self.ind_solv)
-
-            if self.ind_solv:
-                mass_frac, mole_frac, mass_conc = frac_out
-            else:
-                mass_frac, mole_frac = frac_out
-
-            mole_conc = mass_conc / self.mw
-
+            mass_frac, mole_frac = self.mass_conc_to_frac(mass_conc)  # [-]
+            mole_conc = mass_conc / self.mw  # [mol/L], kg/m**3 equals g/L
         elif mass_frac is not None:
-            mole_conc = self.frac_to_conc(mass_frac)
-            mass_conc = mole_conc * self.mw
-            mole_frac = self.frac_to_frac(mass_frac)
-
+            mole_conc = self.frac_to_conc(mass_frac)  # [mol/L]
+            mass_conc = mole_conc * self.mw  # [kg/m**3], g/L equals kg/m**3
+            mole_frac = self.frac_to_frac(mass_frac)  # [-]
         elif mole_frac is not None:
-            mole_conc = self.frac_to_conc(mole_frac=mole_frac)
-            mass_conc = mole_conc * self.mw
-            mass_frac = self.frac_to_frac(mole_frac=mole_frac)
-
+            if np.any(mole_frac):
+                mole_conc = self.frac_to_conc(mole_frac=mole_frac)  # [mol/L]
+                mass_frac = self.frac_to_frac(mole_frac=mole_frac)  # [-]
+            else:
+                # Empty evaporator placeholders have no normalized composition.
+                mole_conc = np.zeros_like(mole_frac)  # [mol/L]
+                mass_frac = np.zeros_like(mole_frac)  # [-]
+            mass_conc = mole_conc * self.mw  # [kg/m**3], g/L equals kg/m**3
         else:
-            mass_frac = self.mass_frac
-            mole_frac = self.mole_frac
-            mole_conc = self.mole_conc
-            mass_conc = self.mass_conc
+            mass_frac = self.mass_frac  # [-]
+            mole_frac = self.mole_frac  # [-]
+            mole_conc = self.mole_conc  # [mol/L]
+            mass_conc = self.mass_conc  # [kg/m**3]
 
         self.__set_amounts(mass, vol, moles, mass_frac, mole_frac,
                            mole_conc, mass_conc)
@@ -967,16 +1063,65 @@ class VaporPhase(ThermoPhysicalManager):
 
         return viscosity
 
-    def getDensity(self, pres_gas=None, temp_gas=None, phase ='gas', basis='mole'):
+    def getDensity(self, mass_frac: Optional[np.ndarray] = None,
+                   mole_frac: Optional[np.ndarray] = None,
+                   temp: Optional[float] = None, pres: Optional[float] = None,
+                   basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Return ideal-gas density on the requested physical basis.
 
-        if pres_gas is None and temp_gas is None:
+        Parameters
+        ----------
+        mass_frac, mole_frac : ndarray, optional
+            Species fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``. Mole fractions take precedence
+            when both are given; omitting both uses stored composition.
+        temp, pres : float, optional
+            Temperature [K] and pressure [Pa]; omitted values use stored state.
+        basis : {'mass', 'mole'}, optional
+            Mass density [kg/m**3] (default) or molar density [mol/L].
 
-            pres_gas = self.pres_gas
-            temp_gas = self.temp
+        Returns
+        -------
+        density : float or ndarray
+            Density [kg/m**3] for ``'mass'`` or [mol/L] (= kmol/m**3) for
+            ``'mole'``. Molar density is the SI value [mol/m**3] divided by
+            1000 L/m**3. Both bases return shape ``(num_points,)`` for a
+            two-dimensional composition, with one value per row. Molar density
+            is composition-independent and is broadcast to the row count.
 
-        densGas = pres_gas/ (8.314 * temp_gas)
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither ``'mass'`` nor ``'mole'``.
 
-        return densGas
+        Notes
+        -----
+        Overrides do not change stored state. An empty vapor placeholder
+        constructed with zero ``mole_frac`` has zero mass density; zero
+        ``mass_frac`` or ``mole_conc`` construction is not supported.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
+        if temp is None:
+            temp = self.temp  # [K]
+        if pres is None:
+            pres = self.pres  # [Pa]
+        molar_density = pres / (VAPOR_GAS_CONSTANT * temp)  # [mol/m**3]
+        if basis == 'mole':
+            composition = mole_frac if mole_frac is not None else mass_frac  # [-]
+            if composition is None:
+                composition = self.mole_frac  # [-]
+            if np.ndim(composition) > 1:
+                return np.broadcast_to(molar_density / 1000,
+                                       (len(composition),))  # [mol/L], 1000 L/m**3
+            return molar_density / 1000  # [mol/L], 1000 L/m**3
+        if mole_frac is None:
+            if mass_frac is None:
+                mole_frac = self.mole_frac  # [-]
+            else:
+                mole_frac = self.frac_to_frac(mass_frac=mass_frac)  # [-]
+        mw_av = np.dot(mole_frac, self.mw)  # [g/mol]
+        return molar_density * mw_av / 1000  # [kg/m**3], 1000 g/kg
 
 
 class SolidPhase(ThermoPhysicalManager):
