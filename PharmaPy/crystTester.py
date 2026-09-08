@@ -12,24 +12,32 @@ from PharmaPy.Mechanisms import OneDFVMMechanism
 import numpy as np
 
 def build_crysts(params):
-    kb, b, kg, g,  = params
+    kb, b, kg, g, beta = params
 
     return {
         "nucl_prim": (kb, 0, b),
-        "nucl_sec":  (4.46e10, 0, 2, 1e-5),
-        "growth":    (kg, 0, g),
+        "nucl_sec":  (0, 0, 0, 0),
+        "growth":    (kg, 0, g, 1, beta),
     }
 
 
-dpath = r"C:\Users\zhillma\OneDrivePZH\Documents\Documents\_Grad_School\mypharmadev\PharmaPy\tests\Flowsheet\data\compound_database.json"
+dpath = r"C:\Users\zhillma\OneDrivePZH\Documents\Documents\_Grad_School\Computational\Systems\AP_Stuff\AP_fitting\AP_properties.json"
 
 def temp_profile(x):
     """
-    Linear profile from (0, 303) to (101, 271).
+    Linear profile from (0, 313) to (101, 273.15).
     """
-    return np.interp(x, [0, 101], [303, 271])
+    return np.interp(x, [0, 101], [313, 273.15])
+def new_temp_profile(x):
+    """
+    hold at 273.15 after 100
+    """
+    t = 100
+    if x<t:
+        return np.interp(x, [0, t], [313, 273.15])
+    return 273.15
 
-temp_control = SimpleTemperatureController(temp_func=temp_profile)
+temp_control = SimpleTemperatureController(temp_func=new_temp_profile)
 # -----------------------------
 # Reactor Setup
 # -----------------------------
@@ -52,7 +60,7 @@ m = 1
 liquid1 = LiquidPhase(
     dpath,
     mass=m,
-    mass_frac=[0,0,0.01,0,0.99],
+    mass_frac=[0,0,0.2,0,0.8],
 
 )
 print("starting vol:", liquid1.vol)
@@ -61,7 +69,7 @@ solid1 = SolidPhase(
     mass=0,
     mass_frac=[0,0,1,0,0],
 )
-fvm = OneDFVMMechanism(solid1,target_components='C',solvent_name='solvent',x_grid=np.arange(1,200),distrib_init=np.zeros(199))
+fvm = OneDFVMMechanism(solid1,target_components='AP',solvent_name='water',x_grid=np.arange(1,200),distrib_init=np.zeros(199))
 solid1.mechanisms = fvm
 vessel.Phases = [liquid1,solid1]
 
@@ -76,13 +84,13 @@ inlet = LiquidStream(
     mass_frac=[0.4,0.6,0,0,0]
 )
 rxns = ['A + B --> C', 'C + A --> D']
-kvals_rxns = np.array([1,1e-1])#, 1e2]) #psuedo instantaneous
-ea_vals = np.array([1e3,1e4])#,1e4]) #psuedo no activation energy
-Rkinetics = RxnKinetics(path=dpath,rxn_list=rxns, k_params=kvals_rxns,ea_params=ea_vals)
-fitted_kinetics = np.array([3e2, 3, 5e3, 1.32]) # HP volfunc big bounds
+# kvals_rxns = np.array([1,1e-1])#, 1e2]) #psuedo instantaneous
+# ea_vals = np.array([1e3,1e4])#,1e4]) #psuedo no activation energy
+# Rkinetics = RxnKinetics(path=dpath,rxn_list=rxns, k_params=kvals_rxns,ea_params=ea_vals)
+fitted_kinetics = np.array([6.26855218e+18, 8.30671806e+00, 1.45782420e+06, 4.52241037e+00, 3.93676056e+00]) 
 cryst_kinetics =build_crysts(fitted_kinetics)
-Ckinetics = CrystKinetics(np.array((2.269e2,-1.88,3.89e-3)),**cryst_kinetics)
-Utility = CoolingWater(mass_flow=100, temp_in=273.55)
+Ckinetics = CrystKinetics(np.array([-28.13909202,	0.001,	5.900800253]),**cryst_kinetics, solubility_type='apelblat')
+# Utility = CoolingWater(mass_flow=100, temp_in=273.55)
 # vessel.Utility = Utility
 # vessel.RxnKinetics = Rkinetics
 vessel.CrystKinetics = Ckinetics
@@ -94,7 +102,7 @@ vessel.CrystKinetics = Ckinetics
 # Solve
 # -----------------------------
 
-vessel.solve_unit(runtime=100)
+vessel.solve_unit(runtime=150)
 
 
 # -----------------------------
@@ -141,12 +149,13 @@ if True:
 
     plt.legend()
     plt.show()
-    plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[-1],label='end')
-    plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[0],label='start')
+    plt.semilogy(solid1.x_grid,vessel.result.distrib_solid0[-1],label='end')
+    plt.semilogy(solid1.x_grid,vessel.result.distrib_solid0[0],label='start')
+    plt.ylim(1,1e11)
     plt.title('Solid distribution')
     plt.show()
     # plt.plot(vessel.result.mu_n[:,1])
-    plt.plot(vessel.result.supersat)
+    plt.plot(vessel.result.time,vessel.result.supersat)
     plt.title('Supersaturation')
     plt.show()
     print(vessel.result.time,vessel.result.Total_m_in_vessel)

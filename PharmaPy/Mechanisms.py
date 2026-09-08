@@ -456,32 +456,27 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         return moments
 
-    def compute_solubility(
-        self,
-        liquid,
-    ):
-        """
-        Returns equilibrium solubility.
-
-        Delegated entirely to the kinetics object.
-        """
-
-        return self.mechanism_kinetics.get_solubility(
-            liquid.temp,
-            liquid,
-        )
-
+    
     def compute_supersaturation(
         self,
         liquid,
-        solubility,
     ):
-
-        conc = liquid.mass_conc
-
+        "Make sure that conc matches the units of supersat"
+        conc = liquid.mass_j/liquid.mass_j[-1]*liquid.getDensityPure()[0][self.solvent_ind] #TODO check if these are the units expected by CrystKin
         
+        conc_target = conc.T[self.target_ind]
+        
+        # Supersaturation
+        solubility = self.mechanism_kinetics.get_solubility(liquid.temp, conc)
+        supersat = (conc_target - solubility)
 
-        return conc[self.target_ind] - solubility
+        if self.mechanism_kinetics.sup_sat_type == 'relative':
+            supersat = supersat / solubility
+
+        if self.mechanism_kinetics.sup_sat_type == 'ratio':
+            supersat = supersat / solubility + 1
+        
+        return conc, supersat, solubility
 
     # ------------------------------------------------------------------
     # Crystal -> liquid coupling
@@ -615,12 +610,8 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             self.liquid_phase_ref
         )
 
-        solubility = self.compute_solubility(liquid)
 
-        return self.compute_supersaturation(
-            liquid,
-            solubility,
-        )
+        return self.compute_supersaturation(liquid)[1]
 
     def compute_solubility_output(
         self,
@@ -640,7 +631,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             self.liquid_phase_ref
         )
 
-        return self.compute_solubility(liquid)
+        return self.compute_supersaturation(liquid)[2]
 
     def compute_moments_output(
         self,
@@ -744,20 +735,13 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         connection:PhaseConnection
     ) -> TransferResult:
         
-        csd = getattr(self,self.distribution_state_name)
-
+        statekey =  StateKey(self.distribution_state_name,connection.sink_phaseref)
+        csd = completed_state[statekey]
         moms = self.compute_moments(csd,self.x_grid)
 
         mu2 = moms[2] #total surface area
 
-        solubility = self.compute_solubility(liquid)
-
-        supersat = self.compute_supersaturation(
-            liquid,
-            solubility,
-        )
-
-        conc = liquid.mass_j/liquid.mass_j[-1]*liquid.getDensity() #TODO check if these are the units expected by CrystKin
+        conc, supersat, solubility = self.compute_supersaturation(liquid)
 
         nucl, growth, dissol = (
             self.mechanism_kinetics.get_kinetics(
