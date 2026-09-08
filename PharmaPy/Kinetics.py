@@ -7,6 +7,7 @@ import numpy as np
 import json
 import re
 import warnings
+from typing import Union
 
 from PharmaPy.Commons import get_permutation_indexes
 from PharmaPy.Errors import PharmaPyTypeError
@@ -15,6 +16,11 @@ from PharmaPy.Errors import PharmaPyTypeError
 
 gas_ct = 8.314  # J/mol/K
 eps = np.finfo(float).eps  # machine-epsilon floor for singularities
+
+STOICH_COEFFICIENT_PATTERN = r'\d+(\.\d+)?(/\d+)?'
+STOICH_COEFFICIENT_PREFIX = r'^' + STOICH_COEFFICIENT_PATTERN + r'\s?'
+# Legacy zero-Keq guard avoids division by zero and makes the rate effectively irreversible.
+ZERO_KEQ_REPLACEMENT = 1e20  # [Keq units], concentration basis of each raw reaction
 
 
 def cryst_mechanism(sup_sat, moms, temp, temp_ref, params, reformulate, kv,
@@ -47,8 +53,30 @@ def cryst_mechanism(sup_sat, moms, temp, temp_ref, params, reformulate, kv,
 
     return kinetic_term
 
-def disect_rxns(rxns, sep='-->'):
+def disect_rxns(rxns: list, sep: str = '-->') -> tuple:
+    """Separate reaction sides and collect participating species in order.
 
+    Parameters
+    ----------
+    rxns : list of str
+        Reactions as written, with coefficients [-] and '+' between species.
+    sep : str, optional
+        Separator between reactants and products; defaults to '-->'.
+
+    Returns
+    -------
+    out : dict
+        Mapping from reaction index to reactant and product strings, retaining
+        the raw stoichiometric coefficients [-].
+    species : list of str
+        Unique species names in first-appearance order, with coefficients
+        removed using the same prefix pattern as ``get_stoich``.
+
+    Raises
+    ------
+    ValueError
+        If a reaction does not contain exactly one separator.
+    """
     out = {}
     species = []
 
@@ -65,9 +93,8 @@ def disect_rxns(rxns, sep='-->'):
         species += reactants
         species += products
 
-    regex = '^\d+(\.\d+)?(/\d+)?\s?'
     for ind, sp in enumerate(species):
-        species[ind] = re.sub(regex, '', sp)
+        species[ind] = re.sub(STOICH_COEFFICIENT_PREFIX, '', sp)
 
     species = list(dict.fromkeys(species))
 
@@ -88,33 +115,47 @@ def get_coeff(pattern, expr):
     return coeff
 
 
-def get_stoich(di_rxn, partic_species):
+def get_stoich(di_rxn: dict, partic_species: list) -> np.ndarray:
+    """Build raw stoichiometric rows from parsed reactions.
 
+    Parameters
+    ----------
+    di_rxn : dict
+        Reaction-index mapping from ``disect_rxns`` containing reactant and
+        product strings with integer, decimal, or fractional coefficients [-].
+    partic_species : list of str
+        Species names in the desired output column order.
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(n_rxns, n_species)``; negative reactant and positive product
+        coefficients [mol species/mol_rxn] on the reaction-as-written basis.
+
+    Raises
+    ------
+    ValueError
+        If a parsed species is absent from ``partic_species``.
+    """
     num_rxns = len(di_rxn)
     num_species = len(partic_species)
 
-    # TODO: read json keys (name species) and make
-
-    stoich = np.zeros((num_rxns, num_species))
-
-    # I think this is the right regex pattern...
-    regex_coeff = r'\d+(\.\d+)?(/\d+)?'
-    regex_sub = r'^\d+(\.d+)?(/\d+)?\s?'
+    stoich = np.zeros((num_rxns, num_species))  # [-], raw reaction basis
 
     for num, di in di_rxn.items():
         for r in di['reactants']:
-            coeff = get_coeff(regex_coeff, r)
+            coeff = get_coeff(STOICH_COEFFICIENT_PATTERN, r)  # [-]
 
-            r = re.sub(regex_sub, '', r)
+            r = re.sub(STOICH_COEFFICIENT_PREFIX, '', r)
 
             col = partic_species.index(r)
 
             stoich[num, col] = -coeff
 
         for p in di['products']:
-            coeff = get_coeff(regex_coeff, p)
+            coeff = get_coeff(STOICH_COEFFICIENT_PATTERN, p)  # [-]
 
-            p = re.sub(regex_sub, '', p)
+            p = re.sub(STOICH_COEFFICIENT_PREFIX, '', p)
 
             col = partic_species.index(p)
 
@@ -145,7 +186,9 @@ class RxnKinetics:
     path : str
         path to the pure-component json file database
     k_params : list or tuple
-        pre-exponential factor value(s) for the temperature-dependent term f\ :sub:`1`.
+        Pre-exponential factors for the temperature term. For total forward
+        order ``m``, units are ``[mol/L]**(1-m)/time``; first-order factors
+        have units [1/s] when the time basis is seconds.
     ea_params : list or tuple
         activation energy [J/mol] value(s) for the temperature-dependent
         term f\ :sub:`1`.
@@ -169,10 +212,13 @@ class RxnKinetics:
         pure-component json file. If 'rxn_list' is None, then both
         stoichiometric_matrix' and 'partic_species' have to be passed
         (see below). The default is None.
-    stoiciometric_matrix : numpy array, optional
+    stoich_matrix : numpy array, optional
         stoichiometric matrix for the set of reactions. It must have
         n_rxn rows and n_comp columns, so the element (i, j) represents
-        the coefficient of species j in reaction i
+        the coefficient of species j in reaction i [-] on the raw reaction
+        basis. Every row must contain at least one negative reactant
+        coefficient; product-only and all-zero rows are invalid. Stored as
+        float64 after reordering columns to the component database order.
     partic_species : list (or tuple) of str, optional
         names of participating species. It will be assumed that the
         order of the names in 'partic_species' is that of the columns of
@@ -182,16 +228,23 @@ class RxnKinetics:
         Equilibrium constant for each reaction at ``tref_hrxn``. Units are
         ``[mol/L]**(sum of product orders - sum of reactant orders)``, so the
         constant is dimensionless only when those sums are equal. If provided,
-        reversible rates are evaluated as forward minus reverse terms. The
-        default is None.
+        reversible rates use the elementary mass-action form documented below.
+        Forward orders must equal the raw reactant stoichiometric coefficients
+        for thermodynamic consistency. Orders are fixed and excluded from
+        fitted parameters even when supplied explicitly. Custom
+        ``kinetic_model`` callbacks are not supported with ``keq_params``.
+        The default is None.
     params_f : numpy array, optional
         parameters for the concentration-dependent term f\ :sub:`2`.
         If no custom model is provided through the 'kinetic_model'
         argument, then 'params_f' values are interpreted as the reaction
-        orders of the built-in elementary reaction kinetic model.
+        orders [-] of the built-in elementary reaction kinetic model.
         The params_f argument is optional only if no custom model is provided.
         If not given, the reaction orders are set to the stoichiometric
-        coefficients for the involved reactants. The default is None.
+        coefficients for the involved reactants. With ``keq_params``, explicit
+        orders are accepted within an absolute tolerance of 1e-12 [-], then
+        replaced by the exact stoichiometric values. They are excluded from
+        fitted parameters and parameter Jacobians. The default is None.
     temp_ref : float, optional
         reference temperature [K]. If not passed, it will be set to np.inf.
         The default is None.
@@ -208,7 +261,7 @@ class RxnKinetics:
         Heat of reaction at ``tref_hrxn`` for each reaction
         [J/mol of reaction as written]. Values are defined on the basis of
         the raw ``stoich_matrix`` rows rather than ``normalized_stoich``. A
-        positive value is endothermic. The default is 0.
+        positive value is endothermic. The default is 0; None also selects 0.
     tref_hrxn : float, optional
         Reference temperature for ``delta_hrxn`` [K]. If None, it is set to
         ``temp_ref``. The default is 298.15.
@@ -218,6 +271,10 @@ class RxnKinetics:
         the signature:
 
             >>> kin_model(conc, params, *args). The default is None.
+
+        Custom models are supported only for irreversible kinetics. Supplying
+        both ``kinetic_model`` and ``keq_params`` raises ValueError because
+        reversible kinetics use the built-in elementary form.
 
     df_dstates : callable, optional
         Derivative of a user-defined concentration term with respect to
@@ -242,8 +299,27 @@ class RxnKinetics:
     -------
     RxnKinetics object.
 
+    Raises
+    ------
+    ValueError
+        If any stoichiometric row lacks a negative reactant coefficient,
+        reversible forward orders differ from reactant stoichiometry beyond
+        roundoff tolerance, or a custom model is combined with ``keq_params``.
+
     Notes
     -----
+    For reversible elementary reactions, the rate is
+    ``r_i = k_i(T) * (prod(C_reactant**alpha) - prod(C_product**beta)/Keq_i(T))``.
+    Concentrations are [mol/L]; alpha and beta are magnitudes of the raw
+    reactant and product stoichiometric coefficients [-]. ``Keq`` is the
+    concentration-based equilibrium constant for that reaction as written,
+    using the ideal concentration mass-action convention (no activity model).
+    This concentration quotient equals ``Keq`` at equilibrium only when the
+    forward orders equal alpha, so non-stoichiometric reversible orders are
+    rejected at construction and by ``set_params``. Rates [mol/L/time] use
+    the normalized extent defined by ``stoich_normalization``; species rates
+    are ``normalized_stoich @ r``. Parameter Jacobians preserve this basis.
+
     Reactor energy balances convert raw-basis reaction enthalpies to the
     normalized rate basis before multiplying them by per-reaction rates.
     Supplying ``delta_hrxn`` values that were already divided by
@@ -255,8 +331,65 @@ class RxnKinetics:
                  temp_ref=None, reformulate_kin=False,
                  keq_params=None, params_f=None, delta_hrxn=0,
                  tref_hrxn=298.15, kinetic_model=None, df_dstates=None,
-                 df_dtheta=None):
+                 df_dtheta=None) -> None:
+        """Initialize species ordering, reaction normalization, and parameters.
 
+        Parameters
+        ----------
+        path : str
+            Pure-component JSON database path; its order defines state columns.
+        k_params : array-like
+            Factors ``[mol/L]**(1-m)/time`` for total forward order m [-].
+        ea_params : array-like
+            Activation energies [J/mol].
+        rxn_list : list of str, optional
+            Reactions as written, used instead of ``stoich_matrix`` if given.
+        stoich_matrix : array-like, optional
+            Raw coefficients [-], shape (n_rxns, n_species); each row requires
+            a negative reactant coefficient.
+        partic_species : list of str, optional
+            Matrix column names; required with ``stoich_matrix``.
+        temp_ref : float, optional
+            Arrhenius reference temperature [K]; None uses infinity.
+        reformulate_kin : bool, optional
+            Store logarithmic Arrhenius parameters when True.
+        keq_params : array-like, optional
+            Raw-basis equilibrium constants with units
+            ``[mol/L]**(sum(beta)-sum(alpha))``; None selects irreversible rates.
+        params_f : array-like, optional
+            Forward orders [-] grouped by reaction/reactant, or custom model
+            parameters in that model's units. Defaults to raw reactant orders.
+        delta_hrxn : float or array-like, optional
+            Reference heat [J/mol_rxn] on the raw reaction basis; defaults to 0.
+            None also selects 0.
+        tref_hrxn : float, optional
+            Heat reference temperature [K]; None uses ``temp_ref``.
+        kinetic_model : callable, optional
+            Concentration term accepting concentrations [mol/L], parameters,
+            and extra arguments; defaults to the elementary power law.
+            Custom models cannot be combined with ``keq_params``.
+        df_dstates : callable, optional
+            Custom concentration derivative, in concentration-term units
+            divided by [mol/L].
+        df_dtheta : callable, optional
+            Custom parameter derivative, in concentration-term units divided
+            by each custom parameter's units.
+
+        Raises
+        ------
+        PharmaPyTypeError
+            If matrix input has no participating species list.
+        ValueError
+            If a reaction lacks a reactant, reversible elementary orders
+            differ from raw reactant stoichiometry beyond roundoff tolerance,
+            or a custom kinetic model is combined with ``keq_params``.
+        RuntimeError
+            If a custom kinetic model has no ``params_f``.
+        """
+        if keq_params is not None and kinetic_model is not None:
+            raise ValueError(
+                "Reversible (equilibrium) kinetics use the built-in elementary "
+                "form and are not supported with a custom kinetic model.")
 
         with open(path) as f:
             db = json.load(f)
@@ -266,9 +399,10 @@ class RxnKinetics:
         # Stoichiometry
         if rxn_list is not None:
             di, partic_species = disect_rxns(rxn_list)
-            stoich_matrix = get_stoich(di, partic_species)
+            stoich_matrix = get_stoich(di, partic_species)  # [-]
         else:
-            stoich_matrix = np.atleast_2d(stoich_matrix)
+            stoich_matrix = np.atleast_2d(
+                np.asarray(stoich_matrix, dtype=np.float64))  # [-]
             if partic_species is None:
                 raise PharmaPyTypeError('Please provide a participating species list when using a stoichiometric matrix.')
 
@@ -301,9 +435,16 @@ class RxnKinetics:
             self.df_dstates = df_dstates
             self.df_dthetaf = df_dtheta
 
+        # Reject undefined reaction extents before choosing a normalization.
+        invalid_rows = np.flatnonzero(~(stoich_matrix < 0).any(axis=1))
+        if invalid_rows.size:
+            raise ValueError(
+                "Each reaction requires a negative reactant coefficient; "
+                f"invalid zero-based rows: {invalid_rows.tolist()}")
+
         # Normalize stoichiometric coefficients
         first_negative = (stoich_matrix < 0).argmax(axis=1)
-        ref_stoich = np.zeros(self.num_rxns)
+        ref_stoich = np.zeros(self.num_rxns)  # [-]
 
         for ind in range(self.num_rxns):
             ref_stoich[ind] = stoich_matrix[ind, first_negative[ind]]
@@ -312,7 +453,13 @@ class RxnKinetics:
         self.stoich_normalization = abs(ref_stoich)  # [-]
         self.normalized_stoich = (
             stoich_matrix.T / self.stoich_normalization)  # [-]
-        self.stoich_matrix = stoich_matrix
+        self.stoich_matrix = stoich_matrix  # [-]
+
+        # Equilibrium kinetics
+        if keq_params is None:
+            self.keq_params = keq_params
+        else:
+            self.keq_params = np.atleast_1d(keq_params)  # [(mol/L)**sum(stoich)]
 
         # ---------- Parameters
         params_dict = {'k_params': k_params, 'ea_params': ea_params,
@@ -321,22 +468,14 @@ class RxnKinetics:
         self.set_params(params_dict)
         self.nomenclature(stoich_matrix, k_params)
 
-        # Equilibrium kinetics
-        if keq_params is None:
-            self.keq_params = keq_params
-        else:
-            self.keq_params = np.atleast_1d(keq_params)
-
         # Heat of reaction
         if delta_hrxn is None:
-            self.delta_hrxn = delta_hrxn
-            self.tref_hrxn = tref_hrxn
+            delta_hrxn = 0  # [J/mol_rxn], documented default on the raw basis
+        self.delta_hrxn = np.atleast_1d(delta_hrxn)  # [J/mol_rxn]
+        if tref_hrxn is None:
+            self.tref_hrxn = temp_ref  # [K]
         else:
-            self.delta_hrxn = np.atleast_1d(delta_hrxn)
-            if tref_hrxn is None:
-                self.tref_hrxn = temp_ref
-            else:
-                self.tref_hrxn = tref_hrxn
+            self.tref_hrxn = tref_hrxn  # [K]
 
         # Outputs
         self.rxn_rates = None
@@ -357,62 +496,104 @@ class RxnKinetics:
 
         return phi_1, phi_2
 
-    def set_params(self, params):  # From 1D params to matrix-shaped params
+    def set_params(self, params: Union[dict, np.ndarray]) -> None:
+        """Set kinetic parameters while preserving reversible mass action.
 
+        Parameters
+        ----------
+        params : dict or numpy.ndarray
+            Dictionary with ``k_params`` in ``[mol/L]**(1-m)/time`` for total
+            order m [-], ``ea_params`` [J/mol], and optional ``params_f``
+            (orders [-] or custom model parameters). Alternatively, a flat
+            vector in ``concat_params`` order: all phi_1, all phi_2, then any
+            fitted concentration parameters. Without reformulation phi_1 and
+            phi_2 are k and Ea; reformulated logarithmic values are numerical
+            parameters [-] in the class's stated unit convention.
+
+        Raises
+        ------
+        RuntimeError
+            If a dictionary omits parameters required by a custom model.
+        ValueError
+            If reversible forward orders differ from raw reactant
+            stoichiometry. Such an update leaves the existing parameters intact.
+
+        Notes
+        -----
+        Equilibrium constants are fixed at construction, outside the fitted
+        parameter vector. The reversible rate law always uses elementary
+        concentration powers. Orders within absolute tolerance 1e-12 [-]
+        (zero relative tolerance) are canonicalized to raw reactant
+        stoichiometry for exact mass action. This tolerance is well above
+        double-precision roundoff for order magnitudes O(1). Reversible orders
+        are never fitted: even explicit orders are excluded from
+        ``concat_params``, parameter names, flat updates, and Jacobians.
+        """
         if isinstance(params, dict):
-            k_params = np.atleast_1d(params['k_params']) + eps
-            ea_params = np.atleast_1d(params['ea_params']) + eps
+            k_params = np.atleast_1d(params['k_params']) + eps  # [k units]
+            ea_params = np.atleast_1d(params['ea_params']) + eps  # [J/mol]
+            phi_1, phi_2 = self.transform_params(
+                k_params, ea_params)  # [k units, J/mol] or [-]
 
-            self.phi_1, self.phi_2 = self.transform_params(k_params, ea_params)
-
-            self.num_paramsk = len(self.phi_1) + len(self.phi_2)
-
-            self.fit_paramsf = True
+            fit_paramsf = True
             if self.elem_flag:
-                params_f = params.get('params_f', None)
+                params_f = params.get('params_f', None)  # [-], forward orders
                 if params_f is None:
                     is_reactant = self.stoich_matrix < 0
-                    orders = abs(is_reactant * self.stoich_matrix)
-                    self.fit_paramsf = False
+                    orders = abs(is_reactant * self.stoich_matrix)  # [-]
+                    fit_paramsf = False
                 else:
                     order_map = self.stoich_matrix < 0
-
-                    params_f = params['params_f']
                     if not isinstance(params_f[0], (list, tuple)):
                         params_f = [params_f]
 
-                    orders = np.zeros_like(self.stoich_matrix)
+                    orders = np.zeros_like(
+                        self.stoich_matrix, dtype=np.float64)  # [-]
                     for ind, order in enumerate(params_f):
                         orders[ind, order_map[ind]] = order
 
                 if orders.ndim == 1:
                     orders = orders[np.newaxis, ...]
-
                 params_f = orders
             else:
-                params_f = params.get('params_f', None)
+                params_f = params.get('params_f', None)  # [custom model units]
                 if params_f is None:
                     raise RuntimeError("For user-defined kinetic function, "
                                        "argument 'params_f' is mandatory.")
                 params_f = np.asarray(params_f)
-                self.params_f_shape = params_f.shape
-
-            self.params_f = params_f
-            self.order_map = self.stoich_matrix < 0
-
         else:
-            self.phi_1, self.phi_2 = np.split(params[:self.num_paramsk], 2)
-
+            phi_1, phi_2 = np.split(params[:self.num_paramsk], 2)  # [k units, J/mol] or [-]
+            fit_paramsf = self.fit_paramsf
+            params_f = self.params_f  # [-] or [custom model units]
             if self.elem_flag:
-                # Reorganize rxn orders into a stoich_matrix-like structure
-                if self.fit_paramsf:
-                    self.params_f = np.zeros_like(self.stoich_matrix,
-                                                  dtype=np.float64)
-
-                    self.params_f[self.order_map] = params[self.num_paramsk:]
+                if fit_paramsf:
+                    params_f = np.zeros_like(self.stoich_matrix,
+                                             dtype=np.float64)  # [-]
+                    params_f[self.order_map] = params[self.num_paramsk:]
             else:
                 params_f = np.asarray(params[self.num_paramsk:])
-                self.params_f = params_f.reshape(self.params_f_shape)
+                params_f = params_f.reshape(self.params_f_shape)
+
+        if self.elem_flag and self.keq_params is not None:
+            reactant_orders = np.maximum(-self.stoich_matrix, 0)  # [-]
+            # Accept arithmetic roundoff well below meaningful O(1) order changes.
+            order_atol = 1e-12  # [-], well above double roundoff for O(1) orders
+            if not np.allclose(params_f, reactant_orders, rtol=0, atol=order_atol):
+                raise ValueError(
+                    "For thermodynamic consistency with keq_params, params_f "
+                    "forward orders must equal the raw reactant stoichiometric "
+                    "coefficients (elementary mass action).")
+            params_f = reactant_orders  # [-], exact mass-action exponents
+            fit_paramsf = False
+
+        self.phi_1, self.phi_2 = phi_1, phi_2  # [k units, J/mol] or [-]
+        self.params_f = params_f  # [-] for orders; custom model units otherwise
+        if isinstance(params, dict):
+            self.num_paramsk = len(self.phi_1) + len(self.phi_2)
+            self.fit_paramsf = fit_paramsf
+            self.order_map = self.stoich_matrix < 0
+            if not self.elem_flag:
+                self.params_f_shape = params_f.shape
 
     def nomenclature(self, stoich_matrix, kvals):
 
@@ -513,10 +694,40 @@ class RxnKinetics:
 
         return k_eq
 
-    def dk_dkparams(self, temp):
-        temp_term = self.temp_term(temp)
+    def dk_dkparams(self, temp: Union[float, np.ndarray]) -> np.ndarray:
+        """Differentiate temperature-dependent rate constants.
 
-        inv_temp = (1/self.temp_ref - 1/temp)
+        Parameters
+        ----------
+        temp : float or numpy.ndarray
+            Temperature [K], scalar or shape ``(n_times,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(n_rxns, 2*n_rxns)`` for scalar temperature, or
+            ``(n_times, n_rxns, 2*n_rxns)`` for a vector. Columns contain all
+            phi_1 derivatives followed by all phi_2 derivatives, in
+            ``concat_params`` order. Units are rate-constant units divided by
+            parameter units: k units and [J/mol] without reformulation, or
+            numerical logarithmic parameters [-] with reformulation.
+        """
+        if np.ndim(temp) == 1:
+            temp = np.asarray(temp)  # [K]
+        temp_term = self.temp_term(temp)  # [k units]
+        inv_temp = (1/self.temp_ref - 1/temp)  # [1/K]
+
+        if np.ndim(temp) == 1:
+            inv_temp = inv_temp[:, np.newaxis]  # [1/K], time then reaction
+            if self.reformulate_kin:
+                first = temp_term  # [k units]
+                second = temp_term * inv_temp * np.exp(self.phi_2)  # [k units]
+            else:
+                first = np.exp(self.phi_2/gas_ct * inv_temp)  # [-]
+                second = temp_term/gas_ct * inv_temp  # [k units mol/J]
+            identity = np.eye(self.num_rxns)  # [-], independent reactions
+            return np.concatenate((first[..., :, None] * identity,
+                                   second[..., :, None] * identity), axis=-1)
 
         if self.reformulate_kin:
             drate_dphi1 = np.diag(temp_term)
@@ -553,7 +764,7 @@ class RxnKinetics:
         f_term = np.exp(np.dot(np.log(conc), rxn_orders.T))
         return f_term
 
-    def equilibrium_model(self, conc, temp, deltah_rxn):
+    def equilibrium_model(self, conc, temp, deltah_rxn) -> np.ndarray:
         """Compute reversible concentration terms for each reaction.
 
         Parameters
@@ -564,24 +775,31 @@ class RxnKinetics:
         temp : float or array-like
             Temperature [K]. Array inputs are interpreted along the same time
             axis as 2-D ``conc``.
-        deltah_rxn : array-like
-            Heat of reaction at ``temp`` [J/mol_rxn].
+        deltah_rxn : array-like or None
+            Heat of reaction at ``temp`` [J/mol_rxn] on the raw reaction basis.
+            None uses ``self.delta_hrxn``; any explicit value, including zero,
+            takes precedence. Shape (n_rxns,) or (n_times, n_rxns).
 
         Returns
         -------
         overall_rate : ndarray
             Reversible concentration term, ``forward - reverse``. Multiplying
             by ``temp_term(temp)`` gives per-reaction rates whose time basis is
-            set by ``k_params``.
+            set by ``k_params``. Units for reaction i are ``[mol/L]**m_i``,
+            where m_i is the total forward order. Shape (n_rxns,) for a scalar
+            state or (n_times, n_rxns) for a concentration batch; vector
+            temperatures must be paired with 2-D concentrations.
         """
         is_product = self.stoich_matrix > 0
         orders = abs(is_product * self.stoich_matrix)
         conc = np.asarray(conc)
         n_conc = len(conc)
 
+        if deltah_rxn is None:
+            deltah_rxn = self.delta_hrxn  # [J/mol_rxn], raw reaction basis
         keq_temp = self.equil_term(temp, deltah_rxn)
 
-        keq_temp[keq_temp == 0] = 1e20
+        keq_temp[keq_temp == 0] = ZERO_KEQ_REPLACEMENT
 
         # Forward term
         f_term = self.elem_f_model(conc, self.params_f)
@@ -680,7 +898,7 @@ class RxnKinetics:
             deltah_rxn = self.delta_hrxn
 
         keq_temp = self.equil_term(temp, deltah_rxn)
-        keq_temp[keq_temp == 0] = 1e20
+        keq_temp[keq_temp == 0] = ZERO_KEQ_REPLACEMENT
 
         if conc.ndim == 1:
             r_term = np.zeros(self.num_rxns)
@@ -730,7 +948,8 @@ class RxnKinetics:
 
         return drate_dorder
 
-    def derivatives(self, conc, temp, dstates=True, delta_hrxn=None):
+    def derivatives(self, conc, temp, dstates: bool = True,
+                    delta_hrxn=None) -> np.ndarray:
         """Calculate reaction-rate Jacobians.
 
         Parameters
@@ -757,10 +976,17 @@ class RxnKinetics:
             species-rate units divided by [mol/L].
         jac_params : ndarray
             Species-rate Jacobian with respect to kinetic parameters. Returned
-            when ``dstates`` is False.
+            when ``dstates`` is False. Shape ``(n_species, n_params)`` for
+            scalar temperature and 1-D concentrations, or
+            ``(n_times, n_species, n_params)`` for a concentration batch.
+            A temperature vector (n_times,) pairs with concentration rows;
+            a scalar temperature applies to every row. Columns follow
+            ``concat_params``: all phi_1, all phi_2, then any fitted forward
+            parameters. Units are normalized species rates [mol/L/time]
+            divided by parameter units; time is set by ``k_params``.
+            Equilibrium constants and reaction heats are held fixed.
         """
-        temp_terms = self.temp_term(temp)
-        f_terms = self.kinetic_model(conc, self.params_f, *self.args_kin)
+        temp_terms = self.temp_term(temp)  # [k units]
 
         if dstates:  # --------------- wrt states
             df_dstates = self.df_dstates(conc, *self.args_kin)
@@ -778,27 +1004,50 @@ class RxnKinetics:
 
             return jac_states
         else:  # --------------- wrt parameters
-            dk_dphi = self.dk_dkparams(temp).T
-            dr_dthetak = (dk_dphi * f_terms).T
+            if self.keq_params is None:
+                f_terms = self.kinetic_model(
+                    conc, self.params_f, *self.args_kin)  # [concentration**order]
+            else:
+                f_terms = self.equilibrium_model(
+                    conc, temp, delta_hrxn)  # [concentration**order]
+            dk_dphi = self.dk_dkparams(temp)  # [k units/parameter units]
+            if dk_dphi.ndim == 2 and np.ndim(f_terms) == 1:
+                dr_dthetak = (dk_dphi.T * f_terms).T  # [mol/L/time/parameter units]
+            else:
+                dr_dthetak = dk_dphi * np.asarray(f_terms)[..., np.newaxis]
 
             if self.fit_paramsf:
-                dr_dthetaf = self.df_dthetaf(conc, *self.args_kin)
-                dr_dthetaf = (dr_dthetaf.T * temp_terms).T
-
-                dr_dparams = np.hstack((dr_dthetak, dr_dthetaf))
-
+                if np.ndim(conc) == 1:
+                    dr_dthetaf = self.df_dthetaf(
+                        conc, *self.args_kin)  # [concentration-term units/parameter units]
+                else:
+                    # Keep the scalar callback contract for custom models.
+                    dr_dthetaf = np.stack([
+                        self.df_dthetaf(row, *self.args_kin) for row in conc
+                    ])  # [concentration-term units/parameter units]
+                if dr_dthetak.ndim == 2:
+                    dr_dthetaf = (dr_dthetaf.T * temp_terms).T
+                    dr_dparams = np.hstack(
+                        (dr_dthetak, dr_dthetaf))  # [mol/L/time/parameter units]
+                else:
+                    dr_dthetaf = dr_dthetaf * temp_terms[..., np.newaxis]
+                    dr_dparams = np.concatenate((dr_dthetak, dr_dthetaf), axis=-1)
             else:
                 dr_dparams = dr_dthetak
 
-            jac_params = np.dot(self.normalized_stoich, dr_dparams)
+            if dr_dparams.ndim == 2:
+                jac_params = np.dot(
+                    self.normalized_stoich, dr_dparams)  # [mol/L/time/parameter units]
+            else:
+                jac_params = np.matmul(self.normalized_stoich, dr_dparams)
 
             if jac_params.ndim == 1:
                 jac_params = jac_params[..., np.newaxis]
 
             return jac_params
 
-    def get_rxn_rates(self, conc, temp=298.15, overall_rates=True, jac=False,
-                      delta_hrxn=None):
+    def get_rxn_rates(self, conc, temp=298.15, overall_rates: bool = True,
+                      jac: bool = False, delta_hrxn=None) -> np.ndarray:
         """Evaluate reaction rates or their concentration Jacobian.
 
         Parameters
@@ -817,7 +1066,8 @@ class RxnKinetics:
         delta_hrxn : array-like, optional
             Runtime heat of reaction [J/mol of reaction as written] for
             reversible rate or Jacobian evaluations. Values use the raw
-            ``stoich_matrix`` row basis.
+            ``stoich_matrix`` row basis. None uses ``self.delta_hrxn``;
+            explicit values, including zero, take precedence.
 
         Returns
         -------
