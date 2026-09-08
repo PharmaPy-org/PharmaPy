@@ -90,6 +90,12 @@ Reviewed on 2026-09-08 against branch `fix/issues` at commit `c5a2c1d`.
 | #140 | Drying initialization state layout | All initialization branches already include the condensed temperature on HEAD. State-vector shape validation at the solver boundary remains unmet; defer it behind PR #210's rewrite into `initialize_states`. |
 | #42 | Drying volatile liquid state and species mapping | PR #210 explicitly says "Preserve the provisional behavior owned by #42". Removing the reset also requires correcting the `unit_model` docstring inside PR #210's hunk; defer the state and heat-capacity mapping fix until that PR lands. |
 
+Reviewed on 2026-09-08 against branch `fix/issues` at commit `486a3fc`.
+
+| Issue | Title (short) | Reason |
+| --- | --- | --- |
+| #231 | Spatial cake handoff and drying continuation | Separation-side fields were fixed here. Drying initialization is deferred behind PR #210's relocation into `initialize_states`; continuation is deferred because it must round-trip with that relocated initialization. |
+
 ## Skipped: already satisfied on master
 
 Reviewed on 2026-09-08 against branch `fix/issues` at commit `50cfd6e`.

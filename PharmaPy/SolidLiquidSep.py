@@ -19,7 +19,6 @@ from PharmaPy._assimulo import CVode, Explicit_Problem
 from PharmaPy.Commons import trapezoidal_rule, series_erfc
 from PharmaPy.Phases import classify_phases
 from PharmaPy.MixedPhases import Slurry, Cake
-from PharmaPy.general_interpolation import define_initial_state
 
 from PharmaPy.Commons import (unpack_states, reorder_pde_outputs,
                               eval_state_events, handle_events,
@@ -33,11 +32,15 @@ from matplotlib.ticker import AutoMinorLocator
 from matplotlib.animation import FuncAnimation
 from matplotlib.animation import FFMpegWriter
 import copy
+import warnings
 
 from scipy.special import erfc, erfcx
 
 eps = np.finfo(float).eps * 1.1
 grav = 9.8  # m/s**2
+# Retain the existing epsilon regularization of the capillary reciprocal power.
+# Shared by initialization and the RHS so a zero reduced saturation is avoided.
+DELIQUORING_SATURATION_FLOOR = eps  # [-], numerical floor, not residual pore filling
 
 
 def high_resolution_fvm(f, boundary_cond, limiter_type='Van Leer'):
@@ -250,6 +253,95 @@ class Carousel:
                 self.uo_instances[key] = value
 
 
+def _remap_cake_fields(cake, z_after: np.ndarray, num_species: int,
+                       span_rtol: float = 1e-9) -> tuple:
+    """Linearly remap cake fields with endpoint holding and domain warnings.
+
+    Parameters
+    ----------
+    cake : Cake
+        Source saturation [-], mass_concentr [kg/m**3], and coordinates [m].
+        If mass_concentr is absent, use the attached liquid concentration.
+    z_after : numpy.ndarray
+        Receiving coordinates [m], in increasing order.
+    num_species : int
+        Number of liquid species, in the attached phase's species order.
+    span_rtol : float, optional
+        Domain comparison tolerance [-], relative to the source cake height.
+        The default 1e-9 allows coordinate roundoff only.
+
+    Returns
+    -------
+    saturation, concentration : numpy.ndarray
+        Saturation [-] of shape (len(z_after),) and concentration [kg/m**3]
+        of shape (len(z_after), num_species), with independent storage.
+
+    Raises
+    ------
+    ValueError
+        If coordinates, shapes, tolerance, or concentrations are invalid.
+
+    Warns
+    -----
+    UserWarning
+        If a nonconstant field is sampled outside [0, source cake_height]
+        beyond the tolerance. Ordinary cell refinement does not warn.
+
+    Notes
+    -----
+    Separation producers store cake_height [m] on the cake. For legacy cakes
+    without it, symmetric endpoint or cell-center grids imply height =
+    z_external[0] + z_external[-1] [m]. No geometric rescaling is inferred.
+    This interpolation is bounded but not conservative. Deliquoring records
+    the remapped initial inventory difference as liquid_initial_adjustment.
+    Negative concentrations are clipped only within the first-order
+    species-sum roundoff allowance, num_species * float64_epsilon *
+    max(abs(concentration)) [kg/m**3]; larger negative values raise.
+    """
+    if not np.isfinite(span_rtol) or span_rtol < 0:
+        raise ValueError("span_rtol must be finite and nonnegative")
+    source_grid = np.asarray(cake.z_external, dtype=float)  # [m]
+    saturation = np.atleast_1d(cake.saturation)  # [-]
+    concentration = getattr(cake, 'mass_concentr', None)
+    if concentration is None:
+        concentration = cake.Liquid_1.mass_conc  # [kg/m**3]
+    concentration = np.asarray(concentration, dtype=float)  # [kg/m**3]
+    if (source_grid.ndim != 1 or source_grid.size == 0
+            or not np.all(np.isfinite(source_grid))
+            or np.any(np.diff(source_grid) <= 0)):
+        raise ValueError("Cake z_external must be finite, increasing coordinates [m]")
+    if (saturation.ndim != 1 or saturation.size not in (1, source_grid.size)
+            or not np.all(np.isfinite(saturation))):
+        raise ValueError("Cake saturation must be finite and scalar or match z_external")
+    if (concentration.shape not in ((num_species,), (source_grid.size, num_species))
+            or not np.all(np.isfinite(concentration))):
+        raise ValueError("Cake concentration must be finite and have "
+                         "species columns with optional z_external rows")
+    concentration_tolerance = (num_species * np.finfo(float).eps
+                               * np.max(np.abs(concentration)))  # [kg/m**3]
+    if np.any(concentration < -concentration_tolerance):
+        raise ValueError("Cake concentration must be nonnegative [kg/m**3]")
+    concentration = np.maximum(concentration, 0)  # [kg/m**3], roundoff only
+    varying = (np.any(saturation != saturation[0]) or
+               (concentration.ndim == 2 and np.any(concentration != concentration[0])))
+    source_height = getattr(cake, 'cake_height', source_grid[0] + source_grid[-1])  # [m]
+    tolerance = span_rtol * source_height  # [m]
+    if varying and (z_after[0] < -tolerance or z_after[-1] > source_height + tolerance):
+        warnings.warn("Receiving span exceeds upstream cake domain; holding endpoint "
+                      "values outside the source grid.", UserWarning, stacklevel=3)
+    if saturation.size == 1:
+        sat_initial = np.full(len(z_after), saturation.item())  # [-]
+    else:
+        sat_initial = np.interp(z_after, source_grid, saturation)  # [-]
+    if concentration.ndim == 1:
+        conc_initial = np.tile(concentration, (len(z_after), 1))  # [kg/m**3]
+    else:
+        conc_initial = np.column_stack([
+            np.interp(z_after, source_grid, column) for column in concentration.T
+        ])  # [kg/m**3]
+    return sat_initial, conc_initial
+
+
 class DeliquoringStep:
     def __init__(self, num_nodes, diam_unit=0.01,
                  resist_medium=1e9):
@@ -287,11 +379,29 @@ class DeliquoringStep:
         return self._Phases
 
     @Phases.setter
-    def Phases(self, phases):
+    def Phases(self, phases: Union[Cake, list, tuple]) -> None:
+        """Attach a cake or construct one from liquid and solid phases.
+
+        Parameters
+        ----------
+        phases : Cake or list or tuple
+            Cake with external axial coordinates [m], or liquid and solid
+            phases used to construct an initially saturated cake.
+
+        Raises
+        ------
+        RuntimeError
+            If the input is neither a cake nor a phase list or tuple.
+
+        Notes
+        -----
+        The solver grid ``z_centers`` and ``z_grid`` uses z/height [-].
+        External cake fields use dimensional coordinates [m].
+        """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
 
-            self.CakePhase = Cake(self.num_nodes)
+            self.CakePhase = Cake(num_discr=self.num_nodes)
             self.CakePhase.Phases = list(phases)
         elif phases.__class__.__name__ == 'Cake':
             self.CakePhase = phases
@@ -302,7 +412,7 @@ class DeliquoringStep:
 
         classify_phases(self)  # Enumerate phases: Liquid_1,..., Solid_1, ...
 
-        self.cake_height = self.CakePhase.cake_vol / self.area_cross
+        self.cake_height = self.CakePhase.cake_vol / self.area_cross  # [m]
 
         z_grid_red = np.linspace(0, 1, self.num_nodes + 1)
         dz = z_grid_red[1] - z_grid_red[0]
@@ -310,6 +420,9 @@ class DeliquoringStep:
         z_centers = (z_grid_red[1:] + z_grid_red[:-1]) / 2
 
         self.z_centers = z_centers
+        if isinstance(phases, (list, tuple)):
+            self.CakePhase.z_external = z_centers * self.cake_height  # [m]
+            self.CakePhase.cake_height = self.cake_height  # [m], source domain
         self.z_grid = z_grid_red
         self.delta_z = np.diff(z_grid_red)
 
@@ -351,17 +464,35 @@ class DeliquoringStep:
 
         return model_eqns
 
-    def material_balance(self, theta, sat_star, conc_star):
+    def material_balance(self, theta: float, sat_star: np.ndarray,
+                         conc_star: np.ndarray) -> np.ndarray:
+        """Evaluate Wakeman's reduced saturation and concentration balances.
 
-        """
+        Parameters
+        ----------
+        theta : float
+            Reduced time [-].
+        sat_star : numpy.ndarray
+            Reduced saturation [-], shape (num_nodes,).
+        conc_star : numpy.ndarray
+            Reduced species concentrations [-], shape (num_nodes, num_species).
 
-        Calculate material balance for a non-dimensional version of the
-        governing equations. Based on Wakeman
+        Returns
+        -------
+        numpy.ndarray
+            Flattened reduced-state derivatives with respect to theta [-].
 
+        Notes
+        -----
+        DELIQUORING_SATURATION_FLOOR [-] regularizes the reciprocal-power
+        capillary expression at zero and negative reduced saturation, using
+        the same numerical floor as initialization. It is not a physical
+        irreducible-saturation parameter. The existing Wakeman exponents
+        (5 for pore-size index and 3.4 for relative permeability) are retained.
         """
 
         lambd = 5
-        sat_star = np.where(sat_star<0, eps, sat_star) #Changing the negative element for numerical issue
+        sat_star = np.maximum(sat_star, DELIQUORING_SATURATION_FLOOR)  # [-]
 
         sat_aug = np.append(sat_star, sat_star[-1])
         p_liq = (self.p_gas - self.p_thresh*sat_aug**(-1/lambd))/self.p_thresh
@@ -377,13 +508,7 @@ class DeliquoringStep:
         advection_vel = q_liq * sat_fun
 
         conc_bound = conc_star[0]  # dC/dt|_{z=0} = 0
-        # conc_bound = np.zeros(conc_star.shape[1])  # F_{1 - 1/2} = 0
-        # conc_bound = (np.zeros(conc_star.shape[1]) - self.conc_mean_init) / \
-        #     (self.rho_j - self.conc_mean_init)
-
         flux_sat = upwind_fvm(q_liq, boundary_cond=0)
-        # flux_conc = upwind_fvm((advection_vel * conc_star.T).T,
-        #                         boundary_cond=conc_bound)
         flux_conc = upwind_fvm(conc_star, boundary_cond=conc_bound)
 
         numerical_fluxes = np.column_stack((flux_sat, flux_conc))
@@ -392,6 +517,82 @@ class DeliquoringStep:
         dstates_dtheta[1:] = dstates_dtheta[1:] * advection_vel
 
         return dstates_dtheta.T.ravel()
+
+    def initialize_states(self, span_rtol: float = 1e-9) -> np.ndarray:
+        """Remap cake fields and construct the reduced deliquoring state.
+
+        Parameters
+        ----------
+        span_rtol : float, optional
+            Relative span comparison tolerance [-]. The default 1e-9 permits
+            coordinate roundoff, not a physical extrapolation distance.
+            The reference length is the source cake height, including the
+            half cells outside the source centers.
+
+        Returns
+        -------
+        numpy.ndarray
+            Flattened node-wise reduced saturation followed by species
+            concentrations [-], shape (num_nodes * (1 + num_species),).
+
+        Raises
+        ------
+        ValueError
+            If the span tolerance, upstream coordinates, or field shapes
+            are invalid, or a concentration is negative or nonfinite.
+
+        Warns
+        -----
+        UserWarning
+            If a nonconstant source field is sampled outside its cake domain
+            [0, cake_height] by more than the relative tolerance, or if raising
+            saturation to the residual floor exceeds 1e-9 [-].
+
+        Notes
+        -----
+        ``sat_inf`` [-] must be configured before this call. Cake coordinates
+        and receiving centers are dimensional [m]. Distributed saturation [-]
+        and ``CakePhase.mass_concentr`` [kg/m**3], with node rows and species
+        columns, use linear interpolation with endpoint holding. When the
+        cake field is absent, use the attached liquid concentration; a uniform
+        species vector is tiled. Legacy attached concentration profiles are
+        also accepted. Saturation is clipped above sat_inf by
+        DELIQUORING_SATURATION_FLOOR and capped at one after interpolation.
+        The positive numerical floor prevents a singular capillary RHS.
+        Raising a below-residual inlet assumes additional pore liquid; warn
+        when this lift exceeds the 1e-9 [-] roundoff allowance, as for washing
+        re-saturation. The initial adjustment accounts for this added inventory.
+        Remapping is not conservative: liquid_initial_adjustment records
+        the difference from the attached inlet inventory.
+        No axial length rescaling is inferred from differing unit diameters.
+        Negative concentration roundoff is clipped to zero only within
+        num_species * float64_epsilon * max(abs(concentration)) [kg/m**3],
+        the first-order species-sum roundoff allowance; larger negatives raise.
+
+        Concentration reference values are cell-width averages [kg/m**3]
+        over z/height [-], including the full first and last control volumes.
+        A uniform pure component has zero reduction contrast; its reduced
+        concentration is zero and reconstruction retains its pure density.
+        """
+        z_dim = self.z_centers * self.cake_height  # [m]
+        sat_initial, conc_initial = _remap_cake_fields(
+            self.CakePhase, z_dim, self.Liquid_1.num_species, span_rtol)  # [-], [kg/m**3]
+        saturation_minimum = min(1., self.sat_inf + DELIQUORING_SATURATION_FLOOR)  # [-]
+        saturation_tolerance = 1e-9  # [-], same roundoff allowance as washing re-saturation
+        if np.any(sat_initial < saturation_minimum - saturation_tolerance):
+            warnings.warn("Deliquoring assumes saturation at or above the residual floor; "
+                          "raising the inlet saturation to that floor.",
+                          UserWarning, stacklevel=2)
+        sat_initial = np.clip(sat_initial, saturation_minimum, 1)  # [-]
+        sat_reduced = (sat_initial - self.sat_inf) / (1 - self.sat_inf)  # [-]
+        self.rho_j = self.Liquid_1.getDensityPure()[0]  # [kg/m**3]
+        self.conc_mean_init = np.tile(
+            self.delta_z @ conc_initial, (self.num_nodes, 1))  # [kg/m**3]
+        contrast = self.rho_j - self.conc_mean_init  # [kg/m**3]
+        conc_reduced = np.divide(
+            conc_initial - self.conc_mean_init, contrast,
+            out=np.zeros_like(conc_initial), where=contrast != 0)  # [-]
+        return np.column_stack((sat_reduced, conc_reduced)).ravel()
 
     def solve_unit(self, deltaP, runtime, p_atm=101325,
                    verbose=True):
@@ -421,7 +622,13 @@ class DeliquoringStep:
         micrometers [um]. The capillary and threshold-pressure correlations use
         particle diameters in meters [m], while CSD-weighted averages integrate
         over the stored number distribution ``Solid_1.distrib`` [#/m**3/um] on
-        the micrometer grid.
+        the micrometer grid. Saturation [-] and liquid concentration
+        [kg/m**3] are interpolated from the cake's external coordinates [m]
+        onto the dimensional solver cell centers by ``initialize_states``.
+        Linear interpolation holds endpoint values outside the upstream span;
+        saturation is clipped above s_inf by the shared numerical floor and
+        capped at one. Uniform fields are tiled. Remapping is not conservative;
+        retrieval records its initial inventory adjustment separately.
         """
 
         # Solid properties
@@ -472,38 +679,7 @@ class DeliquoringStep:
 
         self.p_gas = np.linspace(pgas_out, p_atm, self.num_nodes + 1)
 
-        # ---------- Initial states
-        # Saturation # TODO: read from cake nodes
-        sat_initial = np.ones(self.num_nodes) * self.CakePhase.saturation[0]
-        sat_red_init = (sat_initial - s_inf) / (1 - s_inf)
-
-        # Concentration
-        self.rho_j = self.Liquid_1.getDensityPure()[0]
-        # self.rho_j = np.ones_like(self.rho_j)
-        conc_upstream = self.CakePhase.Liquid_1.mass_conc
-
-        z_dim = self.z_centers * self.cake_height
-        conc_init = define_initial_state(state=conc_upstream, z_after=z_dim,
-                     z_before=self.CakePhase.z_external, indexed_state=True)
-
-        # if conc_upstream.ndim == 1:     # also for saturation : Daniel
-        #     z_dim = self.z_centers * self.cake_height
-        #     conc_liq = self.Liquid_1.mass_conc  # Lets check how the mass conc is calculated: Daniel
-        #     conc_init = np.tile(conc_liq, (self.num_nodes, 1))
-        # elif conc_upstream.ndim == 2:
-        #     z_dim = self.z_centers * self.cake_height
-        #     interp = SplineInterpolation(self.CakePhase.z_external, conc_upstream)
-        #     conc_init = interp.evalSpline(z_dim)
-
-        self.conc_mean_init = np.zeros_like(conc_init)
-        for i in range(len(self.Liquid_1.name_species)):
-            self.conc_mean_init[:,i] = trapezoidal_rule(z_dim, conc_init[:,i]) / \
-            self.cake_height
-
-        conc_star_init = (conc_init - self.conc_mean_init) / \
-            (self.rho_j - self.conc_mean_init)
-
-        y_zero = np.column_stack((sat_red_init, conc_star_init)).ravel()
+        y_zero = self.initialize_states()  # [-], reduced solver state
 
         model = Explicit_Problem(self.unit_model, y0=y_zero, t0=0)
 
@@ -533,89 +709,132 @@ class DeliquoringStep:
     def flatten_states(self):
         pass
 
-    def retrieve_results(self, theta, states):
-        num_species = self.Liquid_1.num_species
+    def retrieve_results(self, theta: np.ndarray, states: np.ndarray) -> None:
+        """Store spatial results and reconcile retained and removed liquid.
 
-        time = theta/ self.theta_conv
+        Parameters
+        ----------
+        theta : numpy.ndarray
+            Reduced solver times [-], shape (num_times,).
+        states : numpy.ndarray
+            Reduced saturation and concentration [-], shape
+            (num_times, num_nodes * (1 + num_species)); each node stores
+            saturation followed by concentrations in liquid species order.
 
+        Raises
+        ------
+        ValueError
+            If retained inventory is nonfinite or nonpositive, or any species
+            inventory is negative. No attached-inlet comparison is enforced.
+
+        Notes
+        -----
+        Result coordinates retain z/height [-]. The outlet cake stores
+        cell-center coordinates [m], saturation [-] of shape (num_nodes,),
+        and ``mass_concentr`` [kg/m**3] of shape (num_nodes, num_species).
+        Attached liquid composition remains a one-dimensional mass-fraction
+        vector [-], weighted by the final species inventories:
+        m_j = porosity * cake_vol * sum_i(delta_z_i * S_i * c_ij) [kg].
+        Thus local mixture density is sum_j(c_ij) [kg/m**3].
+
+        ``liquid_removed`` [kg] and ``liquid_removed_mass_frac`` [-] measure
+        species inventory decreases from the REMAPPED initial field to the
+        final field. ``result.mass_liquid_removed`` [kg] starts at zero.
+        Species inventories are non-increasing under the drainage model;
+        negative numerical differences and the removal history are floored
+        at zero. No inlet-versus-final species check is made.
+
+        Linear remapping is not conservative. The signed difference between
+        attached inlet species masses and remapped initial species masses is
+        published as ``liquid_initial_adjustment_species`` [kg], whose sum is
+        ``liquid_initial_adjustment`` [kg]. Excess Filter liquid above the
+        pores belongs to this adjustment, not to physical removal. Thus inlet
+        = final + removed + adjustment per species, up to subtraction roundoff.
+        The signed species adjustments can cancel in the total, so no
+        adjustment mass fractions are defined. The species vector [kg] and
+        signed total [kg] also appear on ``result``.
+        Legacy attached profiles use the initial field's bulk composition.
+        Zero removal has a zero composition vector. Each call accounts for its
+        own initial field. ``outputs`` retains the reduced state array.
+        Concentration dictionaries and outlet saturation have independent storage.
+        """
+        time = theta / self.theta_conv  # [s]
         indexes = {key: self.states_di[key].get('index', None)
                    for key in self.name_states}
-
-        dp = {}
-
-        dp_reduced= unpack_discretized(states, self.dim_states, self.name_states,
-                                indexes=indexes)
-
-        s_red = dp_reduced['saturation']
-
-        # s_red = states[:, ::num_species + 1]
-        satProf = s_red * (1 - self.sat_inf) + self.sat_inf
-
-        conc_diff = self.rho_j - self.conc_mean_init
-
-        concPerSpecies = {}
-        mass_j = {}
-        mass_bar_j = {}
-
-        porosity = self.CakePhase.porosity
-
-        for ind, name in enumerate(indexes['mass_conc']):
-            conc_sp = dp_reduced['mass_conc'][name]
-
-            conc_sp = conc_sp * conc_diff[:,ind] + self.conc_mean_init[:,ind]
-            mass_sp = porosity * satProf * conc_sp
-            massbar = porosity * satProf * conc_sp / \
-                ((1 - porosity)*self.rho_s + porosity*satProf*self.rho_j[ind])
-
-            concPerSpecies[name] = conc_sp
-            mass_j[name] = mass_sp
-            mass_bar_j[name] = massbar
-
-        self.timeProf = time
-        self.satProf = satProf
-
-        dp['time'] = time
-        dp['z'] = self.z_centers
-        dp['saturation'] = self.satProf
-        dp['mass_conc'] =  concPerSpecies
-
-        self.result = DynamicResult(self.states_di, self.fstates_di, **dp)
-
-        self.mean_sat = trapezoidal_rule(self.z_centers, s_red.T) * \
-            (1 - self.sat_inf) + self.sat_inf
-
-        # dp['mean_saturation_value'] = self.mean_sat
-
-
-        concPerVolElement = {}
-        concPerVolElement = dp_reduced['mass_conc']
-
-        for name in indexes['mass_conc']:
-            concPerVolElement[name] = concPerSpecies[name] * conc_diff[:, ind] \
-                + self.conc_mean_init[:,ind]
-
-        self.concPerSpecies = concPerSpecies
-        self.massCompPerCakeUnitVolume = mass_j
-        self.massjPerMassCake = mass_bar_j
-        self.concPerVolElement = concPerVolElement
-
-        last_state = {}
-        for name in self.concPerSpecies.keys():
-            last_state[name] = self.concPerSpecies[name][-1][-1]
-
-        self.mass_conc= list(last_state.values())
-
-        self.Liquid_1.updatePhase(mass_conc=self.mass_conc)
-
-
+        reduced = unpack_discretized(states, self.dim_states, self.name_states,
+                                     indexes=indexes)
+        saturation = (reduced['saturation'] * (1 - self.sat_inf)
+                      + self.sat_inf)  # [-]
+        contrast = self.rho_j - self.conc_mean_init  # [kg/m**3]
+        concentrations = {
+            name: (reduced['mass_conc'][name] * contrast[:, column]
+                   + self.conc_mean_init[:, column])
+            for column, name in enumerate(self.name_species)
+        }  # [kg/m**3], time rows and node columns per species
+        porosity = self.CakePhase.porosity  # [-]
+        concentration_field = np.stack([
+            concentrations[name] for name in self.name_species], axis=-1)  # [kg/m**3]
+        mass_per_cake_volume = (porosity * saturation[:, :, None]
+                               * concentration_field)  # [kg/m**3 cake]
+        species_inventory = (self.CakePhase.cake_vol
+                             * np.einsum('i,tij->tj', self.delta_z,
+                                         mass_per_cake_volume))  # [kg]
+        retained_mass = species_inventory.sum(axis=1)  # [kg]
+        if (not np.all(np.isfinite(species_inventory))
+                or np.any(species_inventory < 0) or np.any(retained_mass <= 0)):
+            raise ValueError("Deliquoring requires a finite, positive retained liquid "
+                             "inventory with nonnegative species masses [kg]")
+        inlet_liquid = self.CakePhase.Liquid_1
+        inlet_fractions = np.asarray(inlet_liquid.mass_frac)  # [-]
+        if inlet_fractions.ndim == 2:
+            inlet_fractions = species_inventory[0] / retained_mass[0]  # [-]
+        adjustment_species = (inlet_liquid.mass * inlet_fractions
+                              - species_inventory[0])  # [kg], signed basis adjustment
+        self.liquid_initial_adjustment_species = adjustment_species.copy()  # [kg]
+        self.liquid_initial_adjustment = float(adjustment_species.sum())  # [kg]
+        removed_species = species_inventory[0] - species_inventory[-1]  # [kg]
+        removed_species = np.maximum(removed_species, 0)  # [kg], subtraction roundoff only
+        self.liquid_removed = float(removed_species.sum())  # [kg]
+        self.liquid_removed_mass_frac = np.divide(
+            removed_species, self.liquid_removed,
+            out=np.zeros_like(removed_species), where=self.liquid_removed != 0)  # [-]
+        removed_history = np.maximum(retained_mass[0] - retained_mass, 0)  # [kg]
+        self.mean_sat = saturation @ self.delta_z  # [-], full cell volumes
+        self.timeProf = time  # [s]
+        self.satProf = saturation  # [-]
+        self.concPerSpecies = {name: values.copy() for name, values in concentrations.items()}  # [kg/m**3]
+        self.concPerVolElement = {name: values.copy() for name, values in concentrations.items()}  # [kg/m**3]
+        self.massCompPerCakeUnitVolume = {
+            name: mass_per_cake_volume[:, :, column]
+            for column, name in enumerate(self.name_species)
+        }  # [kg species/m**3 cake]
+        self.massjPerMassCake = {
+            name: self.massCompPerCakeUnitVolume[name] / (
+                (1 - porosity) * self.rho_s + porosity * saturation * self.rho_j[column])
+            for column, name in enumerate(self.name_species)
+        }  # [kg species/kg cake], existing per-species diagnostic basis
+        self.fstates_di['mass_liquid_removed'] = {
+            'dim': 1, 'units': 'kg', 'type': 'alg'}
+        self.fstates_di['liquid_initial_adjustment'] = {
+            'dim': 1, 'units': 'kg', 'type': 'alg'}
+        self.result = DynamicResult(
+            self.states_di, self.fstates_di, time=time, z=self.z_centers,
+            saturation=saturation, mass_conc=concentrations,
+            mean_saturation_value=self.mean_sat, mass_liquid_removed=removed_history,
+            liquid_initial_adjustment=self.liquid_initial_adjustment,
+            liquid_initial_adjustment_species=adjustment_species.copy())
+        self.mass_conc = concentration_field[-1].copy()  # [kg/m**3]
+        bulk_fractions = species_inventory[-1] / retained_mass[-1]  # [-]
+        self.Liquid_1.updatePhase(mass=float(retained_mass[-1]), mass_frac=bulk_fractions)
         liquid_out = copy.deepcopy(self.Liquid_1)
         solid_out = copy.deepcopy(self.Solid_1)
-
         self.Outlet = self.CakePhase
-        self.CakePhase.saturation = self.satProf[-1]
-        self.CakePhase.z_external = self.z_centers
+        self.CakePhase.mass_concentr = self.mass_conc  # [kg/m**3]
+        self.CakePhase.saturation = saturation[-1].copy()  # [-]
+        self.CakePhase.z_external = self.z_centers * self.cake_height  # [m]
+        self.CakePhase.cake_height = self.cake_height  # [m], source domain
         self.Outlet.Phases = (liquid_out, solid_out)
-        self.outputs = states
+        self.outputs = states  # [-], original reduced solver layout
 
     def plot_profiles(self, fig_size=None, mean_sat=True,
                       time=None, z_star=None, jump=20, pick_comp=None):
@@ -1255,6 +1474,8 @@ class Filter:
         filtration may still leave liquid above the cake. Recovered dry mass
         is capped at the attached solid inventory, so solver-tolerance
         overshoot cannot make the recovered population fraction exceed one.
+        The outlet cake's external grid stores cell centers [m] over the
+        recovered cake height, computed with the filter cross-sectional area.
         """
         self.timeProf = np.array(time)
         self.massProf = states
@@ -1283,6 +1504,11 @@ class Filter:
 
         self.Outlet = Cake()
         self.Outlet.Phases = (liquid_cake, solid_cake)
+        cake_height = self.Outlet.cake_vol / self.area_filt  # [m]
+        self.Outlet.cake_height = cake_height  # [m], source domain
+        num_cells = len(self.Outlet.z_external)
+        self.Outlet.z_external = (
+            (np.arange(num_cells) + 0.5) * cake_height / num_cells)  # [m], cell centers
 
         self.outputs = np.concatenate(([states[-1, 1], self.Liquid_1.temp],
                                        self.Liquid_1.mass_frac,
@@ -1477,7 +1703,7 @@ class DisplacementWashing:
 
         """
         self.max_exp = np.log(np.finfo('d').max)
-        self.satur = 1
+        self.satur = 1  # [-], fixed filled-pore assumption of displacement washing
         self.num_nodes = num_nodes
 
         self.solvent_idx = solvent_idx
@@ -1502,11 +1728,29 @@ class DisplacementWashing:
         return self._Phases
 
     @Phases.setter
-    def Phases(self, phases):
+    def Phases(self, phases: Union[Cake, list, tuple]) -> None:
+        """Attach an upstream cake or construct a saturated washing cake.
+
+        Parameters
+        ----------
+        phases : Cake or list or tuple
+            Upstream cake with coordinates [m], or liquid and solid phases.
+            Newly constructed cakes use the washing output grid [m].
+
+        Raises
+        ------
+        RuntimeError
+            If the input is neither a cake nor a phase list or tuple.
+
+        Notes
+        -----
+        Existing cake coordinates are retained for interpolation; phase-list
+        construction places the uniform initial fields on the output grid.
+        """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
 
-            self.CakePhase = Cake()
+            self.CakePhase = Cake(num_discr=self.num_nodes)
             self.CakePhase.Phases = list(phases)
         elif phases.__class__.__name__ == 'Cake':
             self.CakePhase = phases
@@ -1516,6 +1760,12 @@ class DisplacementWashing:
                                'objects')
 
         classify_phases(self)  # Enumerate phases: Liquid_1,..., Solid_1, ...
+
+        if isinstance(phases, (list, tuple)):
+            cake_height = self.CakePhase.cake_vol / self.cross_area  # [m]
+            self.CakePhase.cake_height = cake_height  # [m], source domain
+            self.CakePhase.z_external = np.linspace(
+                0, cake_height, self.num_nodes)  # [m], washing output coordinates
 
         self.__original_phase__ = copy.deepcopy(self.Liquid_1.__dict__)
 
@@ -1765,6 +2015,11 @@ class DisplacementWashing:
         concentration values [kg/m**3]. Static output has a singleton time axis.
         Vanishing tails may underflow to zero or subnormal values during
         profile assembly; other floating-point errors retain caller settings.
+        The initial spatial concentration comes from Cake.mass_concentr when
+        available, otherwise the attached liquid. Bounded linear interpolation
+        holds endpoints; nonconstant fields warn outside the source cake domain.
+        This remap is not conservative. Subsequent deliquoring publishes its
+        initial inventory adjustment separately from physical liquid removal.
         """
         if not dynamic and time_vals is not None:
             raise ValueError("time_vals cannot be supplied with dynamic=False; "
@@ -1776,8 +2031,6 @@ class DisplacementWashing:
         diff_pure = self.Liquid_1.getDiffusivityPure(wrt=self.solvent_idx)
         epsilon = self.Solid_1.getPorosity(diam_filter=self.diam_unit)
         lambd_ads = 1 / (1 - self.k_ads + self.k_ads/epsilon)
-
-        c_zero = np.array(self.CakePhase.Liquid_1.mass_conc)
 
         # Solid
         epsilon = self.Solid_1.getPorosity(diam_filter=self.diam_unit)
@@ -1791,19 +2044,8 @@ class DisplacementWashing:
         diff = self.get_diffusivity(vel_liq, diff_pure)  # [m**2/s]
 
         z_vals = np.linspace(0, cake_height, self.num_nodes)
-        c_zero = define_initial_state(state=c_zero, z_after=z_vals,
-                     z_before=self.CakePhase.z_external, indexed_state=True)
-        # if c_zero.ndim == 1:     # also for saturation : Daniel
-        #     c_zero = np.tile(c_zero, (self.num_nodes, 1))
-        # elif c_zero.ndim == 2:
-        #     interp = SplineInterpolation(self.CakePhase.z_external, c_zero)
-        #     c_zero = interp.evalSpline(z_vals)
-
-        # self.conc_mean_init = np.zeros_like(conc_init)
-        # for i in range(len(self.Liquid_1.name_species)):
-        #     self.conc_mean_init[:,i] = trapezoidal_rule(z_dim, conc_init[:,i]) / \
-        #     self.cake_height
-        # c_zero = self.Liquid_1.mass_conc
+        _, c_zero = _remap_cake_fields(
+            self.CakePhase, z_vals, self.Liquid_1.num_species)  # [-], [kg/m**3]
 
         c_inlet = np.zeros(self.Liquid_1.num_species)
         c_inlet[self.solvent_idx] = self.Liquid_1.rho_liq[self.solvent_idx]
@@ -1856,7 +2098,41 @@ class DisplacementWashing:
 
         return conc, conc_star, c_cake, c_effl
 
-    def retrieve_results(self, z_coord, time_coord, conc):
+    def retrieve_results(self, z_coord: np.ndarray, time_coord: np.ndarray,
+                         conc: np.ndarray) -> None:
+        """Store washing concentrations and saturated cake coordinates.
+
+        Parameters
+        ----------
+        z_coord : numpy.ndarray
+            Axial coordinates [m], shape (num_nodes,).
+        time_coord : numpy.ndarray
+            Output times [s], shape (num_times,).
+        conc : numpy.ndarray
+            Liquid mass concentrations [kg/m**3], shape
+            (num_nodes, num_times, num_species).
+
+        Raises
+        ------
+        ValueError
+            If the retained liquid inventory is nonfinite or nonpositive [kg].
+
+        Notes
+        -----
+        The displacement-washing solution assumes saturated pores
+        (``self.satur = 1`` [-]). Store that saturation on the same output
+        grid as the concentration field, including when the inlet cake used
+        a different grid. This represents the model's filled-pore state.
+        Warn if inlet saturation is below one by more than 1e-9 [-], a
+        numerical roundoff allowance, since re-saturation supplies liquid
+        outside the deliquoring model's inventory accounting.
+        Attached liquid mass [kg] and one-dimensional bulk fractions [-] use
+        this washing grid's pore inventory. Cell faces lie halfway between
+        nodes, with exterior faces at 0 and cake_height [m]; endpoint nodes
+        therefore have half-width control volumes. The spatial field remains
+        on Cake.mass_concentr [kg/m**3]. No conservation is assumed during
+        spatial remapping; deliquoring carries its initial adjustment explicitly.
+        """
         num_species = self.Liquid_1.num_species
 
         indexes = {key: self.states_di[key].get('index', None)
@@ -1879,20 +2155,38 @@ class DisplacementWashing:
         if conc.ndim == 3:
             concPerVolElem = []
             for ind in range(self.num_z):
-                concPerVolElem.append(conc[ind])
+                concPerVolElem.append(conc[ind].copy())
 
             concPerSpecies = []
             for ind in range(self.num_t):
-                concPerSpecies.append(conc[:, ind])
+                concPerSpecies.append(conc[:, ind].copy())
 
             self.concPerVolElem = concPerVolElem
             self.concPerSpecies = concPerSpecies
 
-        self.CakePhase.mass_concentr = self.concPerSpecies[-1]  # TODO
-        self.CakePhase.z_external = self.zProf
+        saturation_tolerance = 1e-9  # [-], roundoff allowance at the filled-pore limit
+        if np.any(np.asarray(self.CakePhase.saturation) < 1 - saturation_tolerance):
+            warnings.warn("Displacement washing assumes saturated pores; re-saturating "
+                          "the inlet cake to saturation one.", UserWarning, stacklevel=2)
+        self.CakePhase.mass_concentr = self.concPerSpecies[-1].copy()  # [kg/m**3]
+        self.CakePhase.z_external = self.zProf  # [m]
+        self.CakePhase.saturation = np.full_like(
+            self.zProf, self.satur, dtype=float)  # [-], saturated washing model
 
-        last_state = self.concPerSpecies[-1]
-        self.Liquid_1.updatePhase(mass_conc=last_state)
+        last_state = self.concPerSpecies[-1]  # [kg/m**3]
+        cake_height = self.CakePhase.cake_vol / self.cross_area  # [m]
+        self.CakePhase.cake_height = cake_height  # [m], source domain
+        cell_edges = np.concatenate(([0.], (z_coord[:-1] + z_coord[1:]) / 2,
+                                     [cake_height]))  # [m], half cells at endpoints
+        cell_widths = np.diff(cell_edges) / cake_height  # [-]
+        species_mass = (self.CakePhase.porosity * self.CakePhase.cake_vol
+                        * (cell_widths * self.satur) @ last_state)  # [kg]
+        liquid_mass = float(species_mass.sum())  # [kg]
+        if not np.isfinite(liquid_mass) or liquid_mass <= 0:
+            raise ValueError("DisplacementWashing requires a finite, positive retained "
+                             "liquid inventory [kg]")
+        self.Liquid_1.updatePhase(mass=liquid_mass,
+                                  mass_frac=species_mass / liquid_mass)
 
         liquid_out = copy.deepcopy(self.Liquid_1)
         solid_out = copy.deepcopy(self.Solid_1)

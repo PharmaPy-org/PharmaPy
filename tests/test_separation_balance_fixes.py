@@ -217,6 +217,15 @@ def test_washing_diffusivity_uses_volume_weighted_peclet(separation_phases, popu
 
 @pytest.mark.parametrize('dynamic', [False, True])
 def test_washing_public_solve_preserves_spatial_species_values(separation_phases, dynamic):
+    """Preserve the analytical spatial profile and its attached bulk inventory.
+
+    Parameters
+    ----------
+    separation_phases : tuple
+        Real liquid and solid phases with shipped thermophysical data.
+    dynamic : bool
+        Select time-dependent or final-only analytical washing results.
+    """
     liquid, solid = separation_phases
     # Deliberately large synthetic diffusivities avoid the separate large-Pe
     # exponential overflow problem and expose all five distinct columns.
@@ -248,7 +257,14 @@ def test_washing_public_solve_preserves_spatial_species_values(separation_phases
             expected[node, species] = fraction * (initial[species] - inlet[species]) + inlet[species]
     concentration, _, _, _ = washer.solve_unit(pressure, wash_ratio=ratio, dynamic=dynamic)
     np.testing.assert_allclose(concentration, expected, rtol=RTOL, atol=RTOL)
-    np.testing.assert_allclose(washer.Outlet.Liquid_1.mass_conc, expected, rtol=RTOL, atol=RTOL)
+    np.testing.assert_allclose(washer.Outlet.mass_concentr, expected, rtol=RTOL, atol=RTOL)
+    # Endpoint-centered control volumes have widths L/6, L/3, L/3, L/6.
+    species_mass = washer.CakePhase.porosity * washer.CakePhase.cake_vol * (
+        expected[0] + 2 * expected[1] + 2 * expected[2] + expected[3]) / 6  # [kg]
+    assert washer.Outlet.Liquid_1.mass_frac.shape == (5,)
+    np.testing.assert_allclose(washer.Outlet.Liquid_1.mass_frac,
+                               species_mass / species_mass.sum(), rtol=RTOL, atol=RTOL)
+    assert washer.Outlet.Liquid_1.mass == pytest.approx(species_mass.sum(), rel=RTOL)
     np.testing.assert_allclose(washer.concProf[:, -1, :], expected, rtol=RTOL, atol=RTOL)
     assert washer.timeProf[-1] == pytest.approx(ratio * height / velocity, rel=RTOL)
     if not dynamic:
