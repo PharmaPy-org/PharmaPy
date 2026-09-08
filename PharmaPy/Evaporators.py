@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 
 
+from typing import Optional
+
 import numpy as np
+from PharmaPy.ThermoModule import validate_activity_model
 # from autograd import numpy as np
 # from autograd import jacobian as jacauto
 from PharmaPy.Commons import (mid_fn, trapezoidal_rule, eval_state_events,
@@ -67,7 +70,25 @@ class IsothermalFlash:
 
     """
 
-    def __init__(self, temp_drum=None, pres_drum=None,gamma_method='ideal'):
+    def __init__(self, temp_drum=None, pres_drum=None,
+                 gamma_method: str = 'ideal') -> None:
+        """Configure an isothermal flash with an explicit activity model.
+
+        Parameters
+        ----------
+        temp_drum : float, optional
+            Drum temperature [K]; None uses the inlet temperature.
+        pres_drum : float, optional
+            Drum pressure [Pa]; None uses the inlet pressure.
+        gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Liquid activity model, with parameters supplied by the inlet.
+
+        Raises
+        ------
+        ValueError
+            If ``gamma_method`` is not a supported selector.
+        """
+        validate_activity_model(gamma_method, param_name='gamma_method')
 
         self.temp = temp_drum
         self.pres = pres_drum
@@ -219,18 +240,44 @@ class AdiabaticFlash:
         one of 'ideal', 'UNIFAC' or 'UNIQUAC'. If 'UNIFAC' or 'UNIQUAC' is
         passed, the pure-component .json property file must have required
         parameters for the activity coefficient model. 
-    mult_midfun : TYPE, optional  
-        DESCRIPTION. The default is 1.
-    seed_basedon_input : TYPE, optional  
-        DESCRIPTION. The default is False.
+    mult_midfun : float, optional
+        Multiplier [-] of the phase-fraction closure residual; unity leaves
+        the residual unscaled.
+    seed_basedon_input : bool, optional
+        Seed compositions from the inlet when True; defaults to False.
 
     Returns
     -------
     None.
 
     """
-    def __init__(self, pres_drum, div_energybce=1e3, gamma_method='ideal',
-                 mult_midfun=1, seed_basedon_input=False):
+    def __init__(self, pres_drum, div_energybce=1e3,
+                 gamma_method: str = 'ideal', mult_midfun=1,
+                 seed_basedon_input=False) -> None:
+        """Configure an adiabatic flash and its residual scaling.
+
+        Parameters
+        ----------
+        pres_drum : float
+            Drum pressure [Pa].
+        div_energybce : float, optional
+            Numerical divisor [-] applied to the molar energy residual
+            [J/mol]; the existing default 1e3 reduces its numerical magnitude.
+        gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Liquid activity model, with parameters supplied by the inlet.
+        mult_midfun : float, optional
+            Dimensionless multiplier [-] of the phase-fraction closure
+            residual; the default unity leaves it unscaled.
+        seed_basedon_input : bool, optional
+            If True, seed the solve from the inlet vapor-liquid split;
+            otherwise use the default phase-fraction seed.
+
+        Raises
+        ------
+        ValueError
+            If ``gamma_method`` is not a supported selector.
+        """
+        validate_activity_model(gamma_method, param_name='gamma_method')
  
         self.pres = pres_drum
 
@@ -441,8 +488,8 @@ class Evaporator:
         vaporization. is important for
         The default is True.
     flash_kwargs : dict, optional
-        dictionary to be passed to the solve_unit method of the
-        PharmaPy.AdiabaticFlash instance run to initialize the vaporizer.
+        Keyword arguments passed to the ``AdiabaticFlash`` constructor
+        used by ``init_unit``.
         The default is None.
 
     Returns
@@ -457,10 +504,42 @@ class Evaporator:
                  pressure=101325, diam_out=2.54e-2,
                  k_vap=1, cv_gas=0.8,
                  h_conv=1000,
-                 activity_model='ideal', state_events=None,
+                 activity_model: str = 'ideal', state_events=None,
                  stop_at_maxvol=True, flash_kwargs=None,
-                 include_nitrogen=False):
+                 include_nitrogen=False) -> None:
+        """Configure a batch or semibatch evaporator.
 
+        Parameters
+        ----------
+        vol_drum : float
+            Total drum volume [m**3].
+        pressure : float, optional
+            Downstream pressure used by the vapor outlet law [Pa].
+        diam_out : float, optional
+            Vapor outlet diameter [m].
+        k_vap, cv_gas : float, optional
+            Dimensionless multipliers [-] in the vapor outlet law
+            ``F_v = rho_mol*area_out*velocity*cv_gas*k_vap`` [mol/s].
+        h_conv : float, optional
+            Liquid-side heat-transfer coefficient [W/m**2/K].
+        activity_model : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Liquid activity model for both VLE and pressure closure.
+        state_events : list of dict or dict, optional
+            Event specifications passed to ``eval_state_events``.
+        stop_at_maxvol : bool, optional
+            Stop when liquid volume reaches the drum volume.
+        flash_kwargs : dict, optional
+            Keyword arguments passed to the ``AdiabaticFlash`` constructor
+            used by ``init_unit``.
+        include_nitrogen : bool, optional
+            Include nitrogen in initialization and state bookkeeping.
+
+        Raises
+        ------
+        ValueError
+            If ``activity_model`` is not a supported selector.
+        """
+        validate_activity_model(activity_model, param_name='activity_model')
 
         self._Inlet = None
         self._Phases = None
@@ -616,9 +695,62 @@ class Evaporator:
 
         return inputs
 
-    def material_balances(self, time, mol_i, x_liq, y_vap,
-                          mol_liq, mol_vap, pres, u_int, temp, u_inputs,
-                          dmoli_dt=None):
+    def material_balances(self, time: float, mol_i: np.ndarray,
+                          x_liq: np.ndarray, y_vap: np.ndarray,
+                          mol_liq: float, mol_vap: float, pres: float,
+                          u_int: float, temp: float, u_inputs: dict,
+                          dmoli_dt: Optional[np.ndarray] = None) -> tuple:
+        """Evaluate component balances and thermodynamic closure.
+
+        Parameters
+        ----------
+        time : float
+            Current time [s]; retained for the unit-model interface.
+        mol_i : ndarray
+            Component holdups [mol], shape (num_species,).
+        x_liq, y_vap : ndarray
+            Liquid and vapor mole fractions [-], shape (num_species,).
+        mol_liq, mol_vap : float
+            Total liquid and vapor holdups [mol].
+        pres : float
+            Drum pressure [Pa].
+        u_int : float
+            Internal energy [J]; used by the separate energy balance.
+        temp : float
+            Drum temperature [K].
+        u_inputs : dict
+            Inlet ``mole_flow`` [mol/s] and ``mole_frac`` [-] in species order.
+        dmoli_dt : ndarray, optional
+            Component holdup derivatives [mol/s], shape (num_species,).
+            None requests only the vapor flow and liquid volume.
+
+        Returns
+        -------
+        tuple
+            If ``dmoli_dt`` is None: vapor flow [mol/s], liquid volume [m**3].
+            Otherwise: component differential residuals [mol/s], algebraic
+            residuals, vapor flow [mol/s], liquid volume [m**3]. Algebraic
+            order is component holdups [mol], condensable VLE [-], total
+            holdup [mol], volume [m**3], pressure [Pa]. Supercritical species
+            retain their explicit vapor partial pressures in pressure closure.
+
+        Raises
+        ------
+        ValueError
+            If the configured activity model is unknown during VLE evaluation.
+
+        Notes
+        -----
+        Pressure closure uses the same Henry-based K-values as equilibrium
+        for included species above their critical temperatures. The previous
+        pressure sum extrapolated Antoine for every included species.
+        Species excluded by ``is_supercritic`` retain explicit vapor partial
+        pressures and are indexed out before multiplying K by liquid fraction;
+        missing Henry data for these excluded species cannot poison the sum.
+        The mask is frozen at initialization. An included species crossing its
+        critical temperature mid-run therefore adds a Henry/Antoine step to
+        pressure closure; the equilibrium residual already had that step.
+        """
 
         input_flow = u_inputs['mole_flow']
         input_fracs = u_inputs['mole_frac']
@@ -650,17 +782,21 @@ class Evaporator:
 
             vol_eqn = vol_liq + vol_vap - self.vol_tot
 
-            k_i = self.Liquid_1.getKeqVLE(temp, pres, x_liq, self.activity_model)
+            k_i = self.Liquid_1.getKeqVLE(
+                temp, pres, x_liq, gamma_model=self.activity_model)  # [-]
 
-            equilibria = y_vap * not_super - k_i * x_liq
             equilibria = (y_vap - k_i * x_liq)[not_super.astype(bool)]
-            # equilibria = y_vap - k_i * x_liq
 
-            p_sat = self.Liquid_1.AntoineEquation(temp=temp) * not_super
-            p_super = y_vap[self.is_supercritic] * pres
+            p_super = y_vap[self.is_supercritic] * pres  # [Pa]
 
-            pres_eqn = np.dot(p_sat, x_liq) + sum(p_super) - pres
-            # pres_eqn = sum(y_vap - x_liq)
+            # sum(y) = sum_condensable(K*x) + sum_supercritical(y) = 1.
+            # With gamma_i = 1 and subcritical condensables, P*K_i = p_sat_i, giving
+            # exactly the previous sum(x*p_sat) + sum(p_super) - P.
+            # Index before multiplication: excluded K values may be NaN when
+            # their Henry data are absent, and zero times NaN is still NaN.
+            condensable = not_super.astype(bool)
+            pres_eqn = (pres * np.dot(k_i[condensable], x_liq[condensable])
+                        + sum(p_super) - pres)  # [Pa]
 
             alg_balances = np.concatenate((component_bce,  # x_liq
                                            equilibria,  # y_vap
@@ -1220,10 +1356,9 @@ class ContinuousEvaporator:
         setpoint for the fraction of the total tank volume occupied by the
         liquid phase. The default is 0.5.
     k_liq : float, optional
-        proportional control constant for liquid level control, which
-        dictates output liquid mole flow (F_L), with
-        F_L = k_liq * (v_drum * frac_liq - V_L(t)), being V_L(t) the liquid
-        volume computed by the DAE system. The default is 100.
+        Liquid volume controller gain [mol/s/m**3]. The outlet flow is
+        ``max(0, k_liq*(V_L - vol_drum*frac_liq) + input_flow - flow_vap)``
+        [mol/s], including inlet feedforward. The default is 100.
     k_vap : float, optional
         proportional control constant for pressure, which
         actual pressure (P) by changing output vapor molar flow (F_V), with
@@ -1259,8 +1394,48 @@ class ContinuousEvaporator:
                  k_liq=100, k_vap=1,
                  cv_gas=0.8,
                  h_conv=1000,
-                 activity_model='ideal', num_interp_points=3, mult_flash=1,
-                 state_events=None, reflux_ratio=0):
+                 activity_model: str = 'ideal', num_interp_points=3,
+                 mult_flash=1, state_events=None, reflux_ratio=0) -> None:
+        """Configure a continuous evaporator and its outlet controls.
+
+        Parameters
+        ----------
+        vol_drum : float
+            Total drum volume [m**3].
+        adiabatic : bool, optional
+            Whether to omit heat transfer from the energy balance.
+        pressure : float, optional
+            Downstream pressure used by the vapor outlet law [Pa].
+        diam_out : float, optional
+            Vapor outlet diameter [m].
+        frac_liq : float, optional
+            Liquid volume setpoint as a fraction of drum volume [-].
+        k_liq : float, optional
+            Liquid volume controller gain [mol/s/m**3], applied to
+            ``vol_liq - vol_drum*frac_liq`` with feedforward ``+ input_flow``
+            [mol/s] before vapor-flow subtraction and flow limiting.
+        k_vap, cv_gas : float, optional
+            Dimensionless multipliers [-] in the vapor outlet law
+            ``F_v = rho_mol*area_out*velocity*cv_gas*k_vap`` [mol/s].
+        h_conv : float, optional
+            Liquid-side heat-transfer coefficient [W/m**2/K].
+        activity_model : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Liquid activity model for both VLE and pressure closure.
+        num_interp_points : int, optional
+            Number of interpolation points for dynamic inlet data [-].
+        mult_flash : float, optional
+            Retained unused flash multiplier [-] for API compatibility.
+        state_events : list of dict, optional
+            State event specifications.
+        reflux_ratio : float, optional
+            Fraction of vapor outlet returned as total condensate [-].
+
+        Raises
+        ------
+        ValueError
+            If ``activity_model`` is not a supported selector.
+        """
+        validate_activity_model(activity_model, param_name='activity_model')
  
 
         self._Inlet = None
@@ -1435,9 +1610,58 @@ class ContinuousEvaporator:
 
         return vol_liq, vol_vap, flow_liq, flow_vap
 
-    def material_balances(self, time, mol_i, x_liq, y_vap,
-                          mol_liq, mol_vap, pres, u_int, temp, u_inputs,
-                          flows_out=False):
+    def material_balances(self, time: float, mol_i: np.ndarray,
+                          x_liq: np.ndarray, y_vap: np.ndarray,
+                          mol_liq: float, mol_vap: float, pres: float,
+                          u_int: float, temp: float, u_inputs: dict,
+                          flows_out: bool = False) -> tuple:
+        """Evaluate component balances and thermodynamic closure.
+
+        Parameters
+        ----------
+        time : float
+            Current time [s]; retained for the unit-model interface.
+        mol_i : ndarray
+            Component holdups [mol], shape (num_species,).
+        x_liq, y_vap : ndarray
+            Liquid and vapor mole fractions [-], shape (num_species,).
+        mol_liq, mol_vap : float
+            Total liquid and vapor holdups [mol].
+        pres : float
+            Drum pressure [Pa].
+        u_int : float
+            Internal energy [J]; used by the separate energy balance.
+        temp : float
+            Drum temperature [K].
+        u_inputs : dict
+            Inlet ``mole_flow`` [mol/s] and ``mole_frac`` [-] in species order.
+        flows_out : bool, optional
+            If True, return only outlet flows and liquid volume.
+
+        Returns
+        -------
+        tuple
+            If ``flows_out``: liquid flow [mol/s], vapor flow [mol/s], liquid
+            volume [m**3]. Otherwise: component rates [mol/s], algebraic
+            residuals, liquid flow [mol/s], vapor flow [mol/s], liquid volume
+            [m**3]. Algebraic order is component holdups [mol], VLE [-],
+            total holdup [mol], volume [m**3], pressure [Pa].
+
+        Raises
+        ------
+        ValueError
+            If the configured activity model is unknown or any K-value is
+            non-finite. Supercritical species require Henry data [Pa].
+
+        Notes
+        -----
+        Pressure closure uses the same Henry-based K-values as equilibrium
+        for included species above their critical temperatures. The previous
+        pressure sum extrapolated Antoine for every included species.
+        No species are excluded in this unit. Finite Henry data retain the
+        supercritical closure; non-finite K-values raise before entering the
+        equilibrium and pressure residuals.
+        """
 
         input_flow = u_inputs['mole_flow']
         input_fracs = u_inputs['mole_frac']
@@ -1458,12 +1682,21 @@ class ContinuousEvaporator:
             component_bce = mol_liq * x_liq + mol_vap * y_vap - mol_i
             global_bce = mol_liq + mol_vap - sum(mol_i)
 
-            k_i = self.Liquid_1.getKeqVLE(temp, pres, x_liq,
-                                          self.activity_model)
+            k_i = self.Liquid_1.getKeqVLE(
+                temp, pres, x_liq, gamma_model=self.activity_model)  # [-]
+            invalid_k = ~np.isfinite(k_i)
+            if np.any(invalid_k):
+                species = [name for name, invalid in
+                           zip(self.Liquid_1.name_species, invalid_k) if invalid]
+                raise ValueError(
+                    f"Non-finite VLE K-values for species {species}. Check "
+                    "missing or non-finite 'henry_constant' [Pa] data for "
+                    "supercritical species before evaluating material balances.")
             equilibria = y_vap - k_i * x_liq
 
-            p_sat = self.Liquid_1.AntoineEquation(temp=temp)
-            pres_eqn = np.dot(x_liq, p_sat) - pres
+            # sum(y) = sum(K*x) = 1. For gamma_i = 1 and subcritical
+            # species, P*K_i = p_sat_i: exactly the old dot(x, p_sat) - P.
+            pres_eqn = pres * (np.dot(x_liq, k_i) - 1)  # [Pa]
 
             alg_balances = np.concatenate((component_bce,  # x_liq
                                            equilibria,  # y_vap

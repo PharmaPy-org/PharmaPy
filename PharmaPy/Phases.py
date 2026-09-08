@@ -7,7 +7,8 @@ from typing import Optional, Sequence, Union
 
 import numpy as np
 from numpy.typing import ArrayLike
-from PharmaPy.ThermoModule import ThermoPhysicalManager
+from PharmaPy.ThermoModule import (ThermoPhysicalManager,
+                                  validate_activity_model)
 from PharmaPy.Commons import trapezoidal_rule
 from scipy.optimize import newton
 
@@ -650,7 +651,37 @@ class LiquidPhase(ThermoPhysicalManager):
         enthalpy = self.getEnthalpy(basis=basis)  # [J/kg] or [J/mol]
         return cp, rho, enthalpy
 
-    def getActivityCoeff(self, method='ideal', mole_frac=None, temp=None):
+    def getActivityCoeff(self, method: str = 'ideal',
+                         mole_frac: Optional[np.ndarray] = None,
+                         temp: Optional[Union[float, np.ndarray]] = None
+                         ) -> np.ndarray:
+        """Return liquid activity coefficients for the selected model.
+
+        Parameters
+        ----------
+        method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Case-sensitive activity model. Its property parameters must be
+            present in the database; UNIQUAC uses ``qi`` when ``qip`` is absent.
+        mole_frac : ndarray, optional
+            Liquid mole fractions [-], shape (num_species,) or
+            (num_points, num_species); defaults to the phase composition.
+        temp : float or ndarray, optional
+            Temperature [K], scalar or paired profile (num_points,);
+            defaults to the phase temperature.
+
+        Returns
+        -------
+        ndarray
+            Activity coefficients [-] in the supplied composition order
+            and shape. The ideal model returns ones.
+
+        Raises
+        ------
+        ValueError
+            If ``method`` is not a supported selector. Public parameter names
+            and defaults are unchanged; unknown names no longer select UNIFAC.
+        """
+        validate_activity_model(method, param_name='method')
 
         if mole_frac is None:
             mole_frac = self.mole_frac
@@ -661,9 +692,6 @@ class LiquidPhase(ThermoPhysicalManager):
         if method == 'ideal':
             gamma = np.ones_like(mole_frac)
         elif method == 'UNIQUAC':
-            if 'qip' not in self.__dict__:
-                self.qip = self.qi
-
             gamma = self.UNIQUAC(mole_frac, temp)
 
         else:
