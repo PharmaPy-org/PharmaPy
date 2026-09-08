@@ -75,6 +75,12 @@ A single reported time still uses the requested run duration for differentiation
 
 Crystallizers store :code:`heat_duty = [0, Q]` [J], filling the cooling column of :code:`SimExec.GetDuties`. Positive duty means heat removed to the utility, opposite to the reactor heating column. Uncontrolled crystallizers integrate the jacket heat rate; prescribed-temperature crystallizers reconstruct the utility rate from the energy balance and the temperature slope over each reporting interval. The prescribed-temperature Batch duty has changed sign relative to earlier releases.
 
+Evaporator heat duties
+~~~~~~~~~~~~~~~~~~~~~
+
+Evaporator :code:`heat_profile` columns are powers [J/s], and :code:`heat_duty` contains their cumulative trapezoidal integrals [J] across segments since the last reset or public :code:`Phases` assignment. For batch evaporators, column 0 is heat into the drum (positive for heating) and column 1 is condensation heat (negative for cooling); the cumulative energies retain their signs. For continuous evaporators, column 0 is jacket/utility duty (positive for heat removed) and column 1 is condenser duty (negative for cooling), evaluated on the vapor-composition basis. This replaces the former liquid-composition basis, so existing zero-reflux runs also report a different column-1 value. Continuous duties accumulate signed energy first and then report its magnitude; each physical duty is counted once. Partition independence holds for a fixed trajectory: continuous :code:`solve_unit` restarts at time zero, so splitting solves need not reproduce the same trajectory.
+
+
 Interpolators
 ===============
 

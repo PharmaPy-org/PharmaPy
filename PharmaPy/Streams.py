@@ -159,11 +159,22 @@ class LiquidStream(LiquidPhase):
         return self._DynamicInlet
 
     @DynamicInlet.setter
-    def DynamicInlet(self, dynamic_object):
+    def DynamicInlet(self, dynamic_object: Optional[object]) -> None:
+        """Attach an inlet controller or restore static stream inputs.
+
+        Parameters
+        ----------
+        dynamic_object : object or None
+            Object exposing ``evaluate_inputs(time)`` with time [s].
+            None clears the controller; static flow [kg/s, mol/s, m**3/s]
+            and temperature [K] attributes then supply evaluated inputs.
+        """
+        self._DynamicInlet = dynamic_object
+        if dynamic_object is None:
+            return
+
         dynamic_object.controllable = self.controllable
         dynamic_object.parent_instance = self
-
-        self._DynamicInlet = dynamic_object
 
     def InterpolateInputs(self, time):
         if isinstance(time, (float, int)):
@@ -477,11 +488,22 @@ class VaporStream(VaporPhase):
         return self._DynamicInlet
 
     @DynamicInlet.setter
-    def DynamicInlet(self, dynamic_object):
+    def DynamicInlet(self, dynamic_object: Optional[object]) -> None:
+        """Attach an inlet controller or restore static stream inputs.
+
+        Parameters
+        ----------
+        dynamic_object : object or None
+            Object exposing ``evaluate_inputs(time)`` with time [s].
+            None clears the controller; static flow [kg/s, mol/s, m**3/s]
+            and temperature [K] attributes then supply evaluated inputs.
+        """
+        self._DynamicInlet = dynamic_object
+        if dynamic_object is None:
+            return
+
         dynamic_object.controllable = self.controllable
         dynamic_object.parent_instance = self
-
-        self._DynamicInlet = dynamic_object
 
     def evaluate_inputs(self, time):
         if self.DynamicInlet is None:
