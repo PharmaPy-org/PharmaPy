@@ -415,7 +415,6 @@ class DeliquoringStep:
         self.cake_height = self.CakePhase.cake_vol / self.area_cross  # [m]
 
         z_grid_red = np.linspace(0, 1, self.num_nodes + 1)
-        dz = z_grid_red[1] - z_grid_red[0]
 
         z_centers = (z_grid_red[1:] + z_grid_red[:-1]) / 2
 
@@ -1997,9 +1996,10 @@ class DisplacementWashing:
         Returns
         -------
         tuple of ndarray
-            Final concentration [kg/m**3], normalized final concentration [-],
-            retained concentration [kg/m**3], and effluent concentration
-            [kg/m**3], each with shape (num_nodes, num_species).
+            Final concentration [kg/m**3] and normalized final concentration
+            [-], both with shape (num_nodes, num_species), followed by retained
+            and effluent bulk concentrations [kg/m**3], both with shape
+            (num_species,).
 
         Raises
         ------
@@ -2020,6 +2020,15 @@ class DisplacementWashing:
         holds endpoints; nonconstant fields warn outside the source cake domain.
         This remap is not conservative. Subsequent deliquoring publishes its
         initial inventory adjustment separately from physical liquid removal.
+        The dimensionless analytical solution is exact for a uniform initial
+        field and is applied node-wise otherwise. Retained concentration is
+        the trapezoidal height average of the reconstructed concentration;
+        the effluent balance uses the same average of the initial field for
+        the initial pore inventory. For uniform c_zero, this reduces exactly
+        to (c_zero - c_inlet) * integral(conc_star dz) / cake_height + c_inlet;
+        its initial height average is c_zero, recovering the previous effluent
+        expression as well. Wash volume is wash_ratio * cake volume [m**3],
+        while initial/final pore volumes include porosity and saturation.
         """
         if not dynamic and time_vals is not None:
             raise ValueError("time_vals cannot be supplied with dynamic=False; "
@@ -2083,13 +2092,13 @@ class DisplacementWashing:
                 self.num_t = 1
 
             # Average final concentration and material balance
-            integral = trapezoidal_rule(z_vals, conc_star)
-            c_cake = (c_zero - c_inlet) / cake_height * integral + c_inlet
+            c_cake = trapezoidal_rule(z_vals, conc) / cake_height  # [kg/m**3]
+            c_initial_mean = trapezoidal_rule(z_vals, c_zero) / cake_height  # [kg/m**3]
 
             sat_zero = self.satur
 
-            c_effl = (epsilon/wash_ratio * (sat_zero * c_zero - c_cake) + c_inlet) / \
-                (1 + epsilon/wash_ratio * (sat_zero - 1))
+            c_effl = (epsilon/wash_ratio * (sat_zero * c_initial_mean - c_cake) + c_inlet) / \
+                (1 + epsilon/wash_ratio * (sat_zero - 1))  # [kg/m**3]
 
         self.retrieve_results(z_vals, time_vals, conc_all)
         self.cake_height = cake_height
@@ -2133,8 +2142,6 @@ class DisplacementWashing:
         on Cake.mass_concentr [kg/m**3]. No conservation is assumed during
         spatial remapping; deliquoring carries its initial adjustment explicitly.
         """
-        num_species = self.Liquid_1.num_species
-
         indexes = {key: self.states_di[key].get('index', None)
                    for key in self.name_states}
 

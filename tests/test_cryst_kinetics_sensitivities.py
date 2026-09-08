@@ -66,7 +66,7 @@ def make_kinetics(sup_sat_type, reformulate=False, moment_basis='volume'):
             message=(r"^sup_sat_type='ratio' is deprecated: it now means S - 1 "
                      r"\(identical to 'relative'\)\. Prefactors fitted to the old S "
                      r"law must be refitted\.$"),
-            category=DeprecationWarning)
+            category=FutureWarning)
         kinetics = CrystKinetics(
             coeff_solub=[SATURATION], temp_ref=REFERENCE_TEMPERATURE,
             sup_sat_type=sup_sat_type, reformulate_kin=reformulate,
@@ -188,7 +188,7 @@ def test_unknown_supersaturation_option_is_rejected():
 
 def test_ratio_warns_about_changed_driving_force():
     with pytest.warns(
-            DeprecationWarning,
+            FutureWarning,
             match="S - 1.*identical to 'relative'.*old S law must be refitted") as caught:
         kinetics = CrystKinetics(coeff_solub=[SATURATION], sup_sat_type='ratio')
     assert kinetics.sup_sat_type == 'ratio'

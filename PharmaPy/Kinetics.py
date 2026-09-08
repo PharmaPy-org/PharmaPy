@@ -1161,6 +1161,13 @@ class CrystKinetics:
         If sup_sat_type is not 'relative', 'ratio', or 'absolute'.
     PharmaPyTypeError
         If custom_mechanisms is not a dictionary.
+
+    Warns
+    -----
+    FutureWarning
+        If sup_sat_type='ratio', which is deprecated and now means S - 1 [-],
+        identical to 'relative'. Prefactors fitted to the old S law must be
+        refitted.
     """
 
     def __init__(self, coeff_solub=None, solub_fn=None,
@@ -1178,7 +1185,7 @@ class CrystKinetics:
                 "sup_sat_type='ratio' is deprecated: it now means S - 1 "
                 "(identical to 'relative'). Prefactors fitted to the old S "
                 "law must be refitted.",
-                DeprecationWarning, stacklevel=2)
+                FutureWarning, stacklevel=2)
 
         self.target_idx = None
 

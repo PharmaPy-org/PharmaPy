@@ -551,8 +551,9 @@ class Drying:
         tuple of ndarray
             When ``return_terms`` is True, returns the diagnostic terms
             ``(convec_term, drying, heat_cond, heat_loss_emp)`` instead.
-            ``convec_term`` is the raw ``u_gas * dTg_dz`` diagnostic
-            [kg*K/m**3/s]. ``drying`` is the condensed-temperature latent
+            ``convec_term`` is ``u_gas * epsilon_gas * rho_gas * dT/dz``
+            [kg*K/m**3/s], weighted by pore gas holdup. ``drying`` is the
+            condensed-temperature latent
             contribution [K/s]; ``heat_cond`` and ``heat_loss_emp`` are
             gas-temperature-rate contributions [K/s].
 
@@ -565,9 +566,14 @@ class Drying:
         Convective power per bed volume is ``-u_gas*rho_gas*cp*dT/dz``
         [J/m**3/s]. Dividing by the gas heat capacity per bed volume,
         ``epsilon_gas*rho_gas*cv`` [J/m**3/K], gives the temperature-rate
-        contribution ``-(u_gas/epsilon_gas)*(cp/cv)*dT/dz`` [K/s]. Thus
-        temperature and composition both convect at the pore velocity
-        ``u_gas/epsilon_gas`` [m/s], with density cancelling exactly once.
+        contribution ``-(u_gas/epsilon_gas)*(cp/cv)*dT/dz`` [K/s]. The
+        thermal front therefore moves at ``(cp/cv)*u_gas/epsilon_gas`` [m/s],
+        while composition convects at ``u_gas/epsilon_gas`` [m/s], with
+        density cancelling exactly once. The cv holdup is the constant-volume
+        pore-gas closure prescribed by issue #37; material_balance uses a
+        constant-pressure vent closure. A constant-pressure gas energy holdup
+        would use cp instead of cv. That closure requires a maintainer decision
+        and is unchanged here.
         """
 
         mw_avg_gas = self._gas_mixture_molar_mass(y_gas)  # [g/mol]
@@ -628,7 +634,7 @@ class Drying:
         dTcond_dt = (-drying_terms + heat_transf - heat_loss_cond) / denom_cond  # [K/s]
 
         if return_terms:
-            self.convec_term = u_gas * dTg_dz  # [kg*K/m**3/s]
+            self.convec_term = u_gas * epsilon_gas * dTg_dz  # [kg*K/m**3/s]
             self.drying = drying_terms / denom_cond  # [K/s]
             self.heat_cond = heat_transf/ denom_gas  # [K/s]
             self.heat_loss_emp = heat_loss/ denom_gas  # [K/s]

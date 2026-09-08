@@ -782,6 +782,9 @@ class Mixer:
         geometry, identical to the mass basis for validated inputs, and
         assumes uniform filling. An inlet Cake supplies a copied float
         spatial grid, so later changes to its grid cannot affect the outlet.
+        The mixed cake carries the first solid inlet's z_external coordinates
+        [m] and no cake_height; downstream remapping uses the coordinate-span
+        fallback.
         Continuous inputs always produce a SlurryStream: Cake has no flow
         or duration contract.
         """

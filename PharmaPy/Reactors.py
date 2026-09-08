@@ -462,9 +462,10 @@ class _BaseReactor:
             choice balancing local curvature and subtraction roundoff, with
             a binary fraction to preserve representable time increments.
         minimum_step : float, optional
-            Absolute minimum step [s], default 1/1024 s (about 1 ms). This
+            Nominal minimum step [s], default 1/1024 s (about 1 ms). This
             numerical floor avoids zero steps for zero-duration runs and
-            limits cancellation for short runs at ordinary process temperatures.
+            limits cancellation at ordinary process temperatures; positive
+            run boundaries take precedence over this floor.
 
         Returns
         -------
@@ -485,11 +486,16 @@ class _BaseReactor:
         retrieval without a solve, the profile start and span are used.
         The control's args and kwargs are passed at each evaluation.
 
+        For positive-duration runs, cap h at half the run duration.
         Interior derivatives use (f(t+h)-f(t-h))/(2h), with O(h**2) error.
-        If t-h precedes the run start, use (-3*f(t)+4*f(t+h)-f(t+2*h))/(2*h),
-        also O(h**2). Their truncation bounds are h**2*max|d**3 f/dt**3|/6 and /3,
-        respectively, plus subtraction roundoff. Controls must be evaluable
-        just beyond the run end. Discontinuous controls are differentiated
+        Near the start use (-3*f(t)+4*f(t+h)-f(t+2*h))/(2*h); near the end
+        use (3*f(t)-4*f(t-h)+f(t-2*h))/(2*h). Reduce the local one-sided step
+        further if needed to keep both evaluations inside the run. Central
+        and one-sided truncation bounds are h**2*max|d**3 f/dt**3|/6 and /3,
+        respectively, plus subtraction roundoff. Controls need only be
+        evaluable on [run_start, run_end]. A zero-duration run retains the
+        forward stencil with the nominal minimum step, requiring evaluation
+        beyond its single time. Discontinuous controls are differentiated
         across their jumps; the resulting finite rate is step-dependent.
         Duties still have the reporting grid's trapezoidal quadrature error.
         """
@@ -502,16 +508,31 @@ class _BaseReactor:
             raise ValueError("Control differentiation steps must be finite and positive")
         run_start = getattr(self, '_run_start', time[0])  # [s]
         duration = getattr(self, '_run_duration', time[-1] - time[0])  # [s]
+        run_end = run_start + duration  # [s]
         step = max(step_fraction * duration, minimum_step)  # [s]
+        if duration > 0:
+            step = min(step, duration / 2)  # [s], fit a three-point stencil
         control = self.controls['temp']
         function, args, kwargs = control['fun'], control['args'], control['kwargs']
         slope = np.empty(time.shape)  # [K/s]
         for index, eval_time in enumerate(time):  # eval_time [s]
-            forward = function(eval_time + step, *args, **kwargs)  # [K]
             if eval_time - step < run_start:
-                forward_twice = function(eval_time + 2 * step, *args, **kwargs)  # [K]
-                slope[index] = (-3 * temp[index] + 4 * forward - forward_twice) / (2 * step)
+                local_step = (min(step, (run_end - eval_time) / 2)
+                              if duration > 0 else step)  # [s]
+                forward = function(eval_time + local_step, *args, **kwargs)  # [K]
+                outer_time = eval_time + 2 * local_step  # [s]
+                if duration > 0:
+                    outer_time = min(outer_time, run_end)  # [s], clip endpoint roundoff
+                forward_twice = function(outer_time, *args, **kwargs)  # [K]
+                slope[index] = (-3 * temp[index] + 4 * forward - forward_twice) / (2 * local_step)
+            elif eval_time + step > run_end:
+                local_step = min(step, (eval_time - run_start) / 2)  # [s]
+                backward = function(eval_time - local_step, *args, **kwargs)  # [K]
+                outer_time = max(eval_time - 2 * local_step, run_start)  # [s], clip endpoint roundoff
+                backward_twice = function(outer_time, *args, **kwargs)  # [K]
+                slope[index] = (3 * temp[index] - 4 * backward + backward_twice) / (2 * local_step)
             else:
+                forward = function(eval_time + step, *args, **kwargs)  # [K]
                 backward = function(eval_time - step, *args, **kwargs)  # [K]
                 slope[index] = (forward - backward) / (2 * step)
         return capacitance * slope - source - flow

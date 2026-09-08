@@ -821,3 +821,61 @@ def test_washing_rejects_zero_pore_inventory(separation_phases):
                                     np.array([0.]), concentration)  # [m], [s], [kg/m**3]
     assert washer.Liquid_1.mass == pytest.approx(initial_mass, rel=RTOL)
     np.testing.assert_allclose(washer.Liquid_1.mass_frac, initial_fractions, rtol=RTOL)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('uniform', [False, True])
+@pytest.mark.parametrize('dynamic', [False, True])
+def test_washing_bulk_concentrations_close_species_inventory(separation_phases, uniform, dynamic):
+    """Integrate the reconstructed field and close the pore/wash balance.
+
+    Parameters
+    ----------
+    separation_phases : tuple
+        Real five-species phases from the shipped database.
+    uniform : bool
+        Use a uniform initial field to check the previous analytical formula.
+    dynamic : bool
+        Select time-series or final analytical profile evaluation.
+    """
+    liquid, solid = separation_phases
+    liquid.diffusivity = np.full((5, 5), 1e-4)  # [m**2/s], resolved review-case dispersion
+    washer = DisplacementWashing(solvent_idx=4, num_nodes=4, diam_unit=.1)  # [m]
+    washer.Phases = [liquid, solid]
+    # Asymmetric normalized volume fractions give a physically consistent
+    # nonuniform field with four positions and five species.
+    fractions = np.array([
+        [.1, .2, .3, .1, .3], [.3, .1, .1, .3, .2],
+        [.2, .3, .1, .2, .2], [.4, .1, .2, .1, .2],
+    ])  # [-]
+    if uniform:
+        fractions[:] = fractions[0]
+    initial = fractions * liquid.getDensityPure()[0]  # [kg/m**3]
+    washer.CakePhase.mass_concentr = initial.copy()  # [kg/m**3]
+    inlet = np.zeros(liquid.num_species)  # [kg/m**3], pure washing solvent
+    inlet[washer.solvent_idx] = liquid.rho_liq[washer.solvent_idx]
+    cake_volume = washer.CakePhase.cake_vol  # [m**3]
+    porosity = solid.getPorosity(diam_filter=washer.diam_unit)  # [-]
+    wash_ratio = .5  # [-], half a cake volume of wash liquid (superficial basis)
+    concentration, normalized, retained, effluent = washer.solve_unit(
+        deltaP=1e5, wash_ratio=wash_ratio, dynamic=dynamic)  # [Pa], review pressure drop
+    assert retained.shape == effluent.shape == (liquid.num_species,)
+    # Four equally spaced endpoint nodes have trapezoidal weights 1:2:2:1.
+    expected_mean = (concentration[0] + 2 * concentration[1]
+                     + 2 * concentration[2] + concentration[3]) / 6  # [kg/m**3]
+    initial_mean = (initial[0] + 2 * initial[1]
+                    + 2 * initial[2] + initial[3]) / 6  # [kg/m**3]
+    np.testing.assert_allclose(retained, expected_mean, rtol=RTOL)
+    np.testing.assert_allclose(washer.concProf[:, -1], concentration, rtol=RTOL)
+    pore_volume = porosity * cake_volume  # [m**3], saturated initial and final pores
+    wash_volume = wash_ratio * cake_volume  # [m**3], also effluent volume at saturation one
+    np.testing.assert_allclose(
+        pore_volume * initial_mean + wash_volume * inlet,
+        pore_volume * retained + wash_volume * effluent, rtol=RTOL)
+    if uniform:
+        mean_normalized = (normalized[0] + 2 * normalized[1]
+                           + 2 * normalized[2] + normalized[3]) / 6  # [-]
+        previous_retained = (initial[0] - inlet) * mean_normalized + inlet  # [kg/m**3]
+        previous_effluent = porosity / wash_ratio * (initial[0] - previous_retained) + inlet  # [kg/m**3]
+        np.testing.assert_allclose(retained, previous_retained, rtol=RTOL)
+        np.testing.assert_allclose(effluent, previous_effluent, rtol=RTOL)

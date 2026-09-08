@@ -161,4 +161,3 @@ def test_seedless_secondary_exponent_partial_is_finite(data_path, moment_basis):
     assert np.isfinite(actual).all()
     secondary_exponent_column = 6  # fourth secondary column after three primary columns
     assert actual[0, secondary_exponent_column] == 0
-

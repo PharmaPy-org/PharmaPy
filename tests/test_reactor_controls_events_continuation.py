@@ -10,6 +10,7 @@ import json
 
 import numpy as np
 import pytest
+from scipy.interpolate import interp1d
 
 from PharmaPy import Reactors
 from PharmaPy.ProcessControl import DynamicInput
@@ -791,3 +792,78 @@ def test_single_reported_point_uses_requested_run_duration(monkeypatch, cls, dur
 def test_control_record_missing_function_names_control():
     with pytest.raises(KeyError, match='temp'):
         Reactors.CSTR(controls={'temp': {}})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('cls', ALL_TANKS)
+# The decimal interval exercises endpoint roundoff in short-run stencils.
+@pytest.mark.parametrize('start, duration', [(4., 2.), (4., 1 / 2048), (.0001, .0004)])
+def test_bounded_quadratic_control_retrieval(cls, start, duration):
+    """Recover quadratic slopes without leaving a nonzero run interval.
+
+    Parameters
+    ----------
+    cls : type
+        Tank reactor class.
+    start : float
+        Nonzero absolute start [s], including a decimal sub-millisecond origin.
+    duration : float
+        Run duration [s]; short cases fall below the default minimum step.
+    """
+    end = start + duration  # [s]
+    curvature = 0.5  # [K/s**2], gives the exact slope (t - start) K/s
+    time = start + duration * np.array([0., 1/8, 1/2, 7/8, 1.])  # [s], both edges and interior
+    evaluations = []  # Evaluation times [s].
+
+    def control(time):
+        """Evaluate a quadratic on its bounded run domain.
+
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Evaluation times [s], restricted to [start, end].
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Prescribed temperature [K].
+        """
+        evaluations.append(np.asarray(time).copy())
+        assert np.all((time >= start) & (time <= end))
+        return TEMPERATURE + curvature * (time - start)**2
+
+    reactor = configured(cls, controls={'temp': control})
+    states = profile(reactor, time)  # [mol/L], optional [m**3]
+    reactor.retrieve_results(time, states)
+    reaction, flow, capacity = independent_terms(
+        reactor, time, states, control(time))  # [W], [W], [J/K]
+    actual_slope = (reactor.result.q_ht + reaction + flow) / capacity  # [K/s]
+    expected_slope = 2 * curvature * (time - start)  # [K/s]
+    # Second-order stencils are exact for a quadratic; allow only cancellation
+    # of temperatures near 320 K, amplified by the short interval's 1/h.
+    slope_atol = 1e-8  # [K/s], conservative float64 subtraction allowance
+    np.testing.assert_allclose(actual_slope, expected_slope, rtol=0, atol=slope_atol)
+    assert len(evaluations) > len(time)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_batch_solver_accepts_bounded_interpolated_temperature():
+    """Solve the review's two-second linear ramp with no extrapolation."""
+    pytest.importorskip('assimulo')
+    temperatures = np.array([300., 301., 302.])  # [K], one kelvin per second
+    control = interp1d(TIMES, temperatures)
+    reactor = configured(Reactors.BatchReactor, controls={'temp': control})
+    time, states = reactor.solve_unit(time_grid=TIMES, verbose=False)
+    time = np.asarray(time)  # [s], normalize the backend's list return
+    states = np.asarray(states)  # [mol/L]
+    # Default solver reporting may omit the requested interior sample.
+    # Both run endpoints must be retrieved safely, with the prescribed slope.
+    np.testing.assert_array_equal(time[[0, -1]], TIMES[[0, -1]])
+    slope = 1.0  # [K/s], prescribed ramp
+    expected_temperatures = temperatures[0] + slope * time  # [K]
+    np.testing.assert_allclose(reactor.result.temp, expected_temperatures, rtol=ALGEBRA_RTOL)
+    reaction, flow, capacity = independent_terms(
+        reactor, time, states, expected_temperatures)  # [W], [W], [J/K]
+    np.testing.assert_allclose(reactor.result.q_ht, capacity * slope - reaction - flow,
+                               rtol=ALGEBRA_RTOL)
