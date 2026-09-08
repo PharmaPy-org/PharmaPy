@@ -438,14 +438,30 @@ class LiquidPhase(ThermoPhysicalManager):
 
         The amount is set from the first positive value among ``mass``,
         ``vol``, and ``moles``, using the mixture mass density [kg/m**3] and
-        the average molar mass [g/mol]. When all three are left at zero, the
-        previously stored mass, volume, and moles are retained.
+        the average molar mass [g/mol]. Without a positive explicit amount,
+        composition or intensive-state changes conserve the stored mass [kg],
+        the liquid inventory integrated by the mass balances, and recompute
+        volume [m**3] and moles [mol] from the updated mixture properties.
+        This retained-mass reconciliation applies only when the resolved
+        composition is one-dimensional and stored mass is scalar. For
+        two-dimensional compositions shaped ``(num_points, num_species)``
+        or array-valued stored mass, profile inventories are not reconciled:
+        mass, volume, and moles retain their values and scalar-versus-array
+        behavior when no positive explicit amount is supplied.
+        A no-argument update leaves all state unchanged. Zero amounts mean
+        "not supplied" and cannot empty the phase through this method.
 
         Solvent handling matches the constructor: ``self.ind_solv`` is
         compared with ``None`` rather than tested for truth, so a solvent
         declared as the first species (index ``0``) is honored and the
         concentration converters' three-value return is unpacked correctly.
         """
+
+        explicit_amount = any(amount > 0 for amount in (mass, vol, moles))
+        if not explicit_amount:
+            if all(value is None for value in
+                   (mole_conc, mass_conc, mass_frac, mole_frac, temp, pres)):
+                return
 
         if mole_conc is not None:
             mole_conc = _as_float_array(mole_conc)  # [mol/L]
@@ -487,6 +503,10 @@ class LiquidPhase(ThermoPhysicalManager):
             mole_frac = self.mole_frac
             mole_conc = self.mole_conc
             mass_conc = self.mass_conc
+
+        if (not explicit_amount and np.ndim(mass_frac) == 1
+                and np.ndim(self.mass) == 0):
+            mass = self.mass  # [kg], authoritative retained liquid inventory
 
         if temp is not None:
             self.temp = (float(temp) if np.ndim(temp) == 0

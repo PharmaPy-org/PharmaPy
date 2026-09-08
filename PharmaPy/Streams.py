@@ -6,6 +6,7 @@ Created on Wed May 27 10:12:13 2020
 """
 
 from typing import Optional
+from numpy.typing import ArrayLike
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
 from PharmaPy.Interpolation import NewtonInterpolation
@@ -188,25 +189,60 @@ class LiquidStream(LiquidPhase):
 
         return y_interpol
 
-    def updatePhase(self, concentr=None, mass_conc=None,
-                    mass_frac=None, mole_frac=None,
-                    vol_flow=None, mass_flow=None, mole_flow=None):
+    def updatePhase(self, concentr: Optional[ArrayLike] = None,
+                    mass_conc: Optional[ArrayLike] = None,
+                    mass_frac: Optional[ArrayLike] = None,
+                    mole_frac: Optional[ArrayLike] = None,
+                    vol_flow: Optional[float] = None,
+                    mass_flow: Optional[float] = None,
+                    mole_flow: Optional[float] = None) -> None:
+        """Update liquid composition and reconcile explicit flow rates.
 
-        if vol_flow is None:
-            vol_flow = self.vol_flow
+        Parameters
+        ----------
+        concentr, mass_conc : array-like, optional
+            Species molar [mol/L] and mass [kg/m**3] concentrations, shape
+            ``(num_species,)``. ``concentr`` is the liquid stream's name for
+            the phase's ``mole_conc`` argument.
+        mass_frac, mole_frac : array-like, optional
+            Species mass and mole fractions [-], shape ``(num_species,)``.
+        vol_flow, mass_flow, mole_flow : float, optional
+            Volume [m**3/s], mass [kg/s], and molar [mol/s] flow rates.
+            None and zero mean no explicit flow was supplied.
 
-        if mass_flow is None:
-            mass_flow = self.mass_flow
+        Returns
+        -------
+        None
+            The stream state and flow aliases are updated in place.
 
-        if mole_flow is None:
-            mole_flow = self.mole_flow
+        Notes
+        -----
+        Only explicit positive flows participate in mass, volume, then mole
+        precedence. For scalar inventory and one-dimensional composition,
+        composition-only updates conserve mass flow [kg/s] and recompute the
+        dependent flows. Composition precedence, solvent completion, and
+        unchanged profile inventories follow :meth:`LiquidPhase.updatePhase`.
+        A no-argument update retains the state and flow values. As in previous
+        versions, updates delete the inherited ``mass``, ``vol``, and ``moles``
+        attributes; use the flow aliases to read the reconciled amounts.
+        Zero means "not supplied", so this method cannot set flow to zero.
+        """
+        # The parent reconciles amounts on the stream's per-second basis.
+        self.mass = self.mass_flow  # [kg/s]
+        self.vol = self.vol_flow  # [m**3/s]
+        self.moles = self.mole_flow  # [mol/s]
 
-        super().updatePhase(concentr, mass_conc, mass_frac, mole_frac,
-                            vol_flow, mass_flow, mole_flow)
+        super().updatePhase(
+            mole_conc=concentr, mass_conc=mass_conc,
+            mass_frac=mass_frac, mole_frac=mole_frac,
+            vol=0 if vol_flow is None else vol_flow,
+            mass=0 if mass_flow is None else mass_flow,
+            moles=0 if mole_flow is None else mole_flow,
+        )
 
-        self.mass_flow = self.mass
-        self.vol_flow = self.vol
-        self.mole_flow = self.moles
+        self.mass_flow = self.mass  # [kg/s]
+        self.vol_flow = self.vol  # [m**3/s]
+        self.mole_flow = self.moles  # [mol/s]
 
         del self.mass
         del self.vol

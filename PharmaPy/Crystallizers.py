@@ -999,6 +999,53 @@ class _BaseCryst:
     def paramest_wrapper(self, params, t_vals,
                          modify_phase=None, modify_controls=None,
                          scale_factor=1e-3, run_args={}, reord_sens=True):
+        """Reset and evaluate a crystallizer for parameter estimation.
+
+        Parameters
+        ----------
+        params : dict or array-like
+            Kinetic parameters in the attached kinetics model's order and
+            units, including any configured parameter transformations.
+        t_vals : array-like
+            Evaluation times [s], shape ``(num_times,)``.
+        modify_phase : dict, optional
+            Phase-update dictionaries keyed by ``Liquid`` and/or ``Solid``.
+            Liquid fractions are dimensionless, concentrations use [mol/L] or
+            [kg/m**3], and amounts use mass [kg], volume [m**3], or moles [mol].
+            If the liquid modifier has no amount key, retain its reset charged
+            volume [m**3]. Explicit amounts follow liquid phase precedence.
+            Solid arguments retain the units of ``SolidPhase.updatePhase``.
+        modify_controls : dict, optional
+            Updates to each named control specification; units follow the
+            controlled state.
+        scale_factor : float, optional
+            Legacy unused scaling argument [-]; defaults to 1e-3.
+        run_args : dict, optional
+            Additional keyword arguments passed to ``solve_unit``.
+        reord_sens : bool, optional
+            Stack time-by-parameter sensitivities by state when True; otherwise
+            retain the parameter-by-time-by-state layout. Passed to a configured
+            ``param_wrapper`` as well. Defaults to True.
+
+        Returns
+        -------
+        result : numpy.ndarray, tuple, or object
+            With no custom wrapper, return the time-by-state array, plus
+            sensitivities for the moments method. State units and ordering
+            follow ``solve_unit``; sensitivity units are state units per kinetic
+            parameter unit. With a custom moments wrapper, return its result.
+
+        Raises
+        ------
+        ValueError
+            If a nonempty phase modifier names neither ``Liquid`` nor ``Solid``.
+
+        Notes
+        -----
+        Composition-only liquid modifiers preserve the reset charged volume
+        used by geometry, residence time, and initial states, rather than
+        conserving liquid mass. Supplied modifier dictionaries are not changed.
+        """
         self.reset()
         self.params_iter = params
 
@@ -1017,6 +1064,8 @@ class _BaseCryst:
             liquid_mod = modify_phase.get('Liquid', {})
             solid_mod = modify_phase.get('Solid', {})
 
+            if not any(key in liquid_mod for key in ('mass', 'vol', 'moles')):
+                liquid_mod = {'vol': self.Liquid_1.vol, **liquid_mod}  # vol [m**3]
             self.Liquid_1.updatePhase(**liquid_mod)
             self.Solid_1.updatePhase(**solid_mod)
 

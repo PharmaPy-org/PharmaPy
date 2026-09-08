@@ -523,10 +523,50 @@ class _BaseReactor:
 
     def paramest_wrapper(self, params, t_vals, modify_phase=None,
                          modify_controls=None, reord_sens=True, run_args={}):
+        """Reset and evaluate a reactor for parameter estimation.
 
+        Parameters
+        ----------
+        params : dict or array-like
+            Kinetic parameters in the attached kinetics model's order and
+            units, including any configured parameter transformations.
+        t_vals : array-like
+            Evaluation times [s], shape ``(num_times,)``.
+        modify_phase : dict, optional
+            Keyword arguments to ``LiquidPhase.updatePhase`` after reset.
+            Fractions are dimensionless, concentrations use [mol/L] or
+            [kg/m**3], and amounts use mass [kg], volume [m**3], or moles [mol].
+            If no amount key is present, retain the charged volume [m**3].
+            An explicit amount follows the phase's mass/volume/moles precedence.
+        modify_controls : dict, optional
+            Replacement control parameters; units follow the controlled state.
+        reord_sens : bool, optional
+            If True, stack time-by-parameter sensitivities by state. Otherwise
+            retain the parameter-by-time-by-state layout. Defaults to True.
+        run_args : dict, optional
+            Additional keyword arguments passed to ``solve_unit``.
+
+        Returns
+        -------
+        c_prof : numpy.ndarray
+            Species molar concentrations [mol/L], shape
+            ``(num_times, kinetics.num_species)``.
+        sens : numpy.ndarray, optional
+            Returned with ``c_prof`` only when ``return_sens`` is True.
+            Sensitivities have units of each state per kinetic parameter unit;
+            their layout follows ``reord_sens``.
+
+        Notes
+        -----
+        Composition-only modifiers preserve the reset charged volume used by
+        geometry and initial states, rather than conserving liquid mass.
+        The supplied modifier dictionary is not changed.
+        """
         self.reset()
 
         if isinstance(modify_phase, dict):
+            if not any(key in modify_phase for key in ('mass', 'vol', 'moles')):
+                modify_phase = {'vol': self.Liquid_1.vol, **modify_phase}  # vol [m**3]
             self.Liquid_1.updatePhase(**modify_phase)
 
         if isinstance(modify_controls, dict):
