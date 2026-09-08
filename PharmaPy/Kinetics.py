@@ -6,6 +6,7 @@
 import numpy as np
 import json
 import re
+import warnings
 
 from PharmaPy.Commons import get_permutation_indexes
 from PharmaPy.Errors import PharmaPyTypeError
@@ -853,68 +854,85 @@ class RxnKinetics:
 
 
 class CrystKinetics:
-    """ Specify a kinetics crystallization kinetics object
+    """Model signed crystallization rates with power-law driving forces.
 
-        Parameters
-        ----------
-        coeff_solub : array-like
-            coefficients for a temperature-dependent solubility (S) polynomial
-            of the form S = A + B*T + C*T^2...
-        nucl_prim : array-like (3 elements)
-            primary nucleation coefficients, with the result given in
-            number of particles per second per cubic meter slurry
-        nucl_sec : array-like (4 elements) (optional)
-            secondary nucleation coefficients, with the result given in
-            number of particles per second per cubic meter slurry
-        growth : array-like (dimension 3) (optional)
-            nucleation parameters, with the result given in um/s
-        dissolution : array_like (dimension 3) (optional)
-            dissolution parameters, with the result given in um/s
-        rel_super : bool (optional, default True)
-            if True, relative supersaturation is used for computing the kinetic
-            mechanism
-        alpha_fn : callable (optional)
-            function that receives the vector of liquid phase compositions
-            and calculates the growth inhibition term, returning a float
-            between 0 and 1
+    ``relative`` and ``ratio`` both use ``(c - c_sat) / c_sat`` [-].
+    Thus ``ratio`` means the excess ratio ``S - 1``, where ``S = c/c_sat``,
+    rather than ``S`` itself. ``absolute`` uses ``c - c_sat`` [kg/m**3].
+    Positive driving force enables nucleation and growth; negative driving
+    force enables dissolution, whose rate is negative. At saturation the
+    built-in rates are zero. For relative/ratio kinetics, results are undefined
+    for non-positive solubility (not validated in the rate path). The prefactors
+    must match the selected concentration basis.
 
-        Returns
-        -------
+    Parameters
+    ----------
+    coeff_solub : array-like, optional
+        Polynomial coefficients in ascending powers of temperature,
+        coefficient j in [kg/m**3/K**j]; for Apelblat, coefficients
+        A [-], B [K], C [-] give exp(A + B/T + C*log(T)) [kg/m**3]
+        using numerical temperature in kelvin.
+    solub_fn : callable, optional
+        ``solub_fn(temp, conc)`` returns solubility [kg/m**3], with
+        temperature [K] and species concentrations [kg/m**3]. Overrides
+        the built-in solubility correlation.
+    nucl_prim, growth, dissolution : array-like of length 3, optional
+        Physical parameters [k, E, n], with E [J/mol] and n [-].
+        k has rate units divided by driving-force units to power n.
+        Nucleation rate units are [#/m**3/s]; growth and dissolution
+        rate units are [um/s].
+    nucl_sec : array-like of length 4, optional
+        Physical parameters [k, E, n, s_2], with E [J/mol], n and s_2
+        [-]. k additionally divides by the selected moment basis to
+        power s_2. Omitted secondary nucleation is inactive.
+    solubility_type : {'polynomial', 'apelblat'}, optional
+        Built-in solubility correlation; default 'polynomial'.
+    sup_sat_type : {'relative', 'ratio', 'absolute'}, optional
+        'relative' and 'ratio' use (c - c_sat)/c_sat [-]; 'absolute'
+        uses c - c_sat [kg/m**3]. Default 'relative'.
+    reformulate_kin : bool, optional
+        Transform supplied physical k and E to phi_1 = log(k) - E/R/Tref
+        and phi_2 = log(E/R), using numerical values in the specified
+        units. Default False.
+    alpha_fn : callable, optional
+        Composition-dependent growth inhibition factor [-], default unity.
+    temp_ref : float, optional
+        Reference temperature [K], default 298.15 K (25 degrees Celsius).
+    custom_mechanisms : dict of callables, optional
+        Mechanism overrides receiving signed driving force, solubility
+        [kg/m**3], moments, temperature [K], reference temperature [K],
+        and parameters. See ``get_kinetics`` for the moment basis.
+    mu_sec_nucl : {'area', 'volume'}, optional
+        Select moment order 2 or 3 for (kv*moment)**s_2; default 'volume'.
 
+    Raises
+    ------
+    ValueError
+        If sup_sat_type is not 'relative', 'ratio', or 'absolute'.
+    PharmaPyTypeError
+        If custom_mechanisms is not a dictionary.
     """
 
     def __init__(self, coeff_solub=None, solub_fn=None,
                  nucl_prim=None, nucl_sec=None, growth=None, dissolution=None,
-                 solubility_type='polynomial', sup_sat_type='relative',
+                 solubility_type='polynomial', sup_sat_type: str = 'relative',
                  reformulate_kin=False, alpha_fn=None,
                  temp_ref=298.15, custom_mechanisms=None,
-                 mu_sec_nucl='volume'):
-        """
-        Parameters
-        ----------
-        solub_fn : callable, optional
-            function with the signature solub_fn(temp, conc)
-        sup_sat_type : string, optional
-            Default : 'relative'
-            if 'relative', supersaturation is calculated as:
-                S = (c - c_sat)/ c_sat.
-            if, 'ratio':
-                S = c/ c_sat
-            if, 'absolute':
-                S = c- c_sat.
-            where c is instantaneous concentration and c_sat is saturated concentration [kg/m3]
-        custom_mechanisms: dict of callables
-        mu_sec_nucl : string
-            if 'area', mu_2 will be used on the size-dependent term of Bs, else
-            if 'volume', mu_3 will be used, for secondary nucleation written as:
-
-                Bs = k_s * S^(s_1) * (mu_sec_nucl * k_v)^(s_2)
-
-        """
+                 mu_sec_nucl='volume') -> None:
+        """Initialize kinetics; see the class docstring for parameters and errors."""
+        if sup_sat_type not in ('relative', 'ratio', 'absolute'):
+            raise ValueError("sup_sat_type must be 'relative', 'ratio', or "
+                             f"'absolute'; got {sup_sat_type!r}.")
+        if sup_sat_type == 'ratio':
+            warnings.warn(
+                "sup_sat_type='ratio' is deprecated: it now means S - 1 "
+                "(identical to 'relative'). Prefactors fitted to the old S "
+                "law must be refitted.",
+                DeprecationWarning, stacklevel=2)
 
         self.target_idx = None
 
-        self.temp_ref = temp_ref
+        self.temp_ref = temp_ref  # [K]
         self.sup_sat_type = sup_sat_type
         self.reformulate_kin = reformulate_kin
 
@@ -1061,29 +1079,76 @@ class CrystKinetics:
 
         return c_satur
 
-    def get_kinetics(self, conc, temp, kv_cry,
-                     moments=None, nucl_sec_out=False):
+    def _driving_force(self, conc_target: "float | np.ndarray",
+                       conc_sat: "float | np.ndarray") -> "float | np.ndarray":
+        """Return the signed driving force shared by rates and sensitivities.
+
+        Parameters
+        ----------
+        conc_target, conc_sat : float or ndarray
+            Target and saturation mass concentrations [kg/m**3], with
+            broadcast-compatible shapes. For relative and ratio kinetics,
+            results are undefined for non-positive solubility (not validated
+            in the rate path).
+
+        Returns
+        -------
+        float or ndarray
+            c - c_sat [kg/m**3] for absolute kinetics, otherwise
+            (c - c_sat)/c_sat [-], preserving the broadcast shape.
+        """
+        concentration_difference = conc_target - conc_sat  # [kg/m**3]
+        if self.sup_sat_type == 'absolute':
+            return concentration_difference
+        return concentration_difference / conc_sat
+
+    def get_kinetics(self, conc: "float | np.ndarray",
+                     temp: "float | np.ndarray", kv_cry: float,
+                     moments: "np.ndarray | None" = None,
+                     nucl_sec_out: bool = False) -> tuple:
         """Evaluate crystallization kinetics for target concentration states.
 
-        Scalar concentrations are treated as the already-selected target
-        concentration, matching single-component steady-state solves.
+        Parameters
+        ----------
+        conc : float or ndarray
+            Mass concentrations [kg/m**3]. A scalar is the selected target;
+            an array has species on the last axis, selected by target_idx.
+        temp : float or ndarray
+            Temperature [K], scalar for one state or shape (N,) for N states.
+        kv_cry : float
+            Crystal volume shape factor [-].
+        moments : ndarray, optional
+            Moments with order on the last axis, shape (M,) or (N, M).
+            No unit conversion is performed here: the secondary prefactor
+            must match the supplied moment basis. Crystallizer callers pass
+            SI length moments (order j in [m**j] for total moments or
+            [m**j/m**3] for volume-normalized moments). Required for active
+            built-in secondary nucleation and for vector state evaluation.
+        nucl_sec_out : bool, optional
+            Return primary and secondary nucleation separately, default False.
+
+        Returns
+        -------
+        tuple
+            (total nucleation, growth, dissolution), or (primary nucleation,
+            secondary nucleation, growth, dissolution) when nucl_sec_out is
+            True. Nucleation is [#/m**3/s]; growth and dissolution are [um/s].
+            Each rate is scalar for one state or shape (N,) for N states.
+            Dissolution is negative. Driving-force definitions are given in
+            the class docstring and also apply to custom mechanisms.
+
+        Notes
+        -----
+        Scalar evaluations cache rates and moment inputs for deriv_cryst.
         """
-
-        conc_array = np.asarray(conc)
+        conc_array = np.asarray(conc)  # [kg/m**3]
         if conc_array.ndim == 0:
-            conc_target = conc_array.item()
+            conc_target = conc_array.item()  # [kg/m**3]
         else:
-            conc_target = conc_array.T[self.target_idx]
+            conc_target = conc_array.T[self.target_idx]  # [kg/m**3]
 
-        # Supersaturation
-        conc_sat = self.get_solubility(temp, conc)
-        sup_sat = (conc_target - conc_sat)
-
-        if self.sup_sat_type == 'relative':
-            sup_sat = sup_sat / conc_sat
-
-        if self.sup_sat_type == 'ratio':
-            sup_sat = sup_sat / conc_sat + 1
+        conc_sat = self.get_solubility(temp, conc)  # [kg/m**3]
+        sup_sat = self._driving_force(conc_target, conc_sat)  # [-] or [kg/m**3]
 
         def is_default_secondary(name):
             """Return whether secondary nucleation is the inactive default."""
@@ -1111,7 +1176,6 @@ class CrystKinetics:
             if np.ndim(temp) == 0:
                 temp = np.asarray(temp).item()
 
-            # print(sup_sat)
             args = [sup_sat, conc_sat, moments, temp, self.temp_ref]
             if sup_sat >= 0:
 
@@ -1138,6 +1202,9 @@ class CrystKinetics:
             for ky in self.names_mechanisms:
                 if ky not in mechs:
                     mechs[ky] = 0
+
+            # Retain the moment basis for a zero-prefactor partial derivative.
+            self._moment_inputs = (moments, kv_cry)  # [input moment units], [-]
 
             # Returns
             self.prim_nucl = mechs['nucl_prim']
@@ -1210,36 +1277,109 @@ class CrystKinetics:
             nucl = mechs['nucl_prim'] + mechs['nucl_sec']
             return nucl, mechs['growth'], mechs['dissolution']
 
-    def deriv_cryst(self, conc_tg, conc, temp):
-        conc_sat = self.get_solubility(temp, conc)
-        ssat = max(eps, (conc_tg - conc_sat) / conc_sat)
+    def deriv_cryst(self, conc_tg: float, conc: np.ndarray,
+                    temp: float) -> tuple:
+        """Return built-in mechanism parameter partials at a scalar state.
 
-        def dmech_dparam(mech, params):
+        Parameters
+        ----------
+        conc_tg : float
+            Target mass concentration [kg/m**3].
+        conc : ndarray
+            Species mass concentrations [kg/m**3], shape (num_species,).
+        temp : float
+            Temperature [K].
+
+        Returns
+        -------
+        dbp_dpar, dbs_dpar, dgr_dpar, ddiss_dpar : ndarray
+            Shape (3,) each, ordered as primary nucleation, secondary
+            nucleation, growth, and dissolution. For physical parameters,
+            columns are partials with respect to [k, E, n]: units are
+            [rate/k], [rate/(J/mol)], and [rate], respectively. For
+            reformulated parameters, columns are [phi_1, phi_2, n] with
+            units [rate], where phi_1 = log(k) - E/R/Tref and
+            phi_2 = log(E/R) use numerical values in the configured units.
+            Rate units are [#/m**3/s] for nucleation and [um/s] for growth
+            and dissolution. The signed force and its epsilon-floored
+            magnitude follow the built-in cryst_mechanism expression.
+        conc_sat : float
+            Saturation mass concentration [kg/m**3].
+
+        Notes
+        -----
+        Call get_kinetics for the same scalar state and parameters first;
+        these partials use its cached rates and unchanged moment inputs.
+        The zero-prefactor rebuild uses the current driving force and
+        temperature with moments cached by the last scalar get_kinetics call.
+        The cached moments are immaterial for omitted mechanisms, whose s_2
+        is zero (or absent).
+        Custom mechanism derivatives are not supported. Inactive branches
+        return zero partials. The omitted default secondary mechanism with
+        no moment input also returns zero partials.
+
+        s_2 is deliberately not returned: Crystallizers.jac_params appends
+        that fourth secondary-nucleation column itself. Its existing
+        volume-moment basis remains the caller's responsibility. These
+        partials hold concentration, temperature, and moments fixed.
+        """
+        conc_sat = self.get_solubility(temp, conc)  # [kg/m**3]
+        ssat = self._driving_force(conc_tg, conc_sat)  # [-] or [kg/m**3]
+        absup = max(eps, abs(ssat))  # [-] or [kg/m**3], as in cryst_mechanism
+
+        def dmech_dparam(mech, params, active):
+            """Differentiate one active built-in mechanism.
+
+            Parameters
+            ----------
+            mech : float
+                Cached signed rate [#/m**3/s] or [um/s].
+            params : sequence
+                [k, E, n, optional s_2] or [phi_1, phi_2, n, optional s_2],
+                with units and basis described in deriv_cryst.
+            active : bool
+                Whether the current driving force enables this mechanism.
+
+            Returns
+            -------
+            ndarray
+                Shape (3,) parameter partials in deriv_cryst column order
+                and units; the secondary moment exponent is excluded.
+            """
+            if not active:
+                return np.zeros(3)
             if self.reformulate_kin:
-                phi_2 = params[1]
-
-                dmech = np.array(
+                phi_2 = params[1]  # [-], log of numerical E/R in kelvin
+                dmech = np.array(  # [rate] for all three columns
                     [mech,
                      mech * (1 / self.temp_ref - 1 / temp) * np.exp(phi_2),
-                     mech * np.log(ssat)])
+                     mech * np.log(absup)])
             else:
-                e_act = params[1]
-                expo = params[2]
-
-                absup = max(eps, ssat)
-
-                dmech = np.array(
-                    [np.exp(-e_act/gas_ct/temp) * ssat * absup**(expo - 1),
-                     -mech * np.exp(e_act/gas_ct/temp),
-                     mech * np.log(ssat)])
+                prefactor = params[0]  # [rate / force**n / moment**s_2]
+                if prefactor != 0:
+                    d_prefactor = mech / prefactor  # [rate / prefactor]
+                else:
+                    moments, kv_cry = self._moment_inputs  # [moment units], [-]
+                    if len(params) == 4 and moments is None:
+                        return np.zeros(3)
+                    unit_params = list(params)  # same units as params
+                    unit_params[0] = 1  # [prefactor units], exact linear factor
+                    d_prefactor = cryst_mechanism(  # [rate / prefactor]
+                        ssat, moments, temp, self.temp_ref, unit_params,
+                        False, kv_cry, self.mu_sec_nucl)
+                dmech = np.array(  # [rate/k], [rate/(J/mol)], [rate]
+                    [d_prefactor,
+                     -mech / (gas_ct * temp),
+                     mech * np.log(absup)])
 
             return dmech
 
         b_par, s_par, g_par, d_par = self.params.values()
-
-        dbp_dpar = dmech_dparam(self.prim_nucl, b_par)
-        dbs_dpar = dmech_dparam(self.sec_nucl, s_par)
-        dgr_dpar = dmech_dparam(self.growth, g_par)
-        ddiss_dpar = dmech_dparam(self.dissol, d_par)
+        growing = ssat >= 0
+        # All four arrays: [rate/parameter], with column units in Returns.
+        dbp_dpar = dmech_dparam(self.prim_nucl, b_par, growing)
+        dbs_dpar = dmech_dparam(self.sec_nucl, s_par, growing)
+        dgr_dpar = dmech_dparam(self.growth, g_par, growing)
+        ddiss_dpar = dmech_dparam(self.dissol, d_par, not growing)
 
         return dbp_dpar, dbs_dpar, dgr_dpar, ddiss_dpar, conc_sat
