@@ -812,9 +812,18 @@ class DynamicCollector:
 
         self._Inlet = inlet_object
 
-    def nomenclature(self):
+    def nomenclature(self) -> None:
+        """Declare collector input alternatives and output state names.
+
+        Notes
+        -----
+        Crystallizer inputs accept FVM distributions [#/m**3/um] or SI
+        moments [m**n/m**3]. Connection matches the available upstream name;
+        solve_unit selects the population representation before initialization.
+        Liquid composition is [kg/kg], flow [kg/s], and temperature [K].
+        """
         names_liquid = ['mass_frac', 'mass_flow', 'temp']
-        names_solids = ['mass_conc', 'vol_flow', 'temp', 'distrib']
+        names_solids = ['mass_conc', 'vol_flow', 'temp', 'distrib', 'mu_n']
 
         self.names_states_in = {'liquid_mixer': names_liquid,
                                 'crystallizer': names_solids}
@@ -902,8 +911,8 @@ class DynamicCollector:
             Whether the delegated solver should emit its normal progress
             output.
         sundials_opts : mapping of str to object, optional
-            CVode option names and values for liquid-mixer integration. The
-            crystallizer delegates solver configuration to ``SemibatchCryst``.
+            CVode option names and values for integration. Supplied options
+            are also forwarded to the delegated ``SemibatchCryst`` solve.
 
         Returns
         -------
@@ -922,6 +931,9 @@ class DynamicCollector:
         Crystallizer seed liquid volume uses the inlet liquid fraction
         1 - kv*mu_3 [-], with mu_3 on the slurry-volume basis [m**3/m**3].
         The seed solid retains the inlet solid phase's shape factor kv [-].
+        Gridless MSMPR outlets use SI inlet mu_n [m**n/m**3] to initialize
+        total seed moments [m**n] and delegate a moment-mode SemibatchCryst.
+        No distribution is synthesized for moment-mode collection.
 
         Raises
         ------
@@ -934,7 +946,17 @@ class DynamicCollector:
 
         if self.model_type == 'crystallizer':
 
-            self.states_in_dict['Inlet']['distrib'] = len(self.Inlet.x_distrib)
+            moment_mode = self.Inlet.distrib is None
+            population_name = 'mu_n' if moment_mode else 'distrib'
+            unused_name = 'distrib' if moment_mode else 'mu_n'
+            self.names_states_in.remove(unused_name)
+            self.states_in_dict['Inlet'].pop(unused_name)
+            if moment_mode:
+                self.names_states_out = ['mu_n' if name == 'total_distrib' else name
+                                         for name in self.names_states_out]
+                self.states_in_dict['Inlet'][population_name] = len(self.Inlet.moments)
+            else:
+                self.states_in_dict['Inlet'][population_name] = len(self.Inlet.x_distrib)
             self.states_in_dict['Inlet']['mass_conc'] = len(self.Inlet.Liquid_1.mass_conc)
             self.states_in_dict['Inlet']['vol_flow'] = 1
             self.states_in_dict['Inlet']['temp'] = 1
@@ -944,28 +966,35 @@ class DynamicCollector:
 
             path = self.Inlet.Liquid_1.path_data
 
-            vol_init = np.sqrt(eps)
-            conc_init = init_dict['mass_conc']
-            distr_init = init_dict['distrib'] * vol_init
-            temp_init = init_dict['temp']
+            vol_init = np.sqrt(eps)  # [m**3], established small positive seed volume
+            conc_init = init_dict['mass_conc']  # [kg/m**3]
+            # Total [m**n] for moments or [#/um] for FVM, using slurry volume.
+            population_init = init_dict[population_name] * vol_init
+            temp_init = init_dict['temp']  # [K]
 
             kv_inlet = self.Inlet.Solid_1.kv  # [-], phase-owned crystal shape
-            vol_init *= (1 - kv_inlet * self.Inlet.moments[3])  # [m**3], liquid
+            if moment_mode:
+                vol_init -= kv_inlet * population_init[3]  # [m**3], liquid at initial time
+            else:
+                vol_init *= (1 - kv_inlet * self.Inlet.moments[3])  # [m**3], liquid
 
             liquid = LiquidPhase(path, temp=temp_init, mass_conc=conc_init,
                                  vol=vol_init)
 
             frac_solid = np.zeros_like(conc_init)
             frac_solid[self.kwargs_cryst['target_ind']] = 1
-            solid = SolidPhase(path, temp=temp_init, distrib=distr_init,
-                               x_distrib=self.Inlet.Solid_1.x_distrib,
-                               mass_frac=frac_solid, kv=kv_inlet)
+            population_args = ({'moments': population_init} if moment_mode else
+                               {'distrib': population_init,
+                                'x_distrib': self.Inlet.Solid_1.x_distrib})
+            solid = SolidPhase(path, temp=temp_init, mass_frac=frac_solid,
+                               kv=kv_inlet, **population_args)
 
             phases = (liquid, solid)
 
             self.kwargs_cryst.pop('target_ind')
             self.kwargs_cryst['num_interp_points'] = self.num_interp_points
-            SemiCryst = SemibatchCryst(method='1D-FVM', adiabatic=True,
+            method = 'moments' if moment_mode else '1D-FVM'
+            SemiCryst = SemibatchCryst(method=method, adiabatic=True,
                                        **self.kwargs_cryst)
             SemiCryst.Phases = phases
             SemiCryst.Kinetics = self.KinCryst
@@ -978,8 +1007,8 @@ class DynamicCollector:
 
             SemiCryst.elapsed_time = self.elapsed_time
 
-            time, states = SemiCryst.solve_unit(runtime, time_grid,
-                                                verbose=verbose)
+            time, states = SemiCryst.solve_unit(
+                runtime, time_grid, verbose=verbose, sundials_opts=sundials_opts)
 
             # Retrieve crystallizer results
             output_names = ['Outlet', 'outputs']

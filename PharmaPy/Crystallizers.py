@@ -31,6 +31,7 @@ import copy
 import inspect
 import string
 import warnings
+from typing import Sequence
 
 import numpy as np
 
@@ -482,10 +483,48 @@ class _BaseCryst:
 
         self.profiles_runs = []
 
-    def get_inputs(self, time):
+    def get_inputs(self, time: "float | np.ndarray") -> dict:
+        """Read feed values on the crystallizer's phase and population bases.
 
+        Parameters
+        ----------
+        time : float or ndarray
+            Evaluation times [s], scalar or shape (num_times,).
+
+        Returns
+        -------
+        dict
+            Empty for Batch. Otherwise Inlet contains flow [m**3/s],
+            temperature [K], and population [m**n/m**3] or [#/m**3/um];
+            Liquid_1 contains species concentrations [kg/m**3]. Array times
+            place time on the first axis for interpolated inlet values.
+
+        Notes
+        -----
+        The dynamic solve_unit path supports a bare LiquidStream as a
+        solid-free feed. Its composition belongs to the stream itself;
+        missing population fields are zero. solve_steady_state requires an
+        inlet with a Liquid_1 phase.
+        For SlurryStream feeds, moments supplies the SI mu_n fallback.
+        Upstream or dynamic inlet mu_n values take precedence for that key;
+        other inlet fields do not suppress the moment fallback. Multiple
+        evaluation times broadcast the fallback to (num_times, num_moments);
+        a single evaluation time retains shape (num_moments,).
+        """
         if self.__class__.__name__ == 'BatchCryst':
             inputs = {}
+        elif isinstance(self.Inlet, LiquidStream):
+            inlet_states = {**self.states_in_dict['Inlet'],
+                            **self.states_in_dict['Liquid_1']}
+            inputs = get_inputs_new(time, self.Inlet, {'Inlet': inlet_states})
+            inputs['Liquid_1'] = {
+                name: inputs['Inlet'].pop(name)
+                for name in self.states_in_dict['Liquid_1']}
+        elif (isinstance(self.Inlet, SlurryStream)
+              and 'mu_n' in self.states_in_dict['Inlet']):
+            inlet = copy.copy(self.Inlet)
+            inlet.mu_n = self.Inlet.moments  # [m**n/m**3], slurry-volume fallback
+            inputs = get_inputs_new(time, inlet, self.states_in_dict)
         else:
             inputs = get_inputs_new(time, self.Inlet, self.states_in_dict)
 
@@ -654,7 +693,9 @@ class _BaseCryst:
         Physical crystal volume generation is 3*kv*(G+D)*mu_2 plus B*vol
         times the nucleus volume kv*rad**3. G and D [um/s] require a linear
         conversion to [m/s]; rad [um] requires a cubic conversion to [m**3].
-        Numerical scale affects population fluxes only.
+        Numerical scale affects population fluxes only. Kinetics receive
+        slurry-volume-specific SI moments, matching method_of_moments;
+        total moments remain available for the physical mass source.
         """
 
         if output not in ('flux', 'dstates'):
@@ -673,8 +714,9 @@ class _BaseCryst:
 
         self._set_active_params(params)
 
+        moments_per_volume = moms / vol  # [m**n/m**3], slurry-volume basis
         nucl, growth, dissol = self.Kinetics.get_kinetics(comp_kin, temp,
-                                                          kv_cry, moms)
+                                                          kv_cry, moments_per_volume)
 
         nucleation_rate = nucl * vol  # [#/s] total, or [#/m**3/s] for MSMPR
         scaled_nucleation = nucleation_rate * self.scale  # [#/s] or [#/m**3/s]
@@ -1023,7 +1065,8 @@ class _BaseCryst:
         The raw solver vector carries micrometre moments internally, seeded
         from SI phase moments here. retrieve_results converts them back to SI;
         public states_di describes those reported values. Result retrieval
-        updates the attached phases and stores the profiles.
+        updates the attached phases and stores the profiles. Moment solves do
+        not require a size grid or slurry grid-spacing metadata.
         """
 
         if self.__class__.__name__ != 'BatchCryst' and self.method != 'moments':
@@ -1054,7 +1097,7 @@ class _BaseCryst:
                 x_grid = self.Slurry.x_distrib
                 init_solid = self.Slurry.distrib * self.scale
 
-        self.dx = self.Slurry.dx
+        self.dx = self.Slurry.dx if self.method == '1D-FVM' else None  # [um]
         self.x_grid = self.Slurry.x_distrib
 
         # ---------- Liquid phase states
@@ -2083,6 +2126,12 @@ class BatchCryst(_BaseCryst):
         Raw solver moments are seeded in micrometre lengths by solve_unit.
         Retrieval converts them to total SI moments [m**n] for reported and
         phase values. Public states_di and result metadata both describe SI.
+        Each run is converted before storage so continuation preserves SI.
+        Final solid mass and volume follow kv*mu_3 of the total moments;
+        outlet moments use the final combined liquid and solid volume.
+        For the solid population, moment-mode retrieval updates only moments,
+        mass, and volume. Any seed distrib/x_distrib is retained for plotting
+        consumers and is not refreshed to represent the final population.
         """
         time = np.array(time)
         self.elapsed_time = time[-1]
@@ -2112,33 +2161,34 @@ class BatchCryst(_BaseCryst):
         dp['solubility'] = sat_conc
         dp['supersat'] = supersat
 
+        if self.method == 'moments':
+            dp['mu_n'] = dp['mu_n'] * (1e-6)**np.arange(self.num_distr)  # [m**n]
+
         self.profiles_runs.append(dp)
         dp = self.flatten_states()
 
-        if self.method == 'moments':
-            dp['mu_n'] = dp['mu_n'] * (1e-6)**np.arange(self.num_distr)
-
         self.result = DynamicResult(self.states_di, self.fstates_di, **dp)
         # ---------- Update phases
-        vol_sol = dp['mu_n'][-1, 3] * self.Solid_1.kv
+        vol_sol = dp['mu_n'][-1, 3] * self.Solid_1.kv  # [m**3]
 
-        rho_solid = self.Solid_1.getDensity()
-        mass_sol = rho_solid * vol_sol
+        rho_solid = self.Solid_1.getDensity()  # [kg/m**3]
+        mass_sol = rho_solid * vol_sol  # [kg]
 
-        vol_slurry = dp['vol'][-1] + vol_sol
+        vol_slurry = dp['vol'][-1] + vol_sol  # [m**3]
 
         self.Liquid_1.updatePhase(mass_conc=dp['mass_conc'][-1],
                                   vol=dp['vol'][-1])
 
         self.Liquid_1.temp = dp['temp'][-1]
         self.Solid_1.temp = dp['temp'][-1]
-        slurry = Slurry(vol=vol_slurry)
         if self.method == '1D-FVM':
+            slurry = Slurry(vol=vol_slurry)
             self.Solid_1.updatePhase(distrib=dp['distrib'][-1],
                                      mass=mass_sol)
 
         elif self.method == 'moments':
-            self.Solid_1.updatePhase(moments=dp['mu_n'][-1])
+            self.Solid_1.updatePhase(moments=dp['mu_n'][-1], mass=mass_sol)
+            slurry = Slurry(vol=vol_slurry, moments=dp['mu_n'][-1] / vol_slurry)
 
         # Create outlets
         liquid_out = copy.deepcopy(self.Liquid_1)
@@ -2313,7 +2363,9 @@ class MSMPR(_BaseCryst):
             nonfinite or has nonpositive growth, or no scanned root passes
             the positive-population, positive-liquid-holdup, and relative
             population-closure gates, including skipped unusable brackets.
-            Also raised for the unsupported c* cancellation feed with kv>0.
+            Also raised for a bare LiquidStream inlet (supported only by the
+            dynamic solve_unit path), or the unsupported c* cancellation feed
+            with kv>0.
             No-root errors describe the nearest rejected candidate's gate,
             relative closure error, and closure_rtol when available.
         RuntimeError
@@ -2395,6 +2447,11 @@ class MSMPR(_BaseCryst):
         approximation. Evaluation restores phase temperatures and solid
         moments, including on failure; the usual kinetic caches are refreshed.
         """
+        if isinstance(self.Inlet, LiquidStream):
+            raise ValueError(
+                "solve_steady_state does not accept a bare LiquidStream; "
+                "use solve_unit for a dynamic bare-liquid feed, or configure "
+                "an inlet with a Liquid_1 phase for solve_steady_state.")
         if self.basis not in {'mass_conc', 'mass_frac'}:
             raise ValueError("basis must be 'mass_conc' or 'mass_frac'")
         if self.rad != 0:
@@ -2905,6 +2962,12 @@ class MSMPR(_BaseCryst):
         converts them to SI [m**n/m**3] for MSMPR profiles or total [m**n]
         for Semibatch profiles. Public states_di and result metadata describe
         these SI reported values; phase moments also retain SI lengths.
+        Semibatch solid inventory follows kv*mu_3 of the final total moments.
+        Moment outlets retain that inventory and the phase-owned shape factor,
+        including when the seed phase also has a size grid.
+        For the solid population, moment-mode retrieval updates only moments,
+        mass, and volume. Any seed distrib/x_distrib is retained for plotting
+        consumers and is not refreshed to represent the final population.
         """
         time = np.array(time)
 
@@ -2916,7 +2979,8 @@ class MSMPR(_BaseCryst):
 
         dp['time'] = time
         dp['vol_flow'] = volflow
-        dp['x_cryst'] = self.x_grid
+        if self.method == '1D-FVM':
+            dp['x_cryst'] = self.x_grid  # [um]
 
         if 'temp' in self.controls:
             control = self.controls['temp']
@@ -2944,7 +3008,7 @@ class MSMPR(_BaseCryst):
         if self.method == 'moments':
             dp['mu_n'] = dp['mu_n'] * (1e-6)**np.arange(self.num_distr)
 
-        if self.__class__.__name__ == 'SemibatchCryst':
+        if self.__class__.__name__ == 'SemibatchCryst' and self.method == '1D-FVM':
             dp['total_distrib'] = dp['distrib']
 
         self.profiles_runs.append(dp)
@@ -2979,9 +3043,9 @@ class MSMPR(_BaseCryst):
             self.Liquid_1.updatePhase(mass_conc=dp['mass_conc'][-1],
                                   vol=dp['vol'][-1])
             
-            rho_solid = self.Solid_1.getDensity()
-            vol_solid = dp['mu_n'][-1, 3] * self.Solid_1.kv
-            mass_solid = rho_solid*vol_solid
+            rho_solid = self.Solid_1.getDensity()  # [kg/m**3]
+            vol_solid = dp['mu_n'][-1, 3] * self.Solid_1.kv  # [m**3]
+            mass_solid = rho_solid*vol_solid  # [kg]
 
 
             vol_slurry = vol_solid + vol_liq
@@ -2994,7 +3058,9 @@ class MSMPR(_BaseCryst):
                 self.Slurry = Slurry()
 
             elif self.method == 'moments':
-                pass  # TODO
+                self.Solid_1.updatePhase(moments=dp['mu_n'][-1], mass=mass_solid)
+                self.Slurry = Slurry(vol=vol_slurry,
+                                     moments=dp['mu_n'][-1] / vol_slurry)
 
         self.Slurry.Phases = (self.Solid_1, self.Liquid_1)
         self.elapsed_time = time[-1]
@@ -3010,7 +3076,7 @@ class MSMPR(_BaseCryst):
                                       mass_conc=dp['mass_conc'][-1],
                                       temp=dp['temp'][-1], check_input=False)
 
-            solid_out = SolidStream(path, mass_frac=solid_comp)
+            solid_out = SolidStream(path, mass_frac=solid_comp, kv=self.Solid_1.kv)
 
             if isinstance(inputs['Inlet']['vol_flow'], float):
                 vol_flow = inputs['Inlet']['vol_flow']
@@ -3036,7 +3102,9 @@ class MSMPR(_BaseCryst):
             liquid_out = copy.deepcopy(self.Liquid_1)
             solid_out = copy.deepcopy(self.Solid_1)
 
-            self.Outlet = Slurry(vol=vol_slurry)
+            self.Outlet = Slurry(
+                vol=vol_slurry,
+                moments=dp['mu_n'][-1] / vol_slurry if self.method == 'moments' else None)
 
         # self.outputs = y_outputs
         self.Outlet.Phases = (liquid_out, solid_out)
@@ -3118,8 +3186,12 @@ class SemibatchCryst(MSMPR):
                          jac_type, num_interp_points, state_events,
                          param_wrapper)
 
-    def material_balances(self, time, params, u_inputs, rhos, mu_n,
-                          distrib, mass_conc, temp, temp_ht, vol, phi_in):
+    def material_balances(self, time: float, params: "np.ndarray | None",
+                          u_inputs: dict, rhos: "Sequence[Sequence[float | None]]",
+                          mu_n: np.ndarray, distrib: np.ndarray,
+                          mass_conc: np.ndarray, temp: float,
+                          temp_ht: "float | None", vol: float,
+                          phi_in: np.ndarray) -> tuple:
         """
         Material balances for the semibatch crystallizer.
 
@@ -3127,15 +3199,20 @@ class SemibatchCryst(MSMPR):
         ----------
         time : float
             integration time [s].
-        params : array-like
-            kinetic parameters passed to ``self.Kinetics``.
+        params : ndarray or None
+            Active kinetic vector, shape (num_active_params,), in mask_params
+            order and the native units and transformations of
+            CrystKinetics.concat_params(). None retains stored parameters;
+            fixed parameters remain unchanged.
         u_inputs : dict
             unit inputs at `time`, holding the inlet volumetric flow
-            [m**3/s], inlet distribution and inlet mass concentrations
+            [m**3/s], volume-specific inlet mu_n [m**n/m**3] for moments
+            or distrib [#/m**3/um] for FVM, and liquid mass concentrations
             [kg/m**3].
-        rhos : list
-            [[liquid, solid] tank densities, [liquid, solid] inlet
-            densities], all in [kg/m**3].
+        rhos : sequence of sequences
+            Density pairs, shape (2, 2): tank then inlet, each ordered liquid
+            then solid [kg/m**3]. The unused inlet solid density may be None
+            for a solid-free feed.
         mu_n : array-like
             crystal size distribution moments [m**n] (total basis).
         distrib : array-like
@@ -3183,11 +3260,7 @@ class SemibatchCryst(MSMPR):
         input_flow = u_inputs['Inlet']['vol_flow']  # [m**3/s]
         input_flow = np.max([eps, input_flow])
 
-        # TODO: generalize dictionary iteration ('Inlet', 'Liquid_1', ...)?
-        input_distrib = u_inputs['Inlet']['distrib'] * self.scale
-        input_conc = u_inputs['Liquid_1']['mass_conc']
-
-        # print('time = %.2f, vol = %.2e, flowrate = %.2e' % (time, vol, input_flow))
+        input_conc = u_inputs['Liquid_1']['mass_conc']  # [kg/m**3]
 
         vol_solid = mu_n[3] * self.Solid_1.kv  # mu_3 is total, not by volume
         vol_slurry = vol + vol_solid
@@ -3195,11 +3268,14 @@ class SemibatchCryst(MSMPR):
         self.Liquid_1.updatePhase(mass_conc=mass_conc)
 
         if self.method == 'moments':
+            # [um**n/m**3], exact SI-to-micrometre inlet conversion
+            input_distrib = u_inputs['Inlet']['mu_n'] * 1e6**np.arange(self.num_distr)
             ddistr_dt, transf = self.method_of_moments(distrib, mass_conc, temp,
                                                        params, rho_sol,
                                                        vol=vol_slurry)
 
         elif self.method == '1D-FVM':
+            input_distrib = u_inputs['Inlet']['distrib'] * self.scale  # scaled [#/m**3/um]
             ddistr_dt, transf = self.fvm_method(distrib, mu_n, mass_conc, temp,
                                                 params, rho_sol,
                                                 vol=vol_slurry)
