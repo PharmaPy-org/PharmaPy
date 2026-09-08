@@ -919,6 +919,9 @@ class DynamicCollector:
         -----
         Supply ``runtime`` or ``time_grid``. Crystallizer states are retained
         on the delegated model rather than interpreted as liquid-only states.
+        Crystallizer seed liquid volume uses the inlet liquid fraction
+        1 - kv*mu_3 [-], with mu_3 on the slurry-volume basis [m**3/m**3].
+        The seed solid retains the inlet solid phase's shape factor kv [-].
 
         Raises
         ------
@@ -946,7 +949,8 @@ class DynamicCollector:
             distr_init = init_dict['distrib'] * vol_init
             temp_init = init_dict['temp']
 
-            vol_init *= (1 - self.Inlet.moments[3])
+            kv_inlet = self.Inlet.Solid_1.kv  # [-], phase-owned crystal shape
+            vol_init *= (1 - kv_inlet * self.Inlet.moments[3])  # [m**3], liquid
 
             liquid = LiquidPhase(path, temp=temp_init, mass_conc=conc_init,
                                  vol=vol_init)
@@ -955,7 +959,7 @@ class DynamicCollector:
             frac_solid[self.kwargs_cryst['target_ind']] = 1
             solid = SolidPhase(path, temp=temp_init, distrib=distr_init,
                                x_distrib=self.Inlet.Solid_1.x_distrib,
-                               mass_frac=frac_solid)
+                               mass_frac=frac_solid, kv=kv_inlet)
 
             phases = (liquid, solid)
 

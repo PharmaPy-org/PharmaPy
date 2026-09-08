@@ -37,6 +37,12 @@ import numpy as np
 eps = np.finfo(float).eps
 gas_ct = 8.314  # J/mol/K
 
+# Design assumption: jacket volume as a fraction of tank volume. Introduced
+# by the original author in e1e8164 without a cited source; issue #113 asks
+# the author to confirm it. It affects only the jacket thermal transient:
+# jacket volume cancels at jacket steady state.
+DEFAULT_JACKET_VOLUME_RATIO = 0.14  # [-]
+
 
 def _caller_stacklevel() -> int:
     """Return the ``warnings.warn`` stacklevel of the nearest external caller.
@@ -85,13 +91,15 @@ class _BaseCryst:
     currently implemented, so requests for them use finite differences.
     """
     np = np
+    # Support objects that bypass __init__.
+    vol_ht: "float | None" = None  # [m**3], unspecified jacket inventory
 
     def __init__(self, mask_params,
                  method, target_comp, scale, vol_tank, controls,
                  adiabatic, rad_zero,
                  reset_states,
-                 h_conv, vol_ht, basis, jac_type,
-                 state_events, param_wrapper):
+                 h_conv, vol_ht: "float | None", basis, jac_type,
+                 state_events, param_wrapper) -> None:
         """Initialize crystallizer model and numerical configuration.
 
         Parameters
@@ -119,8 +127,10 @@ class _BaseCryst:
         h_conv : float
             Vessel-side convective heat-transfer coefficient [W/m**2/K].
         vol_ht : float or None
-            Cooling-jacket volume [m**3]. Retained for constructor
-            compatibility; current subclasses derive jacket volume internally.
+            Finite, strictly positive cooling-jacket volume [m**3].
+            If None, use the historical 0.14 design ratio: current slurry
+            volume for Batch, tank volume for
+            MSMPR and Semibatch. See DEFAULT_JACKET_VOLUME_RATIO and #113.
         basis : {'mass_conc', 'mass_frac'}
             Composition basis, respectively [kg/m**3] or [kg/kg].
         jac_type : {'finite_diff', 'analytical', 'AD', None}
@@ -135,12 +145,25 @@ class _BaseCryst:
             unit, and returning transformed states and sensitivities on the
             same declared basis.
 
+        Raises
+        ------
+        ValueError
+            If vol_ht is neither None nor a finite, strictly positive real
+            scalar volume [m**3].
+
         Warns
         -----
         RuntimeWarning
             If ``jac_type='AD'`` is requested; finite-difference sensitivity
             Jacobians are configured instead.
         """
+        if vol_ht is not None and (
+                not isinstance(vol_ht, (int, float, np.integer, np.floating))
+                or not np.isfinite(vol_ht) or vol_ht <= 0):
+            raise ValueError(
+                "vol_ht must be None or a finite, strictly positive volume "
+                "in m**3; use None for the default jacket-volume ratio.")
+
         if jac_type == 'AD':
             warnings.warn(
                 "Automatic-differentiation Jacobian callbacks are not "
@@ -219,6 +242,7 @@ class _BaseCryst:
 
         # Other parameters
         self.h_conv = h_conv
+        self.vol_ht = vol_ht  # [m**3], None selects the historical design ratio
 
         # Slurry phase
         self.Slurry = None
@@ -1134,6 +1158,54 @@ class _BaseCryst:
 
         return result
 
+    def _store_heat_duty(self, time: np.ndarray, heat_terms: np.ndarray) -> None:
+        """Integrate utility heat under the common crystallizer profile contract.
+
+        Parameters
+        ----------
+        time : ndarray
+            Increasing reporting times [s], shape (num_times,).
+        heat_terms : ndarray
+            Shape (num_times, 2) for Batch or (num_times, 3) for MSMPR.
+            Column 0 is signed crystallization source [W], negative for heat
+            release. Column 1 is heat removed to the jacket [W], except with
+            prescribed temperature and nonadiabatic operation, when it is
+            the total tank heat capacitance [J/K]. MSMPR column 2 is net
+            advective heat entering the tank [W]; Batch has no flow term.
+
+        Notes
+        -----
+        Retains these components in heat_prof with the units above. Stores
+        heat_duty = [0, integrated utility heat] [J], positive for heat
+        removed and negative for heat supplied, with legacy duty_type [0, -2].
+        Q fills the cooling column of SimExec.GetDuties; positive Q means
+        heat removed to the utility, opposite to the reactor heating column.
+        For prescribed temperature, C*dT/dt = flow - source - Q gives
+        Q = flow - source - C*dT/dt. Use the temperature slope on each
+        reporting interval and trapezoidal means of C and the heat rates.
+        Thus every interval contributes, even for a two-point trajectory;
+        capacitance itself is never integrated as a heat rate. Adiabatic
+        operation takes precedence over a prescribed-temperature control.
+        """
+        self.heat_prof = heat_terms  # [W] or [J/K], column contract above
+        if 'temp' in self.controls and not self.adiabatic:
+            control = self.controls['temp']
+            temperatures = np.asarray([
+                control['fun'](point, *control['args'], **control['kwargs'])
+                for point in time])  # [K]
+            intervals = np.diff(time)  # [s]
+            temperature_rate = np.diff(temperatures) / intervals  # [K/s]
+            mean_terms = (heat_terms[1:] + heat_terms[:-1]) / 2  # column units above
+            utility_rate = (-mean_terms[:, 0]
+                            - mean_terms[:, 1] * temperature_rate)  # [W]
+            if heat_terms.shape[1] == 3:
+                utility_rate += mean_terms[:, 2]  # [W], net advective heat
+            utility_energy = np.dot(intervals, utility_rate)  # [J]
+        else:
+            utility_energy = trapezoidal_rule(time, heat_terms[:, 1])  # [J]
+        self.heat_duty = np.array([0, utility_energy])  # [J]
+        self.duty_type = [0, -2]
+
     def flatten_states(self):
         out = flatten_states(self.profiles_runs)
 
@@ -1420,7 +1492,9 @@ class BatchCryst(_BaseCryst):
 
         self.vol_offset = 0.75
 
-    def jac_states(self, time, states, params, return_only=True):
+    def jac_states(self, time: float, states: np.ndarray,
+                   params: "np.ndarray | None", return_only: bool = True
+                   ) -> np.ndarray:
         """Return the BatchCryst state Jacobian.
 
         Parameters
@@ -1445,6 +1519,16 @@ class BatchCryst(_BaseCryst):
         -----
         Crystal growth rates are stored in [um/s], so the explicit
         ``(1e-6)**3`` factors convert crystal-volume terms to [m**3].
+        The nucleation row differentiates V*(B_prim + B_sec), including
+        B_sec proportional to (kv*mu_j*1e-6**j/V)**s_2, where V is slurry
+        volume and j is the configured secondary-nucleation moment order.
+        Rates must have been cached by unit_model at the same state first.
+        This analytical path assumes built-in kinetics, zero nucleation
+        radius, alpha_fn = 1, mass-concentration inputs, and prescribed
+        temperature. Phase densities and concentration-dependent solubility
+        are held fixed. Growth and dissolution are mutually exclusive, so
+        the active rate equals G + D; its exponent controls the concentration
+        derivatives in each regime.
         """
 
         if return_only:
@@ -1475,36 +1559,37 @@ class BatchCryst(_BaseCryst):
             b_sec = self.Kinetics.sec_nucl
 
             nucl = b_pr + b_sec
-            gr = self.Kinetics.growth
-
-            g_exp = self.Kinetics.params['growth'][-1]
+            # Built-in kinetics make the inactive rate zero: selecting the
+            # active branch therefore gives the signed sum G + D.
+            if conc_tg < c_sat:
+                size_rate = self.Kinetics.dissol  # [um/s], negative dissolution
+                size_exponent = self.Kinetics.params['dissolution'][-1]  # [-]
+            else:
+                size_rate = self.Kinetics.growth  # [um/s], nonnegative growth
+                size_exponent = self.Kinetics.params['growth'][-1]  # [-]
             bp_exp = self.Kinetics.params['nucl_prim'][-1]
             k_s, _, bs_exp, bs2_exp = self.Kinetics.params['nucl_sec']
-            # bs2_exp = self.Kinetics.params['nucl_sec'][-1]
 
             jacobian = np.zeros((num_states, num_states))
 
             # ----- Moments columns
-            wrt_mu = idx_moms * gr
+            wrt_mu = idx_moms * size_rate  # [um/s]
 
             rng = np.arange(len(wrt_mu))
             jacobian[rng + 1, rng] = wrt_mu
 
-            # dfu0_dmu3
-            jacobian[0, self.num_distr - 1] = vol_liq * bs2_exp * b_sec / \
-                (moms[3] + eps)
-
-            # ssat = (conc_tg - c_sat) / c_sat
-
-            # # bsec_other = k_s * ssat**bs_exp * (kv * moms[3])**bs2_exp
-            # dfu0_dmu3 = k_s * ssat**bs_exp * bs2_exp * kv * \
-            #     (kv * moms[3])**(bs2_exp - 1)
-
-            # jacobian[0, self.num_distr - 1] = dfu0_dmu3
+            # V*B depends on V directly and through B_sec ~ V**(-s_2).
+            vol_slurry = vol_liq + kv * moms[3] * (1e-6)**3  # [m**3]
+            dnucl_dvol = nucl - bs2_exp * b_sec  # [#/m**3/s]
+            jacobian[0, 3] = dnucl_dvol * kv * (1e-6)**3  # [#/s/um**3]
+            if b_sec != 0 and bs2_exp != 0:
+                order = self.Kinetics.mu_sec_nucl
+                jacobian[0, order] += (vol_slurry * bs2_exp * b_sec
+                                       / moms[order])  # [#/s/um**order]
 
             # Second moment column (concentration eqns)
-            dtr_mu2 = 3 * kv * gr * rho_c * \
-                (1e-6)**3  # factor from material bce
+            dtr_mu2 = 3 * kv * size_rate * rho_c * \
+                (1e-6)**3  # [kg/s/um**2], cubic crystal-volume conversion
 
             dfconc_dmu2 = -1/vol_liq * dtr_mu2 * (self.kron_jtg - w_conc/rho_l)
             jacobian[self.num_distr:self.num_distr + dfconc_dmu2.shape[0],
@@ -1518,8 +1603,9 @@ class BatchCryst(_BaseCryst):
             conc_diff = conc_tg - c_sat
 
             dfmu0_dconc = (bp_exp * b_pr + bs_exp * b_sec) * \
-                vol_liq / conc_diff
-            dfmun_dconc = idx_moms * moms[:-1] * g_exp/conc_diff * gr
+                vol_slurry / conc_diff
+            dfmun_dconc = (idx_moms * moms[:-1] * size_exponent
+                             / conc_diff * size_rate)  # [um**n*m**3/kg/s]
 
             jacobian[0, self.num_distr +
                      self.target_ind] = dfmu0_dconc
@@ -1530,10 +1616,10 @@ class BatchCryst(_BaseCryst):
 
             # Concentration eqns
             # tr is the crystal mass transfer rate [kg/s].
-            tr = 3 * kv * gr * moms[2] * rho_c * (1e-6)**3
+            tr = 3 * kv * size_rate * moms[2] * rho_c * (1e-6)**3
 
             # dtr_dconc_tg is d(tr)/d(c_target) [m**3/s].
-            dtr_dconc_tg = g_exp * tr / conc_diff
+            dtr_dconc_tg = size_exponent * tr / conc_diff
 
             # first_conc is [-]; second_conc is [m**3/s].
             first_conc = np.outer(self.kron_jtg - w_conc/rho_l, self.kron_jtg)
@@ -1551,7 +1637,7 @@ class BatchCryst(_BaseCryst):
 
             # ----- Volume column
             # mu_zero eqn
-            jacobian[0, -1] = nucl  # dfmu_0/dvol
+            jacobian[0, -1] = dnucl_dvol  # [#/m**3/s]
 
             # Concentration eqn
             dfconc_dvol = 1/vol_liq**2 * (self.kron_jtg*tr - w_conc/rho_l * tr)
@@ -1560,68 +1646,73 @@ class BatchCryst(_BaseCryst):
 
             return jacobian
 
-    def jac_params(self, time, states, params):
+    def jac_params(self, time: float, states: np.ndarray,
+                   params: np.ndarray) -> np.ndarray:
+        """Return active kinetic parameter partials of the batch moment RHS.
 
-        state_di = unpack_states(states, self.dim_states, self.name_states)
+        Parameters
+        ----------
+        time : float
+            Evaluation time [s].
+        states : ndarray
+            Total moments [um**n], species concentrations [kg/m**3], then
+            liquid volume [m**3], shape (num_states,).
+        params : ndarray
+            Native kinetic parameters, with units defined by CrystKinetics.
+            Cached kinetics must already correspond to these parameters.
 
+        Returns
+        -------
+        ndarray
+            Shape (num_states, num_active_params), with units
+            [state unit/s/parameter unit]. Columns follow concat_params and
+            mask_params, including all three dissolution columns.
+
+        Notes
+        -----
+        Call unit_model at the same state first to cache rates. This analytical
+        path assumes built-in kinetics, zero nucleation radius, alpha_fn = 1,
+        mass-concentration inputs, and prescribed temperature. Secondary
+        nucleation uses slurry-normalized SI moments, including its selected
+        area or volume moment. The logarithm differentiates the numerical
+        moment factor in the configured units of the kinetic prefactor.
+        At a nonpositive moment factor, the s_2 partial is set to zero by
+        convention. In particular, its derivative is undefined at zero
+        moment and s_2 = 0 even though the rate uses 0**0 = 1.
+        """
         control = self.controls['temp']
-        temp = control['fun'](time, *control['args'], **control['kwargs'])
-
-        num_states = len(states)
-
-        vol_liq = states[-1]
-        moms = states[:self.num_distr]
+        temp = control['fun'](time, *control['args'], **control['kwargs'])  # [K]
+        vol_liq = states[-1]  # [m**3]
+        moms = states[:self.num_distr]  # [um**n], total moments
         num_material = self.num_distr + self.num_species
-        w_conc = states[self.num_distr:num_material]
-        conc_tg = w_conc[self.target_ind]
-
-        kv = self.Solid_1.kv
-        rho_c = self.Solid_1.getDensity(temp=temp)
-        rho_l = self.Liquid_1.getDensity(temp=temp)
-
-        b_sec = self.Kinetics.sec_nucl
-
-        dbp, dbs, dg, _, _ = self.Kinetics.deriv_cryst(conc_tg, w_conc, temp)
-        dbs_ds2 = b_sec * np.log(max(eps, kv * moms[3]*1e-18))
-        dbs = np.append(dbs, dbs_ds2)
-
-        # dg *= 1e-6  # to m/s
-
-        num_bp = len(dbp)
-        num_bs = len(dbs)
+        w_conc = states[self.num_distr:num_material]  # [kg/m**3]
+        conc_tg = w_conc[self.target_ind]  # [kg/m**3]
+        kv = self.Solid_1.kv  # [-]
+        rho_c = self.Solid_1.getDensity(temp=temp)  # [kg/m**3]
+        rho_l = self.Liquid_1.getDensity(temp=temp)  # [kg/m**3]
+        vol_slurry = vol_liq + kv * moms[3] * 1e-18  # [m**3]
+        order = self.Kinetics.mu_sec_nucl
+        moment_factor = kv * moms[order] * 1e-6**order / vol_slurry  # [m**order/m**3]
+        b_sec = self.Kinetics.sec_nucl  # [#/m**3/s]
+        # [rate/parameter]; rates are nucleation [#/m**3/s] or size [um/s].
+        dbp, dbs, dg, dd, _ = self.Kinetics.deriv_cryst(conc_tg, w_conc, temp)
+        # The zero-moment boundary uses the convention documented above.
+        dbs_ds2 = (b_sec * np.log(moment_factor)
+                   if moment_factor > 0 else 0)  # [#/m**3/s]
+        dbs = np.append(dbs, dbs_ds2)  # [#/m**3/s/parameter]
+        size_partials = np.concatenate((dg, dd))  # [um/s/parameter]
         num_nucl = len(dbp) + len(dbs)
-        num_gr = len(dg)
-
-        # TODO: the 3 is only to account for dissolution
-        num_params = num_nucl + num_gr + 3
-
+        jacobian = np.zeros((len(states), num_nucl + len(size_partials)))
+        jacobian[0, :num_nucl] = vol_slurry * np.concatenate((dbp, dbs))
         idx_moms = np.arange(1, self.num_distr)
-        g_section = np.outer(idx_moms * moms[:-1], dg)
-
-        # ----- Moment equations
-        jacobian = np.zeros((num_states, num_params))
-
-        # Zeroth moment eqn
-        jacobian[0, :num_bp] = vol_liq * dbp
-        jacobian[0, num_bp:num_bp + num_bs] = vol_liq * dbs
-
-        # jacobian[0] *= vol_liq
-
-        # 1 and higher order moments eqns
-        jacobian[1:1 + g_section.shape[0],
-                 num_nucl:num_nucl + g_section.shape[1]] = g_section
-
-        # ----- Concentration eqns
-        dtr_g = 3 * kv * rho_c * moms[2] * dg * \
-            (1e-6)**3  # factor from material bce
-        dconc_dg = -1/vol_liq * np.outer(self.kron_jtg - w_conc/rho_l, dtr_g)
-
-        jacobian[self.num_distr:self.num_distr + dconc_dg.shape[0],
-                 num_nucl:num_nucl + dconc_dg.shape[1]] = dconc_dg
-
-        # ----- Volume eqn
-        jacobian[-1, num_nucl:num_nucl + dtr_g.shape[0]] = -dtr_g / rho_l
-
+        jacobian[1:self.num_distr, num_nucl:] = np.outer(
+            idx_moms * moms[:-1], size_partials)
+        # Cubic conversion: growth [um/s] times total mu_2 [um**2] to [m**3/s].
+        transfer_partials = (3 * kv * rho_c * moms[2] * size_partials
+                             * 1e-18)  # [kg/s/parameter]
+        jacobian[self.num_distr:num_material, num_nucl:] = -np.outer(
+            self.kron_jtg - w_conc/rho_l, transfer_partials) / vol_liq
+        jacobian[-1, num_nucl:] = -transfer_partials / rho_l
         return jacobian[:, self.mask_params]
 
     def material_balances(self, time, params, u_inputs, rhos, mu_n,
@@ -1709,9 +1800,12 @@ class BatchCryst(_BaseCryst):
 
         return dmaterial_dt, transf  # transf [kg/s]
 
-    def energy_balances(self, time, params, cryst_rate, u_inputs, rhos,
-                        mu_n, distrib, mass_conc, temp, temp_ht, vol,
-                        h_in=None, heat_prof=False):
+    def energy_balances(self, time: float, params, cryst_rate: np.ndarray,
+                        u_inputs: dict, rhos: list, mu_n: np.ndarray,
+                        distrib, mass_conc: np.ndarray, temp: float,
+                        temp_ht: "float | None", vol: float,
+                        h_in=None, heat_prof: bool = False
+                        ) -> "float | tuple | np.ndarray":
         """
         Energy balances for the batch crystallizer.
 
@@ -1751,9 +1845,13 @@ class BatchCryst(_BaseCryst):
 
         Returns
         -------
-        If `heat_prof` is True, an array with the source and heat-transfer
-        terms [J/s]. Otherwise ``dtemp_dt`` [K/s], or the pair
-        (``dtemp_dt``, ``dtht_dt``) [K/s] when a jacket state is present.
+        ndarray or float or tuple
+            If `heat_prof` is True, shape (2,): signed crystallization source [W]
+            and jacket heat removed [W], with column 1 replaced by total heat
+            capacitance [J/K] for nonadiabatic prescribed temperature. See the
+            common contract in _store_heat_duty. Otherwise ``dtemp_dt`` [K/s], or
+            the pair
+            (``dtemp_dt``, ``dtht_dt``) [K/s] when a jacket state is present.
 
         Notes
         -----
@@ -1806,7 +1904,8 @@ class BatchCryst(_BaseCryst):
 
                 cp_ht = 4180  # [J/kg/K]
                 rho_ht = 1000  # [kg/m**3]
-                vol_ht = vol_total*0.14  # [m**3]
+                vol_ht = (vol_total * DEFAULT_JACKET_VOLUME_RATIO
+                          if self.vol_ht is None else self.vol_ht)  # [m**3]
 
                 dtht_dt = flow_ht / vol_ht * (tht_in - temp_ht) - \
                     self.u_ht*area_ht*(temp_ht - temp) / rho_ht/vol_ht/cp_ht
@@ -1886,34 +1985,37 @@ class BatchCryst(_BaseCryst):
         # ---------- Calculate heat duty
         self.get_heat_duty(time, states)
 
-    def get_heat_duty(self, time, states):
-        q_heat = np.zeros((len(time), 2))
+    def get_heat_duty(self, time: np.ndarray, states: np.ndarray) -> None:
+        """Evaluate and integrate the batch utility heat profile.
 
+        Parameters
+        ----------
+        time : ndarray
+            Reporting times [s], shape (num_times,).
+        states : ndarray
+            Retrieved state rows: unscaled total FVM distribution [#/um] or
+            total moments [um**n], concentrations [kg/m**3], liquid volume
+            [m**3], and optional temperatures [K]. FVM retrieval has already
+            removed the numerical distribution scale from these rows.
+
+        Notes
+        -----
+        Moment-mode retrieval requires scale=1 under the existing scaling
+        convention. Stores heat_prof and heat_duty using the rate/capacitance
+        column contract in _store_heat_duty. Positive duty [J] means heat removed,
+        including under prescribed temperature (correcting the former sign).
+        """
+        q_heat = np.zeros((len(time), 2))  # [W] or [J/K], profile column contract
         if self.params_iter is None:
             merged_params = self.Kinetics.concat_params()[self.mask_params]
         else:
             merged_params = self.params_iter
-
         for ind, row in enumerate(states):
-            row = row.copy()
-            row[:self.num_distr] *= self.scale  # scale distribution
+            row = row.copy()  # [state units], documented above
+            row[:self.num_distr] *= self.scale  # [-], numerical distribution scale
             q_heat[ind] = self.unit_model(time[ind], row, merged_params,
                                           enrgy_bce=True)
-
-        if 'temp' in self.controls.keys():
-            q_gen, capacitance = q_heat.T
-
-            dT_dt = np.diff(self.result.temp) / \
-                np.diff(self.result.time)
-
-            q_instant = dT_dt * capacitance[1:] + q_gen[1:]
-            time = time[1:]
-
-        else:
-            q_instant = q_heat  # TODO: write for other scenarios
-
-        self.heat_duty = np.array([0, trapezoidal_rule(time, q_instant)])
-        self.duty_type = [0, -2]
+        self._store_heat_duty(time, q_heat)
 
 
 class MSMPR(_BaseCryst):
@@ -2142,9 +2244,12 @@ class MSMPR(_BaseCryst):
 
         return dmaterial_dt, transf  # transf [kg/m**3/s]
 
-    def energy_balances(self, time, params, cryst_rate, u_inputs, rhos, mu_n,
-                        distrib, mass_conc, temp, temp_ht, vol,
-                        h_in, heat_prof=False):
+    def energy_balances(self, time: float, params, cryst_rate: np.ndarray,
+                        u_inputs: dict, rhos: list, mu_n: np.ndarray,
+                        distrib, mass_conc: np.ndarray, temp: float,
+                        temp_ht: "float | None", vol: float,
+                        h_in: float, heat_prof: bool = False
+                        ) -> "float | tuple | np.ndarray":
         """
         Energy balances for the continuous (MSMPR) crystallizer.
 
@@ -2189,9 +2294,13 @@ class MSMPR(_BaseCryst):
 
         Returns
         -------
-        If `heat_prof` is True, an array with the source, heat-transfer and
-        flow terms [J/s]. Otherwise ``dtemp_dt`` [K/s], or the pair
-        (``dtemp_dt``, ``dtht_dt``) [K/s] when a jacket state is present.
+        ndarray or float or tuple
+            If `heat_prof` is True, shape (3,): signed crystallization source [W],
+            jacket heat removed [W], and net flow heat entering [W]. Column 1 is
+            replaced by total heat capacitance [J/K] for nonadiabatic prescribed
+            temperature; see _store_heat_duty. Otherwise ``dtemp_dt`` [K/s], or
+            the pair
+            (``dtemp_dt``, ``dtht_dt``) [K/s] when a jacket state is present.
 
         Notes
         -----
@@ -2249,7 +2358,8 @@ class MSMPR(_BaseCryst):
             cp_ht = self.Utility.cp  # [J/kg/K]
             rho_ht = self.Utility.rho  # [kg/m**3]
 
-            vol_ht = self.vol_tank*0.14  # [m**3]
+            vol_ht = (self.vol_tank * DEFAULT_JACKET_VOLUME_RATIO
+                      if self.vol_ht is None else self.vol_ht)  # [m**3]
 
             dtht_dt = flow_ht / vol_ht * (tht_in - temp_ht) - \
                 self.u_ht*area_ht*(temp_ht - temp) / rho_ht/vol_ht/cp_ht
@@ -2392,26 +2502,36 @@ class MSMPR(_BaseCryst):
         # self.outputs = y_outputs
         self.Outlet.Phases = (liquid_out, solid_out)
 
-    def get_heat_duty(self, time, states):
-        q_heat = np.zeros((len(time), 3))
+    def get_heat_duty(self, time: np.ndarray, states: np.ndarray) -> None:
+        """Evaluate and integrate the continuous utility heat profile.
 
+        Parameters
+        ----------
+        time : ndarray
+            Reporting times [s], shape (num_times,).
+        states : ndarray
+            Retrieved state rows: unscaled FVM distribution [#/m**3/um] or
+            moments [um**n/m**3], concentrations [kg/m**3], and optional
+            temperatures [K]. FVM retrieval has already removed the numerical
+            distribution scale from these rows.
+
+        Notes
+        -----
+        Stores heat_prof and heat_duty using the rate/capacitance column
+        contract in _store_heat_duty, including net flow heat. Prescribed
+        temperature contributes C*dT/dt [W]; C [J/K] is never integrated alone.
+        """
+        q_heat = np.zeros((len(time), 3))  # [W] or [J/K], profile column contract
         if self.params_iter is None:
             merged_params = self.Kinetics.concat_params()[self.mask_params]
         else:
             merged_params = self.params_iter
-
         for ind, row in enumerate(states):
-            row = row.copy()
-            row[:self.num_distr] *= self.scale  # scale distribution
+            row = row.copy()  # [state units], documented above
+            row[:self.num_distr] *= self.scale  # [-], numerical distribution scale
             q_heat[ind] = self.unit_model(time[ind], row, merged_params,
                                           enrgy_bce=True)
-
-        # q_heat[:, 0] *= -1
-        q_gen, q_ht, flow_term = q_heat.T  # TODO: controlled temperature
-
-        self.heat_prof = q_heat
-        self.heat_duty = np.array([0, trapezoidal_rule(time, q_ht)])
-        self.duty_type = [0, -2]
+        self._store_heat_duty(time, q_heat)
 
 
 class SemibatchCryst(MSMPR):
@@ -2572,8 +2692,11 @@ class SemibatchCryst(MSMPR):
 
         return dmaterial_dt, transf  # transf [kg/s]
 
-    def energy_balances(self, time, params, cryst_rate, u_inputs, rhos,
-                        distrib, mass_conc, temp, temp_ht, vol, mu_n, h_in):
+    def energy_balances(self, time: float, params, cryst_rate: np.ndarray,
+                        u_inputs: dict, rhos: list, distrib,
+                        mass_conc: np.ndarray, temp: float,
+                        temp_ht: "float | None", vol: float,
+                        mu_n: np.ndarray, h_in: float) -> "float | tuple":
         """
         Energy balances for the semibatch crystallizer.
 
@@ -2614,8 +2737,9 @@ class SemibatchCryst(MSMPR):
 
         Returns
         -------
-        ``dtemp_dt`` [K/s], or the pair (``dtemp_dt``, ``dtht_dt``) [K/s]
-        when a jacket state is present.
+        float or tuple
+            ``dtemp_dt`` [K/s], or the pair (``dtemp_dt``, ``dtht_dt``) [K/s]
+            when a jacket state is present.
         """
 
         rho_susp, rho_in = rhos
@@ -2669,7 +2793,8 @@ class SemibatchCryst(MSMPR):
             flow_ht = ht_media['vol_flow']  # [m**3/s]
             cp_ht = self.Utility.cp  # [J/kg/K]
             rho_ht = self.Utility.rho  # [kg/m**3]
-            vol_ht = self.vol_tank*0.14  # [m**3]
+            vol_ht = (self.vol_tank * DEFAULT_JACKET_VOLUME_RATIO
+                      if self.vol_ht is None else self.vol_ht)  # [m**3]
 
             dtht_dt = flow_ht / vol_ht * (tht_in - temp_ht) - \
                 self.u_ht*area_ht*(temp_ht - temp) / rho_ht/vol_ht/cp_ht

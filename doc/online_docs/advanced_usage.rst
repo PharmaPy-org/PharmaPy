@@ -68,6 +68,8 @@ Tank heat rates use positive :code:`q_rxn` for reaction heat generation and posi
 
 A single reported time still uses the requested run duration for differentiation. Direct result retrieval without a preceding solve uses the supplied profile's start and span, with the same minimum step. :code:`heat_duty` is the cumulative trapezoidal integral in joules over all tank segments since the last reset; its accuracy also depends on the reporting grid. Each CSTR/Semibatch segment retains its sampled inlet concentration, temperature and flow. At a shared segment endpoint the earlier sample is retained, so replacing an inlet does not rewrite its historical flow profile.
 
+Crystallizers store :code:`heat_duty = [0, Q]` [J], filling the cooling column of :code:`SimExec.GetDuties`. Positive duty means heat removed to the utility, opposite to the reactor heating column. Uncontrolled crystallizers integrate the jacket heat rate; prescribed-temperature crystallizers reconstruct the utility rate from the energy balance and the temperature slope over each reporting interval. The prescribed-temperature Batch duty has changed sign relative to earlier releases.
+
 Interpolators
 ===============
 

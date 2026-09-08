@@ -65,6 +65,12 @@ Reviewed on 2026-09-07 against branch `fix/issues` at commit `dbdea97`.
 | --- | --- | --- |
 | #178 | VaporPhase.getEnthalpy compares the temperature axis against the species axis | Real defect, deferred: open PR #179 rewrites the same per-species branch of `VaporPhase.getEnthalpy` for #177, so a concurrent fix on this branch would conflict with that PR. Revisit once PR #179 lands. |
 
+Reviewed on 2026-09-08 against branch `fix/issues` at commit `8e6e4d7`.
+
+| Issue | Title (short) | Reason |
+| --- | --- | --- |
+| #213 | Restore required CI coverage for crystallizer ODE problem callbacks | Follow-up to open PR #204; the choice between making the Assimulo CI job required and extracting a solver-independent callback helper is a CI policy decision for maintainers, and the affected tests live in that PR. |
+
 ## Skipped: already satisfied on master
 
 Reviewed on 2026-09-08 against branch `fix/issues` at commit `50cfd6e`.

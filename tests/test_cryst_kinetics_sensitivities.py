@@ -274,10 +274,10 @@ def test_omitted_secondary_without_moments_has_zero_partials():
 def test_crystallizer_parameter_column_handoff(data_path, option, reformulate):
     """Exercise the real jac_params consumer, including its appended s_2.
 
-    This checks parameter ordering and the existing caller contract only.
-    #39 blocks asserting its zeroth-moment row against the slurry-volume RHS;
-    #222 blocks solver-supplied parameter propagation. After those fixes,
-    add a full RHS finite-difference comparison on the corrected volume basis.
+    The fixture has one cubic metre of slurry, with the solid volume deducted
+    from the liquid inventory, so cached normalized moments match the state.
+    #222 still blocks solver-supplied parameter propagation; the separate #39
+    RHS tests perturb the stored kinetics until that handoff is repaired.
 
     Parameters
     ----------
@@ -292,8 +292,10 @@ def test_crystallizer_parameter_column_handoff(data_path, option, reformulate):
     unit = BatchCryst(target_comp='A', method='moments')
     path = str(data_path['flowsheet'] / 'compound_database.json')
     composition = [1.0, 0.0, 0.0, 0.0, 0.0]  # [-], pure synthetic A
+    volume = 1.0  # [m**3], slurry volume makes cached moments equal total moments
+    liquid_volume = volume * (1 - KV * MOMENTS[3])  # [m**3], subtract crystal volume
     unit.Liquid_1 = LiquidPhase(path, mass_frac=composition, temp=TEMPERATURE,
-                                vol=1.0)  # [m**3], finite liquid inventory
+                                vol=liquid_volume)
     unit.Solid_1 = SolidPhase(path, mass_frac=composition, moments=MOMENTS, kv=KV)
     # Assign the actual kinetics; explicit state layout avoids solver setup.
     unit._Kinetics = kinetics
@@ -305,11 +307,10 @@ def test_crystallizer_parameter_column_handoff(data_path, option, reformulate):
     unit.name_states = ['mu_n', 'mass_conc', 'vol']
     unit.controls = {'temp': {'fun': lambda time: TEMPERATURE, 'args': (), 'kwargs': {}}}
     unit.mask_params = np.ones(kinetics.num_params, dtype=bool)
-    volume = 1.0  # [m**3], makes caller's current total/normalized moment equal
     length_conversion = 1e6  # [um/m], exact length conversion
     total_moments = MOMENTS * volume * length_conversion ** np.arange(4)  # [um**j]
     concentrations = np.array([3.5, 0.0, 0.0, 0.0, 0.0])  # [kg/m**3]
-    states = np.concatenate((total_moments, concentrations, [volume]))  # mixed units above
+    states = np.concatenate((total_moments, concentrations, [liquid_volume]))  # mixed units above
     kinetics.get_kinetics(concentrations, TEMPERATURE, KV, MOMENTS)
     jacobian = unit.jac_params(0.0, states, kinetics.concat_params())  # [state/s/parameter]
     force = 1.5 if option == 'absolute' else 0.75  # [kg/m**3] or [-]
