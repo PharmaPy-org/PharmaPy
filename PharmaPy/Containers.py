@@ -6,6 +6,7 @@ Created on Mon Apr 27 14:26:50 2020
 """
 
 from typing import Mapping, Optional, Sequence, Tuple, Union
+from copy import copy
 
 from PharmaPy._assimulo import CVode, Explicit_Problem
 
@@ -1185,10 +1186,41 @@ class DynamicCollector:
             input_dict[name] = inputs[self.bipartite[name]]
         return input_dict
 
-    def get_inputs_new(self, time):
-        input_dict = get_inputs_new(time, self.Inlet, self.states_in_dict)
+    def get_inputs_new(self, time: Union[float, np.ndarray]) -> dict:
+        """Resolve collector feed fields without changing the inlet stream.
 
-        return input_dict
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Evaluation time [s], scalar or shape (num_times,).
+
+        Returns
+        -------
+        dict
+            Inlet fields: mass fractions [-], mass flow [kg/s], temperature
+            [K] for liquid feeds; concentrations [kg/m**3], volume flow
+            [m**3/s], temperature [K], and moments [m**n/m**3] or distribution
+            [#/m**3/um] for slurry feeds. Multiple times put time first;
+            a scalar or one-element time array retains species/population
+            vectors of shape (num_species,) or (num_population,).
+
+        Notes
+        -----
+        When mu_n is an active input, SlurryStream fallback fields come from
+        its own moments and attached liquid concentration. Without an attached
+        liquid phase, concentration retains the generic missing-field default.
+        Connected upstream and dynamic inlet values take precedence for each
+        supplied field. Aliases are installed on a shallow copy so the original
+        stream is unchanged.
+        """
+        inlet = self.Inlet
+        if (isinstance(inlet, SlurryStream)
+                and 'mu_n' in self.states_in_dict['Inlet']):
+            inlet = copy(inlet)
+            inlet.mu_n = self.Inlet.moments  # [m**n/m**3], slurry-volume basis
+            if hasattr(self.Inlet, 'Liquid_1'):
+                inlet.mass_conc = self.Inlet.Liquid_1.mass_conc  # [kg/m**3 liquid]
+        return get_inputs_new(time, inlet, self.states_in_dict)
 
     def unit_model(self, time, states):
         # Calculate inlets
@@ -1293,6 +1325,10 @@ class DynamicCollector:
         Gridless MSMPR outlets use SI inlet mu_n [m**n/m**3] to initialize
         total seed moments [m**n] and delegate a moment-mode SemibatchCryst.
         No distribution is synthesized for moment-mode collection.
+        Selector dictionaries and caller-owned ``kwargs_cryst`` are retained
+        across solves. ``target_ind`` selects the seed solid species and is
+        omitted only from a local copy of crystallizer constructor options;
+        the collector's ``num_interp_points`` takes precedence in that copy.
 
         Raises
         ------
@@ -1300,19 +1336,16 @@ class DynamicCollector:
             If a liquid-mixer solve receives neither ``runtime`` nor
             ``time_grid`` and therefore has no integration end time [s].
         """
-        self.names_states_in = self.names_states_in[self.model_type]
-        self.names_states_out = self.names_states_out[self.model_type]
-
         if self.model_type == 'crystallizer':
 
             moment_mode = self.Inlet.distrib is None
             population_name = 'mu_n' if moment_mode else 'distrib'
             unused_name = 'distrib' if moment_mode else 'mu_n'
-            self.names_states_in.remove(unused_name)
-            self.states_in_dict['Inlet'].pop(unused_name)
+            # Rebuild active dimensions without consuming selector metadata.
+            self.states_in_dict = {'Inlet': dict.fromkeys(
+                name for name in self.names_states_in[self.model_type]
+                if name != unused_name)}
             if moment_mode:
-                self.names_states_out = ['mu_n' if name == 'total_distrib' else name
-                                         for name in self.names_states_out]
                 self.states_in_dict['Inlet'][population_name] = len(self.Inlet.moments)
             else:
                 self.states_in_dict['Inlet'][population_name] = len(self.Inlet.x_distrib)
@@ -1320,8 +1353,7 @@ class DynamicCollector:
             self.states_in_dict['Inlet']['vol_flow'] = 1
             self.states_in_dict['Inlet']['temp'] = 1
 
-            init_dict = get_inputs_new(self.elapsed_time, self.Inlet,
-                                       self.states_in_dict)['Inlet']
+            init_dict = self.get_inputs_new(self.elapsed_time)['Inlet']
 
             path = self.Inlet.Liquid_1.path_data
 
@@ -1350,11 +1382,12 @@ class DynamicCollector:
 
             phases = (liquid, solid)
 
-            self.kwargs_cryst.pop('target_ind')
-            self.kwargs_cryst['num_interp_points'] = self.num_interp_points
+            kwargs_cryst = dict(self.kwargs_cryst)
+            kwargs_cryst.pop('target_ind')
+            kwargs_cryst['num_interp_points'] = self.num_interp_points
             method = 'moments' if moment_mode else '1D-FVM'
             SemiCryst = SemibatchCryst(method=method, adiabatic=True,
-                                       **self.kwargs_cryst)
+                                       **kwargs_cryst)
             SemiCryst.Phases = phases
             SemiCryst.Kinetics = self.KinCryst
             SemiCryst.Inlet = self.Inlet
