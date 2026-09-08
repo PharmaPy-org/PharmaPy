@@ -2,6 +2,11 @@
 Advanced features
 ====================
 
+Liquid heat capacity
+====================
+
+:code:`LiquidPhase.getCp` now defaults to the mass basis [J/kg/K], like its siblings; callers needing [J/mol/K] must pass :code:`basis='mole'`.
+
 State events
 ============
 

@@ -180,11 +180,29 @@ class Mixer:
         return self._Inlets
 
     @Inlets.setter
-    def Inlets(self, inlets):
-        if isinstance(inlets, (list, tuple)):
-            self._Inlets += list(inlets)
-        else:
-            self._Inlets.append(inlets)
+    def Inlets(self, inlets: object) -> None:
+        """Append inlets sharing a material-amount basis.
+
+        Parameters
+        ----------
+        inlets : object or sequence of object
+            Liquid or mixed-phase inventories [kg], or streams [kg/s].
+
+        Raises
+        ------
+        ValueError
+            If batch inventories and flow rates are combined without a
+            duration contract. Supply batch phases or use only streams.
+        """
+        incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
+        flow_flags = [hasattr(inlet, 'mass_flow')
+                      for inlet in self._Inlets + incoming]
+        if any(flow_flags) and not all(flow_flags):
+            raise ValueError(
+                'Mixer cannot combine batch inventories [kg] with flow rates '
+                '[kg/s] without a duration contract; supply batch phases or '
+                'use only streams.')
+        self._Inlets += incoming
 
         flow_flag = hasattr(self.Inlets[-1], 'mass_flow')
 
@@ -280,12 +298,58 @@ class Mixer:
 
         return dict_inputs
 
-    def get_inputs_solids(self):
+    def get_inputs_solids(self) -> Tuple[dict, int]:
+        """Collect static phase amounts on one common population basis.
+
+        Returns
+        -------
+        dict
+            Inlet arrays: temperature [K], liquid mass fractions [-] with
+            shape (num_inlets, num_species), liquid/solid amounts [kg] for
+            batch or [kg/s] for continuous mixing, and number distributions
+            [#/um] or [#/um/s] with shape (num_inlets, num_sizes).
+        int
+            Index of the first solids-bearing inlet.
+
+        Raises
+        ------
+        ValueError
+            If a solids-bearing inlet differs from the first solid in shape
+            factor ``kv`` [-], solid mass fractions [-], or size grid [um].
+            Also raised if attached solid mass [kg], or mass flow [kg/s],
+            disagrees with ``rho_solid * kv * mu_3`` on the same basis,
+            where ``mu_3`` is integrated from the consumed size distribution.
+            Solids without either a size distribution or a size grid are
+            unsupported.
+            The message identifies the differing quantity and inlet index.
+
+        Notes
+        -----
+        Solids must share exactly the same shape factor and size-grid values.
+        Compositions may differ only by normalization roundoff (relative
+        tolerance 1e-12, zero absolute tolerance to retain trace species).
+        A size distribution on a size grid is required. Its third moment is
+        recomputed with ``SolidPhase.getMoments`` rather than read from cached
+        ``moments``:
+        moment-mode crystallizer outlets do not refresh their distribution.
+        Attached solid distributions already represent total populations
+        (or number rates for streams), including those attached to a Slurry.
+        Cake saturation metadata does not override attached phase inventories.
+        Attached solid amounts must be finite and satisfy
+        ``abs(attached - moment_derived) <= 1e-9 * attached``. This relative
+        tolerance is a numerical consistency allowance for floating-point
+        conversions and integration, not a physical uncertainty. It has no
+        absolute floor. MixedPhases inventory/enthalpy reconciliation is
+        deferred: the mixer keeps attached masses authoritative, but Slurry
+        enthalpy weights phases by moment-derived fractions, so inconsistent
+        solids cannot be mixed conservatively.
+        Profiled multiphase mixing remains outside this static path (#221).
+        """
 
         timeseries_flag = []
 
         for inlet in self.Inlets:
-            if inlet.y_upstream is None:
+            if getattr(inlet, 'y_upstream', None) is None:
                 timeseries_flag.append(False)
             else:
                 timeseries_flag.append(len(inlet.y_upstream) > 1)
@@ -301,28 +365,73 @@ class Mixer:
         temps = []
 
         ind_solid = np.argmax(solids_flag)
-        num_dist = self.Inlets[ind_solid].Solid_1.distrib.shape[0]
+        reference_solid = self.Inlets[ind_solid].Solid_1
+        # Allow normalization roundoff without accepting a different material;
+        # zero absolute tolerance preserves distinctions in trace species.
+        composition_rtol = 1e-12  # [-], float64 fraction normalization allowance
+        # Numerical agreement after floating-point moment integration and
+        # amount conversions; this is not a physical modeling tolerance.
+        inventory_rtol = 1e-9  # [-], relative consistency allowance; no absolute floor
+        amount_name = 'mass_flow' if self.is_continuous else 'mass'
+        amount_units = 'kg/s' if self.is_continuous else 'kg'
+        for index, inlet in enumerate(self.Inlets):
+            if not solids_flag[index]:
+                continue
+            solid = inlet.Solid_1
+            if (getattr(solid, 'distrib', None) is None
+                    or getattr(solid, 'x_distrib', None) is None):
+                raise ValueError(
+                    f'Mixer inlet {index}: the solids mixer requires a '
+                    'size-distributed solid on a size grid; moment-only or gridless '
+                    'populations are not supported.')
+            attached_amount = getattr(solid, amount_name)  # [kg] or [kg/s]
+            distribution_moment = np.asarray(solid.getMoments(
+                x_distrib=solid.x_distrib, distrib=solid.distrib, mom_num=3)).item()  # [m**3] or [m**3/s]
+            moment_amount = solid.getDensity() * solid.kv * distribution_moment  # [kg] or [kg/s]
+            if not (np.isfinite(attached_amount) and np.isfinite(moment_amount)
+                    and abs(attached_amount - moment_amount)
+                    <= inventory_rtol * attached_amount):
+                raise ValueError(
+                    f'Mixer inlet {index} has attached solid '
+                    f'{amount_name}={attached_amount:.12g} {amount_units} but '
+                    f'moment-derived {amount_name}={moment_amount:.12g} {amount_units}. '
+                    'The mixer keeps attached masses authoritative while slurry '
+                    'enthalpy weights phases by moment-derived fractions, so '
+                    'inconsistent solids cannot be mixed conservatively; see the '
+                    'deferred MixedPhases inventory/enthalpy reconciliation. '
+                    'Note that moment-mode crystallizer outlets do not refresh '
+                    'their distribution.')
+            if index == ind_solid:
+                continue
+            if solid.kv != reference_solid.kv:
+                raise ValueError(
+                    f'Mixer inlet {index} has kv different from inlet {ind_solid}.')
+            if (solid.mass_frac.shape != reference_solid.mass_frac.shape
+                    or not np.allclose(solid.mass_frac, reference_solid.mass_frac,
+                                       rtol=composition_rtol, atol=0)):
+                raise ValueError(
+                    f'Mixer inlet {index} has mass_frac different from inlet {ind_solid}.')
+            if not np.array_equal(solid.x_distrib, reference_solid.x_distrib):
+                raise ValueError(
+                    f'Mixer inlet {index} has x_distrib different from inlet {ind_solid}.')
+        num_dist = reference_solid.distrib.shape[0]
 
         if any(timeseries_flag):
             pass
         else:
-            self.oper_mode = 'Batch'  # TODO: not necessarily
             for inlet in self.Inlets:
                 if hasattr(inlet, 'Solid_1'):
-                    mass_solid.append(inlet.Solid_1.mass)
-                    mass_liquid.append(inlet.Liquid_1.mass)
+                    mass_solid.append(getattr(inlet.Solid_1, amount_name))
+                    mass_liquid.append(getattr(inlet.Liquid_1, amount_name))
 
                     massfrac_liq.append(inlet.Liquid_1.mass_frac)
 
-                    if 'Slurry' in inlet.__class__.__name__:
-                        distrib_sol.append(inlet.Solid_1.distrib * inlet.vol)
-                    else:  # Cake
-                        distrib_sol.append(inlet.Solid_1.distrib)
+                    distrib_sol.append(inlet.Solid_1.distrib)
 
                     temps.append(inlet.Liquid_1.temp)
                 else:
                     mass_solid.append(0)
-                    mass_liquid.append(inlet.mass)
+                    mass_liquid.append(getattr(inlet, amount_name))
 
                     massfrac_liq.append(inlet.mass_frac)
                     distrib_sol.append(np.zeros(num_dist))
@@ -433,7 +542,21 @@ class Mixer:
 
         return temp_bce
 
-    def balances(self, u_inputs):
+    def balances(self, u_inputs: Mapping[str, np.ndarray]) -> tuple:
+        """Close batch liquid material and adiabatic energy balances.
+
+        Parameters
+        ----------
+        u_inputs : mapping of str to numpy.ndarray
+            Masses [kg] and temperatures [K], shape (num_inlets,), and liquid
+            mass fractions [-], shape (num_inlets, num_species).
+
+        Returns
+        -------
+        tuple
+            Total mass [kg], mass fractions [-] with shape (num_species,),
+            and temperature [K], using ``temp_refer`` [K] on both sides.
+        """
         massfrac_in = u_inputs['mass_frac']
         mass_in = u_inputs['mass']
         temp_in = u_inputs['temp']
@@ -445,9 +568,22 @@ class Mixer:
         # ---------- Energy balance
         h_in = []
         for temp, mass_frac in zip(temp_in, massfrac_in):
-            h_in.append(self.Liquid_1.getEnthalpy(temp, mass_frac=mass_frac))
+            h_in.append(self.Liquid_1.getEnthalpy(
+                temp, mass_frac=mass_frac, temp_ref=self.temp_refer))
 
-        def temp_root(temp):
+        def temp_root(temp: float) -> float:
+            """Evaluate the batch enthalpy residual.
+
+            Parameters
+            ----------
+            temp : float
+                Trial outlet temperature [K].
+
+            Returns
+            -------
+            float
+                Inlet minus outlet energy [J].
+            """
             h_out = self.Liquid_1.getEnthalpy(temp, temp_ref=self.temp_refer,
                                               mass_frac=massfrac)
 
@@ -460,9 +596,23 @@ class Mixer:
 
         return total_mass, massfrac, temp_bce
 
-    def dynamic_balances(self, u_inputs):
+    def dynamic_balances(self, u_inputs: Mapping[str, Sequence[np.ndarray]]) -> tuple:
+        """Mix aligned liquid inlet profiles with a common enthalpy reference.
+
+        Parameters
+        ----------
+        u_inputs : mapping of str to sequence of numpy.ndarray
+            Per-inlet mass flows [kg/s] and temperatures [K], shape
+            (num_times,), and mass fractions [-], shape
+            (num_times, num_species).
+
+        Returns
+        -------
+        tuple
+            Total mass-flow profile [kg/s], mixed mass fractions [-], and
+            temperatures [K], preserving time and species axes.
+        """
         massfrac_in = u_inputs['mass_frac']
-        # mass_in = u_inputs['mass']
         mass_in = u_inputs['mass_flow']
         temp_in = u_inputs['temp']
 
@@ -475,11 +625,26 @@ class Mixer:
         # ---------- Energy balance
         h_in = []
         for temp, mass_frac in zip(temp_in, massfrac_in):
-            h_in.append(self.Liquid_1.getEnthalpy(temp, mass_frac=mass_frac))
+            h_in.append(self.Liquid_1.getEnthalpy(
+                temp, mass_frac=mass_frac, temp_ref=self.temp_refer))
 
         energy_in = sum([mass * enth for (mass, enth) in zip(mass_in, h_in)])
 
-        def temp_root(temp, ind=None):
+        def temp_root(temp: np.ndarray, ind: Optional[int] = None) -> np.ndarray:
+            """Evaluate continuous enthalpy-flow residuals.
+
+            Parameters
+            ----------
+            temp : numpy.ndarray
+                Trial outlet temperature [K], shape (1,) or (num_times,).
+            ind : int, optional
+                Profile row; omitted to evaluate the complete profile.
+
+            Returns
+            -------
+            numpy.ndarray
+                Inlet minus outlet enthalpy flow [J/s].
+            """
             if ind is None:
                 h_out = self.Liquid_1.getEnthalpy(temp, temp_ref=self.temp_refer,
                                                   mass_frac=massfrac)
@@ -493,84 +658,126 @@ class Mixer:
             return balance
 
         temp_seed = sum(temp_in) / 2
-        # temp_bce = fsolve(temp_root, temp_seed)  # TODO: this is very slow
 
         temp_seed = temp_seed[0]
         temp_bce = np.zeros(massfrac.shape[0])
         for idx in range(len(temp_bce)):
-            temp_bce[idx] = fsolve(temp_root, temp_seed, args=(idx, ))
+            temp_bce[idx] = fsolve(temp_root, temp_seed, args=(idx, )).item()  # [K]
             temp_seed = temp_bce[idx]
 
         return total_mass, massfrac, temp_bce
 
-    def balances_solids(self, u_inputs, ind_solids):
-        mass_liquid = u_inputs['mass_liq']
-        mass_solid = u_inputs['mass_solid']
-        massfrac_liq = u_inputs['mass_frac']
+    def balances_solids(self, u_inputs: Mapping[str, np.ndarray],
+                        ind_solids: int) -> tuple:
+        """Mix static liquid and crystal amounts without renormalizing counts.
 
-        distrib_in = u_inputs['num_distrib']
+        Parameters
+        ----------
+        u_inputs : mapping of str to numpy.ndarray
+            Inputs from ``get_inputs_solids``: phase amounts [kg] or [kg/s],
+            liquid fractions [-], temperatures [K], and total-population
+            distributions [#/um] or number-rate distributions [#/um/s].
+        ind_solids : int
+            Index of the inlet supplying the solid composition, size grid
+            [um], and phase-owned volumetric shape factor [-].
 
-        # temp = u_inputs['temp']
+        Returns
+        -------
+        tuple
+            Liquid and solid amounts [kg] or [kg/s], mixed liquid fractions
+            [-], distribution [#/m**3/um] for slurry or [#/um] for cake,
+            and adiabatic temperature [K].
 
-        # Material balances
-        total_solid = sum(mass_solid)
-        total_liquid = sum(mass_liquid)
+        Notes
+        -----
+        ``get_inputs_solids`` validates that inlets share solid composition,
+        size grid, and shape factor before their populations are summed.
+        Each attached solid mass [kg], or flow [kg/s], must also agree with
+        ``rho_solid * kv * mu_3`` within relative tolerance 1e-9, with
+        no absolute floor. The third moment is integrated from the consumed
+        size distribution, not cached moments; moment-only outlets are
+        unsupported. This is a numerical consistency check, not a
+        physical tolerance: until MixedPhases inventory/enthalpy reconciliation
+        is resolved, inconsistent amounts cannot be mixed conservatively.
+        A solid constructor with zero mass consumes raw number counts; the
+        explicit balanced mass is reconciled afterward. Slurry construction
+        then normalizes the total population by the combined phase volume.
+        Cake uses attached phase masses, independent of inlet saturation.
+        The outlet type is selected from the balanced population's solid
+        volume ``kv * mu_3`` [m**3]; zero populations always produce Slurry.
+        Saturation defensively uses the returned Cake's own pore-volume
+        geometry, identical to the mass basis for validated inputs, and
+        assumes uniform filling. An inlet Cake supplies a copied float
+        spatial grid, so later changes to its grid cannot affect the outlet.
+        Continuous inputs always produce a SlurryStream: Cake has no flow
+        or duration contract.
+        """
+        mass_liquid = u_inputs['mass_liq']  # [kg] or [kg/s]
+        mass_solid = u_inputs['mass_solid']  # [kg] or [kg/s]
+        massfrac_liq = u_inputs['mass_frac']  # [-]
+        total_solid = mass_solid.sum()  # [kg] or [kg/s]
+        total_liquid = mass_liquid.sum()  # [kg] or [kg/s]
+        massfrac = mass_liquid.dot(massfrac_liq) / total_liquid  # [-]
+        total_distrib = u_inputs['num_distrib'].sum(axis=0)  # [#/um] or [#/um/s]
 
-        massfrac = np.dot(mass_liquid, massfrac_liq) / total_liquid
-
-        # Physical properties
-        phase_wsolids = self.Inlets[ind_solids]
-        path = phase_wsolids.Liquid_1.path_data
-
-        # TODO: Using phase_wsolids.getDensity() doesnn't allow updating fracs
-        rho_liq = phase_wsolids.Liquid_1.getDensity(mass_frac=massfrac)
-        rho_sol = phase_wsolids.Solid_1.getDensity()
-
-        # Distribution balance
-        vol_liq_in = mass_liquid / rho_liq
-        vol_sol_in = mass_solid / rho_sol
-
-        vol_in = vol_liq_in + vol_sol_in  # slurry volumes
-        vol_total = sum(vol_in)
-
-        vol_liq = total_liquid / rho_liq
-        porosity = phase_wsolids.Solid_1.getPorosity()  # TODO: the inlet is not necessarily a Cake
-
-        vol_pores = total_solid / rho_sol / ((1 - porosity) / porosity)
-        if vol_liq > vol_pores:
-
-            self.type_out = 'Slurry'
-            distrib = distrib_in.sum(axis=0) / vol_total
-
-            if self.is_continuous:
-                self.Outlet = SlurryStream()
-
-                liquid_out = LiquidStream(path, mass_flow=total_liquid,
-                                          mass_frac=massfrac)
-                solid_out = SolidStream(path, mass_flow=total_solid,
-                                        mass_frac=phase_wsolids.Solid_1.mass_frac,
-                                        distrib=distrib,
-                                        x_distrib=phase_wsolids.Solid_1.x_distrib)
+        inlet_solid = self.Inlets[ind_solids].Solid_1
+        path = self.Inlets[ind_solids].Liquid_1.path_data
+        solid_args = dict(mass_frac=inlet_solid.mass_frac, distrib=total_distrib,
+                          x_distrib=inlet_solid.x_distrib, kv=inlet_solid.kv)
+        # Zero constructor mass selects the documented raw-number basis.
+        if self.is_continuous:
+            liquid_out = LiquidStream(path, mass_flow=total_liquid,
+                                      mass_frac=massfrac)
+            solid_out = SolidStream(path, mass_flow=0, **solid_args)
+            solid_out.updatePhase(mass_flow=total_solid)
+            self.Outlet = SlurryStream()
+        else:
+            liquid_out = LiquidPhase(path, mass=total_liquid, mass_frac=massfrac)
+            solid_out = SolidPhase(path, mass=0, **solid_args)
+            solid_out.updatePhase(mass=total_solid)
+            solid_volume = solid_out.kv * solid_out.moments[3]  # [m**3]
+            make_cake = False
+            if solid_volume > 0:
+                porosity = solid_out.getPorosity()  # [-], balanced population packing
+                pore_volume = solid_volume * porosity / (1 - porosity)  # [m**3]
+                make_cake = liquid_out.vol <= pore_volume
+            if make_cake:
+                solid_inlet = self.Inlets[ind_solids]
+                z_external = (np.asarray(solid_inlet.z_external, dtype=float).copy()
+                              if isinstance(solid_inlet, Cake) else None)  # [m]
+                self.Outlet = Cake(z_external=z_external)
             else:
-                liquid_out = LiquidPhase(path, mass=total_liquid,
-                                         mass_frac=massfrac)
-                solid_out = SolidPhase(path, mass=total_solid,
-                                       mass_frac=phase_wsolids.Solid_1.mass_frac,
-                                       distrib=distrib,
-                                       x_distrib=phase_wsolids.Solid_1.x_distrib)
-                self.Outlet = Slurry(vol=vol_total)
+                self.Outlet = Slurry()
 
-            self.Outlet.Phases = (liquid_out, solid_out)
+        self.Outlet.Phases = (liquid_out, solid_out)
+        if isinstance(self.Outlet, Cake):
+            # Use the returned Cake's own geometry defensively; validation
+            # makes the moment and attached-mass volume bases equivalent.
+            pore_volume = self.Outlet.cake_vol * self.Outlet.porosity  # [m**3]
+            self.Outlet.saturation = np.full_like(
+                self.Outlet.z_external, liquid_out.vol / pore_volume,
+                dtype=float)  # [-]
+        if isinstance(self.Outlet, Slurry):
+            self.type_out = 'Slurry'
+            distrib = self.Outlet.distrib  # [#/m**3/um]
         else:
             self.type_out = 'Cake'
-            pass  # TODO: create Cake object
+            distrib = total_distrib  # [#/um]
 
-        # Energy balances
-        temp_out = self.energy_balance(u_inputs)
-
+        temp_out = self.energy_balance(u_inputs)  # [K]
         return total_liquid, total_solid, massfrac, distrib, temp_out
 
-    def solve_unit(self):
+    def solve_unit(self) -> tuple:
+        """Solve instantaneous batch or continuous mixing and publish Outlet.
+
+        Returns
+        -------
+        tuple
+            Liquid-only amounts [kg] or flows [kg/s], mass fractions [-],
+            and temperatures [K]. Solids mixing returns liquid/solid amounts,
+            liquid mass fractions, distribution [#/m**3/um] for slurry or
+            [#/um] for cake, and temperature [K].
+        """
 
         # ---------- Read inputs
         solids_flag = [inlet.__module__ == 'PharmaPy.MixedPhases'
@@ -586,12 +793,19 @@ class Mixer:
             self.states_in_dict = {'Inlet': states_in_dict}  # TODO (solids?)
             u_input, ind_solids = self.get_inputs_solids()
 
-            path = self.Inlets[0].path_data
-            self.Liquid_1 = LiquidPhase(path)
+            path = self.Inlets[ind_solids].Liquid_1.path_data
             if isinstance(u_input['mass_frac'], list):
                 pass
             else:
                 states = self.balances_solids(u_input, ind_solids)
+                # Reuse balanced liquid fractions [-] and the appropriate
+                # batch inventory [kg] or continuous mass flow [kg/s].
+                if self.is_continuous:
+                    self.Liquid_1 = LiquidStream(
+                        path, mass_frac=states[2], mass_flow=states[0])
+                else:
+                    self.Liquid_1 = LiquidPhase(
+                        path, mass_frac=states[2], mass=states[0])
         else:
             self.states_in_dict = {'Inlet': states_in_dict}
             time_prof = [0]  # Static mixer (instantaneous mix)
@@ -636,7 +850,25 @@ class Mixer:
 
         return states
 
-    def retrieve_results(self, time, states):
+    def retrieve_results(self, time: Optional[Sequence[float]], states: tuple) -> None:
+        """Publish mixer balances and commit final phase states.
+
+        Parameters
+        ----------
+        time : sequence of float or None
+            Profile times [s]; None for static solids mixing.
+        states : tuple
+            Returned balance quantities: liquid-only amount [kg] or flow
+            [kg/s], composition [-], temperature [K]; for solids, liquid and
+            solid amounts, liquid composition, slurry volume-specific or cake
+            total distribution, and temperature, as in ``balances_solids``.
+
+        Notes
+        -----
+        Solid populations and phase amounts are already reconciled by
+        ``balances_solids``. Retrieval commits temperature without replacing
+        a total solid population with a volume-specific slurry distribution.
+        """
         solids_flag = [inlet.__module__ == 'PharmaPy.MixedPhases'
                        for inlet in self.Inlets]
 
@@ -650,15 +882,10 @@ class Mixer:
 
             self.outputs = states
 
-            # Update phases
-            self.Outlet.Liquid_1.updatePhase(mass=mass_liq,
-                                             mass_frac=massfrac_liq)
-
+            # Amounts and populations were reconciled during construction.
             self.Outlet.Liquid_1.temp = temp
-
-            self.Outlet.Solid_1.updatePhase(mass=mass_sol, distrib=distrib)
-
             self.Outlet.Solid_1.temp = temp
+            self.Outlet.temp = temp  # [K]
 
             self.timeProf = [0]
 
@@ -880,14 +1107,36 @@ class DynamicCollector:
 
         return dmaterial_dt
 
-    def energy_balance(self, time, fracs, mass, temp, u_inputs):
+    def energy_balance(self, time: float, fracs: np.ndarray, mass: float,
+                       temp: float, u_inputs: Mapping[str, object]) -> float:
+        """Return the adiabatic collector temperature derivative.
+
+        Parameters
+        ----------
+        time : float
+            Current time [s], retained for the balance interface.
+        fracs : numpy.ndarray
+            Tank liquid mass fractions [-], shape (num_species,).
+        mass : float
+            Tank liquid inventory [kg].
+        temp : float
+            Tank temperature [K].
+        u_inputs : mapping of str to object
+            Feed mass flow [kg/s], mass fractions [-], and temperature [K].
+
+        Returns
+        -------
+        float
+            Temperature derivative [K/s], using mass-basis enthalpy and Cp.
+        """
         inlet_flow = u_inputs['mass_flow']
         inlet_fracs = u_inputs['mass_frac']
         inlet_temp = u_inputs['temp']
 
         h_in = self.Inlet.getEnthalpy(temp=inlet_temp, mass_frac=inlet_fracs)
         h_tank = self.Liquid_1.getEnthalpy(temp=temp, mass_frac=fracs)
-        cp_tank = self.Liquid_1.getCp(temp=temp, mass_frac=fracs)
+        cp_tank = self.Liquid_1.getCp(temp=temp, mass_frac=fracs,
+                                       basis='mass')  # [J/kg/K]
 
         dtemp_dt = inlet_flow / mass / cp_tank * (h_in - h_tank)
 

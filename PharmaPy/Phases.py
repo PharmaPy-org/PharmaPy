@@ -534,7 +534,37 @@ class LiquidPhase(ThermoPhysicalManager):
 
         return rhoLiq
 
-    def getCp(self, temp=None, mass_frac=None, mole_frac=None, basis='mole'):
+    def getCp(self, temp: Optional[ArrayLike] = None,
+              mass_frac: Optional[ArrayLike] = None,
+              mole_frac: Optional[ArrayLike] = None,
+              basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Return liquid heat capacity on the requested mixture basis.
+
+        Parameters
+        ----------
+        temp : float or array-like, optional
+            Temperature [K], scalar or shape (num_temperatures,); defaults
+            to the stored phase temperature.
+        mass_frac, mole_frac : array-like, optional
+            Species fractions [-], shape (num_species,) or paired profiles
+            (num_temperatures, num_species). Defaults to stored composition.
+            Fractions matching the requested basis take precedence.
+        basis : {'mass', 'mole'}, optional
+            Mixture basis; defaults to mass, consistently with getEnthalpy.
+            Callers requiring molar heat capacity must request 'mole'.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Heat capacity [J/kg/K] for mass or [J/mol/K] for mole. Scalar
+            temperature and fixed composition return a scalar; profiles
+            retain the temperature row axis, including one-row profiles.
+
+        Raises
+        ------
+        ValueError
+            If basis is neither 'mass' nor 'mole'.
+        """
         if temp is None:
             temp = self.temp
 

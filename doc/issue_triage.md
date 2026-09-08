@@ -25,6 +25,12 @@ Reviewed on 2026-09-07 against branch `fix/issues` at commit `c11abed`.
 | #17 | PR #189 refs it | Tracking epic for #18–#66; addressed through its sub-issues. |
 | #7 | PR #201 refs it | Tracking epic for test coverage; addressed through its sub-issues. |
 
+Reviewed on 2026-09-08 against branch `fix/issues` at commit `c019f07`.
+
+| Issue | Open PR | Basis |
+| --- | --- | --- |
+| #75 | PR #207 | The issue's own comment states the production fix and regression coverage are in PR #207 (DynamicCollector result routing and plotting). |
+
 ## Skipped: planning, scoping, epic, blocked-external, and process issues
 
 Reviewed on 2026-09-07 against branch `fix/issues` at commit `c11abed`.
