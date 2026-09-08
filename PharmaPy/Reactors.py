@@ -15,6 +15,7 @@ from PharmaPy.Connections import get_inputs_new
 
 from PharmaPy.Plotting import plot_function, plot_distrib
 from PharmaPy.Results import DynamicResult
+from PharmaPy.ProcessControl import analyze_controls
 from PharmaPy.CheckModule import check_modeling_objects
 
 import numpy as np
@@ -25,7 +26,8 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.animation import FFMpegWriter
 
 import copy
-from typing import Optional
+from typing import Optional, Union
+from functools import partial
 from itertools import cycle
 
 linestyles = cycle(['-', '--', '-.', ':'])
@@ -118,11 +120,12 @@ class _BaseReactor:
     reset_states : bool (optional)
         Boolean value indicating whether the states should be
         reset before simulation.
-    controls : dict of functions (optional)
-        Dictionary with keys representing the state which is
-        controlled and the value indicating the function to use
-        while computing the variable. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). A tank ``temp`` control removes ``temp``
+        and ``temp_ht`` from the integrated states.
     ht_mode : {'jacket', 'bath'}
         Tank heat-transfer mode. Jacket mode includes a utility temperature
         balance; bath mode prescribes the utility inlet temperature at the
@@ -137,6 +140,15 @@ class _BaseReactor:
     state_events : lsit of dict(s)
         list of dictionaries, each one containing the specification of a
         state event
+
+    Notes
+    -----
+    Heat profiles use ``q_rxn > 0`` for reaction heat generation and
+    ``q_ht > 0`` for utility heat added to the liquid, both [W]. The tank
+    balance is ``C*dT/dt = q_rxn + q_ht + q_flow`` in every thermal mode.
+    Tank ``heat_duty`` [J] is cumulative over all segments since the last
+    reset, using the composite trapezoidal integral of ``q_ht`` and the
+    established ``[integral, 0]`` layout with ``duty_type = [0, 0]``.
     """
     def __init__(self, mask_params,
                  base_units, temp_ref, isothermal,
@@ -158,7 +170,11 @@ class _BaseReactor:
             Whether a solve resets the stored initial phase state.
         controls : dict or None
             Prescribed-state controls, with time [s] as input and the
-            controlled state's units as output (temperature [K]).
+            controlled state's units as output (temperature [K]). Values may
+            be callables or records with ``fun`` and optional ``args`` and
+            ``kwargs`` (defaulting to an empty tuple and dictionary).
+            Bath temperature always comes from ``Utility``; a ``temp_ht``
+            control does not override it.
         h_conv : float
             Liquid-side convective heat-transfer coefficient [W/m**2/K].
         ht_mode : {'jacket', 'bath'}
@@ -176,7 +192,12 @@ class _BaseReactor:
         NotImplementedError
             If ``ht_mode='coil'``; its modeling scope is tracked in issue #168.
         ValueError
-            If ``ht_mode`` is neither 'jacket' nor 'bath'.
+            If ``ht_mode`` is neither 'jacket' nor 'bath', or a control record
+            has unknown keys.
+        KeyError
+            If a control record has no ``fun`` field.
+        TypeError
+            If a control record has invalid callable, args or kwargs values.
         """
         if ht_mode == 'coil':
             raise NotImplementedError(
@@ -233,10 +254,21 @@ class _BaseReactor:
         self.temp_control = None
         self.resid_time = None
         self.oper_mode = None
-        if controls is None:
-            self.controls = {}
-        else:
-            self.controls = controls
+        # analyze_controls fills defaults in records; copy to preserve caller data.
+        self.controls = analyze_controls({
+            name: dict(control) if isinstance(control, dict) else control
+            for name, control in (controls or {}).items()})
+        for name, control in self.controls.items():
+            if set(control) != {'fun', 'args', 'kwargs'}:
+                raise ValueError(
+                    f"Control {name!r} must be callable or have exactly "
+                    "fun, args, kwargs keys")
+            if not callable(control['fun']):
+                raise TypeError(f"Control {name!r} 'fun' must be callable")
+            if (not isinstance(control['args'], (tuple, list))
+                    or not isinstance(control['kwargs'], dict)):
+                raise TypeError(
+                    f"Control {name!r} requires sequence args and dictionary kwargs")
 
         if state_events is None:
             state_events = []
@@ -351,23 +383,138 @@ class _BaseReactor:
         self.u_ht = 1 / (1 / self.h_conv + 1 / utility.h_conv)
         self._Utility = utility
 
-    def reset(self):
+    def reset(self) -> None:
+        """Restore the original phase and reactor profile.
+
+        Notes
+        -----
+        Clears accumulated profiles and solve timing. Direct result retrieval
+        then uses the supplied profile's start and span [s] for differentiation.
+        """
         copy_dict = copy.deepcopy(self.__original_prof__)
 
         self.Liquid_1.__dict__.update(self.__original_phase_dict__)
         self.__dict__.update(copy_dict)
 
         self.profiles_runs = []
+        self.__dict__.pop('_run_start', None)
+        self.__dict__.pop('_run_duration', None)
 
-    def _eval_state_events(self, time, states, sw):
+    def _eval_state_events(self, time: float, states: np.ndarray,
+                           sw: list) -> np.ndarray:
+        """Evaluate shared events in the reactor's named packing order.
+
+        Parameters
+        ----------
+        time : float
+            Absolute simulation time [s].
+        states : numpy.ndarray
+            Packed states in name_states order, with the units in states_di.
+        sw : list of bool
+            Solver event activation switches.
+
+        Returns
+        -------
+        numpy.ndarray
+            Flattened root conditions, in each definition's state units.
+        """
         is_PFR = self.__class__.__name__ == 'PlugFlowReactor'
-
-        events = eval_state_events(
+        return eval_state_events(
             time, states, sw, self.dim_states,
-            self.states_uo, self.state_event_list, sdot=self.derivatives,
+            self.name_states, self.state_event_list, sdot=self.derivatives,
             discretized_model=is_PFR)
 
-        return events
+    def _require_utility(self) -> None:
+        """Require a utility when a tank temperature balance is integrated.
+
+        Raises
+        ------
+        ValueError
+            If a bath or jacket energy balance is active without a Utility.
+        """
+        if 'temp' in self.states_uo and self.Utility is None:
+            raise ValueError(
+                "A Utility is required for an active bath or jacket energy balance")
+
+    def _prescribed_heat(self, time: np.ndarray, temp: np.ndarray,
+                         capacitance: np.ndarray, source: np.ndarray,
+                         flow: Union[np.ndarray, float] = 0,
+                         step_fraction: float = 1 / 1024,
+                         minimum_step: float = 1 / 1024) -> np.ndarray:
+        """Reconstruct utility heat by differentiating the temperature control.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Finite, increasing absolute times [s], shape ``(num_times,)``.
+            A single sample is supported.
+        temp : numpy.ndarray
+            Prescribed temperatures [K], same shape as time.
+        capacitance : numpy.ndarray
+            Liquid thermal capacitance [J/K], same shape as time.
+        source : numpy.ndarray
+            Reaction heat generation [W], same shape as time.
+        flow : numpy.ndarray or float, optional
+            Net sensible feed contribution [W]; zero for Batch.
+        step_fraction : float, optional
+            Fraction of the run duration [-] used as the differentiation
+            step. The default 1/1024 is about 0.1 percent: a numerical design
+            choice balancing local curvature and subtraction roundoff, with
+            a binary fraction to preserve representable time increments.
+        minimum_step : float, optional
+            Absolute minimum step [s], default 1/1024 s (about 1 ms). This
+            numerical floor avoids zero steps for zero-duration runs and
+            limits cancellation for short runs at ordinary process temperatures.
+
+        Returns
+        -------
+        numpy.ndarray
+            Utility heat added to the liquid [W], same shape as time.
+
+        Raises
+        ------
+        ValueError
+            If times are empty, nonfinite or not increasing, or either step
+            parameter is nonpositive or nonfinite.
+
+        Notes
+        -----
+        h = max(step_fraction * run_duration, minimum_step), where solve_unit
+        records run_duration = final_time - t0 before integration. Thus even
+        a single reported point uses the requested run duration. For direct
+        retrieval without a solve, the profile start and span are used.
+        The control's args and kwargs are passed at each evaluation.
+
+        Interior derivatives use (f(t+h)-f(t-h))/(2h), with O(h**2) error.
+        If t-h precedes the run start, use (-3*f(t)+4*f(t+h)-f(t+2*h))/(2*h),
+        also O(h**2). Their truncation bounds are h**2*max|d**3 f/dt**3|/6 and /3,
+        respectively, plus subtraction roundoff. Controls must be evaluable
+        just beyond the run end. Discontinuous controls are differentiated
+        across their jumps; the resulting finite rate is step-dependent.
+        Duties still have the reporting grid's trapezoidal quadrature error.
+        """
+        time = np.asarray(time)  # [s]
+        if (time.ndim != 1 or time.size == 0 or not np.all(np.isfinite(time))
+                or np.any(np.diff(time) <= 0)):
+            raise ValueError("Prescribed heat duty requires finite increasing time samples")
+        if (not np.isfinite(step_fraction) or step_fraction <= 0
+                or not np.isfinite(minimum_step) or minimum_step <= 0):
+            raise ValueError("Control differentiation steps must be finite and positive")
+        run_start = getattr(self, '_run_start', time[0])  # [s]
+        duration = getattr(self, '_run_duration', time[-1] - time[0])  # [s]
+        step = max(step_fraction * duration, minimum_step)  # [s]
+        control = self.controls['temp']
+        function, args, kwargs = control['fun'], control['args'], control['kwargs']
+        slope = np.empty(time.shape)  # [K/s]
+        for index, eval_time in enumerate(time):  # eval_time [s]
+            forward = function(eval_time + step, *args, **kwargs)  # [K]
+            if eval_time - step < run_start:
+                forward_twice = function(eval_time + 2 * step, *args, **kwargs)  # [K]
+                slope[index] = (-3 * temp[index] + 4 * forward - forward_twice) / (2 * step)
+            else:
+                backward = function(eval_time - step, *args, **kwargs)  # [K]
+                slope[index] = (forward - backward) / (2 * step)
+        return capacitance * slope - source - flow
 
     def heat_transfer(self, temp, temp_ht, vol):
         """Return reactor heat transfer duty for supported heat-transfer modes.
@@ -414,6 +561,10 @@ class _BaseReactor:
         cover participating species for Batch and all phase species otherwise;
         Semibatch also carries liquid volume [m**3]. Prescribed reactor
         temperature is recorded among the nonintegrated outputs.
+        CSTR and Semibatch also record nonintegrated inlet histories:
+        ``inlet_mole_conc`` [mol/L], ``inlet_temp`` [K], and ``inlet_vol_flow``
+        [m**3/s]. Their ``q_flow`` [W] is the net sensible heat rate entering
+        the liquid through flow.
         """
         mask_species = [True] * self.num_species
         if self.name_species is not None:
@@ -440,6 +591,13 @@ class _BaseReactor:
             }
 
         reactor_type = self.__class__.__name__
+        if reactor_type in ('CSTR', 'SemibatchReactor'):
+            self.fstates_di.update({
+                'q_flow': {'units': 'W', 'dim': 1},
+                'inlet_mole_conc': {'units': 'mol/L', 'dim': self.num_species,
+                                    'index': self.name_species},
+                'inlet_temp': {'units': 'K', 'dim': 1},
+                'inlet_vol_flow': {'units': 'm**3/s', 'dim': 1}})
 
         if 'temp' not in self.states_uo:
             self.fstates_di['temp'] = {'units': 'K', 'dim': 1, 'type': 'diff'}
@@ -462,7 +620,7 @@ class _BaseReactor:
         name_states = list(self.states_di.keys())
 
         self.name_states = order_state_names(name_states)
-        self.dim_states = [a['dim'] for a in self.states_di.values()]
+        self.dim_states = [self.states_di[name]['dim'] for name in self.name_states]
 
         # Input names
         len_in = [self.num_species, 1, 1]
@@ -507,7 +665,13 @@ class _BaseReactor:
         Notes
         -----
         Bath mode has no jacket state or balance. Its active reactor energy
-        balance uses the utility inlet temperature prescribed at ``time``.
+        balance uses the utility inlet temperature prescribed at ``time``;
+        ``controls['temp_ht']`` never overrides the Utility.
+
+        Raises
+        ------
+        ValueError
+            If an active bath or jacket balance has no Utility.
         """
         # Calculate inlets
         u_values = self.get_inputs(time)
@@ -519,6 +683,7 @@ class _BaseReactor:
                                          ('vol', 'temp', 'temp_ht'),
                                          self.Liquid_1, self.controls)
 
+        self._require_utility()
         if self.ht_mode == 'bath' and 'temp' in self.states_uo:
             di_states['temp_ht'] = self.Utility.get_inputs(time)['temp_in']  # [K]
 
@@ -789,11 +954,12 @@ class BatchReactor(_BaseReactor):
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation.
-    controls : dict of functions (optional, default = None)
-        Dictionary with keys representing the state which is
-        controlled and the value indicating the function to use
-        while computing the variable. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). A tank ``temp`` control removes ``temp``
+        and ``temp_ht`` from the integrated states.
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'jacket')
@@ -857,8 +1023,44 @@ class BatchReactor(_BaseReactor):
 
         return dmaterial_dt
 
-    def energy_balances(self, time, mole_conc, vol, temp, temp_ht, inputs,
-                        heat_prof=False):
+    def energy_balances(
+            self, time: Union[float, np.ndarray], mole_conc: np.ndarray,
+            vol: Union[float, np.ndarray], temp: Union[float, np.ndarray],
+            temp_ht: Optional[Union[float, np.ndarray]], inputs: Optional[dict],
+            heat_prof: bool = False) -> np.ndarray:
+        """Evaluate the liquid temperature balance or heat-rate profile.
+
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Absolute time [s], scalar for the RHS or profile sample vector.
+        mole_conc : numpy.ndarray
+            Concentrations [mol/L], species vector or time-by-species array.
+            Batch uses participating species; CSTR/Semibatch use all species.
+        vol : float or numpy.ndarray
+            Liquid volume [m**3], scalar or one value per time.
+        temp : float or numpy.ndarray
+            Liquid temperature [K], scalar or one value per time.
+        temp_ht : float or numpy.ndarray or None
+            Utility temperature [K]; unused for reconstructed heat profiles.
+        inputs : dict or None
+            CSTR/Semibatch Inlet concentrations [mol/L], temperature [K] and
+            volume flow [m**3/s]. Unused by Batch.
+        heat_prof : bool, optional
+            Return heat rates instead of temperature derivatives.
+
+        Returns
+        -------
+        numpy.ndarray
+            RHS temperature derivatives [K/s], including jacket temperature
+            when active, or time-by-rate profiles [W]: reaction, utility, and
+            (CSTR/Semibatch only) sensible flow. Signs follow _BaseReactor.
+
+        Notes
+        -----
+        Prescribed-temperature heat differentiates the control function as
+        documented in ``_prescribed_heat``, independently of sample spacing.
+        """
 
         temp = np.atleast_1d(temp)
         mole_conc = np.atleast_2d(mole_conc)
@@ -893,17 +1095,15 @@ class BatchReactor(_BaseReactor):
             * vol * 1000  # [W], vol converted from m**3 to L
 
         if heat_prof:
-            if 'temp' in self.controls.keys():
-                heat_profile = -np.column_stack((source_term, ))
-                capacitance = vol[0] * (conc_all *
-                                        1000 * cp_j).sum(axis=1)  # J/K (NCp)
-                self.capacitance = capacitance
-
-            if self.isothermal:
-                heat_profile = -np.column_stack((source_term, -source_term))
+            if 'temp' in self.controls:
+                capacitance = vol * (conc_all * 1000 * cp_j).sum(axis=1)  # [J/K]
+                utility_heat = self._prescribed_heat(
+                    time, temp, capacitance, source_term)  # [W]
+            elif self.isothermal:
+                utility_heat = -source_term  # [W], zero temperature accumulation
             else:
-                ht_term = self.heat_transfer(temp, temp_ht, vol)
-                heat_profile = np.column_stack((source_term, -ht_term))
+                utility_heat = -self.heat_transfer(temp, temp_ht, vol)  # [W]
+            heat_profile = np.column_stack((source_term, utility_heat))  # [W]
 
             return heat_profile
         else:
@@ -931,40 +1131,54 @@ class BatchReactor(_BaseReactor):
 
             return output
 
-        return dtemp_dt
-
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
                    params_control=None, verbose=True, sundials_opts=None):
-        """
-        Batch reactor method for solving the individual unit directly.
-        runtime : float (default = None)
-            Value for total unit runtime.
-        time_grid : list of float (optional, default = None)
-            Optional list of time values for the integrator to use
-            during simulation.
-        eval_sens : bool (optional, default = False)
-            Boolean value indicating whether the parametric
-            sensitivity system will be included during simulation.
-            Must be true to access sensitivity information.     
-        verbose : bool (optional, default = True)
-            Boolean value indicating whether the simulator will
-            output run statistics after simulation is complete.
-            Use true if you want to see the number of function
-            evaluations and wall-clock runtime for the unit.
-        timesim_limit : float (optional, default = 0)
-            Float value of the maximum wall-clock time for the
-            simulator to use before aborting the simulation.
-        return : default 2 arrays (3 if eval_sens is True)
-            Returns 2 or 3 indexed data structures. First, the
-            integrator time points. Second, the state values
-            corresponding to those integrator time points. And
-            if eval_sens is True, third is the parametric
-            sensitivity information of the simulation.
+        """Integrate Batch balances and store cumulative tank results.
+
+        Parameters
+        ----------
+        runtime : float or None, optional
+            Run duration [s], added to elapsed time.
+        time_grid : array-like or None, optional
+            Requested output times [s]; preserves the existing Batch time-grid
+            convention. Use runtime for continuation without a supplied grid.
+        eval_sens : bool, optional
+            Whether to solve parameter sensitivities.
+        params_control : dict or None, optional
+            Control parameters retained for downstream use.
+        verbose : bool, optional
+            Whether to print solver statistics.
+        sundials_opts : dict or None, optional
+            CVode options in the backend's units and conventions.
+
+        Returns
+        -------
+        time : numpy.ndarray
+            Absolute reported times [s], shape (num_times,).
+        states : numpy.ndarray
+            Time-by-state profile: participating concentrations [mol/L],
+            followed by active reactor and jacket temperatures [K].
+        sensitivities : list of numpy.ndarray, optional
+            Returned only for eval_sens=True, in state-unit/parameter-unit
+            bases. One time-by-state array per kinetic parameter.
+
+        Raises
+        ------
+        ValueError
+            If an active bath or jacket balance has no Utility.
+        ImportError
+            If the optional Assimulo solver backend is unavailable.
+
+        Notes
+        -----
+        The requested duration is recorded before integration for control
+        differentiation, including when an event leaves a single output point.
         """
 
         check_modeling_objects(self)
 
         self.set_names()
+        self._require_utility()
 
         # check_stoichiometry(self.Kinetics.stoich_matrix,
         #                     self.Liquid_1.mw[self.mask_species])
@@ -977,6 +1191,9 @@ class BatchReactor(_BaseReactor):
         if time_grid is not None:
             final_time = time_grid[-1] + self.elapsed_time
             self.elapsed_time = time_grid[0]
+
+        self._run_start = self.elapsed_time  # [s], absolute start for control differentiation
+        self._run_duration = final_time - self._run_start  # [s], requested duration
 
         # Initial states
         conc_init = self.Liquid_1.mole_conc[self.mask_species]
@@ -1081,10 +1298,8 @@ class BatchReactor(_BaseReactor):
         Notes
         -----
         Stores ``result`` and outlet data. Heat profiles ``q_rxn`` and ``q_ht``
-        have units [W]. For non-isothermal energy balances, ``q_ht`` is
-        negative for heat lost to the utility. The existing isothermal
-        reconstruction uses the opposite ``q_ht`` sign and also reverses
-        the ``q_rxn`` sign. These sign differences are tracked separately.
+        have units [W] and the _BaseReactor sign convention. Prescribed
+        temperature differentiates the control callable (see _prescribed_heat).
         When the bath energy balance is active, its prescribed utility inlet
         temperature is evaluated at every profile time; no jacket temperature
         is integrated. Jacket mode uses the solved utility temperature.
@@ -1097,6 +1312,9 @@ class BatchReactor(_BaseReactor):
 
         dp = complete_dict_states(time, dp, ('vol', 'temp'), self.Liquid_1,
                                   self.controls)
+        for name in ('vol', 'temp'):
+            if np.ndim(dp[name]) == 0:
+                dp[name] = np.full(time.shape, dp[name])  # vol [m**3], temp [K]
 
         if 'temp_ht' in self.name_states:
             heat_prof = self.energy_balances(**dp, inputs=None, heat_prof=True)
@@ -1116,7 +1334,7 @@ class BatchReactor(_BaseReactor):
         self.result = DynamicResult(self.states_di, self.fstates_di, **dp)
 
         # Heat duty
-        self.heat_duty = np.array([trapezoidal_rule(time, dp['q_ht']), 0])  # J
+        self.heat_duty = np.array([trapezoidal_rule(dp['time'], dp['q_ht']), 0])  # [J]
         self.duty_type = [0, 0]
 
         # Final state
@@ -1157,11 +1375,12 @@ class CSTR(_BaseReactor):
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation.
-    controls : dict of functions (optional, default = None)
-        Dictionary with keys representing the state which is
-        controlled and the value indicating the function to use
-        while computing the variable. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). A tank ``temp`` control removes ``temp``
+        and ``temp_ht`` from the integrated states.
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'jacket')
@@ -1204,10 +1423,16 @@ class CSTR(_BaseReactor):
     def Inlet(self, inlet_object):
         self._Inlet = inlet_object
 
-    def nomenclature(self):
-        # self.name_species = self.Liquid_1.name_species
+    def nomenclature(self) -> None:
+        """Declare integrated tank states and material inlet/output names.
 
-        if not self.isothermal:
+        Notes
+        -----
+        Concentrations [mol/L] and Semibatch volume [m**3] are integrated.
+        Reactor and jacket temperatures [K] are integrated only when the
+        reactor temperature is neither isothermal nor prescribed.
+        """
+        if not self.isothermal and 'temp' not in self.controls:
             self.states_uo.append('temp')
             if self.ht_mode == 'jacket':
                 self.states_uo.append('temp_ht')
@@ -1272,8 +1497,44 @@ class CSTR(_BaseReactor):
 
         return dmaterial_dt
 
-    def energy_balances(self, time, mole_conc, vol, temp, temp_ht, inputs,
-                        heat_prof=False):
+    def energy_balances(
+            self, time: Union[float, np.ndarray], mole_conc: np.ndarray,
+            vol: Union[float, np.ndarray], temp: Union[float, np.ndarray],
+            temp_ht: Optional[Union[float, np.ndarray]], inputs: Optional[dict],
+            heat_prof: bool = False) -> np.ndarray:
+        """Evaluate the liquid temperature balance or heat-rate profile.
+
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Absolute time [s], scalar for the RHS or profile sample vector.
+        mole_conc : numpy.ndarray
+            Concentrations [mol/L], species vector or time-by-species array.
+            Batch uses participating species; CSTR/Semibatch use all species.
+        vol : float or numpy.ndarray
+            Liquid volume [m**3], scalar or one value per time.
+        temp : float or numpy.ndarray
+            Liquid temperature [K], scalar or one value per time.
+        temp_ht : float or numpy.ndarray or None
+            Utility temperature [K]; unused for reconstructed heat profiles.
+        inputs : dict or None
+            CSTR/Semibatch Inlet concentrations [mol/L], temperature [K] and
+            volume flow [m**3/s]. Unused by Batch.
+        heat_prof : bool, optional
+            Return heat rates instead of temperature derivatives.
+
+        Returns
+        -------
+        numpy.ndarray
+            RHS temperature derivatives [K/s], including jacket temperature
+            when active, or time-by-rate profiles [W]: reaction, utility, and
+            (CSTR/Semibatch only) sensible flow. Signs follow _BaseReactor.
+
+        Notes
+        -----
+        Prescribed-temperature heat differentiates the control function as
+        documented in ``_prescribed_heat``, independently of sample spacing.
+        """
 
         inputs = inputs['Inlet']
 
@@ -1321,13 +1582,17 @@ class CSTR(_BaseReactor):
             * vol * 1000  # [W], vol converted from m**3 to L
 
         if heat_prof:
-            if self.isothermal:
-                ht_term = -(source_term + flow_term)
+            if 'temp' in self.controls:
+                capacitance = vol * (mole_conc * 1000 * cp_j).sum(axis=1)  # [J/K]
+                utility_heat = self._prescribed_heat(
+                    time, temp, capacitance, source_term, flow_term)  # [W]
+            elif self.isothermal:
+                utility_heat = -(source_term + flow_term)  # [W]
             else:
-                ht_term = self.heat_transfer(temp, temp_ht, vol)
+                utility_heat = -self.heat_transfer(temp, temp_ht, vol)  # [W]
 
-            heat_profile = np.column_stack((source_term, -ht_term,
-                                            flow_term))
+            heat_profile = np.column_stack((source_term, utility_heat,
+                                            flow_term))  # [W]
             return heat_profile
         else:
             ht_term = self.heat_transfer(temp, temp_ht, vol)
@@ -1358,7 +1623,8 @@ class CSTR(_BaseReactor):
             return output
 
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
-                   params_control=None, verbose=True, sundials_opts=None):
+                   params_control=None, verbose=True, sundials_opts=None,
+                   any_event: bool = True):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -1366,8 +1632,8 @@ class CSTR(_BaseReactor):
         runtime : float or None, optional
             Integration duration [s], added to elapsed simulation time.
         time_grid : array-like or None, optional
-            Requested output times [s]; its last value plus elapsed time
-            overrides ``runtime`` when both are supplied.
+            Output offsets [s] from the retained absolute start time.
+            The last offset overrides ``runtime`` when both are supplied.
         eval_sens : bool, optional
             Direct sensitivity evaluation; only False is supported.
         params_control : dict or None, optional
@@ -1376,6 +1642,9 @@ class CSTR(_BaseReactor):
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
             CVode options in the backend's documented units and conventions.
+        any_event : bool, optional
+            Stop on any eligible event condition (default). False requires all
+            conditions in the current notification, as in SimExec steady-state runs.
 
         Returns
         -------
@@ -1392,6 +1661,16 @@ class CSTR(_BaseReactor):
             If direct sensitivity evaluation is requested.
         ImportError
             If the optional Assimulo backend is unavailable.
+        ValueError
+            If an active bath or jacket energy balance has no Utility.
+
+        Notes
+        -----
+        The initial jacket charge is at Utility.temp_in [K], matching Batch.
+        Dynamic utility inputs drive the jacket balance after initialization.
+        Continuation retains the previous terminal jacket temperature [K].
+        The RHS is evaluated before constructing the solver so input failures
+        propagate directly.
         """
 
         check_modeling_objects(self)
@@ -1404,26 +1683,27 @@ class CSTR(_BaseReactor):
 
         self.params_control = params_control
         self.set_names()
+        self._require_utility()
 
         self.num_concentr = len(self.Liquid_1.mole_conc)
         self.args_inputs = (self, self.num_concentr, 0)
+
+        if self.reset_states:
+            self.reset()
 
         if runtime is not None:
             final_time = runtime + self.elapsed_time
 
         if time_grid is not None:
-            final_time = time_grid[-1] + self.elapsed_time
-
-        # Reset states
-        if self.reset_states:
-            self.reset()
+            time_grid = np.asarray(time_grid) + self.elapsed_time  # [s]
+            final_time = time_grid[-1]  # [s]
 
         vol_tank = self.Liquid_1.vol / self.vol_offset
         self.diam = (4 / np.pi * vol_tank)**(1/3)
         self.area_base = np.pi/4 * self.diam**2
 
-        # # Define inlet streams
-        # self.Inlet.Liquid_1.getProps()
+        self._run_start = self.elapsed_time  # [s], absolute start for control differentiation
+        self._run_duration = final_time - self._run_start  # [s], requested duration
 
         # Initial states
         states_init = self.Liquid_1.mole_conc
@@ -1431,22 +1711,32 @@ class CSTR(_BaseReactor):
         if 'temp' in self.states_uo:
             states_init = np.append(states_init, self.Liquid_1.temp)
             if 'temp_ht' in self.states_uo:
-                tht_init = self.Utility.evaluate_inputs(0)['temp_in']
+                if self.profiles_runs:
+                    tht_init = self.profiles_runs[-1]['temp_ht'][-1]  # [K]
+                else:
+                    tht_init = self.Utility.temp_in  # [K], nominal initial jacket charge
                 states_init = np.append(states_init, tht_init)
 
         self.resid_time = self.Liquid_1.vol / self.Inlet.vol_flow
 
         # Create problem
         merged_params = self.Kinetics.concat_params()
-        def fobj(time, states): return self.unit_model(
-            time, states, merged_params)
+        call_fn, _, kw_problem = get_sundials_callable(
+            self.state_event_list, False, merged_params,
+            self.unit_model, self.get_jacobians)
+        self.derivatives = call_fn(self.elapsed_time, states_init,
+                                   *list(kw_problem.values()))
 
-        problem = Explicit_Problem(fobj, states_init,
-                                   t0=self.elapsed_time)
+        problem = Explicit_Problem(call_fn, states_init,
+                                   t0=self.elapsed_time, **kw_problem)
+        if self.state_event_list:
+            problem.state_events = self._eval_state_events
+            problem.handle_event = partial(
+                handle_events, state_event_list=self.state_event_list,
+                any_event=any_event)
 
         # Set solver
         solver = CVode(problem)
-        # solver = LSODAR(problem)
 
         if sundials_opts is not None:
             for name, val in sundials_opts.items():
@@ -1466,7 +1756,6 @@ class CSTR(_BaseReactor):
         self.states = states[-1]
 
         self.retrieve_results(time, states)
-        # self.flatten_states()
 
         return time, states
 
@@ -1484,11 +1773,17 @@ class CSTR(_BaseReactor):
 
         Notes
         -----
+        Commits terminal composition, volume and temperature to Liquid_1 and
+        advances elapsed_time to the absolute endpoint [s]. Profiles include
+        all segments, with their shared endpoint included once. Each segment
+        stores inlet_mole_conc [mol/L], inlet_temp [K], inlet_vol_flow [m**3/s]
+        and q_flow [W]. The earlier segment owns the shared endpoint; changing
+        Inlet later does not rewrite these samples or downstream flow history. heat_duty [J]
+        is [the composite trapezoidal integral of q_ht over absolute time, 0];
+        duty_type is [0, 0], matching Batch's existing accounting layout.
         Stores ``result`` and outlet data. Heat profiles ``q_rxn`` and ``q_ht``
-        have units [W]. For non-isothermal energy balances, ``q_ht`` is
-        negative for heat lost to the utility. The existing isothermal
-        reconstruction uses the opposite ``q_ht`` sign; this difference
-        is tracked separately.
+        have units [W] and the _BaseReactor sign convention. Prescribed
+        temperature differentiates the control callable (see _prescribed_heat).
         When the bath energy balance is active, its prescribed utility inlet
         temperature is evaluated at every profile time; no jacket temperature
         is integrated. Jacket mode uses the solved utility temperature.
@@ -1501,6 +1796,9 @@ class CSTR(_BaseReactor):
 
         dp = complete_dict_states(time, dp, ('vol', 'temp'), self.Liquid_1,
                                   self.controls)
+        for name in ('vol', 'temp'):
+            if np.ndim(dp[name]) == 0:
+                dp[name] = np.full(time.shape, dp[name])  # vol [m**3], temp [K]
 
         inputs = self.get_inputs(time)
 
@@ -1516,26 +1814,37 @@ class CSTR(_BaseReactor):
 
         dp['q_rxn'] = heat_prof[:, 0]
         dp['q_ht'] = heat_prof[:, 1]
+        dp['q_flow'] = heat_prof[:, 2]  # [W], net sensible feed contribution
+        # Snapshot each segment: concentrations [mol/L], temperature [K], flow [m**3/s].
+        for name in ('mole_conc', 'temp', 'vol_flow'):
+            shape = (len(time), self.num_species) if name == 'mole_conc' else time.shape
+            dp['inlet_' + name] = np.broadcast_to(inputs['Inlet'][name], shape).copy()
 
         self.profiles_runs.append(dp)
+        dp = self.flatten_states()
+
+        self.heat_duty = np.array([
+            trapezoidal_rule(dp['time'], dp['q_ht']), 0])  # [J]
+        self.duty_type = [0, 0]
+        self.elapsed_time = time[-1]  # [s], absolute endpoint
+        self.Liquid_1.updatePhase(temp=dp['temp'][-1],
+                                  mole_conc=dp['mole_conc'][-1],
+                                  vol=dp['vol'][-1])
 
         self.result = DynamicResult(self.states_di, self.fstates_di, **dp)
 
         # Outlet stream/phase
         path = self.Inlet.path_data
         if self.__class__.__name__ == 'SemibatchReactor':
-            self.Liquid_1.updatePhase(temp=dp['temp'][-1],
-                                      mole_conc=dp['mole_conc'][-1],
-                                      vol=dp['vol'][-1])
             self.Outlet = self.Liquid_1
         else:
             self.Outlet = LiquidStream(path, temp=dp['temp'][-1],
                                        mole_conc=dp['mole_conc'][-1],
-                                       vol_flow=inputs['Inlet']['vol_flow'][-1])
+                                       vol_flow=dp['inlet_vol_flow'][-1])
 
         # Output vector
         outputs = {key: dp[key] for key in ('mole_conc', 'temp')}
-        outputs['vol_flow'] = inputs['Inlet']['vol_flow']
+        outputs['vol_flow'] = dp['inlet_vol_flow']  # [m**3/s], retained inlet history
         self.outputs = outputs
 
 
@@ -1565,11 +1874,12 @@ class SemibatchReactor(CSTR):
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation.
-    controls : dict of functions (optional, default = None)
-        Dictionary with keys representing the state which is
-        controlled and the value indicating the function to use
-        while computing the variable. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). A tank ``temp`` control removes ``temp``
+        and ``temp_ht`` from the integrated states.
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'jacket')
@@ -1608,9 +1918,17 @@ class SemibatchReactor(CSTR):
 
         self.material_from_upstream = False
 
-    def nomenclature(self):
+    def nomenclature(self) -> None:
+        """Declare integrated tank states and material inlet/output names.
+
+        Notes
+        -----
+        Concentrations [mol/L] and Semibatch volume [m**3] are integrated.
+        Reactor and jacket temperatures [K] are integrated only when the
+        reactor temperature is neither isothermal nor prescribed.
+        """
         self.states_uo.append('vol')
-        if not self.isothermal:
+        if not self.isothermal and 'temp' not in self.controls:
             self.states_uo.append('temp')
 
             if self.ht_mode == 'jacket':
@@ -1627,7 +1945,8 @@ class SemibatchReactor(CSTR):
         return np.append(dc_dt, dvol_dt)
 
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
-                   params_control=None, verbose=True, sundials_opts=None):
+                   params_control=None, verbose=True, sundials_opts=None,
+                   any_event: bool = True):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -1635,8 +1954,8 @@ class SemibatchReactor(CSTR):
         runtime : float or None, optional
             Integration duration [s], added to elapsed simulation time.
         time_grid : array-like or None, optional
-            Requested output times [s]; its last value plus elapsed time
-            overrides ``runtime`` when both are supplied.
+            Output offsets [s] from the retained absolute start time.
+            The last offset overrides ``runtime`` when both are supplied.
         eval_sens : bool, optional
             Direct sensitivity evaluation; only False is supported.
         params_control : dict or None, optional
@@ -1645,6 +1964,9 @@ class SemibatchReactor(CSTR):
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
             CVode options in the backend's documented units and conventions.
+        any_event : bool, optional
+            Stop on any eligible event condition (default). False requires all
+            conditions in the current notification, as in SimExec steady-state runs.
 
         Returns
         -------
@@ -1661,6 +1983,16 @@ class SemibatchReactor(CSTR):
             If direct sensitivity evaluation is requested.
         ImportError
             If the optional Assimulo backend is unavailable.
+        ValueError
+            If an active bath or jacket energy balance has no Utility.
+
+        Notes
+        -----
+        The initial jacket charge is at Utility.temp_in [K], matching Batch.
+        Dynamic utility inputs drive the jacket balance after initialization.
+        Continuation retains the previous terminal jacket temperature [K].
+        The RHS is evaluated before constructing the solver so input failures
+        propagate directly.
         """
 
 
@@ -1674,16 +2006,20 @@ class SemibatchReactor(CSTR):
 
         self.params_control = params_control
         self.set_names()
+        self._require_utility()
+
+        if self.reset_states:
+            self.reset()
 
         if runtime is not None:
             final_time = runtime + self.elapsed_time
 
         if time_grid is not None:
-            final_time = time_grid[-1] + self.elapsed_time
+            time_grid = np.asarray(time_grid) + self.elapsed_time  # [s]
+            final_time = time_grid[-1]  # [s]
 
-        # Reset states
-        if self.reset_states:
-            self.reset()
+        self._run_start = self.elapsed_time  # [s], absolute start for control differentiation
+        self._run_duration = final_time - self._run_start  # [s], requested duration
 
         # Initial states
         states_init = self.Liquid_1.mole_conc
@@ -1692,15 +2028,26 @@ class SemibatchReactor(CSTR):
         if 'temp' in self.states_uo:
             states_init = np.append(states_init, self.Liquid_1.temp)
             if 'temp_ht' in self.states_uo:
-                tht_init = self.Utility.evaluate_inputs(0)['temp_in']
+                if self.profiles_runs:
+                    tht_init = self.profiles_runs[-1]['temp_ht'][-1]  # [K]
+                else:
+                    tht_init = self.Utility.temp_in  # [K], nominal initial jacket charge
                 states_init = np.append(states_init, tht_init)
 
         merged_params = self.Kinetics.concat_params()
-        def fobj(time, states): return self.unit_model(
-            time, states, merged_params)
+        call_fn, _, kw_problem = get_sundials_callable(
+            self.state_event_list, False, merged_params,
+            self.unit_model, self.get_jacobians)
+        self.derivatives = call_fn(self.elapsed_time, states_init,
+                                   *list(kw_problem.values()))
 
-        problem = Explicit_Problem(fobj, states_init,
-                                   t0=self.elapsed_time)
+        problem = Explicit_Problem(call_fn, states_init,
+                                   t0=self.elapsed_time, **kw_problem)
+        if self.state_event_list:
+            problem.state_events = self._eval_state_events
+            problem.handle_event = partial(
+                handle_events, state_event_list=self.state_event_list,
+                any_event=any_event)
 
         # Set solver
         solver = CVode(problem)
@@ -1806,11 +2153,13 @@ class PlugFlowReactor(_BaseReactor):
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation.
-    controls : dict of functions (optional, default = None)
-        Dictionary with keys representing the state which is
-        controlled and the value indicating the function to use
-        while computing the variable. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). PFR accepts and documents these forms but
+        does not yet apply controls to its integrated states. The tank
+        behavior of removing ``temp``/``temp_ht`` does not apply to PFR.
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'bath')
@@ -2334,7 +2683,23 @@ class PlugFlowReactor(_BaseReactor):
 
         return time, states_solver
 
-    def retrieve_results(self, time, states):
+    def retrieve_results(self, time: np.ndarray, states: np.ndarray) -> None:
+        """Store distributed PFR results and outlet profiles for this run.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Absolute reported times [s], shape (num_times,).
+        states : numpy.ndarray
+            Time-by-packed-state array, with node-major concentrations [mol/L]
+            and active temperatures [K] in name_states order at each node.
+
+        Notes
+        -----
+        Heat rates [W] follow the _BaseReactor sign convention. PFR retains
+        its existing per-run heat_duty [J]; the cumulative tank contract in
+        _BaseReactor Notes applies to Batch, CSTR and Semibatch only.
+        """
         time = np.asarray(time)
 
         indexes = {key: self.states_di[key].get('index', None)

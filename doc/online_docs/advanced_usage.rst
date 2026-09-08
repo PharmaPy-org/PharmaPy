@@ -17,6 +17,15 @@ If a given state is not scalar but has to be indexed, e.g. concentration for a g
 
    my_state_event = {'state_name': 'mole_conc', 'state_idx': 0, 'value': 0.2} 
 
+For distributed models, :code:`state_idx` selects a component across all nodes. Use :code:`node_idx` to select particular nodes as well; omitting either index retains that axis. For example, monitoring component 1 at three nodes requires three conditions:
+
+.. testcode::
+
+   my_state_event = {'state_name': 'mole_conc', 'state_idx': 1,
+                     'value': 0.2, 'num_conditions': 3}  # threshold [mol/L]
+
+To monitor only the last of those nodes, add :code:`'node_idx': 2` and set :code:`'num_conditions': 1`. Multiple component or node indices can be supplied as lists. Conditions are flattened in node-major order within each definition, followed by the next definition in the event list. :code:`num_conditions` defaults to one and must equal the selected condition count, including for vector-valued callable events. Direction filters and event messages apply to the definition owning each condition.
+
 More advanced usage of state events is allowed by passing a callable directly to PharmaPy. This callable will be able to make full use of all the instantaneous state and derivative information, which is passed by PharmaPy at each integration step. In this case, the function is passed using a dictionary with the keyword :code:`callable`:
 
 .. testcode::
@@ -40,6 +49,24 @@ An example of a callable passed as a state event is when solubility wants to be 
        return event
 
 In this case, the returned :code:`event` variable will be positive until the solubility limit is reached. When that happens, its sign change will be detected by PharmaPy and the integration will be interruped.
+
+Reactor controls
+================
+
+Tank reactors accept a :code:`controls` dictionary mapping state names to callables :code:`f(time)` or records containing :code:`fun` and optional :code:`args` and :code:`kwargs`. The latter default to an empty tuple and dictionary. For example, these controls both prescribe a temperature initially at 320 K, increasing at 0.5 K/s:
+
+.. testcode::
+
+   controls = {'temp': lambda time: 320.0 + 0.5 * time}
+   controls_record = {
+       'temp': {'fun': lambda time, initial, rate: initial + rate * time,
+                'args': (320.0,), 'kwargs': {'rate': 0.5}}}
+
+Time is in seconds and the returned temperature is in kelvin. A :code:`temp` control removes :code:`temp` and :code:`temp_ht` from the integrated tank states. PFR accepts these control forms but does not yet apply them to its integrated states. In bath mode, the Utility inlet temperature takes precedence over a :code:`temp_ht` control.
+
+Tank heat rates use positive :code:`q_rxn` for reaction heat generation and positive :code:`q_ht` for utility heat added to the liquid, both in watts. Prescribed-temperature duty uses the control callable's temperature derivative in the energy balance. The differentiation step is 1/1024 of the requested run duration, with a minimum of 1/1024 s. Central differences have second-order error; a second-order forward difference is used when the central stencil would precede the run start. Controls must be evaluable slightly beyond the run end. Discontinuous controls are differentiated across their jumps, so the apparent rate at a jump depends on the differentiation step.
+
+A single reported time still uses the requested run duration for differentiation. Direct result retrieval without a preceding solve uses the supplied profile's start and span, with the same minimum step. :code:`heat_duty` is the cumulative trapezoidal integral in joules over all tank segments since the last reset; its accuracy also depends on the reporting grid. Each CSTR/Semibatch segment retains its sampled inlet concentration, temperature and flow. At a shared segment endpoint the earlier sample is retained, so replacing an inlet does not rewrite its historical flow profile.
 
 Interpolators
 ===============
