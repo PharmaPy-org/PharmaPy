@@ -276,8 +276,8 @@ def test_crystallizer_parameter_column_handoff(data_path, option, reformulate):
 
     The fixture has one cubic metre of slurry, with the solid volume deducted
     from the liquid inventory, so cached normalized moments match the state.
-    #222 still blocks solver-supplied parameter propagation; the separate #39
-    RHS tests perturb the stored kinetics until that handoff is repaired.
+    Rates are cached through unit_model with solver-supplied parameters;
+    the growth-prefactor column is also checked through that public handoff.
 
     Parameters
     ----------
@@ -297,6 +297,7 @@ def test_crystallizer_parameter_column_handoff(data_path, option, reformulate):
     unit.Liquid_1 = LiquidPhase(path, mass_frac=composition, temp=TEMPERATURE,
                                 vol=liquid_volume)
     unit.Solid_1 = SolidPhase(path, mass_frac=composition, moments=MOMENTS, kv=KV)
+    unit.Phases = (unit.Liquid_1, unit.Solid_1)
     # Assign the actual kinetics; explicit state layout avoids solver setup.
     unit._Kinetics = kinetics
     unit.num_distr = len(MOMENTS)
@@ -311,8 +312,9 @@ def test_crystallizer_parameter_column_handoff(data_path, option, reformulate):
     total_moments = MOMENTS * volume * length_conversion ** np.arange(4)  # [um**j]
     concentrations = np.array([3.5, 0.0, 0.0, 0.0, 0.0])  # [kg/m**3]
     states = np.concatenate((total_moments, concentrations, [liquid_volume]))  # mixed units above
-    kinetics.get_kinetics(concentrations, TEMPERATURE, KV, MOMENTS)
-    jacobian = unit.jac_params(0.0, states, kinetics.concat_params())  # [state/s/parameter]
+    parameters = kinetics.concat_params()  # [native kinetic parameter units]
+    unit.unit_model(0.0, states, params=parameters)
+    jacobian = unit.jac_params(0.0, states, parameters)  # [state/s/parameter]
     force = 1.5 if option == 'absolute' else 0.75  # [kg/m**3] or [-]
     expected_nucleation = np.array([  # [#/m**3/s/parameter]
         central_partial(kinetics, name, column, force)
@@ -325,3 +327,13 @@ def test_crystallizer_parameter_column_handoff(data_path, option, reformulate):
     np.testing.assert_allclose(jacobian[1, 7:10], total_moments[0] * expected_growth,
                                rtol=FD_RTOL, atol=0)
     assert jacobian.shape == (len(states), 13)
+
+    growth_column = 7  # growth prefactor follows three primary/four secondary columns
+    step = FD_REL_STEP * max(abs(parameters[growth_column]), 1.0)  # [parameter unit]
+    plus, minus = parameters.copy(), parameters.copy()  # [native parameter units]
+    plus[growth_column] += step
+    minus[growth_column] -= step
+    upper = unit.unit_model(0.0, states, params=plus)  # [state unit/s]
+    lower = unit.unit_model(0.0, states, params=minus)  # [state unit/s]
+    rhs_partial = (upper[1] - lower[1]) / (2 * step)  # [um/s/parameter unit]
+    assert jacobian[1, growth_column] == pytest.approx(rhs_partial, rel=FD_RTOL, abs=0)

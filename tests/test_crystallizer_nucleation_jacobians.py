@@ -1,8 +1,7 @@
 """#39 Jacobians on total moments, with 10% solids relative to liquid volume.
 
 Real phases and kinetics drive unit_model without a solver. Parameter probes
-update the kinetics object because solver-vector propagation is deferred in
-#222; they must use unit_model(params=...) once that issue is fixed.
+use its params argument to exercise the #222 solver-vector handoff.
 """
 
 import numpy as np
@@ -87,6 +86,19 @@ def test_nucleation_state_row_matches_rhs(data_path, moment_basis, column):
 @pytest.mark.parametrize('concentration,column', [(4.0, 0), (4.0, 3), (4.0, 6),
                                                   (1.0, 10), (1.0, 11), (1.0, 12)])
 def test_parameter_columns_match_rhs(data_path, moment_basis, concentration, column):
+    """Compare analytical columns against solver-supplied parameter probes.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository database paths.
+    moment_basis : str
+        Area or volume basis for secondary nucleation.
+    concentration : float
+        Target concentration [kg/m**3].
+    column : int
+        Parameter position in CrystKinetics.concat_params().
+    """
     unit, states = make_unit(data_path, moment_basis, concentration)
     kinetics = unit.Kinetics
     parameters = kinetics.concat_params()  # [native parameter units]
@@ -96,11 +108,8 @@ def test_parameter_columns_match_rhs(data_path, moment_basis, concentration, col
     plus, minus = parameters.copy(), parameters.copy()  # [parameter units]
     plus[column] += step
     minus[column] -= step
-    kinetics.set_params(plus)
-    upper = unit.unit_model(0.0, states)  # [state unit/s]
-    kinetics.set_params(minus)
-    lower = unit.unit_model(0.0, states)  # [state unit/s]
-    kinetics.set_params(parameters)
+    upper = unit.unit_model(0.0, states, params=plus)  # [state unit/s]
+    lower = unit.unit_model(0.0, states, params=minus)  # [state unit/s]
     expected = (upper - lower) / (2 * step)  # [state unit/s/parameter unit]
     np.testing.assert_allclose(actual[:, column], expected, rtol=FD_RTOL, atol=0)
 

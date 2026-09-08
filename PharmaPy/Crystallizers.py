@@ -37,7 +37,8 @@ import numpy as np
 eps = np.finfo(float).eps
 gas_ct = 8.314  # J/mol/K
 
-# Design assumption: jacket volume as a fraction of tank volume. Introduced
+# Design assumption: jacket volume as a fraction of Batch slurry volume or
+# MSMPR/Semibatch vessel volume (working vol_tank / vol_offset). Introduced
 # by the original author in e1e8164 without a cited source; issue #113 asks
 # the author to confirm it. It affects only the jacket thermal transient:
 # jacket volume cancels at jacket steady state.
@@ -113,7 +114,8 @@ class _BaseCryst:
         scale : float
             Crystal-size-distribution scaling factor [-].
         vol_tank : float or None
-            Initial vessel volume [m**3], or None to obtain it from the phase.
+            Working vessel volume [m**3], or None to infer it at initialization.
+            This stored volume is not expanded by a headspace factor.
         controls : dict or None
             Controlled-state callables. Each callable must return the units of
             its controlled state, such as temperature [K].
@@ -121,7 +123,8 @@ class _BaseCryst:
             If True, exclude utility heat transfer while retaining the vessel
             energy balance.
         rad_zero : float
-            Lower boundary of the first crystal-size bin [m].
+            Nucleation size [um], on the same length basis as the CSD grid.
+            Zero represents point nuclei.
         reset_states : bool
             If True, reset model states before a subsequent simulation.
         h_conv : float
@@ -129,8 +132,8 @@ class _BaseCryst:
         vol_ht : float or None
             Finite, strictly positive cooling-jacket volume [m**3].
             If None, use the historical 0.14 design ratio: current slurry
-            volume for Batch, tank volume for
-            MSMPR and Semibatch. See DEFAULT_JACKET_VOLUME_RATIO and #113.
+            volume for Batch, vessel volume (working vol_tank / vol_offset)
+            for MSMPR and Semibatch. See DEFAULT_JACKET_VOLUME_RATIO and #113.
         basis : {'mass_conc', 'mass_frac'}
             Composition basis, respectively [kg/m**3] or [kg/kg].
         jac_type : {'finite_diff', 'analytical', 'AD', None}
@@ -203,7 +206,7 @@ class _BaseCryst:
             self.controls = analyze_controls(controls)
 
         self.method = method
-        self.rad = rad_zero
+        self.rad = rad_zero  # [um], same length basis as the CSD grid
 
         self.dx = None
         self.sensit = None
@@ -248,7 +251,6 @@ class _BaseCryst:
         self.Slurry = None
 
         # Parameters for optimization
-        self.params_iter = None
         self.vol_mult = 1
 
         if state_events is None:
@@ -489,7 +491,84 @@ class _BaseCryst:
 
         return inputs
 
-    def method_of_moments(self, mu, conc, temp, params, rho_cry, vol=1):
+    def _set_active_params(self, params: "np.ndarray | None") -> None:
+        """Install an active kinetic vector while retaining fixed parameters.
+
+        Parameters
+        ----------
+        params : ndarray or None
+            One-dimensional active parameter vector in mask_params order,
+            with the native units and transformations of concat_params().
+            None retains all stored parameters. Fractional values are preserved
+            even when stored kinetics were initialized with integers.
+
+        Raises
+        ------
+        ValueError
+            If params is not a vector with one entry per True mask_params item.
+        """
+        if params is None:
+            return
+        active_params = np.asarray(params)  # [native active parameter units]
+        expected_count = np.count_nonzero(self.mask_params)
+        if active_params.shape != (expected_count,):
+            raise ValueError(
+                f"mask_params selects {expected_count} active parameter(s); "
+                f"params must have shape ({expected_count},), "
+                f"got {active_params.shape}.")
+        merged_params = np.asarray(self.Kinetics.concat_params(), dtype=float)
+        # [native parameter units], floating buffer preserves fractional iterates
+        merged_params[self.mask_params] = active_params
+        self.Kinetics.set_params(merged_params)
+
+    def method_of_moments(self, mu: np.ndarray, conc: np.ndarray,
+                          temp: float, params: "np.ndarray | None",
+                          rho_cry: float, vol: float = 1) -> tuple:
+        """Evaluate crystal moment derivatives and the physical mass source.
+
+        Parameters
+        ----------
+        mu : ndarray
+            Shape (num_moments,), total moments [um**n] for Batch/Semibatch
+            or volume-specific moments [um**n/m**3] for MSMPR.
+        conc : ndarray
+            Liquid species mass concentrations [kg/m**3], shape (num_species,).
+        temp : float
+            Slurry temperature [K].
+        params : ndarray or None
+            Active kinetic parameters in mask_params order, using the native
+            units and transformations of CrystKinetics.concat_params(). None
+            retains the stored parameters. Fixed parameter values are retained.
+        rho_cry : float
+            Crystal density [kg/m**3].
+        vol : float, optional
+            Slurry volume [m**3] for total moments; use the default unit volume
+            for volume-specific MSMPR moments.
+
+        Returns
+        -------
+        dmu_dt : ndarray
+            Moment derivatives [um**n/s] or [um**n/m**3/s], shape mu.shape.
+        mass_transf : ndarray
+            Crystal mass source [kg/s] or [kg/m**3/s], shape (1,).
+
+        Raises
+        ------
+        ValueError
+            If params does not have one entry per active mask_params item.
+
+        Notes
+        -----
+        Supplied active parameters are installed on the kinetics object so its
+        cached rates and parameter values agree for subsequent Jacobian calls.
+        The nucleus size rad is in [um]. Length conversion uses 1 um = 1e-6 m.
+        The pre-existing finite-radius nucleation terms above order zero and
+        their mass source omit vol for total moments; correcting this is
+        tracked for the next crystallizer increment after #222/#227.
+        The RHS and retrieval use moment states [um**n], which conflicts with
+        states_di['mu_n']['units'] and the SI moment seeding in solve_unit.
+        That basis mismatch is also tracked for the next increment.
+        """
         kv = self.Solid_1.kv
 
         # Kinetics
@@ -498,6 +577,8 @@ class _BaseCryst:
             comp_kin = conc / rho_liq
         else:
             comp_kin = conc
+
+        self._set_active_params(params)
 
         # Kinetic terms
         mu_susp = mu*(1e-6)**np.arange(self.num_distr) / vol  # m**n/m**3_susp
@@ -520,8 +601,66 @@ class _BaseCryst:
 
         return dmu_dt, mass_transf
 
-    def fvm_method(self, csd, moms, conc, temp, params, rho_cry,
-                   output='dstates', vol=1):
+    def fvm_method(self, csd: np.ndarray, moms: np.ndarray,
+                   conc: np.ndarray, temp: float, params: "np.ndarray | None",
+                   rho_cry: float, output: str = 'dstates',
+                   vol: float = 1) -> "tuple | np.ndarray":
+        """Evaluate FVM population fluxes and physical crystal mass generation.
+
+        Parameters
+        ----------
+        csd : ndarray
+            Numerically scaled CSD, shape (num_bins,). Before multiplication
+            by scale [-], its basis is [#/um] for Batch/Semibatch or
+            [#/m**3/um] for MSMPR. The size grid and dx are in [um].
+        moms : ndarray
+            Unscaled physical moments, shape (num_moments,), with order n in
+            [m**n] for Batch/Semibatch or [m**n/m**3] for MSMPR.
+        conc : ndarray
+            Liquid species mass concentrations [kg/m**3], shape (num_species,).
+        temp : float
+            Slurry temperature [K].
+        params : ndarray or None
+            Active kinetic parameters in mask_params order, using the native
+            units and transformations of CrystKinetics.concat_params(). None
+            retains the stored parameters. Fixed parameter values are retained.
+        rho_cry : float
+            Crystal density [kg/m**3].
+        output : {'flux', 'dstates'}, optional
+            'flux' returns scaled population fluxes; 'dstates' (default)
+            returns the CSD derivative and physical mass source.
+        vol : float, optional
+            Slurry volume [m**3] for total CSDs; use the default unit volume
+            for volume-specific MSMPR distributions.
+
+        Returns
+        -------
+        dcsd_dt, mass_transfer : tuple of ndarray
+            For output='dstates', scaled derivatives with shape csd.shape
+            in [#/um/s] or [#/m**3/um/s], and a scalar unscaled physical mass
+            source [kg/s] or [kg/m**3/s].
+        flux : ndarray
+            For output='flux', scaled bin-face fluxes [#/s] or [#/m**3/s],
+            shape (num_bins + 1,).
+
+        Raises
+        ------
+        ValueError
+            If params does not have one entry per active mask_params item,
+            or output is neither 'flux' nor 'dstates'.
+
+        Notes
+        -----
+        Supplied active parameters are installed on the kinetics object so its
+        cached rates and parameter values agree for subsequent Jacobian calls.
+        Physical crystal volume generation is 3*kv*(G+D)*mu_2 plus B*vol
+        times the nucleus volume kv*rad**3. G and D [um/s] require a linear
+        conversion to [m/s]; rad [um] requires a cubic conversion to [m**3].
+        Numerical scale affects population fluxes only.
+        """
+
+        if output not in ('flux', 'dstates'):
+            raise ValueError("output must be 'flux' or 'dstates'.")
 
         mu_2 = moms[2]
 
@@ -534,31 +673,27 @@ class _BaseCryst:
         else:
             comp_kin = conc
 
+        self._set_active_params(params)
+
         nucl, growth, dissol = self.Kinetics.get_kinetics(comp_kin, temp,
                                                           kv_cry, moms)
 
-        nucl = nucl * self.scale * vol
+        nucleation_rate = nucl * vol  # [#/s] total, or [#/m**3/s] for MSMPR
+        scaled_nucleation = nucleation_rate * self.scale  # [#/s] or [#/m**3/s]
 
         impurity_factor = self.Kinetics.alpha_fn(conc)
         growth = growth * impurity_factor  # um/s
 
-        dissol = dissol  # um/s
-
-        boundary_cond = nucl / (growth + eps) # num/um or num/um/m**3
+        boundary_cond = scaled_nucleation / (growth + eps)  # [#/um] or [#/m**3/um]
         f_aug = np.concatenate(([boundary_cond]*2, csd, [csd[-1]]))
 
         # Flux source terms
         f_diff = np.diff(f_aug)
-        # f_diff[f_diff == 0] = eps  # avoid division by zero for theta
 
         if growth > 0:
             theta = f_diff[:-1] / (f_diff[1:] + eps*10)
-            # theta = f_diff[:-1] / (f_diff[1:] + eps)
-            # theta = f_diff[:-1] / f_diff[1:]
         else:
             theta = f_diff[1:] / (f_diff[:-1] + eps*10)
-            # theta = f_diff[:-1] / (f_diff[1:] + eps)
-            # theta = f_diff[:-1] / f_diff[1:]
         # Van-Leer limiter
         limiter = np.zeros_like(f_diff)
         limiter[:-1] = (np.abs(theta) + theta) / (1 + np.abs(theta))
@@ -569,13 +704,14 @@ class _BaseCryst:
         flux = growth_term + dissol_term
 
         if output == 'flux':
-            return flux  # TODO: isn't it necessary to divide by dx?
-        elif 'dstates':
+            return flux
+        else:
             dcsd_dt = -np.diff(flux) / self.dx
 
-            # Material bce in kg_API/s --> G in um, mu_2 in m**2 (or m**2/m**3)
-            mass_transfer = rho_cry * kv_cry * (
-                3*(growth + dissol)*mu_2 + nucl*self.rad**3) * (1e-6)
+            # Exact conversion: 1 um = 1e-6 m. mu_2 already uses SI lengths.
+            mass_transfer = rho_cry * kv_cry * (  # [kg/s] or [kg/m**3/s]
+                3 * (growth + dissol) * mu_2 * 1e-6
+                + nucleation_rate * (self.rad * 1e-6)**3)
 
             return dcsd_dt, np.array(mass_transfer)
 
@@ -881,6 +1017,11 @@ class _BaseCryst:
         -----
         The Batch/Semibatch volume state is initialized from the liquid phase;
         total slurry volume includes crystals and is reserved for geometry.
+        Reset, when requested, precedes initial-state capture. vol_tank retains
+        its assigned or inferred working volume [m**3] across initializations;
+        geometry does not expand that volume by the headspace factor.
+        Stored kinetic parameters are restored after integration, before heat
+        retrieval, so sensitivity difference-quotient probes cannot persist.
         Result retrieval updates the attached phases and stores the profiles.
         """
 
@@ -892,6 +1033,9 @@ class _BaseCryst:
                 self.states_in_dict['Inlet']['distrib'] = len(x_distr)
 
         self.Kinetics.target_idx = self.target_ind
+
+        if self.reset_states:
+            self.reset()
 
         # ---------- Solid phase states
         if 'vol' in self.states_uo:
@@ -932,9 +1076,6 @@ class _BaseCryst:
         else:
             init_susp = init_liquid
 
-        if self.reset_states:
-            self.reset()
-
         # ---------- Read time
         if runtime is not None:
             final_time = runtime + self.elapsed_time
@@ -957,9 +1098,9 @@ class _BaseCryst:
             else:
                 self.vol_tank = self.Slurry.vol
 
-        self.diam_tank = (4/np.pi * self.vol_tank)**(1/3)
-        self.area_base = np.pi/4 * self.diam_tank**2
-        self.vol_tank *= 1 / self.vol_offset
+        # Existing cylindrical geometry assumes working liquid height = diameter.
+        self.diam_tank = (4/np.pi * self.vol_tank)**(1/3)  # [m]
+        self.area_base = np.pi/4 * self.diam_tank**2  # [m**2]
 
         if 'temp_ht' in self.states_uo:
 
@@ -1020,7 +1161,12 @@ class _BaseCryst:
             solver.verbosity = 50
 
         # ---------- Solve model
-        time, states = solver.simulate(final_time, ncp_list=time_grid)
+        nominal_params = self.Kinetics.concat_params().copy()  # [native parameter units]
+        try:
+            time, states = solver.simulate(final_time, ncp_list=time_grid)
+        finally:
+            # CVODES sensitivity probes install perturbed values through the RHS.
+            self.Kinetics.set_params(nominal_params)
 
         self.retrieve_results(time, states)
 
@@ -1087,9 +1233,11 @@ class _BaseCryst:
         Composition-only liquid modifiers preserve the reset charged volume
         used by geometry, residence time, and initial states, rather than
         conserving liquid mass. Supplied modifier dictionaries are not changed.
+        This wrapper owns the estimation reset: solve_unit's reset_states flag
+        is temporarily disabled so it preserves these modifiers, then restored
+        even if the solve raises an exception.
         """
         self.reset()
-        self.params_iter = params
 
         self.Kinetics.set_params(params)
 
@@ -1115,46 +1263,52 @@ class _BaseCryst:
             for key, val in modify_controls.items():
                 self.controls[key].update(val)
 
-        if self.param_wrapper is None:
-            if self.method == 'moments':
-                t_prof, states, sens = self.solve_unit(time_grid=t_vals,
-                                                       eval_sens=True,
-                                                       verbose=False,
-                                                       **run_args)
+        reset_states = self.reset_states
+        self.reset_states = False
+        try:
+            if self.param_wrapper is None:
+                if self.method == 'moments':
+                    t_prof, states, sens = self.solve_unit(time_grid=t_vals,
+                                                           eval_sens=True,
+                                                           verbose=False,
+                                                           **run_args)
 
-                if reord_sens:
-                    sens = reorder_sens(sens, separate_sens=False)
+                    if reord_sens:
+                        sens = reorder_sens(sens, separate_sens=False)
+                    else:
+                        sens = np.stack(sens)
+
+                    result = (states, sens)
                 else:
-                    sens = np.stack(sens)
+                    t_prof, states_out = self.solve_unit(time_grid=t_vals,
+                                                         eval_sens=False,
+                                                         verbose=False,
+                                                         **run_args)
 
-                result = (states, sens)
-            else:
-                t_prof, states_out = self.solve_unit(time_grid=t_vals,
-                                                     eval_sens=False,
-                                                     verbose=False,
-                                                     **run_args)
+                    result = states_out
 
-                result = states_out
+            elif callable(self.param_wrapper):
+                if self.method == 'moments':
+                    t_prof, states, sens = self.solve_unit(time_grid=t_vals,
+                                                           eval_sens=True,
+                                                           verbose=False,
+                                                           **run_args)
 
-        elif callable(self.param_wrapper):
-            if self.method == 'moments':
-                t_prof, states, sens = self.solve_unit(time_grid=t_vals,
-                                                       eval_sens=True,
-                                                       verbose=False,
-                                                       **run_args)
+                    # dy/dt for each state separately
+                    sens_sep = reorder_sens(sens, separate_sens=True)
 
-                # dy/dt for each state separately
-                sens_sep = reorder_sens(sens, separate_sens=True)
+                    # TODO: is this the better way of naming the states?
+                    di_keys = ['mu_%s' % ind for ind in range(self.num_distr)]
+                    di_keys += ['w_%s' % name for name in self.name_species]
+                    di_keys.append('vol')
 
-                # TODO: is this the better way of naming the states?
-                di_keys = ['mu_%s' % ind for ind in range(self.num_distr)]
-                di_keys += ['w_%s' % name for name in self.name_species]
-                di_keys.append('vol')
+                    sens_sep = dict(zip(di_keys, sens_sep))
 
-                sens_sep = dict(zip(di_keys, sens_sep))
+                    result = self.param_wrapper(self.result, sens_sep,
+                                                reord_sens=reord_sens)
 
-                result = self.param_wrapper(self.result, sens_sep,
-                                            reord_sens=reord_sens)
+        finally:
+            self.reset_states = reset_states
 
         return result
 
@@ -1463,7 +1617,7 @@ class BatchCryst(_BaseCryst):
         Boolean value indicating whether the heat transfer of
         the crystallization is considered.
     rad_zero : float (optional)
-        size of the first bin of the CSD discretization [m]
+        Nucleation size [um], matching the CSD grid; zero gives point nuclei.
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation
@@ -2004,12 +2158,11 @@ class BatchCryst(_BaseCryst):
         convention. Stores heat_prof and heat_duty using the rate/capacitance
         column contract in _store_heat_duty. Positive duty [J] means heat removed,
         including under prescribed temperature (correcting the former sign).
+        Uses the current stored active kinetic parameters for every profile row.
         """
         q_heat = np.zeros((len(time), 2))  # [W] or [J/K], profile column contract
-        if self.params_iter is None:
-            merged_params = self.Kinetics.concat_params()[self.mask_params]
-        else:
-            merged_params = self.params_iter
+        merged_params = self.Kinetics.concat_params()[self.mask_params]
+        # [native active parameter units], current solve rather than an old iterate
         for ind, row in enumerate(states):
             row = row.copy()  # [state units], documented above
             row[:self.num_distr] *= self.scale  # [-], numerical distribution scale
@@ -2358,7 +2511,7 @@ class MSMPR(_BaseCryst):
             cp_ht = self.Utility.cp  # [J/kg/K]
             rho_ht = self.Utility.rho  # [kg/m**3]
 
-            vol_ht = (self.vol_tank * DEFAULT_JACKET_VOLUME_RATIO
+            vol_ht = (self.vol_tank / self.vol_offset * DEFAULT_JACKET_VOLUME_RATIO
                       if self.vol_ht is None else self.vol_ht)  # [m**3]
 
             dtht_dt = flow_ht / vol_ht * (tht_in - temp_ht) - \
@@ -2520,12 +2673,11 @@ class MSMPR(_BaseCryst):
         Stores heat_prof and heat_duty using the rate/capacitance column
         contract in _store_heat_duty, including net flow heat. Prescribed
         temperature contributes C*dT/dt [W]; C [J/K] is never integrated alone.
+        Uses the current stored active kinetic parameters for every profile row.
         """
         q_heat = np.zeros((len(time), 3))  # [W] or [J/K], profile column contract
-        if self.params_iter is None:
-            merged_params = self.Kinetics.concat_params()[self.mask_params]
-        else:
-            merged_params = self.params_iter
+        merged_params = self.Kinetics.concat_params()[self.mask_params]
+        # [native active parameter units], current solve rather than an old iterate
         for ind, row in enumerate(states):
             row = row.copy()  # [state units], documented above
             row[:self.num_distr] *= self.scale  # [-], numerical distribution scale
@@ -2793,7 +2945,7 @@ class SemibatchCryst(MSMPR):
             flow_ht = ht_media['vol_flow']  # [m**3/s]
             cp_ht = self.Utility.cp  # [J/kg/K]
             rho_ht = self.Utility.rho  # [kg/m**3]
-            vol_ht = (self.vol_tank * DEFAULT_JACKET_VOLUME_RATIO
+            vol_ht = (self.vol_tank / self.vol_offset * DEFAULT_JACKET_VOLUME_RATIO
                       if self.vol_ht is None else self.vol_ht)  # [m**3]
 
             dtht_dt = flow_ht / vol_ht * (tht_in - temp_ht) - \
