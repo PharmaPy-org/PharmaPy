@@ -30,7 +30,23 @@ eps = np.finfo(float).eps
 
 
 class ContinuousHoldup:
-    def __init__(self):
+    """Adiabatic, perfectly mixed liquid tank with fixed mass inventory.
+
+    Inlet and outlet mass flows are equal. Composition and temperature evolve
+    without reaction or external heat transfer; retrieval commits the terminal
+    liquid state and absolute time for continuation.
+    """
+
+    def __init__(self) -> None:
+        """Initialize an adiabatic, constant-mass continuous liquid holdup.
+
+        Notes
+        -----
+        Assign a liquid phase to set the fixed inventory [kg] and an inlet
+        stream supplying mass flow [kg/s], composition [-], and temperature
+        [K]. Outlet mass flow equals inlet mass flow at every time [s].
+        """
+        self.is_continuous = True
         self._Inlet = None
         self._Phases = None
 
@@ -61,7 +77,15 @@ class ContinuousHoldup:
         self.nomenclature()
         self.mass = self.Liquid_1.mass
 
-    def nomenclature(self):
+    def nomenclature(self) -> None:
+        """Declare holdup composition, temperature, and outlet-flow metadata.
+
+        Notes
+        -----
+        Differential states are species mass fractions [-], followed by
+        temperature [K]. Outlet mass flow [kg/s] is algebraic and equals the
+        inlet flow because the liquid mass inventory [kg] remains constant.
+        """
         name_comp = self.Liquid_1.name_species
         num_comp = len(name_comp)
 
@@ -69,6 +93,7 @@ class ContinuousHoldup:
         dict_in = {'mass_flow': 1, 'mass_frac': num_comp, 'temp': 1}
         self.dict_states_in = dict_in
         self.names_states_in = list(dict_in.keys())
+        self.names_states_out = self.names_states_in.copy()
 
         self.dict_states_in = {'Inlet': self.dict_states_in}
 
@@ -81,7 +106,8 @@ class ContinuousHoldup:
         self.name_states = list(states_di.keys())
 
         self.states_di = states_di
-        self.fstates_di = {}
+        self.fstates_di = {'mass_flow': {'type': 'alg', 'dim': 1,
+                                         'units': 'kg/s'}}
 
     def get_inputs(self, time):
         inputs = get_inputs_new(time, self.Inlet, self.dict_states_in)
@@ -140,19 +166,44 @@ class ContinuousHoldup:
 
         return time, states
 
-    def retrieve_results(self, time, states):
-        time = np.asarray(time)
+    def retrieve_results(self, time: Sequence[float],
+                         states: np.ndarray) -> None:
+        """Publish a holdup segment and commit its state for continuation.
 
+        Parameters
+        ----------
+        time : sequence of float
+            Absolute integration times [s], shape (num_times,).
+        states : numpy.ndarray
+            State rows of shape (num_times, num_species + 1): liquid mass
+            fractions [-] followed by temperature [K].
+
+        Notes
+        -----
+        ``outputs`` and the retained legacy ``output`` alias contain the
+        current segment, including outlet mass flow [kg/s] equal to inlet
+        flow. The final liquid state updates the fixed inventory [kg] and a
+        separate ``LiquidStream`` outlet. ``elapsed_time`` becomes the
+        absolute endpoint [s], so the next solve starts at the terminal state.
+        """
+        time = np.asarray(time)  # [s]
         di = unpack_states(states, self.dim_states, self.name_states)
+        # di: species mass fractions [-] and temperature [K]
+        inputs = self.get_inputs(time)
+        di['mass_flow'] = np.broadcast_to(inputs['mass_flow'], time.shape).copy()  # [kg/s]
         di['time'] = time
         self.result = DynamicResult(self.states_di, self.fstates_di, **di)
+        self.outputs = di
+        self.output = self.outputs
 
-        self.output = di
-
-        inputs = self.get_inputs(time)
-        # self.Outlet = LiquidStream(mass_flow=inputs['mass_flow'][-1],
-        #                            temp=inputs['temp'][-1],
-        #                            mass_frac=inputs['mass_frac'])
+        terminal_fraction = np.atleast_1d(di['mass_frac'][-1])  # [-], species vector
+        self.Liquid_1.updatePhase(mass_frac=terminal_fraction,
+                                  temp=di['temp'][-1], mass=self.mass)
+        self.Outlet = LiquidStream(
+            self.Liquid_1.path_data, mass_flow=di['mass_flow'][-1],
+            mass_frac=terminal_fraction, temp=di['temp'][-1],
+            pres=self.Liquid_1.pres)
+        self.elapsed_time = time[-1]  # [s]
 
 
 class Mixer:
@@ -250,7 +301,24 @@ class Mixer:
         self.names_upstream = []
         self.bipartite = []
 
-    def get_inputs_new(self, time):
+    def get_inputs_new(self, time: Optional[Sequence[float]]) -> dict:
+        """Collect liquid inputs with explicit time and species axes.
+
+        Parameters
+        ----------
+        time : sequence of float or None
+            Profile times [s]; None evaluates static inlet attributes.
+
+        Returns
+        -------
+        dict
+            Continuous inputs are per-inlet tuples: mass fractions [-] of
+            shape (num_times, num_species), mass flows [kg/s] and temperatures
+            [K] of shape (num_times,). Static streams broadcast to the
+            connected grid when mixed with profiles; an entirely static mix
+            has one time row. Batch inputs are arrays of masses [kg],
+            temperatures [K], and fractions [-] with inlet and species axes.
+        """
         inlets = self.Inlets
 
         massfracs = []
@@ -263,8 +331,12 @@ class Mixer:
 
             dict_list = []
             for ind, inlet in enumerate(self.Inlets):
-                # TODO: extracting 'Inlet' only is not general
                 di = get_inputs_new(time, inlet, self.states_in_dict)['Inlet']
+                # Retain a complete species vector even for one static time.
+                di['mass_frac'] = np.asarray(di['mass_frac']).reshape(
+                    -1, inlet.num_species)  # [-], time rows and species columns
+                di['mass_flow'] = np.atleast_1d(di['mass_flow'])  # [kg/s]
+                di['temp'] = np.atleast_1d(di['temp'])  # [K]
 
                 dict_list.append(di)
 
@@ -777,6 +849,29 @@ class Mixer:
             and temperatures [K]. Solids mixing returns liquid/solid amounts,
             liquid mass fractions, distribution [#/m**3/um] for slurry or
             [#/um] for cake, and temperature [K].
+
+        Raises
+        ------
+        ValueError
+            If a multi-sample liquid inlet's time window does not overlap the
+            chosen grid or starts after that grid begins. The message names
+            the zero-based inlet index and both windows [s].
+
+        Notes
+        -----
+        The first connected liquid inlet with more than one sample supplies
+        the evaluation grid [s]. Single-sample inlets are constant feeds: they
+        neither select the grid nor restrict its time window. Other connected
+        inlets must overlap the grid and cover its beginning. Endpoint
+        comparisons allow ``sqrt(machine epsilon) * grid span`` [s] as a
+        numerical roundoff allowance for independently propagated clocks,
+        not a physical extrapolation allowance. Values past an inlet's last
+        time within the grid are held at its endpoint. Static streams
+        broadcast to the chosen grid.
+
+        Entirely static liquid mixing publishes a single time [s]
+        and contributes no duration. Duration-based flowsheet accounting of
+        instantaneous units is a separate SimExec concern.
         """
 
         # ---------- Read inputs
@@ -808,23 +903,32 @@ class Mixer:
                         path, mass_frac=states[2], mass=states[0])
         else:
             self.states_in_dict = {'Inlet': states_in_dict}
-            time_prof = [0]  # Static mixer (instantaneous mix)
+            time_prof = [0]  # [s], instantaneous static mixing
 
             if self.is_continuous:
-
+                time_prof = np.zeros(1)  # [s], static continuous-source time
                 for inlet in self.Inlets:
-                    # TODO: should we create a time_prof that contains the
-                    # times of all the input time grids? (like a universal set)
-                    time_prof = getattr(inlet, 'time_upstream', None)
-
-                    if time_prof is not None:
-                        # t_diff = time_prof - self.elapsed_time
-                        # idx_elapsed = np.where(t_diff >= 0)[0][0]
-
-                        # time_prof = np.hstack((self.elapsed_time,
-                        #                        time_prof[idx_elapsed:]))
-
+                    # A single upstream sample is constant for every time.
+                    inlet_time = getattr(inlet, 'time_upstream', None)  # [s]
+                    if inlet_time is not None and np.size(inlet_time) > 1:
+                        time_prof = np.atleast_1d(inlet_time)  # [s]
                         break
+
+                clock_tolerance = np.sqrt(eps) * (
+                    time_prof[-1] - time_prof[0])  # [s], clock roundoff allowance
+                for index, inlet in enumerate(self.Inlets):
+                    inlet_time = getattr(inlet, 'time_upstream', None)  # [s]
+                    if inlet_time is None or np.size(inlet_time) == 1:
+                        continue
+                    inlet_time = np.atleast_1d(inlet_time)  # [s]
+                    # Start coverage also guarantees a start before grid end.
+                    if (inlet_time[-1] < time_prof[0] - clock_tolerance
+                            or inlet_time[0] > time_prof[0] + clock_tolerance):
+                        raise ValueError(
+                            f'Inlet {index} window [{inlet_time[0]}, '
+                            f'{inlet_time[-1]}] s must overlap the mixer grid '
+                            f'[{time_prof[0]}, {time_prof[-1]}] s and cover '
+                            'its start; supply aligned inlet profiles.')
 
             u_input = self.get_inputs_new(time_prof)
 
@@ -868,6 +972,11 @@ class Mixer:
         Solid populations and phase amounts are already reconciled by
         ``balances_solids``. Retrieval commits temperature without replacing
         a total solid population with a volume-specific slurry distribution.
+        For continuous liquid mixing, outlet temperature is committed before
+        ``updatePhase`` reconciles volumetric flow at that temperature.
+        Entirely static, instantaneous liquid mixing publishes one time [s]
+        and contributes no duration. Duration-based accounting for these units
+        is a separate SimExec concern.
         """
         solids_flag = [inlet.__module__ == 'PharmaPy.MixedPhases'
                        for inlet in self.Inlets]
@@ -914,6 +1023,7 @@ class Mixer:
             self.outputs = result
 
             if self.is_continuous:
+                self.Liquid_1.temp = np.asarray(temp).reshape(-1)[-1].item()  # [K]
                 self.Liquid_1.updatePhase(mass_frac=last_massfrac,
                                           mass_flow=last_mass)
 
