@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 
 
-from assimulo.solvers import CVode, LSODAR
-from assimulo.problem import Explicit_Problem
+from PharmaPy._assimulo import CVode, Explicit_Problem
 
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Commons import (reorder_sens, plot_sens, trapezoidal_rule,

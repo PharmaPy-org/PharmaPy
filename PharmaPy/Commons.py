@@ -11,12 +11,12 @@ from matplotlib.ticker import AutoMinorLocator
 import numpy as np
 from scipy.integrate import simpson
 from itertools import cycle
-import io
-import contextlib
-import sys
-with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()): # o|-<( this muting line was taken from chatgpt 20250717
-    
+
+try:
     from assimulo.exception import TerminateSimulation
+except ImportError:
+    class TerminateSimulation(Exception):
+        """Fallback used when optional Assimulo solvers are not installed."""
 
 linestyles = cycle(['-', '--', '-.', ':'])
 eps = np.finfo(float).eps

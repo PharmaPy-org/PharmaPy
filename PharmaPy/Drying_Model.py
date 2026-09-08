@@ -7,8 +7,7 @@ Created on Tue Jul 28 00:24:18 2020
 import warnings
 import numpy as np
 import numpy.matlib
-from assimulo.problem import Explicit_Problem
-from assimulo.solvers import CVode
+from PharmaPy._assimulo import CVode, Explicit_Problem
 import matplotlib.pyplot as plt
 import scipy
 from scipy.interpolate import CubicSpline

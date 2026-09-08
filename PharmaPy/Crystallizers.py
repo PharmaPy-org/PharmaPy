@@ -4,8 +4,7 @@
 # import autograd.numpy as np
 
 
-from assimulo.solvers import CVode
-from assimulo.problem import Explicit_Problem
+from PharmaPy._assimulo import CVode, Explicit_Problem
 
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Streams import LiquidStream, SolidStream

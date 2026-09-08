@@ -6,15 +6,13 @@ Created on Mon Mar 13 10:51:16 2023
 """
 
 import numpy as np
-from assimulo.problem import Implicit_Problem
+from PharmaPy._assimulo import IDA, Implicit_Problem
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Connections import get_inputs_new
 from PharmaPy.Streams import LiquidStream, SolidStream
 from PharmaPy.MixedPhases import Slurry, SlurryStream
 from PharmaPy.Results import DynamicResult
 from PharmaPy.Plotting import plot_distrib
-
-from assimulo.solvers import IDA
 
 import scipy.optimize
 import scipy.sparse

@@ -1,5 +1,5 @@
 import numpy as np
-from assimulo.problem import Implicit_Problem
+from PharmaPy._assimulo import IDA, Implicit_Problem
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Streams import VaporStream
 from PharmaPy.Connections import get_inputs_new
@@ -9,8 +9,6 @@ from PharmaPy.Streams import LiquidStream
 from PharmaPy.Results import DynamicResult
 from PharmaPy.Plotting import plot_distrib
 from PharmaPy.CheckModule import check_modeling_objects
-
-from assimulo.solvers import IDA
 
 import scipy.optimize
 import scipy.sparse

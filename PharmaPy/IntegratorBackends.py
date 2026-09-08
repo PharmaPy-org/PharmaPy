@@ -1,7 +1,5 @@
 from abc import ABC, abstractmethod
-from assimulo.solvers import CVode
-from assimulo.problem import Explicit_Problem
-from assimulo.solvers.sundials import CVodeError
+from PharmaPy._assimulo import CVode, Explicit_Problem
 from PharmaPy.Commons import eval_state_events
 from PharmaPy.DataClasses import *
 

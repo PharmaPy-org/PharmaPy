@@ -5,8 +5,7 @@ Created on Mon Apr 27 14:26:50 2020
 @author: dcasasor
 """
 
-from assimulo.solvers import CVode
-from assimulo.problem import Explicit_Problem
+from PharmaPy._assimulo import CVode, Explicit_Problem
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, classify_phases
 from PharmaPy.Streams import LiquidStream, SolidStream
