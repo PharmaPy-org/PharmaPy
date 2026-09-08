@@ -448,11 +448,10 @@ def test_mixer_accepts_distributed_producer_and_closes_energy(data_path, path, p
             unit.Phases = inlet
             filtrate_mass = inlet.Liquid_1.mass / 2  # [kg], half the liquid filtered
             liquid_density = inlet.Liquid_1.getDensity()  # [kg/m**3]
-            # Full solid recovery: dry cake mass = c_solids * filtrate volume.
-            unit.c_solids = solid.mass * liquid_density / filtrate_mass  # [kg/m**3 filtrate]
+            unit.mass_crit = filtrate_mass  # [kg], full solid recovery at this filtrate mass
             states = np.array([[0., MASS], [filtrate_mass, MASS - filtrate_mass]])  # [kg]
             unit.retrieve_results(np.array([0., 1.]), states, liquid_density,
-                                  solid.getDensity(), solid.getPorosity())
+                                  solid.getDensity(), solid.getPorosity(), mass_solids=solid.mass)
             inlet = unit.Outlet
     liquid = LiquidPhase(path, mass=MASS, mass_frac=HOT_COMPOSITION, temp=HOT)
     inlet_energy = sum(phase.mass * phase.getEnthalpy(basis='mass')

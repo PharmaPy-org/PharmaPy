@@ -11,7 +11,10 @@ https://doi.org/10.1016/j.ces.2021.116803.
 See repository-level REFERENCES.md for the full citation.
 """
 
+from typing import Callable, Optional, Union
+
 import numpy as np
+from numpy.typing import ArrayLike
 from PharmaPy._assimulo import CVode, Explicit_Problem
 from PharmaPy.Commons import trapezoidal_rule, series_erfc
 from PharmaPy.Phases import classify_phases
@@ -31,7 +34,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.animation import FFMpegWriter
 import copy
 
-from scipy.special import erfc
+from scipy.special import erfc, erfcx
 
 eps = np.finfo(float).eps * 1.1
 grav = 9.8  # m/s**2
@@ -791,25 +794,39 @@ class DeliquoringStep:
 
 
 class Filter:
-    def __init__(self, station_diam, alpha=None, resist_medium=1e9,
-                 log_params=False):
-
-        """
+    def __init__(self, station_diam: float,
+                 alpha: Optional[Union[float, Callable[[float], float]]] = None,
+                 resist_medium: Union[float, Callable[[float], float]] = 1e9,
+                 log_params: bool = False) -> None:
+        """Configure a batch filter with physical resistance parameters.
 
         Parameters
         ----------
 
         station_diam : float
             Diameter of the filter's cross section [m]
-        alpha : float
-            Specific cake resistance of filter cake. [m kg**-1]
-        resist_medium : float (optional, default=1e9)
-            Mesh resistance in filter. [m**-1]
-        log_params : bool (optional, default = False)
-            If true, alpha and resist_medium keyword should be
-            provided in logarithmic scale.
+        alpha : float or callable, optional
+            Specific cake resistance [m/kg], or a function of pressure drop
+            [Pa] returning [m/kg]. None estimates resistance from the solid.
+        resist_medium : float or callable, optional
+            Medium resistance [1/m], or a function of pressure drop [Pa]
+            returning [1/m]. Default 1e9 [1/m] is the existing medium value.
+        log_params : bool, optional
+            Interpret only estimation model_params as natural logarithms of
+            SI numerical values. Constructor values and callable results
+            always use physical SI units, including when this is True.
 
+        Raises
+        ------
+        ValueError
+            If numeric alpha is nonfinite or nonpositive, or numeric medium
+            resistance is nonfinite or negative. A zero medium resistance is
+            valid for simulation, but cannot seed logarithmic estimation.
         """
+        if alpha is not None and not callable(alpha) and (not np.isfinite(alpha) or alpha <= 0):
+            raise ValueError("Cake resistance alpha [m/kg] must be finite and strictly positive.")
+        if not callable(resist_medium) and (not np.isfinite(resist_medium) or resist_medium < 0):
+            raise ValueError("Medium resistance [1/m] must be finite and nonnegative.")
         self._Phases = None
         self.material_from_upstream = False
 
@@ -840,7 +857,25 @@ class Filter:
         return self._Phases
 
     @Phases.setter
-    def Phases(self, phases):
+    def Phases(self, phases) -> None:
+        """Attach the slurry and retain physical filtration parameters.
+
+        Parameters
+        ----------
+        phases : Slurry or sequence of phase objects
+            Slurry or liquid/solid phases with attached inventories [kg].
+
+        Notes
+        -----
+        params retains alpha [m/kg] and medium resistance [1/m], or their
+        pressure-dependent callables, until solve_unit resolves them. The
+        log_params option transforms only supplied estimation parameters.
+
+        Raises
+        ------
+        RuntimeError
+            If phases is neither a Slurry nor a phase sequence.
+        """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
 
@@ -861,12 +896,7 @@ class Filter:
                                     porosity=epsilon,
                                     rho_sol=dens_sol)
 
-        self.params = (self.alpha, self.r_medium)
-        if self.log_params:
-            self.params = np.log(self.params)
-
-        # self.__original_phase__ = copy.deepcopy(self.Liquid_1.__dict__)
-        # self.__original_phase__ = copy.deepcopy(self.Liquid_1)
+        self.params = (self.alpha, self.r_medium)  # [m/kg, 1/m] or callables
 
         self.states_di = {
             'mass_filtrate': {'dim': 1, 'units': 'kg', 'type': 'diff'},
@@ -933,29 +963,132 @@ class Filter:
         if state_event:
             raise TerminateSimulation
 
-    def reset(self):
-        self.elapsed_time = 0
-        if self.log_params:
-            self.params = np.log(self.params)
+    @property
+    def param_seed(self) -> np.ndarray:
+        """Return numeric resistances in the optimizer's parameter space.
 
-    def solve_unit(self, runtime=None, time_grid=None, deltaP=1e5,
-                   slurry_div=1, verbose=True, model_params=None,
-                   sundials_opts=None):
+        Returns
+        -------
+        ndarray
+            Seed with shape (2,), ordered as alpha and medium resistance.
+            With log_params=False, units are [m/kg] and [1/m]. With
+            log_params=True, entries are natural logarithms of the SI
+            numerical values [-]. Uses configured alpha and r_medium,
+            independently of params from prior optimizer evaluations.
 
-        # Filtration parameters (constant)
-        self.deltaP = deltaP
+        Raises
+        ------
+        ValueError
+            If a configured resistance is callable or nonfinite, alpha is
+            nonpositive, or medium resistance is negative. A zero medium
+            resistance is allowed only when log_params=False.
 
-        epsilon = self.Solid_1.getPorosity(diam_filter=self.station_diam)
-        dens_sol = self.Solid_1.getDensity()
+        Notes
+        -----
+        A prior solve may have resolved a callable into numeric params;
+        the underlying callable still makes that resistance non-estimable.
+        """
+        if any(callable(value) for value in (self.alpha, self.r_medium)):
+            raise ValueError(
+                "Callable resistances are not estimable; configure numeric "
+                "alpha [m/kg] and medium resistance [1/m] before estimation.")
+        physical_params = np.array((self.alpha, self.r_medium), dtype=float)  # [m/kg, 1/m]
+        if (not np.all(np.isfinite(physical_params)) or physical_params[0] <= 0
+                or physical_params[1] < 0 or (self.log_params and physical_params[1] == 0)):
+            raise ValueError(
+                "Estimation seeds require finite alpha [m/kg] (strictly positive) "
+                "and medium resistance [1/m] (nonnegative); medium resistance "
+                "must be strictly positive when log_params=True; "
+                f"received {physical_params}.")
+        return np.log(physical_params) if self.log_params else physical_params
 
-        if model_params is not None:
-            self.params = model_params
+    def reset(self) -> None:
+        """Reset the batch clock while preserving physical parameters.
 
-        if callable(self.alpha):
-            self.alpha = self.alpha(deltaP)
+        Notes
+        -----
+        log_params affects only the estimation-parameter transform in
+        solve_unit; resetting does not logarithmically transform params.
+        """
+        self.elapsed_time = 0  # [s]
 
-        if self.log_params:
-            self.params = np.exp(self.params)
+    def solve_unit(self, runtime: Optional[float] = None,
+                   time_grid: Optional[ArrayLike] = None, deltaP: float = 1e5,
+                   slurry_div: float = 1, verbose: bool = True,
+                   model_params: Optional[ArrayLike] = None,
+                   sundials_opts: Optional[dict] = None) -> tuple:
+        """Integrate a batch with pressure-resolved filtration parameters.
+
+        Parameters
+        ----------
+        runtime : float, optional
+            Batch duration [s]. Without model_params, an omitted duration
+            integrates to cake completion. Estimation requires a bounded
+            runtime or time_grid; times beyond completion hold the plateau.
+        time_grid : array-like, optional
+            Output times relative to this batch's start [s], shape (num_times,).
+            Takes precedence over runtime; caller data is not modified. With
+            model_params, return exactly these samples or raise RuntimeError
+            if CVode omits any. The initial condition is returned only if requested.
+        deltaP : float, optional
+            Pressure drop [Pa], default 1e5 Pa (one bar).
+        slurry_div : float, optional
+            Number of equal feed portions [-], default one (the full batch).
+        verbose : bool, optional
+            Enable solver output.
+        model_params : array-like, optional
+            Override (alpha [m/kg], medium resistance [1/m]). When log_params
+            is True, these are natural logarithms of the SI numerical values.
+            Overrides take precedence over the constructor's parameters.
+        sundials_opts : dict, optional
+            CVode options, including relative [-] and absolute [kg] tolerances.
+
+        Returns
+        -------
+        time : ndarray
+            Absolute output times [s], shape (num_times,).
+        states : ndarray
+            Filtrate and remaining liquid masses [kg], shape (num_times, 2).
+
+        Raises
+        ------
+        ValueError
+            If the feed has no positive solid mass, or lacks enough liquid
+            to saturate the packed cake and leave positive filtrate volume.
+            These feed checks precede changes to deltaP and params. Also
+            raised before any mutation if estimation supplies neither runtime
+            nor time_grid.
+        RuntimeError
+            If CVode omits requested estimation samples. Tighten rtol/atol
+            in sundials_opts; output-grid coverage depends on solver tolerances.
+
+        Notes
+        -----
+        Each call filters a fresh portion of the attached slurry, starting at
+        elapsed_time. Callable resistances receive deltaP [Pa] and return SI
+        values even when log_params is True; they are retained for later
+        batches at different pressures. Only model_params supplied for
+        estimation are exponentiated when log_params is True.
+        The numeric tuple in params is the one used by the balance and the
+        analytical completion-time calculation. Estimation integrates only
+        up to completion and holds later requested samples at mass_crit [kg]
+        of filtrate and the remaining cake liquid [kg]. This permits optimizer
+        trials that finish before the last observation. Relative durations
+        come directly from the input grid, avoiding cancellation against
+        elapsed_time. No warning is emitted for the physical plateau. CVode
+        can omit samples inside its final step, especially on dense grids at
+        default tolerances. Estimation checks exact time coverage before
+        returning; callers may need tighter rtol/atol in sundials_opts.
+        """
+        if model_params is not None and runtime is None and time_grid is None:
+            raise ValueError("Filter estimation requires runtime or time_grid; "
+                             "an unbounded estimation solve is not supported.")
+        if self.Solid_1.mass <= 0:
+            raise ValueError(
+                "Filter requires positive solid mass [kg]; "
+                "use a liquid transfer for a zero-solid feed.")
+        epsilon = self.Solid_1.getPorosity(diam_filter=self.station_diam)  # [-]
+        dens_sol = self.Solid_1.getDensity()  # [kg/m**3]
 
         solid_conc = self.SlurryPhase.getSolidsConcentr()
         solid_conc = max(0, solid_conc)
@@ -967,7 +1100,27 @@ class Filter:
         vol_liq_cake = vol_slurry * solid_conc/dens_sol * epsilon/(1 - epsilon)
         vol_liq_slur = vol_slurry * frac_liq
 
-        vol_filtrate = vol_liq_slur - vol_liq_cake
+        vol_filtrate = vol_liq_slur - vol_liq_cake  # [m**3]
+        if vol_filtrate <= 0:
+            raise ValueError(
+                "Slurry liquid must saturate the packed cake and leave "
+                "positive filtrate volume; "
+                f"slurry liquid volume={vol_liq_slur} m**3, "
+                f"cake liquid volume={vol_liq_cake} m**3. "
+                "Add liquid or reduce solids.")
+
+        if model_params is not None:
+            resolved_params = (np.exp(model_params) if self.log_params
+                               else model_params)  # [m/kg, 1/m]
+        else:
+            resolved_params = (
+                self.alpha(deltaP) if callable(self.alpha) else self.alpha,
+                self.r_medium(deltaP) if callable(self.r_medium) else self.r_medium,
+            )  # [m/kg, 1/m]
+        self.params = tuple(resolved_params)  # [m/kg, 1/m]
+        alpha, resistance = self.params  # [m/kg], [1/m]
+
+        self.deltaP = deltaP  # [Pa]
 
         self.c_solids = vol_slurry * solid_conc / vol_filtrate
 
@@ -986,8 +1139,8 @@ class Filter:
         mass_init = [mass_filtr_init, mass_up_init]
 
         # Solve ODE
-        problem = Explicit_Problem(self.unit_model, y0=mass_init, t0=0,
-                                   sw0=[True])
+        problem = Explicit_Problem(self.unit_model, y0=mass_init,
+                                   t0=self.elapsed_time, sw0=[True])
 
         # State event
         if model_params is None:
@@ -1006,37 +1159,111 @@ class Filter:
                 if name == 'time_limit':
                     solver.report_continuously = True
 
+        relative_grid = None  # [s], caller's batch-relative output times
         if time_grid is not None:
-            final_time = time_grid[-1] + self.elapsed_time
-            time_grid += self.elapsed_time
-
+            relative_grid = np.asarray(time_grid, dtype=float)  # [s]
+            duration = relative_grid[-1]  # [s], before adding the batch clock
+            time_grid = relative_grid + self.elapsed_time  # [s], absolute output times
+            final_time = time_grid[-1]  # [s]
         elif runtime is None:
-            final_time = 1e10
-
+            final_time = 1e10  # [s], existing event-driven integration horizon
         else:
-            final_time = runtime + self.elapsed_time
+            duration = runtime  # [s]
+            final_time = runtime + self.elapsed_time  # [s]
 
-        time, states = solver.simulate(final_time, ncp_list=time_grid)
-
-        # Additional model equations
         self.time_filt = visc_liq/self.deltaP * (
-            self.alpha*self.c_solids/2 * (vol_filtrate/self.area_filt)**2 +
-            self.r_medium * (vol_filtrate/self.area_filt))
-        # self.time_filt = visc_liq * self.alpha * vol_filtrate * solid_conc * vol_slurry\
-        #     / (2 * self.area_filt**2 * self.deltaP)\
-        #     + visc_liq * self.r_medium * vol_filtrate/ (self.area_filt * self.deltaP)
-        self.retrieve_results(time, states, dens_liq, dens_sol, epsilon)
+            alpha*self.c_solids/2 * (vol_filtrate/self.area_filt)**2 +
+            resistance * (vol_filtrate/self.area_filt))  # [s]
+        holds_plateau = model_params is not None and duration >= self.time_filt
+        integration_grid = time_grid  # [s]
+        integration_end = final_time  # [s]
+        if holds_plateau:
+            integration_end = self.elapsed_time + self.time_filt  # [s]
+            if relative_grid is not None:
+                before_completion = relative_grid < self.time_filt
+                # Only requested observations before completion need integration.
+                # Appending a nearby completion point can make CVode omit the
+                # preceding observation; the exact plateau needs no ODE sample.
+                integration_grid = time_grid[before_completion]  # [s]
+                integration_end = (integration_grid[-1] if len(integration_grid)
+                                   else self.elapsed_time)  # [s]
+
+        if integration_end == self.elapsed_time:
+            time = np.array([self.elapsed_time])  # [s], initial condition only
+            states = np.array([mass_init])  # [kg]
+        else:
+            time, states = solver.simulate(integration_end, ncp_list=integration_grid)
+        time = np.asarray(time, dtype=float)  # [s], consistent return type on all routes
+        states = np.asarray(states, dtype=float)  # [kg]
+        if model_params is not None and relative_grid is not None:
+            requested_indices = np.searchsorted(time, integration_grid)
+            if (np.any(requested_indices == len(time)) or
+                    not np.array_equal(time[requested_indices], integration_grid)):
+                raise RuntimeError(
+                    "CVode did not return every requested Filter output time; "
+                    "set tighter rtol/atol in sundials_opts to cover the grid.")
+            # Exclude CVode's unrequested initial row, including an empty
+            # pre-completion grid that will be filled entirely by the plateau.
+            time = time[requested_indices]  # [s]
+            states = states[requested_indices]  # [kg]
+        if holds_plateau:
+            plateau = np.array([self.mass_crit, mass_up_init - self.mass_crit])  # [kg, kg]
+            if relative_grid is not None:
+                plateau_times = time_grid[~before_completion]  # [s], preserve caller sampling
+                time = np.concatenate((time, plateau_times))  # [s]
+                states = np.vstack((states, np.tile(plateau, (len(plateau_times), 1))))  # [kg]
+            else:
+                states[-1] = plateau
+                if duration > self.time_filt:
+                    time = np.append(time, final_time)  # [s], bounded runtime endpoint
+                    states = np.vstack((states, plateau))  # [kg]
+        if model_params is not None:
+            # Cap numerical overshoot while preserving total liquid inventory.
+            states[:, 0] = np.minimum(states[:, 0], self.mass_crit)  # [kg]
+            states[:, 1] = mass_up_init - states[:, 0]  # [kg]
+
+        self.retrieve_results(time, states, dens_liq, dens_sol, epsilon,
+                              mass_solids=self.Solid_1.mass / slurry_div)
 
         return time, states
 
-    def retrieve_results(self, time, states, dens_liq, dens_sol, epsilon):
+    def retrieve_results(self, time: ArrayLike, states: np.ndarray,
+                         dens_liq: float, dens_sol: float,
+                         epsilon: float, mass_solids: float) -> None:
+        """Store filtrate histories and the recovered cake inventory.
+
+        Parameters
+        ----------
+        time : array-like
+            Absolute output times [s], shape (num_times,).
+        states : ndarray
+            Filtrate and remaining liquid masses [kg], shape (num_times, 2).
+        dens_liq, dens_sol : float
+            Liquid and solid mixture densities [kg/m**3].
+        epsilon : float
+            Packed-cake porosity [-].
+        mass_solids : float
+            Solid inventory in this feed portion [kg]. Recovery is the
+            filtrate fraction of mass_crit, capped at one.
+
+        Notes
+        -----
+        Scale the feed's total particle population [#/um] by the recovered
+        solid mass fraction. This preserves particle sizes while reconciling
+        attached mass and distribution for divided or incomplete batches.
+        The attached liquid is the remaining batch liquid; incomplete
+        filtration may still leave liquid above the cake. Recovered dry mass
+        is capped at the attached solid inventory, so solver-tolerance
+        overshoot cannot make the recovered population fraction exceed one.
+        """
         self.timeProf = np.array(time)
         self.massProf = states
 
         dp = unpack_states(states, self.dim_states, self.name_states)
         dp['time'] = np.asarray(time)
 
-        cake_dry = self.c_solids * states[:, 0] / dens_liq
+        portion_recovery = np.minimum(states[:, 0] / self.mass_crit, 1.)  # [-]
+        cake_dry = mass_solids * portion_recovery  # [kg], exact inventory on the plateau
         cake_wet = cake_dry * (1 + epsilon/(1 - epsilon) * dens_liq/dens_sol)
 
         dp['mass_cake_dry'] = cake_dry
@@ -1045,34 +1272,90 @@ class Filter:
         self.result = DynamicResult(self.states_di, self.fstates_di, **dp)
 
         solid_cake = copy.deepcopy(self.Solid_1)
-        solid_cake.updatePhase(mass=cake_dry[-1], distrib=self.Solid_1.distrib)
+        recovered_fraction = cake_dry[-1] / self.Solid_1.mass  # [-]
+        cake_distribution = self.Solid_1.distrib * recovered_fraction  # [#/um]
+        solid_cake.updatePhase(mass=cake_dry[-1], distrib=cake_distribution)
 
         liquid_cake = copy.deepcopy(self.Liquid_1)
-        liquid_cake.updatePhase(mass=self.massProf[-1, 1])  # TODO: the other outlet
+        # Deferred outlet/inventory work: the filtrate outlet is not constructed;
+        # incomplete filtration can leave liquid above the cake.
+        liquid_cake.updatePhase(mass=self.massProf[-1, 1])
 
         self.Outlet = Cake()
         self.Outlet.Phases = (liquid_cake, solid_cake)
 
         self.outputs = np.concatenate(([states[-1, 1], self.Liquid_1.temp],
                                        self.Liquid_1.mass_frac,
-                                       self.Solid_1.distrib))
+                                       solid_cake.distrib))  # [kg], [K], [-], [#/um]
 
         self.outputs = np.atleast_2d(self.outputs)
 
-        self.elapsed_time += time[-1]
+        self.elapsed_time = time[-1]  # [s], absolute batch endpoint
 
     def flatten_states(self):
         pass
 
-    def paramest_wrapper(self, params, time_vals, modify_phase=None,
-                         modify_controls=None):
+    def paramest_wrapper(self, params: ArrayLike, time_vals: ArrayLike,
+                         modify_phase=None, modify_controls=None,
+                         run_args: dict = {}) -> np.ndarray:
+        """Evaluate filtrate masses using estimation-space parameters.
 
+        Parameters
+        ----------
+        params : array-like
+            Optimizer vector (alpha, medium resistance), shape (2,).
+            With log_params=False, units are [m/kg] and [1/m]; otherwise
+            supply natural logarithms of the SI numerical values [-].
+            param_seed provides this representation from configured resistances.
+        time_vals : array-like
+            Requested output times relative to batch start [s], shape
+            (num_times,). No unrequested initial-condition row is returned.
+        modify_phase, modify_controls : dict, optional
+            Only None or empty mappings are supported; non-empty modifiers
+            are rejected because this wrapper does not apply them.
+        run_args : dict, optional
+            Additional solve_unit options. May override a resolved deltaP
+            [Pa] and default verbose=False, or supply slurry_div [-] and
+            sundials_opts. time_grid and model_params are supplied by this
+            wrapper. The mapping is not modified. An unresolved or explicitly
+            None deltaP is omitted, selecting the solve_unit default (1e5 Pa).
+
+        Returns
+        -------
+        ndarray
+            Filtrate mass history [kg], shape (num_times,).
+
+        Raises
+        ------
+        ValueError
+            If modify_phase or modify_controls is non-empty.
+        RuntimeError
+            If CVode omits a requested time. Supply tighter rtol/atol via
+            run_args['sundials_opts'] (wrapper_kwargs['sundials_opts'] in SimExec).
+
+        Notes
+        -----
+        Each evaluation resets the batch clock. solve_unit transforms the
+        optimizer vector into physical resistances exactly once. Exact
+        output-grid coverage depends on CVode tolerances and is verified
+        before residual calculation; omitted samples raise an actionable error.
+        """
+        for name, modifier in (('modify_phase', modify_phase),
+                               ('modify_controls', modify_controls)):
+            if modifier:
+                raise ValueError(
+                    f"{name} is not supported by Filter.paramest_wrapper; "
+                    "configure the Filter phases directly and pass solve options "
+                    "through wrapper_kwargs/run_args instead.")
         self.reset()
-
-        deltaP = self.deltaP
-        time, states = self.solve_unit(time_grid=time_vals, deltaP=deltaP,
-                                       model_params=params, verbose=False)
-
+        solve_options = {'verbose': False}
+        if self.deltaP is not None:
+            solve_options['deltaP'] = self.deltaP  # [Pa], previously resolved pressure
+        solve_options.update(run_args)
+        if solve_options.get('deltaP') is None:
+            solve_options.pop('deltaP', None)
+        _, states = self.solve_unit(time_grid=time_vals, model_params=params,
+                                    **solve_options)
         return states[:, 0]
 
     def plot_profiles(self, time_div=1, black_white=False, **fig_kwargs):
@@ -1127,6 +1410,43 @@ class Filter:
             ax[1].set_xlabel('time (s)')
 
         return fig, ax
+
+
+def _exp_erfc(exponent: ArrayLike, argument: ArrayLike) -> np.ndarray:
+    """Evaluate exp(exponent)*erfc(argument) without spurious overflow.
+
+    Parameters
+    ----------
+    exponent, argument : array-like
+        Dimensionless exponent and erfc argument [-], broadcastable together.
+
+    Returns
+    -------
+    ndarray
+        Product [-], with the broadcast shape of the inputs.
+
+    Notes
+    -----
+    For b >= 0, use erfcx(b)*exp(a-b**2), since
+    erfcx(b) = exp(b**2)*erfc(b). For b < 0, use the complementary
+    identity erfc(b) = 2-erfc(-b), keeping its erfc argument nonnegative.
+    This also avoids evaluating erfcx at negative arguments. The two washing
+    callers have b >= 0 and a-b**2 <= 0, so no residual exponential overflow
+    occurs there; the negative branch is retained only for generality.
+    Underflow in vanishing exponential tails is allowed to yield zero or
+    subnormal values; overflow of the product itself remains an error when
+    enabled by the caller. These are algebraic identities, not fitted limits.
+    """
+    exponent, argument = np.broadcast_arrays(
+        np.asarray(exponent, dtype=float), np.asarray(argument, dtype=float))  # [-]
+    product = np.empty(exponent.shape)  # [-]
+    nonnegative = argument >= 0
+    negative = ~nonnegative
+    with np.errstate(under='ignore'):
+        product[nonnegative] = erfcx(argument[nonnegative]) * np.exp(
+            exponent[nonnegative] - argument[nonnegative]**2)
+        product[negative] = np.exp(exponent[negative]) * (2 - erfc(-argument[negative]))
+    return product
 
 
 class DisplacementWashing:
@@ -1223,19 +1543,90 @@ class DisplacementWashing:
     def Inlet(self, inlet):
         self._Inlet = inlet
 
-    def get_diffusivity(self, vel, diff_pure):
-        distr = self.Solid_1.distrib
-        size = self.Solid_1.x_distrib
+    def get_diffusivity(self, vel: float, diff_pure: np.ndarray,
+                        cake_height: Optional[float] = None) -> np.ndarray:
+        """Evaluate axial dispersion from the volume-weighted Peclet number.
 
-        re_sc = vel * np.dot(distr, size)/diff_pure
-        diff_ratio = np.ones_like(re_sc) * 1/np.sqrt(2)
+        Parameters
+        ----------
+        vel : float
+            Superficial liquid velocity [m/s].
+        diff_pure : ndarray
+            Molecular diffusivity for each species [m**2/s].
+        cake_height : float, optional
+            Test hook overriding cake height [m] to isolate correlation
+            branches. Production calls derive thickness from attached cake
+            volume divided by the unit cross-sectional area.
+
+        Returns
+        -------
+        ndarray
+            Effective axial diffusivity by species [m**2/s].
+
+        Raises
+        ------
+        ValueError
+            If the particle population has no positive volume to normalize.
+
+        Notes
+        -----
+        Destro's thesis (2021), section 4.3.5, Eq. 4.27 averages
+        bin Peclet numbers ``vel * particle_size / diff_pure`` [-] with
+        particle size in metres [m]. Eq. 4.26 is then applied ONCE to that
+        average for each species; averaging bin diffusivities would change
+        the nonlinear correlation. The corresponding article is Destro
+        et al. (2021), doi:10.1016/j.ces.2021.116803, also cited by
+        get_alpha and get_sat_inf.
+
+        As in those helpers, midpoint bin volumes approximate
+        ``integral(kv * L**3 * n(L) dL)``. Normalization cancels a common
+        population scale and the scalar shape factor kv [-], so kv is omitted
+        from the proportional-volume weights as in get_sat_inf. The stored
+        size grid [um] is converted to particle sizes [m]; bin counts use
+        the matching distribution [#/um] and bin widths [um].
+
+        Eq. 4.26 attributes the dimensionless constants 1/sqrt(2), 55.5,
+        0.96 and 1.75 to Wakeman and Tarleton (2005). Re*Sc <= 1 uses
+        1/sqrt(2), retaining the existing equality convention. For Re*Sc > 1,
+        add 55.5*(Re*Sc)**0.96 for cake heights at or below 0.10 m and
+        1.75*Re*Sc above 0.10 m. The 10 cm threshold is the source's stated
+        limit; assigning exact height equality to the thin-cake branch closes
+        the source's unspecified equality case.
+
+        References
+        ----------
+        Destro, F. (2021). Digitalizing pharmaceutical development and
+        manufacturing: advanced mathematical modeling for operation design,
+        process monitoring and process control. Ph.D. thesis, University
+        of Padova, section 4.3.5, Eqs. 4.26-4.27.
+        https://www.research.unipd.it/retrieve/e14fb26f-d5f2-3de1-e053-1705fe0ac030/Dissertation_Destro.pdf
+        """
+        distr = self.Solid_1.distrib  # [#/um], total population density
+        size = self.Solid_1.x_distrib  # [um]
+        micrometre_to_metre = 1e-6  # [m/um], exact SI prefix conversion
+        bin_sizes = (size[:-1] + size[1:]) / 2 * micrometre_to_metre  # [m]
+        bin_counts = (distr[:-1] + distr[1:]) / 2 * np.diff(size)  # [-], particle counts
+        bin_volumes = bin_sizes**3 * bin_counts  # [m**3], proportional volume; kv cancels
+        total_bin_volume = bin_volumes.sum()  # [m**3], same proportional basis
+        if total_bin_volume <= 0:
+            raise ValueError("Washing diffusivity requires a nonzero particle "
+                             "population with positive particle volume.")
+        volume_fractions = bin_volumes / total_bin_volume  # [-]
+        bin_peclet = vel * bin_sizes[:, np.newaxis] / diff_pure  # [-], bin/species
+        re_sc = np.sum(volume_fractions[:, np.newaxis] * bin_peclet, axis=0)  # [-]
+        diff_ratio = np.ones_like(re_sc) * 1/np.sqrt(2)  # [-], Eq. 4.26
+        if cake_height is None:
+            cake_height = self.CakePhase.cake_vol / self.cross_area  # [m]
+        thin_cake_limit = 0.10  # [m], Destro thesis Eq. 4.26: 10 cm
 
         for i in range(len(re_sc)):
-
             if re_sc[i] > 1:
-                diff_ratio[i] += 55.5 * re_sc[i]**0.96
+                if cake_height > thin_cake_limit:
+                    diff_ratio[i] += 1.75 * re_sc[i]  # [-], thick-cake branch, Eq. 4.26
+                else:
+                    diff_ratio[i] += 55.5 * re_sc[i]**0.96
 
-        diff_eff = diff_ratio * diff_pure
+        diff_eff = diff_ratio * diff_pure  # [m**2/s]
 
         return diff_eff
 
@@ -1247,43 +1638,137 @@ class DisplacementWashing:
     def get_inputs(self, time):
         pass
 
-    def material_balance(self, z_pos, time, vel, diff, lambd):
+    def material_balance(self, z_pos: ArrayLike, time: ArrayLike, vel: float,
+                         diff: np.ndarray, lambd: float) -> np.ndarray:
+        """Evaluate the transient analytical washing profile.
 
+        Parameters
+        ----------
+        z_pos : array-like
+            Axial positions [m], shape (num_nodes,).
+        time : array-like
+            Positive washing times [s], shape (num_times,).
+        vel : float
+            Superficial liquid velocity [m/s].
+        diff : ndarray
+            Effective axial diffusivities [m**2/s], shape (num_species,).
+        lambd : float
+            Adsorption correction [-].
+
+        Returns
+        -------
+        ndarray
+            Normalized concentration [-], shape (num_nodes, num_times,
+            num_species), with one representing the initial liquid.
+
+        Notes
+        -----
+        The Lapidus-Amundson exponential-erfc product is evaluated by
+        _exp_erfc to avoid overflow followed by multiplication by zero.
+        """
         arg_one = 0.5 * np.sqrt(lambd*vel**2*np.einsum('i,j->ij', time,
-                                                       1/diff))
+                                                       1/diff))  # [-], time/species
         arg_two = 0.5 * np.sqrt(1/lambd) * np.einsum(
-            'i,j,k->ijk', z_pos, 1/np.sqrt(time), 1/np.sqrt(diff))
-        arg_exp = vel * np.einsum('i,j->ij', z_pos, 1/diff)
+            'i,j,k->ijk', z_pos, 1/np.sqrt(time), 1/np.sqrt(diff))  # [-], position/time/species
+        arg_exp = vel * np.einsum('i,j->ij', z_pos, 1/diff)  # [-], position/species
 
-        first = erfc(arg_one - arg_two)
-        second = np.exp(arg_exp) * erfc(arg_one + arg_two).transpose(1, 0, 2)
-
-        conc_star = 0.5 * (first - second.transpose(1, 0, 2))
-
-        return conc_star
-
-    def material_bce(self, z_pos, wash_ratio, vel, l_total, diff, lambd):
-        # z_pos = np.atleast_1d(z_pos)
-
-        root = np.sqrt(vel*l_total / diff)
-
-        z_adim = z_pos / l_total
-        lambd_wash = lambd * wash_ratio
-
-        arg_one = (z_adim - lambd_wash)/2/np.sqrt(lambd_wash)
-        arg_two = (z_adim + lambd_wash)/2/np.sqrt(lambd_wash)
-        exp_term = np.exp(vel * np.outer(z_pos, 1/diff))
-
-        conc_star = 1 - 0.5 * (
-            erfc(np.outer(arg_one, root)) +
-            exp_term * erfc(np.outer(arg_two, root))
-            )
+        first = erfc(arg_one - arg_two)  # [-]
+        second = _exp_erfc(arg_exp[:, None, :], arg_one + arg_two)  # [-]
+        with np.errstate(under='ignore'):  # vanishing profile tails
+            conc_star = 0.5 * (first - second)  # [-]
 
         return conc_star
 
-    def solve_unit(self, deltaP, wash_ratio=1, time_vals=None,
-                   dynamic=True, verbose=True):
+    def material_bce(self, z_pos: ArrayLike, wash_ratio: float, vel: float,
+                     l_total: float, diff: np.ndarray, lambd: float) -> np.ndarray:
+        """Evaluate the analytical profile at a specified washing ratio.
 
+        Parameters
+        ----------
+        z_pos : array-like
+            Axial positions [m], shape (num_nodes,).
+        wash_ratio : float
+            Displacement distance divided by cake height [-], positive.
+        vel : float
+            Superficial liquid velocity [m/s].
+        l_total : float
+            Cake height [m].
+        diff : ndarray
+            Effective axial diffusivities [m**2/s], shape (num_species,).
+        lambd : float
+            Adsorption correction [-].
+
+        Returns
+        -------
+        ndarray
+            Normalized concentration [-], shape (num_nodes, num_species),
+            with one representing the initial liquid.
+
+        Notes
+        -----
+        This is the Lapidus-Amundson solution at time wash_ratio*l_total/vel
+        [s]. _exp_erfc evaluates its exponential-erfc product without the
+        overflowing intermediate exponential.
+        """
+        root = np.sqrt(vel*l_total / diff)  # [-]
+        z_adim = np.asarray(z_pos) / l_total  # [-]
+        lambd_wash = lambd * wash_ratio  # [-]
+        arg_one = (z_adim - lambd_wash)/2/np.sqrt(lambd_wash)  # [-]
+        arg_two = (z_adim + lambd_wash)/2/np.sqrt(lambd_wash)  # [-]
+        arg_exp = vel * np.outer(z_pos, 1/diff)  # [-]
+
+        with np.errstate(under='ignore'):  # vanishing profile tails
+            conc_star = 1 - 0.5 * (
+                erfc(np.outer(arg_one, root)) +
+                _exp_erfc(arg_exp, np.outer(arg_two, root))
+                )  # [-]
+
+        return conc_star
+
+    def solve_unit(self, deltaP: float, wash_ratio: float = 1,
+                   time_vals: Optional[ArrayLike] = None,
+                   dynamic: bool = True, verbose: bool = True) -> tuple:
+        """Calculate a displacement-washing profile on the cake's axial grid.
+
+        Parameters
+        ----------
+        deltaP : float
+            Pressure drop through cake and medium [Pa].
+        wash_ratio : float, optional
+            Displacement distance divided by cake height [-], default one.
+        time_vals : array-like, optional
+            Dynamic output times [s]; defaults to the full washing interval.
+        dynamic : bool, optional
+            If True, store the time series. If False, evaluate the final
+            analytical profile and store it with one time at washing completion.
+        verbose : bool, optional
+            Reserved output option; currently unused.
+
+        Returns
+        -------
+        tuple of ndarray
+            Final concentration [kg/m**3], normalized final concentration [-],
+            retained concentration [kg/m**3], and effluent concentration
+            [kg/m**3], each with shape (num_nodes, num_species).
+
+        Raises
+        ------
+        RuntimeError
+            If the requested final time exceeds the total washing time.
+        ValueError
+            If time_vals is supplied with dynamic=False, which computes only
+            the profile at the washing-completion time.
+
+        Notes
+        -----
+        Stored concProf has axes (position [m], time [s], species), with
+        concentration values [kg/m**3]. Static output has a singleton time axis.
+        Vanishing tails may underflow to zero or subnormal values during
+        profile assembly; other floating-point errors retain caller settings.
+        """
+        if not dynamic and time_vals is not None:
+            raise ValueError("time_vals cannot be supplied with dynamic=False; "
+                             "static washing returns the completion profile.")
         # ---------- Physical properties
         # Liquid
         visc_liq_per_node = self.Liquid_1.getViscosity()
@@ -1303,7 +1788,7 @@ class DisplacementWashing:
         cake_height = self.CakePhase.cake_vol / self.cross_area  # m
         vel_liq = deltaP / visc_liq / (alpha * dens_sol * cake_height *
                                        (1 - epsilon) + self.resist_medium)
-        diff = self.get_diffusivity(vel_liq, diff_pure)
+        diff = self.get_diffusivity(vel_liq, diff_pure)  # [m**2/s]
 
         z_vals = np.linspace(0, cake_height, self.num_nodes)
         c_zero = define_initial_state(state=c_zero, z_after=z_vals,
@@ -1345,21 +1830,24 @@ class DisplacementWashing:
 
             conc_star = conc_adim
 
-        conc = conc_star * (c_zero - c_inlet) + c_inlet
-        conc_all = np.zeros_like(conc_adim)
+        with np.errstate(under='ignore'):  # assembly may round vanishing tails to zero
+            conc = conc_star * (c_zero - c_inlet) + c_inlet
+            if dynamic:
+                conc_all = (conc_adim * (c_zero - c_inlet)[:, None, :]
+                            + c_inlet)  # [kg/m**3], position/time/species
+            else:
+                conc_all = conc[:, None, :]  # [kg/m**3], final profile with one time
+                time_vals = np.array([time_total])  # [s], actual static output time
+                self.num_t = 1
 
-        for i in range(self.num_t):
-            conc_all[:,i] = conc_adim[:,i] * (c_zero - c_inlet) + c_inlet
-        # conc_all = conc_adim * (c_zero - c_inlet) + c_inlet
+            # Average final concentration and material balance
+            integral = trapezoidal_rule(z_vals, conc_star)
+            c_cake = (c_zero - c_inlet) / cake_height * integral + c_inlet
 
-        # Average final concentration and material balance
-        integral = trapezoidal_rule(z_vals, conc_star)
-        c_cake = (c_zero - c_inlet) / cake_height * integral + c_inlet
+            sat_zero = self.satur
 
-        sat_zero = self.satur
-
-        c_effl = (epsilon/wash_ratio * (sat_zero * c_zero - c_cake) + c_inlet) / \
-            (1 + epsilon/wash_ratio * (sat_zero - 1))
+            c_effl = (epsilon/wash_ratio * (sat_zero * c_zero - c_cake) + c_inlet) / \
+                (1 + epsilon/wash_ratio * (sat_zero - 1))
 
         self.retrieve_results(z_vals, time_vals, conc_all)
         self.cake_height = cake_height

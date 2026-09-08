@@ -31,6 +31,12 @@ Reviewed on 2026-09-08 against branch `fix/issues` at commit `c019f07`.
 | --- | --- | --- |
 | #75 | PR #207 | The issue's own comment states the production fix and regression coverage are in PR #207 (DynamicCollector result routing and plotting). |
 
+Reviewed on 2026-09-08 against branch `fix/issues` at commit `c5a2c1d`.
+
+| Issue | Open PR | Basis |
+| --- | --- | --- |
+| #214 | PR #210 | The issue states the one-cell FVM contract is implemented in PR #210 (consolidated `high_resolution_fvm` with zero-gradient outlet, empty-grid and unknown-limiter errors). |
+
 ## Skipped: planning, scoping, epic, blocked-external, and process issues
 
 Reviewed on 2026-09-07 against branch `fix/issues` at commit `c11abed`.
@@ -76,6 +82,13 @@ Reviewed on 2026-09-08 against branch `fix/issues` at commit `8e6e4d7`.
 | Issue | Title (short) | Reason |
 | --- | --- | --- |
 | #213 | Restore required CI coverage for crystallizer ODE problem callbacks | Follow-up to open PR #204; the choice between making the Assimulo CI job required and extracting a solver-independent callback helper is a CI policy decision for maintainers, and the affected tests live in that PR. |
+
+Reviewed on 2026-09-08 against branch `fix/issues` at commit `c5a2c1d`.
+
+| Issue | Title (short) | Reason |
+| --- | --- | --- |
+| #140 | Drying initialization state layout | All initialization branches already include the condensed temperature on HEAD. State-vector shape validation at the solver boundary remains unmet; defer it behind PR #210's rewrite into `initialize_states`. |
+| #42 | Drying volatile liquid state and species mapping | PR #210 explicitly says "Preserve the provisional behavior owned by #42". Removing the reset also requires correcting the `unit_model` docstring inside PR #210's hunk; defer the state and heat-capacity mapping fix until that PR lands. |
 
 ## Skipped: already satisfied on master
 

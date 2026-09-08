@@ -332,7 +332,7 @@ class SimulationExec:
         if hasattr(target_unit, 'Kinetics'):
             param_seed = target_unit.Kinetics.concat_params()
         else:
-            param_seed = target_unit.params
+            param_seed = getattr(target_unit, 'param_seed', target_unit.params)
 
         name_params = inputs_paramest.get('name_params')
 
