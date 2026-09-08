@@ -695,6 +695,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
                 dim=len(self.x_grid),
                 units="#/(micron m3)",
                 state_type="diff",
+                limit_negative_inventory=False
             ),
         )
 

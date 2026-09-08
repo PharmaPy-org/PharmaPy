@@ -65,7 +65,49 @@ class IntraPhaseProcess:
     phaseref:PhaseRef
     mechanism: "Mechanism"
 
+class MaterialContributionBuffer:
 
+    __slots__ = (
+        "n_material",
+        "contributions",
+        "rates",
+        "aux",
+    )
+
+    # Contribution indices
+    INLET = 0
+    OUTLET = 1
+    INTRAPHASE = 2
+    CROSSPHASE = 3
+
+    def __init__(self, n_material):
+
+        self.n_material = n_material
+
+        # [contribution_type, flattened material states]
+        self.contributions = np.zeros((4, n_material))
+
+        # Sum of all contribution types
+        self.rates = np.zeros(n_material)
+
+        # These are intentionally Python objects because they contain
+        # arbitrary diagnostic/connection information.
+        self.aux = [
+            [],  # inlet
+            [],  # outlet
+            [],  # intraphase
+            [],  # crossphase
+        ]
+
+    def reset(self):
+
+        self.contributions.fill(0.0)
+        self.rates.fill(0.0)
+
+        self.aux[0].clear()
+        self.aux[1].clear()
+        self.aux[2].clear()
+        self.aux[3].clear()
 
 @dataclass
 class StateVariable:
@@ -77,6 +119,10 @@ class StateVariable:
     depends_on: tuple = ("time",)
     stream: Optional[str] = None
     phaseref: Optional[PhaseRef] = None
+    limit_negative_inventory: bool = True
+    # If limit_negative_inventory==True, the vessel's generic material limiter checks this
+    # state for negative inventory. States with their own internal
+    # positivity/conservation handling may set this to False.
 
     compute_value: Callable[
         [
@@ -307,8 +353,28 @@ class StateCollection:
             f"{key.phaseref.phase_type}"
             f"{key.phaseref.index}"
         )
-        
+    def get_static_statekey_slices(self):
 
+        state_slices = {}
+
+        start = 0
+
+        for key, state in self.states.items():
+
+            if state.state_type != "diff":
+                continue
+
+            # Material states only
+            if key.phaseref is None:
+                continue
+
+            end = start + state.dim
+
+            state_slices[key] = slice(start, end)
+
+            start = end
+
+        return state_slices, start
 @dataclass
 class PhaseStateVariable:
     phaseref: PhaseRef

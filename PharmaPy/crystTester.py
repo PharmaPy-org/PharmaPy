@@ -22,7 +22,7 @@ def build_crysts(params):
 
 
 dpath = r"C:\Users\zhillma\OneDrivePZH\Documents\Documents\_Grad_School\Computational\Systems\AP_Stuff\AP_fitting\AP_properties.json"
-
+API_NAME ="AP"
 def temp_profile(x):
     """
     Linear profile from (0, 313) to (101, 273.15).
@@ -69,7 +69,7 @@ solid1 = SolidPhase(
     mass=0,
     mass_frac=[0,0,1,0,0],
 )
-fvm = OneDFVMMechanism(solid1,target_components='AP',solvent_name='water',x_grid=np.arange(1,200),distrib_init=np.zeros(199))
+fvm = OneDFVMMechanism(solid1,target_components=API_NAME,solvent_name='water',x_grid=np.arange(1,200),distrib_init=np.zeros(199))
 solid1.mechanisms = fvm
 vessel.Phases = [liquid1,solid1]
 
@@ -109,6 +109,8 @@ vessel.solve_unit(runtime=150)
 # Check outlet
 # -----------------------------
 
+print(vessel.result.Total_m_in_vessel[-5:])
+print('model_calls', vessel.model_call_count)
 print("done")
 
 # print(
@@ -123,25 +125,25 @@ print("done")
 # print("outlet temp:",
 #       vessel.Outlet.temp)
 
-print(
-    "Vessel Final composition:",
-    vessel.Phases.mass_frac
-)
-print(
-    "Vessel Final mass:",
-    vessel.Phases.mass
-)
-print(
-    "Vessel Final vol:",
-    vessel.Phases.vol
-)
-print(
-    "Vessel Final temp:",
-    vessel.Phases.temp
-)
+# print(
+#     "Vessel Final composition:",
+#     vessel.Phases.mass_frac
+# )
+# print(
+#     "Vessel Final mass:",
+#     vessel.Phases.mass
+# )
+# print(
+#     "Vessel Final vol:",
+#     vessel.Phases.vol
+# )
+# print(
+#     "Vessel Final temp:",
+#     vessel.Phases.temp
+# )
 import matplotlib.pyplot as plt
 
-if True:
+if False:
     for mj,spec in zip(vessel.result.mass_j_liquid0.T,['A','B','C','D','Solvent']):
         if spec=='Solvent':continue
         plt.plot(vessel.result.time,mj,label=spec)

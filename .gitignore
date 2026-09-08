@@ -82,3 +82,5 @@ ENV/
 *.rar
 
 source/crystallization/
+.vscode
+refactor_old_cryst_test.py
