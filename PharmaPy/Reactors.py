@@ -25,6 +25,7 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.animation import FFMpegWriter
 
 import copy
+from typing import Optional
 from itertools import cycle
 
 linestyles = cycle(['-', '--', '-.', ':'])
@@ -122,6 +123,12 @@ class _BaseReactor:
         controlled and the value indicating the function to use
         while computing the variable. Functions are of the form
         f(time) = state_value
+    ht_mode : {'jacket', 'bath'}
+        Tank heat-transfer mode. Jacket mode includes a utility temperature
+        balance; bath mode prescribes the utility inlet temperature at the
+        current time without a jacket balance. PFR accepts
+        both values but uses the same tube area model for either value.
+        Coil heat transfer is not implemented (issue #168).
     return_sens : bool (optional, default = True)
         whether or not the paramest_wrapper method should return
         the sensitivity system along with the concentratio profiles.
@@ -134,7 +141,49 @@ class _BaseReactor:
     def __init__(self, mask_params,
                  base_units, temp_ref, isothermal,
                  reset_states, controls,
-                 h_conv, ht_mode, return_sens, state_events):
+                 h_conv, ht_mode: str, return_sens, state_events) -> None:
+        """Initialize shared reactor settings and validate heat-transfer mode.
+
+        Parameters
+        ----------
+        mask_params : array-like of bool or None
+            Mask selecting kinetic parameters for estimation.
+        base_units : str
+            Legacy material-basis selector; currently unused.
+        temp_ref : float
+            Reference temperature for sensible enthalpy [K].
+        isothermal : bool
+            Whether to omit the reactor temperature balance.
+        reset_states : bool
+            Whether a solve resets the stored initial phase state.
+        controls : dict or None
+            Prescribed-state controls, with time [s] as input and the
+            controlled state's units as output (temperature [K]).
+        h_conv : float
+            Liquid-side convective heat-transfer coefficient [W/m**2/K].
+        ht_mode : {'jacket', 'bath'}
+            Tank utility model: dynamic jacket temperature or prescribed
+            bath temperature. PFR validates this option but its cylindrical
+            tube area model is independent of the value.
+        return_sens : bool
+            Whether parameter estimation requests sensitivities.
+        state_events : list of dict or None
+            State-event specifications, expressed in the monitored state's
+            units.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``ht_mode='coil'``; its modeling scope is tracked in issue #168.
+        ValueError
+            If ``ht_mode`` is neither 'jacket' nor 'bath'.
+        """
+        if ht_mode == 'coil':
+            raise NotImplementedError(
+                "ht_mode='coil' is not implemented; see issue #168")
+        if ht_mode not in ('jacket', 'bath'):
+            raise ValueError(
+                f"Invalid ht_mode {ht_mode!r}; valid options are 'jacket', 'bath'")
 
         self.distributed_uo = False
         self.is_continuous = False
@@ -341,8 +390,8 @@ class _BaseReactor:
         Raises
         ------
         NotImplementedError
-            If ``ht_mode`` is 'coil', which is documented as an option but
-            has no implementation.
+            If ``ht_mode`` was changed to unsupported 'coil' after
+            construction. This defensive guard does not enable coil mode.
         """
         # Heat transfer area
         if self.ht_mode == 'coil':  # Half pipe heat transfer
@@ -354,7 +403,18 @@ class _BaseReactor:
 
         return heat_transf
 
-    def set_names(self):
+    def set_names(self) -> None:
+        """Build species masks and metadata for the packed reactor states.
+
+        Notes
+        -----
+        Temperature metadata follows ``states_uo``, which also controls initial
+        state packing: reactor and utility temperatures [K] are differential
+        states only when their balances are active. Concentrations [mol/L]
+        cover participating species for Batch and all phase species otherwise;
+        Semibatch also carries liquid volume [m**3]. Prescribed reactor
+        temperature is recorded among the nonintegrated outputs.
+        """
         mask_species = [True] * self.num_species
         if self.name_species is not None:
             mask_species = [name in self.partic_species
@@ -381,11 +441,11 @@ class _BaseReactor:
 
         reactor_type = self.__class__.__name__
 
-        if self.isothermal:
+        if 'temp' not in self.states_uo:
             self.fstates_di['temp'] = {'units': 'K', 'dim': 1, 'type': 'diff'}
         else:
             self.states_di['temp'] = {'units': 'K', 'dim': 1, 'type': 'diff'}
-            if reactor_type != 'PlugFlowReactor':
+            if 'temp_ht' in self.states_uo:
                 self.states_di['temp_ht'] = {'units': 'K', 'dim': 1,
                                              'type': 'diff'}
 
@@ -419,7 +479,36 @@ class _BaseReactor:
 
         return inputs
 
-    def unit_model(self, time, states, sw=None, params=None):
+    def unit_model(self, time: float, states: np.ndarray,
+                   sw: Optional[list] = None,
+                   params: Optional[np.ndarray] = None) -> np.ndarray:
+        """Evaluate tank material and active temperature balances.
+
+        Parameters
+        ----------
+        time : float
+            Simulation time [s] for material and utility inlet evaluation.
+        states : numpy.ndarray
+            Packed state vector in ``name_states`` order. Concentrations
+            [mol/L] come first (participating species for Batch, all species
+            otherwise), then Semibatch volume [m**3], reactor temperature [K]
+            and jacket temperature [K] when those states are active.
+        sw : list of bool or None, optional
+            Solver event switches; unused by this balance evaluation.
+        params : numpy.ndarray or None, optional
+            Solver parameter argument; this method uses stored kinetics.
+
+        Returns
+        -------
+        numpy.ndarray
+            Derivatives in the same shape and order as ``states``:
+            concentrations [mol/L/s], volume [m**3/s], temperatures [K/s].
+
+        Notes
+        -----
+        Bath mode has no jacket state or balance. Its active reactor energy
+        balance uses the utility inlet temperature prescribed at ``time``.
+        """
         # Calculate inlets
         u_values = self.get_inputs(time)
 
@@ -429,6 +518,9 @@ class _BaseReactor:
         di_states = complete_dict_states(time, di_states,
                                          ('vol', 'temp', 'temp_ht'),
                                          self.Liquid_1, self.controls)
+
+        if self.ht_mode == 'bath' and 'temp' in self.states_uo:
+            di_states['temp_ht'] = self.Utility.get_inputs(time)['temp_in']  # [K]
 
         self.Liquid_1.temp = di_states['temp']
 
@@ -705,8 +797,11 @@ class BatchReactor(_BaseReactor):
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'jacket')
-        What method is used for heat transfer. Options: ['jacket',
-        'coil', 'bath']
+        Supported modes are 'jacket' (dynamic utility temperature) and 'bath'
+        (prescribed utility inlet temperature at the current time, without a
+        jacket balance). 'coil' is not implemented and raises
+        NotImplementedError at construction; see issue #168. Other values
+        raise ValueError.
     return_sens : bool (optional, default = True)
         whether or not the paramest_wrapper method should return
         the sensitivity system along with the concentratio profiles.
@@ -971,7 +1066,29 @@ class BatchReactor(_BaseReactor):
         else:
             return time, states
 
-    def retrieve_results(self, time, states):
+    def retrieve_results(self, time: np.ndarray, states: np.ndarray) -> None:
+        """Store tank profiles, heat duties, and the outlet phase or stream.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Simulation times [s], shape ``(num_times,)``.
+        states : numpy.ndarray
+            Solver profile, shape ``(num_times, sum(dim_states))`` in
+            ``name_states`` order: concentrations [mol/L], optional Semibatch
+            volume [m**3], and active temperatures [K].
+
+        Notes
+        -----
+        Stores ``result`` and outlet data. Heat profiles ``q_rxn`` and ``q_ht``
+        have units [W]. For non-isothermal energy balances, ``q_ht`` is
+        negative for heat lost to the utility. The existing isothermal
+        reconstruction uses the opposite ``q_ht`` sign and also reverses
+        the ``q_rxn`` sign. These sign differences are tracked separately.
+        When the bath energy balance is active, its prescribed utility inlet
+        temperature is evaluated at every profile time; no jacket temperature
+        is integrated. Jacket mode uses the solved utility temperature.
+        """
         time = np.asarray(time)
 
         # ---------- Prepare dict of results
@@ -984,7 +1101,10 @@ class BatchReactor(_BaseReactor):
         if 'temp_ht' in self.name_states:
             heat_prof = self.energy_balances(**dp, inputs=None, heat_prof=True)
         else:
-            heat_prof = self.energy_balances(temp_ht=None, **dp, inputs=None,
+            temp_ht = None  # [K], unused for isothermal heat reconstruction
+            if self.ht_mode == 'bath' and 'temp' in self.states_uo:
+                temp_ht = self.Utility.get_inputs(time)['temp_in']  # [K]
+            heat_prof = self.energy_balances(temp_ht=temp_ht, **dp, inputs=None,
                                              heat_prof=True)
 
         dp['q_rxn'] = heat_prof[:, 0]
@@ -1045,8 +1165,11 @@ class CSTR(_BaseReactor):
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'jacket')
-        What method is used for heat transfer. Options: ['jacket',
-        'coil', 'bath']
+        Supported modes are 'jacket' (dynamic utility temperature) and 'bath'
+        (prescribed utility inlet temperature at the current time, without a
+        jacket balance). 'coil' is not implemented and raises
+        NotImplementedError at construction; see issue #168. Other values
+        raise ValueError.
     return_sens : bool (optional, default = True)
         whether or not the paramest_wrapper method should return
         the sensitivity system along with the concentratio profiles.
@@ -1092,7 +1215,39 @@ class CSTR(_BaseReactor):
         self.names_states_out += ['temp', 'vol_flow']
         self.names_states_in = self.names_states_out
 
-    def material_balances(self, time, mole_conc, vol, temp, temp_ht, inputs):
+    def material_balances(
+            self, time: float, mole_conc: np.ndarray, vol: float,
+            temp: float, temp_ht: Optional[float], inputs: dict) -> np.ndarray:
+        """Evaluate CSTR species balances, including equilibrium reactions.
+
+        Parameters
+        ----------
+        time : float
+            Simulation time [s]; inlet values have already been evaluated.
+        mole_conc : numpy.ndarray
+            Full phase concentrations [mol/L], shape ``(num_species,)`` in
+            thermodynamic species order, including inert species.
+        vol : float
+            Liquid holdup volume [m**3].
+        temp : float
+            Reactor temperature [K].
+        temp_ht : float or None
+            Utility temperature [K]; unused in the material balance.
+        inputs : dict
+            ``Inlet`` values: ``vol_flow`` [m**3/s] and ``mole_conc`` [mol/L]
+            in the same full species order as ``mole_conc``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Concentration derivatives [mol/L/s], shape ``(num_species,)``.
+            Inert species receive only the inlet/outlet contribution.
+
+        Notes
+        -----
+        Equilibrium kinetics receives temperature-corrected reaction enthalpy
+        on the raw stoichiometric basis [J/mol of reaction as written].
+        """
         inputs = inputs['Inlet']
         inlet_flow = inputs['vol_flow']
         inlet_conc = inputs['mole_conc']
@@ -1101,12 +1256,14 @@ class CSTR(_BaseReactor):
             rate = self.Kinetics.get_rxn_rates(mole_conc[self.mask_species],
                                                temp)
         else:
-            deltah_rxn = self.Liquid_1.getHeatOfRxn(temp,
-                                                    self.Kinetics.tref_hrxn)
+            deltah_rxn = self.Liquid_1.getHeatOfRxn(
+                self.Kinetics.stoich_matrix, temp, self.mask_species,
+                self.Kinetics.delta_hrxn,
+                self.Kinetics.tref_hrxn)  # [J/mol of reaction as written]
 
             rate = self.Kinetics.get_rxn_rates(mole_conc[self.mask_species],
                                                temp,
-                                               deltah_rxn)
+                                               delta_hrxn=deltah_rxn)
 
         rates = np.zeros_like(mole_conc)
         rates[self.mask_species] = rate
@@ -1202,6 +1359,40 @@ class CSTR(_BaseReactor):
 
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
                    params_control=None, verbose=True, sundials_opts=None):
+        """Integrate the tank balances and store the resulting profiles.
+
+        Parameters
+        ----------
+        runtime : float or None, optional
+            Integration duration [s], added to elapsed simulation time.
+        time_grid : array-like or None, optional
+            Requested output times [s]; its last value plus elapsed time
+            overrides ``runtime`` when both are supplied.
+        eval_sens : bool, optional
+            Direct sensitivity evaluation; only False is supported.
+        params_control : dict or None, optional
+            Control parameters stored on the reactor for downstream use.
+        verbose : bool, optional
+            Whether to print solver statistics.
+        sundials_opts : dict or None, optional
+            CVode options in the backend's documented units and conventions.
+
+        Returns
+        -------
+        time : list of float or numpy.ndarray
+            Solver output times [s], length ``num_times``.
+        states : numpy.ndarray
+            Profile in ``name_states`` order, shape
+            ``(num_times, sum(dim_states))``: concentrations [mol/L], optional
+            Semibatch volume [m**3], and active temperatures [K].
+
+        Raises
+        ------
+        NotImplementedError
+            If direct sensitivity evaluation is requested.
+        ImportError
+            If the optional Assimulo backend is unavailable.
+        """
 
         check_modeling_objects(self)
 
@@ -1213,10 +1404,6 @@ class CSTR(_BaseReactor):
 
         self.params_control = params_control
         self.set_names()
-
-        if self.ht_mode == 'coil' and not self.isothermal:
-            raise NotImplementedError(
-                "CSTR heat transfer with ht_mode='coil' is not supported")
 
         self.num_concentr = len(self.Liquid_1.mole_conc)
         self.args_inputs = (self, self.num_concentr, 0)
@@ -1283,7 +1470,29 @@ class CSTR(_BaseReactor):
 
         return time, states
 
-    def retrieve_results(self, time, states):
+    def retrieve_results(self, time: np.ndarray, states: np.ndarray) -> None:
+        """Store tank profiles, heat duties, and the outlet phase or stream.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Simulation times [s], shape ``(num_times,)``.
+        states : numpy.ndarray
+            Solver profile, shape ``(num_times, sum(dim_states))`` in
+            ``name_states`` order: concentrations [mol/L], optional Semibatch
+            volume [m**3], and active temperatures [K].
+
+        Notes
+        -----
+        Stores ``result`` and outlet data. Heat profiles ``q_rxn`` and ``q_ht``
+        have units [W]. For non-isothermal energy balances, ``q_ht`` is
+        negative for heat lost to the utility. The existing isothermal
+        reconstruction uses the opposite ``q_ht`` sign; this difference
+        is tracked separately.
+        When the bath energy balance is active, its prescribed utility inlet
+        temperature is evaluated at every profile time; no jacket temperature
+        is integrated. Jacket mode uses the solved utility temperature.
+        """
         time = np.asarray(time)
 
         # ---------- Prepare dict of results
@@ -1299,7 +1508,10 @@ class CSTR(_BaseReactor):
             heat_prof = self.energy_balances(**dp, inputs=inputs,
                                              heat_prof=True)
         else:
-            heat_prof = self.energy_balances(temp_ht=None, **dp, inputs=inputs,
+            temp_ht = None  # [K], unused for isothermal heat reconstruction
+            if self.ht_mode == 'bath' and 'temp' in self.states_uo:
+                temp_ht = self.Utility.get_inputs(time)['temp_in']  # [K]
+            heat_prof = self.energy_balances(temp_ht=temp_ht, **dp, inputs=inputs,
                                              heat_prof=True)
 
         dp['q_rxn'] = heat_prof[:, 0]
@@ -1361,8 +1573,11 @@ class SemibatchReactor(CSTR):
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'jacket')
-        What method is used for heat transfer. Options: ['jacket',
-        'coil', 'bath']
+        Supported modes are 'jacket' (dynamic utility temperature) and 'bath'
+        (prescribed utility inlet temperature at the current time, without a
+        jacket balance). 'coil' is not implemented and raises
+        NotImplementedError at construction; see issue #168. Other values
+        raise ValueError.
     return_sens : bool (optional, default = True)
         whether or not the paramest_wrapper method should return
         the sensitivity system along with the concentratio profiles.
@@ -1413,6 +1628,40 @@ class SemibatchReactor(CSTR):
 
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
                    params_control=None, verbose=True, sundials_opts=None):
+        """Integrate the tank balances and store the resulting profiles.
+
+        Parameters
+        ----------
+        runtime : float or None, optional
+            Integration duration [s], added to elapsed simulation time.
+        time_grid : array-like or None, optional
+            Requested output times [s]; its last value plus elapsed time
+            overrides ``runtime`` when both are supplied.
+        eval_sens : bool, optional
+            Direct sensitivity evaluation; only False is supported.
+        params_control : dict or None, optional
+            Control parameters stored on the reactor for downstream use.
+        verbose : bool, optional
+            Whether to print solver statistics.
+        sundials_opts : dict or None, optional
+            CVode options in the backend's documented units and conventions.
+
+        Returns
+        -------
+        time : list of float or numpy.ndarray
+            Solver output times [s], length ``num_times``.
+        states : numpy.ndarray
+            Profile in ``name_states`` order, shape
+            ``(num_times, sum(dim_states))``: concentrations [mol/L], optional
+            Semibatch volume [m**3], and active temperatures [K].
+
+        Raises
+        ------
+        NotImplementedError
+            If direct sensitivity evaluation is requested.
+        ImportError
+            If the optional Assimulo backend is unavailable.
+        """
 
 
         check_modeling_objects(self)
@@ -1425,11 +1674,6 @@ class SemibatchReactor(CSTR):
 
         self.params_control = params_control
         self.set_names()
-
-        if self.ht_mode == 'coil' and not self.isothermal:
-            raise NotImplementedError(
-                "SemibatchReactor heat transfer with ht_mode='coil' is "
-                "not supported")
 
         if runtime is not None:
             final_time = runtime + self.elapsed_time
@@ -1570,8 +1814,12 @@ class PlugFlowReactor(_BaseReactor):
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'bath')
-        What method is used for heat transfer. Options: ['jacket',
-        'coil', 'bath']
+        Accepted values are 'jacket' and 'bath', for consistency with tank
+        reactors. This parameter has no effect on the PFR area model: both
+        energy balances use the cylindrical tube area per volume, 4/diam_in
+        [m**2/m**3], and neither integrates a jacket temperature. 'coil' is not
+        implemented and raises NotImplementedError at construction (issue
+        #168); other values raise ValueError.
     return_sens : bool (optional, default = True)
         whether or not the paramest_wrapper method should return
         the sensitivity system along with the concentratio profiles.
@@ -1724,11 +1972,34 @@ class PlugFlowReactor(_BaseReactor):
 
         return dtemp_dv
 
-    def unit_steady(self, time, states, params=None):
-        conc = states[:self.num_species]
+    def unit_steady(self, time: float, states: np.ndarray,
+                    params: Optional[np.ndarray] = None) -> np.ndarray:
+        """Evaluate participating-species and temperature balances along volume.
+
+        Parameters
+        ----------
+        time : float
+            Reactor volume coordinate [m**3], named ``time`` for the solver
+            callback interface; the balances do not depend explicitly on it.
+        states : numpy.ndarray
+            Shape ``(num_species_steady,)`` for isothermal operation, otherwise
+            ``(num_species_steady + 1,)``. Participating concentrations [mol/L]
+            in thermodynamic species order, followed by temperature [K].
+        params : numpy.ndarray or None, optional
+            Unused solver parameter argument; kinetics uses its stored values.
+
+        Returns
+        -------
+        numpy.ndarray
+            Derivatives in the same order and shape as ``states``:
+            concentration per volume [mol/L/m**3], then temperature per volume
+            [K/m**3] when its balance is active. Inert concentrations remain
+            fixed at the inlet values stored by ``solve_steady``.
+        """
+        conc = states[:self.num_species_steady]  # [mol/L]
 
         if 'temp' in self.states_uo:
-            temp = states[self.num_species]
+            temp = states[self.num_species_steady]  # [K]
         else:
             temp = self.Inlet.temp
 
@@ -1743,7 +2014,7 @@ class PlugFlowReactor(_BaseReactor):
 
         return deriv
 
-    def solve_steady(self, vol_rxn, adiabatic=False):
+    def solve_steady(self, vol_rxn: float, adiabatic: bool = False) -> tuple:
         """Integrate the steady-state PFR balances along reactor volume.
 
         Parameters
@@ -1763,56 +2034,76 @@ class PlugFlowReactor(_BaseReactor):
         states_solver : numpy.ndarray
             Solution states at each volume coordinate: participating-species
             molar concentrations [mol/L], followed by temperature [K] when
-            'temp' is among the unit states.
+            the instance is non-isothermal or ``adiabatic=True``.
 
         Notes
         -----
-        This method overwrites the instance ``adiabatic`` attribute with the
-        argument value.
+        The requested adiabatic mode applies only during this solve. It
+        activates the temperature balance even for an isothermal instance.
+        ``isothermal``, ``adiabatic``, ``states_uo``, and the corresponding
+        metadata are restored on success or failure, so subsequent dynamic
+        solves retain their original model. ``num_species_steady`` counts
+        participating species;
+        ``num_species`` retains the full thermodynamic species count for
+        dynamic reuse. This solve leaves the phase and its inert species
+        unchanged; the returned concentration profile contains only
+        participating species in thermodynamic species order.
         """
-        self.adiabatic = adiabatic
-        self.set_names()
+        original_isothermal = self.isothermal
+        original_adiabatic = self.adiabatic
+        original_states = self.states_uo
+        self.states_uo = list(original_states)
+        try:
+            self.adiabatic = adiabatic
 
-        if adiabatic:
-            self.isothermal = False
-            self.states_uo.append('temp')
+            if adiabatic:
+                self.isothermal = False
+                if 'temp' not in self.states_uo:
+                    self.states_uo.append('temp')
 
-        c_inlet = self.Inlet.mole_conc
+            self.set_names()
 
-        self.c_inert = c_inlet[~self.mask_species]
-        c_partic = c_inlet[self.mask_species]
+            c_inlet = self.Inlet.mole_conc
 
-        self.num_species = len(c_partic)
+            self.c_inert = c_inlet[~self.mask_species]
+            c_partic = c_inlet[self.mask_species]
 
-        states_init = c_partic
+            self.num_species_steady = len(c_partic)
 
-        if 'temp' in self.states_uo:
-            states_init = np.append(states_init, self.Inlet.temp)
+            states_init = c_partic
 
-        if 'temp' in self.states_uo and not self.adiabatic:
-            # The steady solve integrates over volume, not time, so use the
-            # inlet utility condition at the start of the volume profile.
-            self.temp_ht_steady = self.Utility.evaluate_inputs(0)['temp_in']
+            if 'temp' in self.states_uo:
+                states_init = np.append(states_init, self.Inlet.temp)
 
-        problem = Explicit_Problem(self.unit_steady, states_init, t0=0)
-        solver = CVode(problem)
+            if 'temp' in self.states_uo and not self.adiabatic:
+                # The steady solve integrates over volume, not time, so use the
+                # inlet utility condition at the start of the volume profile.
+                self.temp_ht_steady = self.Utility.evaluate_inputs(0)['temp_in']
 
-        volPosition, states_solver = solver.simulate(vol_rxn)
+            problem = Explicit_Problem(self.unit_steady, states_init, t0=0)
+            solver = CVode(problem)
 
-        num_x = len(volPosition)
+            volPosition, states_solver = solver.simulate(vol_rxn)
 
-        # Retrieve results
-        concentr = states_solver[:, :self.num_species]
-        self.concProfSteady = concentr
-        self.volPosition = volPosition
-        if 'temp' in self.states_uo:
-            temper = states_solver[:, self.num_species]
-        else:
-            temper = np.ones(num_x) * self.Inlet.temp
+            num_x = len(volPosition)
 
-        self.tempProfSteady = temper
+            # Retrieve results
+            concentr = states_solver[:, :self.num_species_steady]  # [mol/L]
+            self.concProfSteady = concentr
+            self.volPosition = volPosition
+            if 'temp' in self.states_uo:
+                temper = states_solver[:, self.num_species_steady]  # [K]
+            else:
+                temper = np.ones(num_x) * self.Inlet.temp
 
-        return volPosition, states_solver
+            self.tempProfSteady = temper
+
+            return volPosition, states_solver
+        finally:
+            self.isothermal = original_isothermal
+            self.adiabatic = original_adiabatic
+            self.states_uo = original_states
+            self.set_names()
 
     def material_balances(self, time, mole_conc, vol_diff, temp, flow_in,
                           rate_j):

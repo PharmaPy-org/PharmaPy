@@ -64,3 +64,11 @@ Reviewed on 2026-09-07 against branch `fix/issues` at commit `dbdea97`.
 | Issue | Title (short) | Reason |
 | --- | --- | --- |
 | #178 | VaporPhase.getEnthalpy compares the temperature axis against the species axis | Real defect, deferred: open PR #179 rewrites the same per-species branch of `VaporPhase.getEnthalpy` for #177, so a concurrent fix on this branch would conflict with that PR. Revisit once PR #179 lands. |
+
+## Skipped: already satisfied on master
+
+Reviewed on 2026-09-08 against branch `fix/issues` at commit `50cfd6e`.
+
+| Issue | Title (short) | Reason |
+| --- | --- | --- |
+| #33 | PFR steady-state heat-transfer area uses diameter/4 | Already fixed on master by commit 6a0fb16 (both PFR energy balances use `a_prime = 4 / self.diam` [m**2/m**3]); no further change needed. |

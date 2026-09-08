@@ -112,6 +112,15 @@ def central_partial(kinetics, name, column, force):
 @pytest.mark.parametrize('option', ['relative', 'ratio', 'absolute'])
 @pytest.mark.parametrize('vector', [False, True])
 def test_signed_rates_and_saturation(option, vector):
+    """Check signed rates, exact saturation zeros, and equivalent force modes.
+
+    Parameters
+    ----------
+    option : str
+        Supersaturation driving-force convention.
+    vector : bool
+        Whether to evaluate all concentrations together or one at a time.
+    """
     kinetics = make_kinetics(option)
     concentrations = np.array([3.5, 0.5, SATURATION])  # [kg/m**3], above/below/at
     if vector:
@@ -131,7 +140,11 @@ def test_signed_rates_and_saturation(option, vector):
         expected = np.array([relative.get_kinetics(  # same rate units
             conc, TEMPERATURE, KV, MOMENTS, nucl_sec_out=True)
             for conc in concentrations]).T
-        np.testing.assert_array_equal(rates, expected)
+        # Allow roundoff from scalar/vector evaluation of these short products.
+        roundoff_rtol = 1e-12  # [-], relative allowance above machine epsilon
+        roundoff_atol = 1e-15  # [#/m**3/s] nucleation; [um/s] growth/dissolution
+        np.testing.assert_allclose(
+            rates, expected, rtol=roundoff_rtol, atol=roundoff_atol)
 
 
 @pytest.mark.parametrize('option', ['relative', 'absolute'])
