@@ -2,7 +2,8 @@
 
 Issue #160 records that the scalar volumetric shape factor cancels from the
 normalized crystal-volume weights. The hydraulic resistance ``alpha`` should
-therefore be independent of any positive scalar ``kv``, while the method must
+therefore be independent of any positive scalar ``kv`` at fixed porosity,
+while the method must
 still obtain that factor from its attached solid phase rather than a literal.
 """
 
@@ -93,19 +94,25 @@ def _make_cake(thermo_path: str, shape_factor: float) -> Cake:
 
 
 def test_cake_alpha_is_invariant_to_real_phase_shape_factor(thermo_path):
-    """Verify real solid phases give the pinned, shape-invariant ``alpha``.
+    """Verify shape-factor cancellation at fixed porosity with real phases.
+
+    #165 makes the packing model use phase-owned kv. Its epsilon-regularized
+    weights have a small kv dependence, so exact alpha invariance applies
+    only at fixed porosity. Hold the historical porosity constant to isolate
+    alpha's cancellation; separate packing regressions cover that dependence.
 
     Parameters
     ----------
     thermo_path : str
         Path to the pure-component thermodynamic database.
     """
-    alpha_values = np.array(
-        [
-            _make_cake(thermo_path, shape_factor).get_alpha()
-            for shape_factor in SHAPE_FACTOR_PROBES
-        ]
-    )  # [m/kg]
+    reference = _make_cake(thermo_path, LEGACY_SHAPE_FACTOR)
+    alpha_values = []  # [m/kg]
+    for shape_factor in SHAPE_FACTOR_PROBES:
+        cake = _make_cake(thermo_path, shape_factor)
+        cake.porosity = reference.porosity  # [-], isolate resistance weights
+        alpha_values.append(cake.get_alpha())
+    alpha_values = np.array(alpha_values)  # [m/kg]
     assert alpha_values[0] == pytest.approx(
         EXPECTED_LEGACY_ALPHA,
         rel=ALPHA_RELATIVE_TOLERANCE,

@@ -63,7 +63,8 @@ def upwind_fvm(f, boundary_cond):
     return f_aug
 
 
-def get_alpha(solid_phase, porosity, sphericity, rho_sol, csd=None):
+def get_alpha(solid_phase, porosity: float, sphericity: float,
+              rho_sol: float, csd=None) -> float:
     """Estimate the cake specific resistance from the particle-size grid.
 
     Parameters
@@ -75,7 +76,7 @@ def get_alpha(solid_phase, porosity, sphericity, rho_sol, csd=None):
         Cake porosity [-].
     sphericity : float
         Particle sphericity [-]. Accepted for the legacy API; the current
-        implementation uses the pre-existing spherical volume-shape factor.
+        implementation uses the solid phase's volumetric shape factor.
     rho_sol : float
         Solid density [kg/m**3]. Accepted for the legacy API; the current
         implementation reads density from ``solid_phase``.
@@ -92,24 +93,16 @@ def get_alpha(solid_phase, porosity, sphericity, rho_sol, csd=None):
     -----
     ``SolidPhase.x_distrib`` is stored in micrometers [um] and converted to
     meters [m] before the Carman-Kozeny-style resistance is evaluated.
+    The coefficient 180 is the Carman (1937), Equation 10 value with Kozeny
+    constant 5 for granular beds (doi:10.1016/S0263-8762(97)80003-2).
+    The phase-owned scalar ``kv`` [-] cancels from normalized volume weights;
+    resistance is independent of it at fixed porosity.
     """
-    # if csd is None:
-    #     csd = solid_phase.distrib
-
-    # x_grid = solid_phase.x_distrib
-
-    # alpha_x = 180 * (1 - porosity) / \
-    #     (porosity**3 * (x_grid*1e-6)**2 * rho_sol * sphericity**2)
-
-    # numerator = trapezoidal_rule(x_grid, csd * alpha_x)
-    # denominator = solid_phase.moments[0]
-
-    # alpha = numerator / (denominator + eps)
-    csd = solid_phase.distrib
+    csd = solid_phase.distrib  # [common number basis/um]
     rho_sol = solid_phase.getDensity()
     x_grid = solid_phase.x_distrib * 1e-6
 
-    kv = 0.524  # converting number based CSD to volume based:
+    kv = solid_phase.kv  # [-], phase-owned volumetric shape factor
 
     del_x_dist = np.diff(x_grid)
     node_x_dist = (x_grid[:-1] + x_grid[1:]) / 2
@@ -117,11 +110,7 @@ def get_alpha(solid_phase, porosity, sphericity, rho_sol, csd=None):
 
     # Volume of crystals in each bin
     vol_cry = node_CSD * del_x_dist * (kv * node_x_dist**3)
-    frac_vol_cry = vol_cry / (np.sum(vol_cry) + eps)
-
-    csd = vol_cry
-
-    # Calculate irreducible saturation in weighted csd (volume based)
+    # Normalize volume weights; their common scalar kv cancels exactly.
     vol_frac = vol_cry/ np.sum(vol_cry)
     x_grid = node_x_dist
     alpha_x = 180 * (1 - porosity) / porosity**3 / x_grid**2 / rho_sol
@@ -130,7 +119,8 @@ def get_alpha(solid_phase, porosity, sphericity, rho_sol, csd=None):
     return alpha
 
 
-def get_sat_inf(x_vec, csd, deltaP, porosity, height, mu_zero, props):
+def get_sat_inf(x_vec, csd, deltaP: float, porosity: float, height: float,
+                mu_zero: float, props):
     """Estimate irreducible cake saturation from a particle-size distribution.
 
     Parameters
@@ -164,11 +154,11 @@ def get_sat_inf(x_vec, csd, deltaP, porosity, height, mu_zero, props):
     Destro et al. (2021), Equations 16-18
     (doi:10.1016/j.ces.2021.116803), which adapt Wakeman's mono-sized-cake
     correlations to a particle-size distribution with additive
-    volume-fraction weighting.
+    volume-fraction weighting. The common scalar volume shape factor
+    cancels exactly: ``kv*w_i / sum(kv*w) = w_i / sum(w)``. This function
+    therefore needs no phase-owned shape factor or change to its callers.
     """
     surf_tens, rho_liq = props
-
-    kv = 0.524  # converting number based CSD to volume based:
 
     del_x_dist = np.diff(x_vec)
     node_x_dist = (x_vec[:-1] + x_vec[1:]) / 2
@@ -183,11 +173,9 @@ def get_sat_inf(x_vec, csd, deltaP, porosity, height, mu_zero, props):
             porosity**3 * x_vec**2,
             (rho_liq*grav*height + deltaP)/(1 - porosity)**2 / height / surf_tens
             )
-    # Volume of crystals in each bin
-    vol_cry = node_CSD * del_x_dist * (kv * node_x_dist**3)
-    frac_vol_cry = vol_cry / (np.sum(vol_cry) + eps)
-
-    csd = vol_cry
+    # kv is common to all bin volumes: kv*w_i / sum(kv*w) = w_i/sum(w).
+    # No phase collaborator or shape-factor handoff is needed here.
+    vol_cry = node_CSD * del_x_dist * node_x_dist**3  # [proportional volume]
 
     s_inf = 0.155 * (1 + 0.031*capillary_number**(-0.49))
     s_inf = np.where(s_inf > 1, 1, s_inf)

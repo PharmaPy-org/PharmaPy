@@ -621,20 +621,33 @@ class LiquidPhase(ThermoPhysicalManager):
 
             return pres_bubble
 
-    def getProps(self, basis='mass'):
-        cpmass, cpmole = self.getCpMix(self.temp, self.mass_frac)
-        rhoMass, rhoMole = self.getDensityMix(self.mass_frac, temp=self.temp)
-        hmass, hmole = self.getEnthalpy(self.temp, mass_frac=self.mass_frac)
-        # viscosity = self.getViscosityMix(self.temp, self.mass_frac)
-        if basis == 'mass':
-            cp = cpmass
-            enthalpy = hmass
-            rho = rhoMass
-        else:
-            cp = cpmole
-            enthalpy = hmole
-            rho = rhoMole
+    def getProps(self, basis: str = 'mass') -> tuple:
+        """Return Cp, density, and enthalpy at the current phase state.
 
+        Parameters
+        ----------
+        basis : {'mass', 'mole'}, optional
+            Property basis; default mass.
+
+        Returns
+        -------
+        tuple
+            Cp, density, and enthalpy, in that order. Mass units are [J/kg/K],
+            [kg/m**3], and [J/kg]. Molar units follow the phase providers:
+            [J/mol/K], [kmol/m**3] (equivalently [mol/L]), and [J/mol].
+            Scalars are returned for a scalar state; profile shapes follow
+            the individual providers. Enthalpy uses their 298.15 K reference.
+
+        Raises
+        ------
+        ValueError
+            If basis is neither 'mass' nor 'mole'.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
+        cp = self.getCp(basis=basis)  # [J/kg/K] or [J/mol/K]
+        rho = self.getDensity(basis=basis)  # [kg/m**3] or [kmol/m**3]
+        enthalpy = self.getEnthalpy(basis=basis)  # [J/kg] or [J/mol]
         return cp, rho, enthalpy
 
     def getActivityCoeff(self, method='ideal', mole_frac=None, temp=None):
@@ -1258,7 +1271,7 @@ class SolidPhase(ThermoPhysicalManager):
                  distrib: Optional[ArrayLike] = None,
                  x_distrib: Optional[ArrayLike] = None, distrib_type='vol_perc',
                  moisture=0, porosity=0,
-                 mole_conc: Optional[ArrayLike] = None, kv=1) -> None:
+                 mole_conc: Optional[ArrayLike] = None, kv: float = 1) -> None:
         """Initialize a solid inventory and its optional size distribution.
 
         Parameters
@@ -1313,14 +1326,15 @@ class SolidPhase(ThermoPhysicalManager):
             ``(num_species,)``; currently unused.
         kv : float, optional
             Volumetric shape factor [-] in ``particle_volume = kv * size**3``;
-            default one represents cubic particles.
+            Must be a finite positive scalar; default one represents cubic
+            particles.
 
         Raises
         ------
         ValueError
             If ``mass_frac`` is None, ``distrib_type`` is not 'vol_perc' or
             'mass_frac', or a supplied distribution grid has fewer than two
-            points.
+            points, or ``kv`` is not a finite positive scalar.
         RuntimeError
             If the species mass fractions sum to less than the existing
             composition threshold of 0.99 [-].
@@ -1332,8 +1346,13 @@ class SolidPhase(ThermoPhysicalManager):
             raise ValueError("distrib_type must be 'vol_perc' or 'mass_frac'; "
                              f"got {distrib_type!r}")
 
+        if (np.ndim(kv) != 0 or not np.isrealobj(kv)
+                or not np.issubdtype(np.asarray(kv).dtype, np.number)
+                or not np.isfinite(kv) or kv <= 0):
+            raise ValueError("kv must be a finite positive scalar")
+
         super().__init__(path_thermo)
-        self.kv = kv
+        self.kv = kv  # [-], physical particle volume / size**3
         self.distrib_type = distrib_type
         self.num_mom = num_mom  # [-]
 
@@ -1660,8 +1679,39 @@ class SolidPhase(ThermoPhysicalManager):
 
         return densSolid
 
-    def getPorosity(self, distrib=None, diam_filter=1, AR=None,
-                    sphericity=None):
+    def getPorosity(self, distrib=None, diam_filter: float = 1, AR=None,
+                    sphericity=None) -> float:
+        """Estimate packed-bed porosity with the existing linear packing model.
+
+        Parameters
+        ----------
+        distrib : array-like, optional
+            Number distribution [#/um], shape (num_sizes,). Defaults to the
+            attached distribution. Mean size uses the attached phase moments.
+        diam_filter : float, optional
+            Filter diameter [m]; default 1 m is the existing reference bed.
+        AR : float, optional
+            Legacy unused aspect ratio [-].
+        sphericity : float, optional
+            Particle sphericity [-]; default 0.7 is the existing model
+            assumption. A positive value is required for packing diameters.
+
+        Returns
+        -------
+        float
+            Pore fraction of total packed-bed volume [-].
+
+        Notes
+        -----
+        Repository commit 9b646f2 attributes this model and its empirical
+        coefficients to Yu, Zou, and Standish (1996). It does not establish a
+        calibrated range. The existing Jeschar initial-porosity relation is
+        ``0.375 + 0.34 * mean_size / diam_filter``. The equivalent packing
+        diameter uses the phase-owned volume factor ``kv`` [-]. Common
+        diameter scaling cancels in pairwise size ratios, but ``kv`` does not
+        exactly cancel from volume weights because their denominator retains
+        the existing machine-epsilon regularization.
+        """
 
         if distrib is None:
             distrib = self.distrib
@@ -1670,18 +1720,13 @@ class SolidPhase(ThermoPhysicalManager):
         else:
             mom_zero, mom_one = self.getMoments(mom_num=(0, 1))
 
-        # mom_one *= 1e-6  # m
-        x_dist = self.x_distrib * 1e-6  # m
-
-        if AR is None:
-            AR = 2
+        x_dist = self.x_distrib * 1e-6  # [m], exact um-to-m conversion
 
         if sphericity is None:
-            sphericity = 0.7
+            sphericity = 0.7  # [-], existing particle-shape assumption
 
-        # Yu, Zou et al (1996) and Yu,Zou, Stnadish (1996) model
-        kv = 0.524  # Volumetric shape coefficient
-        ks = 3.142  # Surface shape coefficient
+        # Yu, Zou, and Standish (1996), attributed in commit 9b646f2.
+        kv = self.kv  # [-], phase-owned volumetric shape coefficient
 
         del_x_dist = np.diff(x_dist)
         node_x_dist = (x_dist[:-1] + x_dist[1:]) / 2

@@ -814,32 +814,50 @@ class _BaseCryst:
         return events
 
     def solve_unit(self, runtime=None, time_grid=None,
-                   eval_sens=False,
-                   jac_v_prod=False, verbose=True, test=False,
-                   sundials_opts=None, any_event=True):
-        """
-        runtime : float (default = None)
-            Value for the total unit runtime
-        time_grid : list of float (optional, dafault = None)
-            Optional list of time values for the integrator to use
-            during simulation
-        eval_sens : bool (optional, default = False)
-            Boolean value indicating whether the parametric
-            sensitivity system will be included during simulation.
-            Must be True to access sensitivity information.
-        jac_v_prod :
-            TODO
-        verbose : bool (optional, default = True)
-            Boolean value indicating whether the simulator will
-            output run statistics after simulation is complete.
-            Use True if you want to see the number of function
-            evaluations and wall-clock runtime for the unit.
-        test :
-            TODO
-        sundials_opts :
-            TODO
-        any_event :
-            TODO
+                   eval_sens: bool = False,
+                   jac_v_prod: bool = False, verbose: bool = True, test=False,
+                   sundials_opts=None, any_event: bool = True):
+        """Initialize and integrate the crystallizer state.
+
+        Parameters
+        ----------
+        runtime : float, optional
+            Integration duration [s] from the elapsed time.
+        time_grid : array-like, optional
+            Output times [s], shape (num_times,). Its final value overrides
+            runtime when both are supplied. One time specification is needed.
+        eval_sens : bool, optional
+            Integrate parameter sensitivities; default False.
+        jac_v_prod : bool, optional
+            Use the FVM Jacobian-vector product; default False.
+        verbose : bool, optional
+            Display solver statistics; default True.
+        test : bool, optional
+            Legacy unused option.
+        sundials_opts : dict, optional
+            CVode solver options; units follow the named solver option.
+        any_event : bool, optional
+            Stop on any state event when True (default), otherwise all events.
+
+        Returns
+        -------
+        time : ndarray
+            Integration times [s], shape (num_times,).
+        states : ndarray
+            State rows at each time in ``name_states`` order: total crystal
+            moments [m**n] or scaled distribution [#/um], liquid species mass
+            concentrations [kg/m**3], liquid volume [m**3] for Batch/Semibatch,
+            and optional phase/jacket temperatures [K]. Continuous units use
+            volume-normalized crystal states instead.
+        sensit : list of ndarray, optional
+            Parameter sensitivities [state unit / parameter unit], returned
+            only when eval_sens is True.
+
+        Notes
+        -----
+        The Batch/Semibatch volume state is initialized from the liquid phase;
+        total slurry volume includes crystals and is reserved for geometry.
+        Result retrieval updates the attached phases and stores the profiles.
         """
 
         if self.__class__.__name__ != 'BatchCryst':
@@ -883,7 +901,7 @@ class _BaseCryst:
         self.len_states = [self.num_distr, self.num_species]  # TODO: not neces
 
         if 'vol' in self.states_uo:  # Batch or semibatch
-            vol_init = self.Slurry.getTotalVol()
+            vol_init = self.Liquid_1.vol  # [m**3], ODE liquid-volume state
             init_susp = np.append(init_liquid, vol_init)
 
             self.len_states.append(1)
@@ -1741,27 +1759,27 @@ class BatchCryst(_BaseCryst):
         -----
         When ``'temp'`` is a control, ``ht_term`` carries the heat
         capacitance [J/K] instead of a heat rate, so that the caller can
-        back out the required duty.
+        back out the required duty. Capacitance per liquid volume is
+        multiplied by liquid volume for storage; vessel geometry and jacket
+        volume retain the total slurry-volume basis.
         """
 
         vol_solid = mu_n[3] * self.Solid_1.kv  # mu_3 is total, not by volume
-        vol_total = vol + vol_solid
+        vol_total = vol + vol_solid  # [m**3], slurry volume
 
         phi = vol / vol_total  # [-], liquid volume fraction
         phis = [phi, 1 - phi]  # [-], [liq, sol]
 
         # Suspension properties  TODO: slurry should be updated here
         capacitance = self.Slurry.getCp(temp, phis, rhos,
-                                        times_vliq=True)  # [J/m**3/K]
+                                        times_vliq=True)  # [J/m**3 liquid/K]
 
         # Renaming
         dh_cryst = -1.46e4  # [J/kg]
         # dh_cryst = -self.Liquid_1.delta_fus[self.target_ind] / \
         #     self.Liquid_1.mw[self.target_ind] * 1000  # [J/kg]
 
-        vol = vol / phi  # [m**3], liquid -> slurry volume
-
-        height_liq = vol / (np.pi/4 * self.diam_tank**2)  # [m]
+        height_liq = vol_total / (np.pi/4 * self.diam_tank**2)  # [m]
         # [m**2], wetted lateral area plus tank base
         area_ht = np.pi * self.diam_tank * height_liq + self.area_base
 
@@ -1788,7 +1806,7 @@ class BatchCryst(_BaseCryst):
 
                 cp_ht = 4180  # [J/kg/K]
                 rho_ht = 1000  # [kg/m**3]
-                vol_ht = vol*0.14  # [m**3]
+                vol_ht = vol_total*0.14  # [m**3]
 
                 dtht_dt = flow_ht / vol_ht * (tht_in - temp_ht) - \
                     self.u_ht*area_ht*(temp_ht - temp) / rho_ht/vol_ht/cp_ht
@@ -2615,7 +2633,7 @@ class SemibatchCryst(MSMPR):
 
         # Suspension properties
         capacitance = self.Slurry.getCp(temp, phis, rho_susp,
-                                        times_vliq=True)  # [J/m**3/K]
+                                        times_vliq=True)  # [J/m**3 liquid/K]
         h_sp = self.Slurry.getEnthalpy(temp, phis, rho_susp)  # [J/m**3]
 
         # Renaming

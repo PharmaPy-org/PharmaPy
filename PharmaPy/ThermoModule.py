@@ -211,9 +211,38 @@ class ThermoPhysicalManager:
         return cpMass, cpMole
 
     def getCpMix(self, temp, mass_frac=None, mole_frac=None, phase='liquid',
-                 basis='mass'):
-        # mass_frac = np.asarray(mass_frac)
+                 basis: str = 'mass'):
+        """Mix pure heat capacities over the species axis.
 
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature [K], scalar or shape (num_temperatures,).
+        mass_frac, mole_frac : ndarray, optional
+            Species fractions [-], shape (num_species,) for fixed composition
+            or (num_temperatures, num_species) for paired profiles. The
+            requested basis takes precedence; the other basis is converted
+            when needed.
+        phase : {'liquid', 'solid', 'vapor'}, optional
+            Pure-component Cp correlation; default liquid.
+        basis : {'mass', 'mole'}, optional
+            Cp basis, default mass.
+
+        Returns
+        -------
+        float or ndarray
+            Mixture Cp [J/kg/K] for mass or [J/mol/K] for mole. A single
+            temperature and fixed composition return a scalar; multiple
+            temperatures return shape (num_temperatures,). Composition
+            profiles retain their row axis, including a one-row profile.
+
+        Raises
+        ------
+        ValueError
+            If basis is neither 'mass' nor 'mole'.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
         cp_mass, cp_mole = self.getCpPure(temp, phase=phase)
 
         if basis == 'mass':
@@ -221,7 +250,7 @@ class ThermoPhysicalManager:
                 mass_frac = self.frac_to_frac(mole_frac=mole_frac)
 
             if mass_frac.ndim == 1:
-                cpMix = np.dot(mass_frac, cp_mass)
+                cpMix = np.dot(cp_mass, mass_frac)
             elif mass_frac.ndim == 2:
                 cpMix = (mass_frac * cp_mass).sum(axis=1)
 
@@ -230,7 +259,7 @@ class ThermoPhysicalManager:
                 mole_frac = self.frac_to_frac(mass_frac)
 
             if mole_frac.ndim == 1:
-                cpMix = np.dot(mole_frac, cp_mole)
+                cpMix = np.dot(cp_mole, mole_frac)
             elif mole_frac.ndim == 2:
                 cpMix = (mole_frac * cp_mole).sum(axis=1)
 
