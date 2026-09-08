@@ -36,9 +36,9 @@ def assert_nominal_heat_source(unit, states, growth_prefactor):
 
     Notes
     -----
-    The moment solve currently seeds SI moments into the micrometre RHS
-    (#222 follow-up in the next increment). Use the returned raw solver state
-    here; this test checks nominal parameter ownership, not that seeding basis.
+    The returned raw solver moments use micrometre lengths; the heat-source
+    calculation converts them to SI lengths. Phase and result moments use SI
+    lengths, as checked separately by the #224 seeding regressions.
     """
     concentration = states[:, unit.num_distr + unit.target_ind]  # [kg/m**3]
     growth = growth_prefactor * (concentration / SATURATION - 1)  # [um/s]

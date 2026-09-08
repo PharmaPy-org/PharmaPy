@@ -134,6 +134,17 @@ class OdeBoundaryReached(Exception):
 @pytest.mark.parametrize('unit_type', [BatchCryst, SemibatchCryst])
 def test_crystallizer_initial_state_contains_liquid_volume(
         thermo_path, monkeypatch, unit_type):
+    """Seed liquid volume and micrometre moments at the solver boundary.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Thermophysical database path.
+    monkeypatch : pytest.MonkeyPatch
+        Replace only solver construction.
+    unit_type : type
+        Batch or semibatch crystallizer class.
+    """
     slurry = make_slurry(thermo_path)
     unit = unit_type(target_comp='A', method='moments', adiabatic=True,
                      vol_tank=slurry.vol)
@@ -152,7 +163,7 @@ def test_crystallizer_initial_state_contains_liquid_volume(
         eval_sens, jac_v_prod : bool
             Solver options.
         states_init : ndarray
-            Total moments [m**n], concentrations [kg/m**3], volume [m**3],
+            Total moments [um**n], concentrations [kg/m**3], volume [m**3],
             and temperature [K], in the crystallizer's named state order.
         params : ndarray
             Kinetic parameters in the kinetics provider's units.
@@ -171,8 +182,12 @@ def test_crystallizer_initial_state_contains_liquid_volume(
     assert len(captured) == 1
     volume_index = unit.num_distr + unit.num_species
     assert captured[0][volume_index] == pytest.approx(9e-4, rel=RTOL, abs=0)
+    moments = slurry.Solid_1.moments  # [m**n], total phase moments
+    expected_moments = np.array([moments[0], moments[1] * 1e6,
+                                 moments[2] * 1e12, moments[3] * 1e18])
+    # [um**n], exact SI phase to raw solver-state length conversion (#224)
     np.testing.assert_allclose(captured[0][:unit.num_distr],
-                               slurry.Solid_1.moments, rtol=RTOL, atol=0)
+                               expected_moments, rtol=RTOL, atol=0)
 
 
 @pytest.mark.parametrize('unit_type', [BatchCryst, SemibatchCryst])

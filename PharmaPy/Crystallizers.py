@@ -25,7 +25,7 @@ from matplotlib import cm
 from matplotlib.ticker import AutoMinorLocator
 from matplotlib.colors import LightSource
 
-from scipy.optimize import newton
+from scipy.optimize import brentq, RootResults
 
 import copy
 import inspect
@@ -372,7 +372,16 @@ class _BaseCryst:
         self.u_ht = 1 / (1 / self.h_conv + 1 / utility.h_conv)
         self._Utility = utility
 
-    def nomenclature(self):
+    def nomenclature(self) -> None:
+        """Declare reported-state metadata and derived result fields.
+
+        Notes
+        -----
+        Public states_di describes SI reported/phase moments: [m**n] for
+        Batch/Semibatch and [m**n/m**3] for MSMPR. Internally, solve_unit
+        seeds the raw solver vector in micrometre lengths, and
+        retrieve_results converts these moments back to SI for reporting.
+        """
         name_class = self.__class__.__name__
 
         states_di = {
@@ -391,16 +400,10 @@ class _BaseCryst:
                 self.states_in_dict['Inlet']['distrib'] = self.num_distr
 
         if self.method == 'moments':
-            # mom_names = ['mu_%s0' % ind for ind in range(self.num_mom)]
-
-            # for mom in mom_names[::-1]:
             self.names_states_in.insert(0, 'mu_n')
-
-            # self.states_in_dict['solid']['moments']
 
             if name_class == 'MSMPR':
                 self.states_uo.append('moments')
-                # self.states_in_dict['Inlet']['distrib'] = self.num_distr
 
                 di_distr['units'] = 'm**n/m**3'
                 states_di['mu_n'] = di_distr
@@ -409,9 +412,6 @@ class _BaseCryst:
 
                 di_distr['units'] = 'm**n'
                 states_di['mu_n'] = di_distr
-
-                # if name_class == 'SemibatchCryst':
-                    # self.states_in_dict['Inlet']['distrib'] = self.num_distr
 
         elif self.method == '1D-FVM':
             self.names_states_in.insert(0, 'distrib')
@@ -562,12 +562,10 @@ class _BaseCryst:
         Supplied active parameters are installed on the kinetics object so its
         cached rates and parameter values agree for subsequent Jacobian calls.
         The nucleus size rad is in [um]. Length conversion uses 1 um = 1e-6 m.
-        The pre-existing finite-radius nucleation terms above order zero and
-        their mass source omit vol for total moments; correcting this is
-        tracked for the next crystallizer increment after #222/#227.
-        The RHS and retrieval use moment states [um**n], which conflicts with
-        states_di['mu_n']['units'] and the SI moment seeding in solve_unit.
-        That basis mismatch is also tracked for the next increment.
+        Nucleation contributes B*vol*rad**n to every total moment, including
+        n=0. The crystal mass source is rho_cry*kv times the SI third-moment
+        derivative. For MSMPR, the unit-volume convention gives rates per
+        slurry volume instead.
         """
         kv = self.Solid_1.kv
 
@@ -592,12 +590,12 @@ class _BaseCryst:
         # Model
         dmu_zero_dt = np.atleast_1d(nucl * vol)
         dmu_1on_dt = ind_mom * (growth + dissol) * mu[:-1] + \
-            nucl * self.rad**ind_mom
+            nucl * vol * self.rad**ind_mom
         dmu_dt = np.concatenate((dmu_zero_dt, dmu_1on_dt))
 
         # Material balance in kg_API/s --> G in um, u_2 in um**2 (or m**2/m**3)
         mass_transf = np.atleast_1d(rho_cry * kv * (
-            3*(growth + dissol)*mu[2] + nucl*self.rad**3)) * (1e-6)**3
+            3*(growth + dissol)*mu[2] + nucl*vol*self.rad**3)) * (1e-6)**3
 
         return dmu_dt, mass_transf
 
@@ -1005,7 +1003,7 @@ class _BaseCryst:
             Integration times [s], shape (num_times,).
         states : ndarray
             State rows at each time in ``name_states`` order: total crystal
-            moments [m**n] or scaled distribution [#/um], liquid species mass
+            moments [um**n] or scaled distribution [#/um], liquid species mass
             concentrations [kg/m**3], liquid volume [m**3] for Batch/Semibatch,
             and optional phase/jacket temperatures [K]. Continuous units use
             volume-normalized crystal states instead.
@@ -1022,15 +1020,15 @@ class _BaseCryst:
         geometry does not expand that volume by the headspace factor.
         Stored kinetic parameters are restored after integration, before heat
         retrieval, so sensitivity difference-quotient probes cannot persist.
-        Result retrieval updates the attached phases and stores the profiles.
+        The raw solver vector carries micrometre moments internally, seeded
+        from SI phase moments here. retrieve_results converts them back to SI;
+        public states_di describes those reported values. Result retrieval
+        updates the attached phases and stores the profiles.
         """
 
-        if self.__class__.__name__ != 'BatchCryst':
-            if self.method == 'moments':
-                pass  # TODO: MSMPR MoM should be addressed?
-            else:
-                x_distr = getattr(self.Solid_1, 'x_distrib', [])
-                self.states_in_dict['Inlet']['distrib'] = len(x_distr)
+        if self.__class__.__name__ != 'BatchCryst' and self.method != 'moments':
+            x_distr = getattr(self.Solid_1, 'x_distrib', [])
+            self.states_in_dict['Inlet']['distrib'] = len(x_distr)
 
         self.Kinetics.target_idx = self.target_ind
 
@@ -1040,9 +1038,8 @@ class _BaseCryst:
         # ---------- Solid phase states
         if 'vol' in self.states_uo:
             if self.method == 'moments':
-                init_solid = self.Solid_1.moments
-                # exp = np.arange(0, self.Solid_1.num_mom) # TODO: problematic line for seeded crystallization.
-                # init_solid = init_solid * (1e6)**exp
+                init_solid = self.Solid_1.moments * 1e6**np.arange(self.num_distr)
+                # SI phase moments converted to [um**n]; exactly 1e6 um per metre
 
             elif self.method == '1D-FVM':
                 x_grid = self.Solid_1.x_distrib
@@ -1050,9 +1047,8 @@ class _BaseCryst:
 
         else:
             if self.method == 'moments':
-                init_solid = self.Slurry.moments
-                # exp = np.arange(0, self.Solid_1.num_mom) # TODO
-                # init_solid = init_solid * (1e6)**exp
+                init_solid = self.Slurry.moments * 1e6**np.arange(self.num_distr)
+                # SI slurry moments converted to [um**n/m**3]; exactly 1e6 um/m
 
             elif self.method == '1D-FVM':
                 x_grid = self.Slurry.x_distrib
@@ -1066,7 +1062,7 @@ class _BaseCryst:
 
         self.num_species = len(init_liquid)
 
-        self.len_states = [self.num_distr, self.num_species]  # TODO: not neces
+        self.len_states = [self.num_distr, self.num_species]
 
         if 'vol' in self.states_uo:  # Batch or semibatch
             vol_init = self.Liquid_1.vol  # [m**3], ODE liquid-volume state
@@ -1914,7 +1910,7 @@ class BatchCryst(_BaseCryst):
         Notes
         -----
         Batch states are declared on a *total* basis in
-        :meth:`_BaseCryst.nomenclature` (``mu_n`` in [m**n], ``distrib`` in
+        :meth:`_BaseCryst.solve_unit` (``mu_n`` in [um**n], ``distrib`` in
         [#/um]), and the kinetics are evaluated with ``vol=vol_slurry``, so
         ``transf`` is a total rate [kg/s] rather than the volumetric
         [kg/m**3/s] rate returned by :meth:`MSMPR.material_balances`.
@@ -2069,7 +2065,25 @@ class BatchCryst(_BaseCryst):
             else:
                 return dtemp_dt
 
-    def retrieve_results(self, time, states):
+    def retrieve_results(self, time: np.ndarray, states: np.ndarray) -> None:
+        """Store batch profiles, update inventories, and construct the outlet.
+
+        Parameters
+        ----------
+        time : ndarray
+            Reporting times [s], shape (num_times,).
+        states : ndarray
+            Solver rows in name_states order: total moments [um**n] or scaled
+            total FVM CSD [#/um], concentrations [kg/m**3], liquid volume
+            [m**3], and optional temperatures [K]. FVM retrieval removes
+            scale in place.
+
+        Notes
+        -----
+        Raw solver moments are seeded in micrometre lengths by solve_unit.
+        Retrieval converts them to total SI moments [m**n] for reported and
+        phase values. Public states_di and result metadata both describe SI.
+        """
         time = np.array(time)
         self.elapsed_time = time[-1]
 
@@ -2104,8 +2118,7 @@ class BatchCryst(_BaseCryst):
         if self.method == 'moments':
             dp['mu_n'] = dp['mu_n'] * (1e-6)**np.arange(self.num_distr)
 
-        self.result = DynamicResult(self.states_di, self.fstates_di,
-                                            **dp)
+        self.result = DynamicResult(self.states_di, self.fstates_di, **dp)
         # ---------- Update phases
         vol_sol = dp['mu_n'][-1, 3] * self.Solid_1.kv
 
@@ -2252,49 +2265,402 @@ class MSMPR(_BaseCryst):
         self.tau = tau
         return tau
 
-    def solve_steady_state(self, frac_seed, temp):
+    def solve_steady_state(self, frac_seed: float, temp: float, *,
+                           num_scan: int = 64) -> tuple:
+        """Solve the MSMPR moment and target-composition steady balances.
 
-        vol = self.vol_slurry
-        flow_v = self.Inlet.vol_flow / vol  # 1/s
+        Parameters
+        ----------
+        frac_seed : float
+            Target liquid composition hint in the unit's basis: [kg/m**3]
+            for mass_conc or [kg/kg] for mass_frac. Among accepted roots,
+            return the one nearest this finite, positive-growth hint.
+            Kinetics must use the same basis.
+        temp : float
+            Constant vessel temperature [K].
+        num_scan : int, optional
+            Number of evenly spaced domain samples, at least two. The default
+            64 is a numerical resolution choice, not a physical parameter.
+            Detected admissibility transitions are refined to concentration
+            resolution. Increase this value for narrow admissible intervals
+            or closely spaced roots; tangential roots can still be missed.
 
-        x_vec = self.Solid_1.x_distrib  # um
+        Returns
+        -------
+        x_vec : ndarray
+            Crystal size grid [um], shape (num_bins,).
+        f_convg : ndarray
+            Steady number density [#/m**3/um] on x_vec.
+        composition : float
+            Target liquid composition in the unit's basis: [kg/m**3] or
+            [kg/kg].
+        info : scipy.optimize.RootResults
+            Mass-concentration root [kg/m**3] convergence information; for
+            kv=0, records the exact B/G boundary [#/m**3/um] with zero
+            iterations and method='closed-form'.
+        final_fn : float
+            Dynamic model's target derivative, evaluated by calling
+            material_balances at the returned analytical moments, in
+            [kg/m**3/s] or [kg/kg/s], according to the unit's basis. Density
+            is evaluated at the attached liquid composition, so this residual
+            cannot expose error from the constant-density approximation.
 
-        kv = self.Solid_1.kv
-        rho = self.Solid_1.getDensity(temp=temp)
+        Raises
+        ------
+        ValueError
+            If basis or num_scan is invalid, nuclei have finite radius, the
+            inlet concentration is nonpositive or nonfinite, the hint is
+            nonfinite or has nonpositive growth, or no scanned root passes
+            the positive-population, positive-liquid-holdup, and relative
+            population-closure gates, including skipped unusable brackets.
+            Also raised for the unsupported c* cancellation feed with kv>0.
+            No-root errors describe the nearest rejected candidate's gate,
+            relative closure error, and closure_rtol when available.
+        RuntimeError
+            If the kv=0 boundary is not positive and finite.
 
-        w_in = self.Inlet.Liquid_1.mass_frac[self.target_ind]
+        Warns
+        -----
+        UserWarning
+            If brackets were skipped but an accepted root is returned; the
+            warning reports the skipped count and suggests finer num_scan.
 
-        def fun_of_frac(w_tank, full_output=False):
+        Notes
+        -----
+        Solves the moment-mode MSMPR.material_balances target equation with
+        phi_in=1 and no inlet solids. With D=Q/V [1/s], target concentration
+        c [kg/m**3], and phi=1-kv*mu_3, this is
+        0=D*(c_in-c*phi)-R*(1-c/rho_l). The derivative divides this expression
+        by phi, and also by rho_l for mass_frac. Thus this is the dynamic
+        model's solute bookkeeping, not a separate stream mass balance.
 
-            nucl, growth, _ = self.Kinetics.get_kinetics(w_tank, temp, kv)
+        Assumes constant tank liquid density and holdup, no inlet solids,
+        zero-size nuclei, and positive size- and population-independent
+        growth. No Kinetics.alpha_fn impurity factor is applied, although
+        the dynamic model applies it. Density is evaluated at the attached
+        liquid composition and requested temperature. The feed term always
+        uses the inlet liquid's own mass concentration, allowing its density
+        to differ from the tank density.
 
-            # growth *= 1e-6
+        For n(L)=boundary*exp(-D*L/G), the infinite-domain moment factors
+        are a_n=n!*(G/D)**(n+1)*(1e-6)**n, so mu_n=boundary*a_n in
+        [m**n/m**3]. These analytical integrals satisfy the moment equations
+        without grid truncation error. The returned grid CSD is a sample;
+        downstream quadrature needs many G/D decay lengths to reproduce
+        these analytical moments.
+        With r=3*kv*rho_s*G*a_2*1e-6, R=boundary*r [kg/m**3/s]. At each
+        trial c, solve the linear solute equation for boundary:
+        boundary=D*(c_in-c)/(r*(1-c/rho_l)-D*c*kv*a_3).
+        The rescaled residual is f(c)=D*(c_in-c)-coefficient*B(mu_n)/G.
+        Scan the open interval 0<c<min(c_in,c*), where
+        c*=rho_s*rho_l/(rho_s+rho_l), retaining positive growth and positive
+        amplitude coefficients. Candidates must also have finite positive
+        liquid volume fraction phi=1-kv*boundary*a_3. A zero solute residual
+        alone does not establish positive liquid holdup. Growth is evaluated
+        at each composition, including composition-dependent solubility.
+        Each detected sign change between consecutive admissible samples is
+        solved with brentq, using xtol=4*machine epsilon*c_in [kg/m**3] as
+        concentration resolution and brentq's default rtol. Secondary
+        nucleation can give multiple roots; return the accepted root nearest
+        frac_seed. Brackets with nonfinite midpoint residuals, failed solves,
+        or nonfinite returned roots or residuals are skipped. Warn with the
+        skipped count if another root is returned. A finite midpoint does
+        not rule out an unsampled inadmissible interval inside the bracket.
+        The trivial washout state at exactly c_in and states above c_in
+        (possible for feeds above c*) are not returned. Positive populations
+        must satisfy the measured closure gate; frac_seed selects among
+        accepted roots.
 
-            # Analytical solution to f(x)
-            f_zero = nucl / growth  # num / s / m**3 / um
-            f_x = np.exp(-flow_v / growth * x_vec) * f_zero
+        Accept physically admissible, converged roots only when
+        abs(f(c)) <= closure_rtol*D*(c_in-c) [kg/m**3/s], with
+        closure_rtol=1e-5 [-]. Since boundary=D*(c_in-c)/coefficient,
+        abs(f(c))/(D*(c_in-c)) equals abs(boundary-B/G)/boundary. Thus
+        rejection depends on measured relative population-closure error,
+        not just a sign change or the eliminated solute residual. The
+        tolerance leaves over a decade of margin above the worst resolved
+        repository case (2.6e-7, absolute-supersaturation low conversion)
+        and below false-root errors of at least 1.9e-2. The residual roundoff
+        floor is about eps*D*c_in. Relative depletion (c_in-c)/c_in, or
+        relative supersaturation near growth onset, below roughly
+        eps/closure_rtol (about 5e4 float64 spacings) cannot reliably pass
+        closure. Such roots are rejected when measured error exceeds the
+        gate. Increasing num_scan helps resolve narrow intervals or growth
+        gaps, but cannot improve root accuracy or physical admissibility.
+        Only kv=0 uses the zero-transfer branch: crystal volume vanishes,
+        secondary nucleation sees kv*mu=0 at every population, and B/G is
+        evaluated directly without iteration at c_in/concentration_scale.
+        With kv>0, the cancellation feed c_in=c* is unsupported; use a
+        slightly different feed. The final dynamic residual can expose
+        omitted impurity effects, but uses the same constant-density
+        approximation. Evaluation restores phase temperatures and solid
+        moments, including on failure; the usual kinetic caches are refreshed.
+        """
+        if self.basis not in {'mass_conc', 'mass_frac'}:
+            raise ValueError("basis must be 'mass_conc' or 'mass_frac'")
+        if self.rad != 0:
+            raise ValueError("finite-radius nuclei are unsupported; rad must be zero")
+        flow_v = self.Inlet.vol_flow / self.vol_slurry  # [1/s]
+        x_vec = self.Solid_1.x_distrib  # [um]
+        kv = self.Solid_1.kv  # [-]
+        rho_solid = self.Solid_1.getDensity(temp=temp)  # [kg/m**3]
+        rho_liquid = self.Liquid_1.getDensity(temp=temp)  # [kg/m**3]
+        concentration_scale = rho_liquid if self.basis == 'mass_frac' else 1
+        # [kg/m**3] or [-], configured composition to mass concentration
+        concentration_in = self.Inlet.Liquid_1.mass_conc[self.target_ind]
+        # [kg/m**3], the feed term consumed by material_balances
+        composition_in = concentration_in / concentration_scale
+        # [configured composition unit], feed concentration on the tank basis
+        if not np.isfinite(concentration_in) or concentration_in <= 0:
+            raise ValueError("Inlet target mass concentration must be positive and finite")
+        if not np.isfinite(frac_seed):
+            raise ValueError("Trial composition hint must be finite")
+        if (not isinstance(num_scan, (int, np.integer))
+                or isinstance(num_scan, bool) or num_scan < 2):
+            raise ValueError("num_scan must be an integer of at least two")
+        num_moments = self.Solid_1.num_mom
+        orders = np.arange(num_moments)
+        factorials = np.cumprod(np.maximum(orders, 1), dtype=float)
+        # [-], n! including 0!=1
+        metre_per_um = 1e-6  # [m/um], exact SI prefix conversion
 
-            # vfrac_ph = self.Slurry.getFractions(f_x)
-            # rho_liq = self.Liquid_1.getDensity(temp=temp)
+        def population_data(composition: float) -> "tuple | None":
+            """Evaluate growth and analytical exponential moment factors.
 
-            mu_2 = trapezoidal_rule(x_vec, x_vec**2 * f_x)
+            Parameters
+            ----------
+            composition : float
+                Target liquid composition [kg/m**3] or [kg/kg].
 
-            kinetic_term = -3 * kv * rho * growth * mu_2
-            flow_term = flow_v * (w_in - w_tank)
+            Returns
+            -------
+            tuple
+                Primary nucleation [#/m**3/s], growth [um/s], moment factors
+                [m**n*um], mass-source factor [kg*um/s], and coefficient of
+                boundary in the solute equation [kg*um/s].
+                Returns None when growth is nonpositive or nonfinite.
+            """
+            empty_moments = np.zeros(num_moments)  # [m**n/m**3]
+            nucl_seed, growth, _ = self.Kinetics.get_kinetics(
+                composition, temp, kv, empty_moments)
+            # [#/m**3/s], [um/s], [um/s]
+            if not np.isfinite(growth) or growth <= 0:
+                return None
+            factors = (factorials * (growth / flow_v)**(orders + 1)
+                       * metre_per_um**orders)  # [m**n*um]
+            mass_factor = 3 * kv * rho_solid * growth * factors[2] * metre_per_um
+            # [kg*um/s], crystal mass source per unit boundary number density
+            concentration = composition * concentration_scale  # [kg/m**3]
+            coefficient = (mass_factor * (1 - concentration / rho_liquid)
+                           - flow_v * concentration * kv * factors[3])
+            # [kg*um/s], coefficient of boundary in the solute equation
+            return nucl_seed, growth, factors, mass_factor, coefficient
 
-            conc_eqn = kinetic_term + flow_term
+        def composition_residual(concentration: float) -> float:
+            """Evaluate the solute residual without its amplitude pole.
 
-            if full_output:
-                return f_x, conc_eqn
-            else:
-                return conc_eqn
+            Parameters
+            ----------
+            concentration : float
+                Trial tank target concentration [kg/m**3].
 
-        # Solve eqn
-        # frac_seed = self.Liquid_1.mass_frac[self.target_ind]
-        w_convg, info = newton(fun_of_frac, frac_seed, full_output=True)
-        f_convg, final_fn = fun_of_frac(w_convg, full_output=True)
+            Returns
+            -------
+            float
+                Rescaled population-closure residual [kg/m**3/s], or NaN
+                for nonpositive/nonfinite growth or amplitude coefficient.
+            """
+            composition = concentration / concentration_scale  # [basis unit]
+            data = population_data(composition)
+            if data is None or not np.isfinite(data[-1]) or data[-1] <= 0:
+                return np.nan
+            _, growth, factors, _, coefficient = data
+            feed_difference = flow_v * (concentration_in - concentration)
+            # [kg/m**3/s]
+            boundary = feed_difference / coefficient  # [#/m**3/um]
+            moments = boundary * factors  # [m**n/m**3]
+            nucl, _, _ = self.Kinetics.get_kinetics(composition, temp, kv, moments)
+            # [#/m**3/s], total population-dependent nucleation
+            return feed_difference - coefficient * nucl / growth
 
-        return x_vec, f_convg, w_convg, info, final_fn
+        if population_data(frac_seed) is None:
+            raise ValueError(
+                f"Trial composition {frac_seed!r} has nonpositive growth; "
+                "check solubility and the growth kinetics")
+        inlet_data = population_data(composition_in)
+        critical_concentration = rho_solid * rho_liquid / (rho_solid + rho_liquid)
+        # [kg/m**3], c* where the amplitude coefficient cancels for positive kv
+        # Four rounded arithmetic steps form the coefficient; use its
+        # mass-source scale to recognize exact physical cancellation.
+        if (kv > 0 and inlet_data is not None
+                and abs(inlet_data[-1]) <= 4 * eps * abs(inlet_data[-2])):
+            raise ValueError(
+                f"Unsupported feed concentration {float(concentration_in)!r} kg/m**3 "
+                f"at c*={float(critical_concentration)!r} kg/m**3 for kv > 0; "
+                "use a slightly different feed concentration")
+        if kv == 0:
+            if inlet_data is None:
+                raise ValueError("Inlet composition has nonpositive growth; check solubility")
+            nucl_seed, growth, factors, _, _ = inlet_data
+            # [#/m**3/s], [um/s], [m**n*um], [kg*um/s], [kg*um/s]
+            composition = composition_in  # [configured composition unit]
+            boundary = nucl_seed / growth  # [#/m**3/um], kv*mu=0 at every population
+            info = RootResults(boundary, iterations=0, function_calls=1,
+                               flag=0, method='closed-form')
+            # flag=0 is SciPy's success code; one evaluation of B/G, no iteration.
+        else:
+            upper = min(concentration_in, critical_concentration)  # [kg/m**3]
+            concentration_xtol = 4 * eps * concentration_in  # [kg/m**3]
+            closure_rtol = 1e-5  # [-], relative population-closure tolerance
+            # Resolved repository cases reach 2.6e-7 error; false roots reach
+            # at least 1.9e-2. This leaves over a decade of margin each way.
+            grid = np.linspace(np.nextafter(0.0, upper),
+                               np.nextafter(upper, 0.0), num_scan)  # [kg/m**3]
+            scan = []
+            previous = None
+            for concentration in grid:
+                residual = composition_residual(concentration)  # [kg/m**3/s]
+                admissible = np.isfinite(residual)
+                if previous is not None and admissible != np.isfinite(previous[1]):
+                    # Refine detected growth/coefficient boundaries so roots
+                    # close to positive-growth onset can also be bracketed.
+                    left, right = previous[0], concentration  # [kg/m**3]
+                    left_admissible = np.isfinite(previous[1])
+                    while right - left > concentration_xtol:
+                        midpoint = (left + right) / 2  # [kg/m**3]
+                        if midpoint == left or midpoint == right:
+                            break
+                        if np.isfinite(composition_residual(midpoint)) == left_admissible:
+                            left = midpoint  # [kg/m**3]
+                        else:
+                            right = midpoint  # [kg/m**3]
+                    edge = left if left_admissible else right  # [kg/m**3]
+                    scan.append((edge, composition_residual(edge)))
+                scan.append((concentration, residual))
+                previous = concentration, residual
+            roots = []
+            rejected = []
+            skipped_brackets = 0
+            for (left, left_fn), (right, right_fn) in zip(scan, scan[1:]):
+                # Do not bridge intervals containing inadmissible scan points.
+                if (not np.isfinite(left_fn) or not np.isfinite(right_fn)
+                        or left == right or left_fn * right_fn > 0):
+                    continue
+                midpoint = (left + right) / 2  # [kg/m**3]
+                if not np.isfinite(composition_residual(midpoint)):
+                    skipped_brackets += 1
+                    continue
+                try:
+                    concentration, root_info = brentq(
+                        composition_residual, left, right,
+                        xtol=concentration_xtol, full_output=True)  # [kg/m**3]
+                except (ValueError, RuntimeError):
+                    # An unsampled growth gap or solver failure invalidates
+                    # this bracket, not roots resolved in other brackets.
+                    skipped_brackets += 1
+                    continue
+                if not np.isfinite(concentration):
+                    skipped_brackets += 1
+                    continue
+                residual = composition_residual(concentration)  # [kg/m**3/s]
+                if not np.isfinite(residual):
+                    skipped_brackets += 1
+                    rejected.append((concentration / concentration_scale,
+                                     'finite residual', np.inf))
+                    # [basis unit], gate name, unavailable relative closure error [-]
+                    continue
+                composition = concentration / concentration_scale  # [basis unit]
+                _, growth, factors, _, coefficient = population_data(composition)
+                # [#/m**3/s], [um/s], [m**n*um], [kg*um/s], [kg*um/s]
+                boundary = flow_v * (concentration_in - concentration) / coefficient
+                # [#/m**3/um], positive population recovered from solute balance
+                liquid_fraction = 1 - kv * boundary * factors[3]  # [-]
+                depletion_rate = flow_v * (concentration_in - concentration)
+                # [kg/m**3/s], residual/depletion_rate equals relative B/G error
+                relative_error = (abs(residual) / depletion_rate
+                                  if depletion_rate > 0 else np.inf)  # [-]
+                if not root_info.converged:
+                    gate = 'solver convergence'
+                elif not np.isfinite(boundary) or boundary <= 0:
+                    gate = 'positive population'
+                elif not np.isfinite(liquid_fraction) or liquid_fraction <= 0:
+                    gate = 'positive liquid volume fraction'
+                elif relative_error > closure_rtol:
+                    gate = 'population closure'
+                else:
+                    roots.append((composition, boundary, growth, factors, root_info))
+                    continue
+                rejected.append((composition, gate, relative_error))
+                # [basis unit], gate name, relative population-closure error [-]
+            if not roots:
+                if rejected:
+                    candidate, gate, relative_error = min(
+                        rejected, key=lambda root: abs(root[0] - frac_seed))
+                    # [basis unit], gate name, relative population-closure error [-]
+                    diagnosis = (
+                        f"Nearest candidate {float(candidate)!r} ({self.basis}) "
+                        f"rejected by {gate} gate; relative closure error="
+                        f"{relative_error:.6g}; closure_rtol={closure_rtol:g}. ")
+                else:
+                    diagnosis = (
+                        "No finite candidate resolved; rejected by bracket "
+                        "admissibility gate; relative closure error=unavailable; "
+                        f"closure_rtol={closure_rtol:g}. ")
+                raise ValueError(
+                    f"No accepted steady root in scanned tank concentration domain "
+                    f"(0, {float(upper)!r}) kg/m**3 with positive growth, coefficient, "
+                    "finite positive liquid volume fraction, and population closure. "
+                    f"{diagnosis}"
+                    "Washout at exactly the inlet and states above the inlet "
+                    f"concentration are not returned; skipped brackets: {skipped_brackets}. "
+                    "Increasing num_scan may resolve narrow root intervals or "
+                    "growth gaps, but cannot fix physical inadmissibility or "
+                    "insufficient root accuracy; check the feed and kinetics.")
+            if skipped_brackets:
+                warnings.warn(
+                    f"MSMPR steady-state scan skipped brackets: {skipped_brackets}; "
+                    "use a finer num_scan to resolve narrow growth gaps or roots.",
+                    stacklevel=2)
+            composition, boundary, growth, factors, info = min(
+                roots, key=lambda root: abs(root[0] - frac_seed))
+            # [basis unit], [#/m**3/um], [um/s], [m**n*um], solver information
+        if not np.isfinite(boundary) or boundary <= 0:
+            raise RuntimeError(
+                "Steady-state population boundary must be positive and finite; "
+                "check the nucleation kinetics")
+        f_convg = boundary * np.exp(-flow_v / growth * x_vec)  # [#/m**3/um]
+        moments_si = boundary * factors  # [m**n/m**3]
+        concentrations = self.Liquid_1.mass_conc.copy()  # [kg/m**3]
+        concentrations[self.target_ind] = composition * concentration_scale
+        # [kg/m**3], tank target concentration on the dynamic model's basis
+        inputs = {'Inlet': {'vol_flow': self.Inlet.vol_flow},
+                  'Liquid_1': {'mass_conc': self.Inlet.Liquid_1.mass_conc.copy()}}
+        # [m**3/s], [kg/m**3], solid-free feed as consumed by material_balances
+        if self.method == 'moments':
+            population_state = moments_si / metre_per_um**orders  # [um**n/m**3]
+            inputs['Inlet']['mu_n'] = np.zeros(num_moments)  # [m**n/m**3]
+        else:
+            population_state = f_convg * self.scale  # scaled [#/m**3/um]
+            inputs['Inlet']['distrib'] = np.zeros_like(f_convg)  # [#/m**3/um]
+            self.dx = self.Slurry.dx  # [um], same FVM initialization as solve_unit
+        rho_inlet = self.Inlet.Liquid_1.getDensity(temp=temp)  # [kg/m**3]
+        liquid_temp, solid_temp = self.Liquid_1.temp, self.Solid_1.temp  # [K]
+        if self.method != 'moments':
+            solid_moments = self.Solid_1.moments.copy()  # [m**n], phase inventory
+        try:
+            self.Liquid_1.temp = temp  # [K], match the dynamic density evaluation
+            self.Solid_1.temp = temp  # [K]
+            derivative, _ = self.material_balances(
+                0.0, None, inputs, [[rho_liquid, rho_solid], [rho_inlet, None]],
+                moments_si, population_state, concentrations, temp, None,
+                self.vol_slurry, [1.0, 0.0])
+            # [population unit/s], [composition unit/s], actual dynamic balance
+        finally:
+            self.Liquid_1.temp, self.Solid_1.temp = liquid_temp, solid_temp  # [K]
+            if self.method != 'moments':
+                self.Solid_1.moments[:] = solid_moments  # [m**n], preserve inventory
+        final_fn = derivative[len(population_state) + self.target_ind]
+        # [configured composition unit/s], actual dynamic target derivative
+        return x_vec, f_convg, composition, info, final_fn
 
     def material_balances(self, time, params, u_inputs, rhos, mu_n,
                           distrib, mass_conc, temp, temp_ht, vol, phi_in):
@@ -2345,7 +2711,7 @@ class MSMPR(_BaseCryst):
         Notes
         -----
         MSMPR states are declared on a *volumetric* basis in
-        :meth:`_BaseCryst.nomenclature` (``mu_n`` in [m**n/m**3],
+        :meth:`_BaseCryst.solve_unit` (``mu_n`` in [um**n/m**3],
         ``distrib`` in [#/m**3/um]), and the kinetics are evaluated with the
         default ``vol=1``. ``transf`` is therefore an intensive rate
         [kg/m**3/s], unlike the total [kg/s] rate returned by
@@ -2519,7 +2885,27 @@ class MSMPR(_BaseCryst):
 
             return dtemp_dt, dtht_dt
 
-    def retrieve_results(self, time, states):
+    def retrieve_results(self, time: np.ndarray, states: np.ndarray) -> None:
+        """Store continuous or semibatch profiles and construct the outlet.
+
+        Parameters
+        ----------
+        time : ndarray
+            Reporting times [s], shape (num_times,).
+        states : ndarray
+            MSMPR solver rows contain volume-specific moments [um**n/m**3]
+            or scaled FVM CSD [#/m**3/um], liquid concentrations [kg/m**3],
+            and optional temperatures [K], in name_states order. Semibatch
+            rows instead contain total moments [um**n] or CSD [#/um] and
+            a liquid volume [m**3]. FVM retrieval removes scale in place.
+
+        Notes
+        -----
+        solve_unit seeds raw solver moments in micrometre lengths. Retrieval
+        converts them to SI [m**n/m**3] for MSMPR profiles or total [m**n]
+        for Semibatch profiles. Public states_di and result metadata describe
+        these SI reported values; phase moments also retain SI lengths.
+        """
         time = np.array(time)
 
         # ---------- Create result object
@@ -2780,7 +3166,7 @@ class SemibatchCryst(MSMPR):
         -----
         Like :class:`BatchCryst` and unlike :class:`MSMPR`, the semibatch
         states are declared on a *total* basis in
-        :meth:`_BaseCryst.nomenclature` (``mu_n`` in [m**n], ``distrib`` in
+        :meth:`_BaseCryst.solve_unit` (``mu_n`` in [um**n], ``distrib`` in
         [#/um]), and the kinetics are evaluated with ``vol=vol_slurry``, so
         ``transf`` is a total rate [kg/s].
 

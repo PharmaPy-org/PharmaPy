@@ -99,6 +99,11 @@ def test_msmpr_steady_state_accepts_scalar_seed():
     """MSMPR steady-state solve accepts a scalar seed fraction."""
 
     crystallizer = MSMPR.__new__(MSMPR)
+    crystallizer.basis = 'mass_frac'
+    crystallizer.method = 'moments'
+    crystallizer.rad = 0.0  # [um], zero-size nuclei
+    crystallizer.kron_jtg = np.array([1.0])  # [-], one target species
+    crystallizer.num_distr = 4  # zeroth through third population moments
     crystallizer.vol_slurry = 1.0  # [m**3]
     crystallizer.target_ind = 0  # [-]
     crystallizer._Kinetics = _primary_growth_kinetics()
@@ -107,7 +112,9 @@ def test_msmpr_steady_state_accepts_scalar_seed():
         """Solid-phase fixture for MSMPR steady-state solve."""
 
         x_distrib = np.array([0.0, 1.0])  # [um]
+        temp = 298.15  # [K], initial phase temperature
         kv = 0.0  # [-]
+        num_mom = 4  # zeroth through third moments
 
         def getDensity(self, temp):
             """Return a constant solid density.
@@ -127,7 +134,24 @@ def test_msmpr_steady_state_accepts_scalar_seed():
     class Liquid:
         """Liquid-phase fixture with one mass fraction."""
 
+        temp = 298.15  # [K], initial phase temperature
         mass_frac = np.array([0.5])  # [-]
+        mass_conc = np.array([0.5])  # [kg/m**3], density is 1 kg/m**3
+
+        def getDensity(self, temp=None):
+            """Return the synthetic liquid density.
+
+            Parameters
+            ----------
+            temp : float or None, optional
+                Liquid temperature [K]; omitted for the constant-density RHS.
+
+            Returns
+            -------
+            float
+                Constant liquid density [kg/m**3].
+            """
+            return 1.0  # [kg/m**3], immaterial when kv=0
 
     class Inlet:
         """Inlet fixture for the MSMPR steady-state solve."""
@@ -137,6 +161,7 @@ def test_msmpr_steady_state_accepts_scalar_seed():
 
     crystallizer.Solid_1 = Solid()
     crystallizer._Inlet = Inlet()
+    crystallizer.Liquid_1 = crystallizer.Inlet.Liquid_1
 
     x_vec, f_convg, w_convg, info, final_fn = crystallizer.solve_steady_state(
         0.3, 298.15)  # [um], [#/m**3/um], [-], [-], [-]
