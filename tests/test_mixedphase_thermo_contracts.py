@@ -277,10 +277,10 @@ def test_mixer_energy_balance_accepts_real_partial_cake_inlet(thermo_path, inven
 
     Notes
     -----
-    This directly exercises energy_balance's public input mapping. The full
-    mixer solve still has #186/#187 blockers, and Cake lacks the y_upstream
-    attribute required by get_inputs_solids. No collaborator is stubbed;
-    #88's unfinished Cake-output branch is not entered.
+    This directly exercises energy_balance's input mapping with real phase
+    inventories and no collaborator stubs. Full mixer solves and the
+    Cake/Slurry outlet decision are covered separately in
+    test_mixer_container_balances.py.
     """
     cake = Cake()
     cake.Phases = [LiquidPhase(thermo_path, mass_frac=LIQUID_COMPOSITION,

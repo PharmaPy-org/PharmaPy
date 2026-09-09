@@ -10,7 +10,7 @@ import warnings
 from typing import Union
 
 from PharmaPy.Commons import get_permutation_indexes
-from PharmaPy.Errors import PharmaPyTypeError
+from PharmaPy.Errors import PharmaPyTypeError, PharmaPyValueError
 
 # from autograd import numpy as np
 
@@ -301,9 +301,10 @@ class RxnKinetics:
 
     Raises
     ------
+    PharmaPyValueError
+        If any stoichiometric row lacks a negative reactant coefficient.
     ValueError
-        If any stoichiometric row lacks a negative reactant coefficient,
-        reversible forward orders differ from reactant stoichiometry beyond
+        If reversible forward orders differ from reactant stoichiometry beyond
         roundoff tolerance, or a custom model is combined with ``keq_params``.
 
     Notes
@@ -379,9 +380,11 @@ class RxnKinetics:
         ------
         PharmaPyTypeError
             If matrix input has no participating species list.
+        PharmaPyValueError
+            If a reaction lacks a negative reactant coefficient.
         ValueError
-            If a reaction lacks a reactant, reversible elementary orders
-            differ from raw reactant stoichiometry beyond roundoff tolerance,
+            If reversible elementary orders differ from raw reactant
+            stoichiometry beyond roundoff tolerance,
             or a custom kinetic model is combined with ``keq_params``.
         RuntimeError
             If a custom kinetic model has no ``params_f``.
@@ -438,7 +441,7 @@ class RxnKinetics:
         # Reject undefined reaction extents before choosing a normalization.
         invalid_rows = np.flatnonzero(~(stoich_matrix < 0).any(axis=1))
         if invalid_rows.size:
-            raise ValueError(
+            raise PharmaPyValueError(
                 "Each reaction requires a negative reactant coefficient; "
                 f"invalid zero-based rows: {invalid_rows.tolist()}")
 
@@ -705,10 +708,12 @@ class RxnKinetics:
         Returns
         -------
         numpy.ndarray
-            Shape ``(n_rxns, 2*n_rxns)`` for scalar temperature, or
-            ``(n_times, n_rxns, 2*n_rxns)`` for a vector. Columns contain all
-            phi_1 derivatives followed by all phi_2 derivatives, in
-            ``concat_params`` order. Units are rate-constant units divided by
+            Shape ``(n_pairs, 2*n_pairs)`` for scalar temperature, or
+            ``(n_times, n_pairs, 2*n_pairs)`` for a vector, where n_pairs is
+            the number of stored Arrhenius parameter pairs. It is one for a
+            shared pair or n_rxns for independent reaction parameters. Columns
+            contain all phi_1 derivatives followed by all phi_2 derivatives,
+            in ``concat_params`` order. Units are rate-constant units divided by
             parameter units: k units and [J/mol] without reformulation, or
             numerical logarithmic parameters [-] with reformulation.
         """
@@ -725,7 +730,7 @@ class RxnKinetics:
             else:
                 first = np.exp(self.phi_2/gas_ct * inv_temp)  # [-]
                 second = temp_term/gas_ct * inv_temp  # [k units mol/J]
-            identity = np.eye(self.num_rxns)  # [-], independent reactions
+            identity = np.eye(len(self.phi_1))  # [-], independent stored constants
             return np.concatenate((first[..., :, None] * identity,
                                    second[..., :, None] * identity), axis=-1)
 
@@ -1576,9 +1581,9 @@ class CrystKinetics:
         no moment input also returns zero partials.
 
         s_2 is deliberately not returned: Crystallizers.jac_params appends
-        that fourth secondary-nucleation column itself. Its existing
-        volume-moment basis remains the caller's responsibility. These
-        partials hold concentration, temperature, and moments fixed.
+        that fourth secondary-nucleation column itself, using the configured
+        secondary-nucleation moment basis. These partials hold concentration,
+        temperature, and moments fixed.
         """
         conc_sat = self.get_solubility(temp, conc)  # [kg/m**3]
         ssat = self._driving_force(conc_tg, conc_sat)  # [-] or [kg/m**3]

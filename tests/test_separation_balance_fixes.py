@@ -237,7 +237,7 @@ def test_washing_public_solve_preserves_spatial_species_values(separation_phases
     pressure = 1.  # [Pa], low-flow analytical probe
     ratio = 0.5  # [-], half a pore displacement
     height = washer.CakePhase.cake_vol / washer.cross_area  # [m]
-    porosity = solid.getPorosity(diam_filter=washer.diam_unit)  # [-]
+    porosity = washer.CakePhase.porosity  # [-], packing that owns volume and resistance
     velocity = pressure / np.mean(liquid.getViscosity()) / (
         washer.CakePhase.alpha * solid.getDensity() * height * (1 - porosity)
         + washer.resist_medium)  # [m/s]
@@ -401,7 +401,7 @@ def test_washing_public_solve_uses_height_dependent_dispersion(separation_phases
     washer = DisplacementWashing(solvent_idx=4, num_nodes=4, diam_unit=diameter)
     washer.Phases = cake
     pressure = 1.  # [Pa], low-flow analytical probe
-    porosity = solid.getPorosity(diam_filter=diameter)  # [-]
+    porosity = cake.porosity  # [-], packing that owns volume and resistance
     velocity = pressure / np.mean(liquid.getViscosity()) / (
         cake.alpha * solid.getDensity() * height * (1 - porosity)
         + washer.resist_medium)  # [m/s], Darcy flow
@@ -464,7 +464,7 @@ def test_washing_high_peclet_profile_is_finite(separation_phases, dynamic, heigh
     liquid.diffusivity = np.full((5, 5), diffusivity)  # [m**2/s]
     mean_size = 8825 / 152 * 1e-6  # [m], independently derived average above
     velocity = 2 * diffusivity / mean_size  # [m/s], imposes ReSc=2
-    porosity = solid.getPorosity(diam_filter=diameter)  # [-]
+    porosity = cake.porosity  # [-], packing that owns volume and resistance
     pressure = velocity * np.mean(liquid.getViscosity()) * (
         cake.alpha * solid.getDensity() * height * (1 - porosity)
         + washer.resist_medium)  # [Pa], inversion of Darcy's law

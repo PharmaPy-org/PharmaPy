@@ -17,6 +17,8 @@ from scipy.integrate import simpson
 from PharmaPy.Crystallizers import MSMPR
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Phases import LiquidPhase, SolidPhase
+from PharmaPy.MixedPhases import SlurryStream
+from PharmaPy.Streams import LiquidStream, SolidStream
 
 pytestmark = pytest.mark.unit
 TEMPERATURE = 310.0  # [K], synthetic isothermal vessel
@@ -964,3 +966,101 @@ def test_zero_kv_boundary_is_exact_without_iteration(data_path):
     assert composition == pytest.approx(0.2, rel=ROUND_OFF, abs=0)
     assert info.converged
     assert info.iterations == 0
+
+
+def make_public_unit(data_path, basis):
+    """Build the constant-rate fixture with public attachment and fresh kinetics.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    basis : str
+        Composition basis [kg/kg] or [kg/m**3], shared with the kinetics.
+
+    Returns
+    -------
+    MSMPR
+        Isothermal vessel and real solid-free inlet, both with constant density.
+    """
+    fixture = make_unit(data_path, basis)
+    unit = MSMPR('A', method='moments', basis=basis, controls={
+        'temp': lambda time: TEMPERATURE + np.zeros_like(time)})
+    unit.Phases = fixture.Phases
+    inlet_liquid = LiquidStream(fixture.Liquid_1.path_data, temp=TEMPERATURE,
+                                mass_frac=fixture.Liquid_1.mass_frac, vol_flow=2.0)
+    # [m**3/s], the fixture's D=1/s feed to a two-cubic-metre vessel
+    inlet_liquid.rho_liq[:] = DENSITY  # [kg/m**3], constant-density contract case
+    inlet_liquid.updatePhase(mass_frac=inlet_liquid.mass_frac, vol_flow=2.0)
+    inlet = SlurryStream(vol_flow=2.0, moments=np.zeros(4))
+    # [m**3/s], [m**n/m**3], solid-free feed
+    inlet.Phases = (inlet_liquid, SolidStream(
+        fixture.Solid_1.path_data, temp=TEMPERATURE, kv=0.5,
+        mass_frac=[1, 0, 0, 0, 0]))
+    unit.Inlet = inlet
+    scale = DENSITY if basis == 'mass_conc' else 1.0  # [kg/m**3] or [-]
+    unit.Kinetics = CrystKinetics(
+        coeff_solub=[0.01 * scale], nucl_prim=(1e10, 0, 0), growth=(100, 0, 0))
+    # [basis unit], [#/m**3/s], [um/s], constant-rate fixture from make_unit
+    return unit
+
+
+@pytest.mark.parametrize('basis', ['mass_frac', 'mass_conc'])
+def test_steady_solve_initializes_fresh_kinetics(data_path, basis):
+    """Solve before dynamic initialization using public phase and stream attachment.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    basis : str
+        Composition basis [kg/kg] or [kg/m**3], shared with the kinetics.
+    """
+    unit = make_public_unit(data_path, basis)
+    scale = DENSITY if basis == 'mass_conc' else 1.0  # [kg/m**3] or [-]
+    assert unit.Kinetics.target_idx is None
+    _, distribution, composition, info, residual = unit.solve_steady_state(
+        0.15 * scale, TEMPERATURE)
+    # [#/m**3/um], [basis unit], convergence information, [basis unit/s]
+    assert info.converged
+    # Same independent equation as the fixture: .2-w+.03*(3*w-2)=0.
+    assert composition / scale == pytest.approx(2 / 13, rel=ROUND_OFF, abs=0)
+    assert distribution[0] == pytest.approx(1e8, rel=ROUND_OFF, abs=0)
+    assert abs(residual) <= ROUND_OFF * scale  # [basis unit/s], D=1/s roundoff
+
+
+@pytest.mark.assimulo
+def test_steady_solution_matches_long_time_dynamic_solve(data_path):
+    """Compare CVode startup with the independent constant-rate steady solution.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+
+    Notes
+    -----
+    The mass-concentration basis avoids the deferred #47 dynamic state-basis
+    defect. This synthetic case validates the model's own solute bookkeeping,
+    not stream mass conservation. Constant phase densities and rates match
+    solve_steady_state's documented assumptions.
+    """
+    pytest.importorskip('assimulo')
+    unit = make_public_unit(data_path, 'mass_conc')
+    _, _, composition, _, _ = unit.solve_steady_state(150.0, TEMPERATURE)
+    # [kg/m**3], positive-growth hint below the 200 kg/m**3 feed
+    residence_time = unit.Slurry.vol / unit.Inlet.vol_flow  # [s]
+    duration = 50 * residence_time  # [s], exp(-50)*50**3 < 3e-17 population tail
+    solver_rtol = 1e-9  # [-], tighter than the independent final-state check
+    solver_atol = 1e-10  # [raw state units], below initial concentration scales
+    comparison_rtol = 1e-7  # [-], allows integration error at the 1e-9 solver setting
+    unit.solve_unit(time_grid=[0.0, duration], verbose=False,
+                    sundials_opts={'rtol': solver_rtol, 'atol': solver_atol})
+    # Independent n!*B*G**n*tau**(n+1), converted from um lengths to SI.
+    expected_moments = np.array([1e10, 1e6, 200.0, 0.06])  # [m**n/m**3], n=0..3
+    np.testing.assert_allclose(unit.result.mu_n[-1], expected_moments,
+                               rtol=comparison_rtol, atol=0)
+    expected_concentration = DENSITY * 2 / 13  # [kg/m**3], .2-w+.03*(3*w-2)=0
+    assert unit.result.mass_conc[-1, unit.target_ind] == pytest.approx(
+        expected_concentration, rel=comparison_rtol, abs=0)
+    assert composition == pytest.approx(expected_concentration, rel=ROUND_OFF, abs=0)

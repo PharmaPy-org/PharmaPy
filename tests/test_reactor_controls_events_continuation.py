@@ -7,6 +7,7 @@ Synthetic ramps and profiles test balances, not calibrated process predictions.
 
 from types import SimpleNamespace
 import json
+import math
 
 import numpy as np
 import pytest
@@ -867,3 +868,93 @@ def test_batch_solver_accepts_bounded_interpolated_temperature():
         reactor, time, states, expected_temperatures)  # [W], [W], [J/K]
     np.testing.assert_allclose(reactor.result.q_ht, capacity * slope - reaction - flow,
                                rtol=ALGEBRA_RTOL)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+@pytest.mark.parametrize('cls', TANKS)
+def test_derivative_event_root_matches_returned_tank_state(cls):
+    """#233: localized derivative roots use the interpolated event state.
+
+    Parameters
+    ----------
+    cls : type
+        CSTR or Semibatch reactor class with newly attached event callbacks.
+    """
+    pytest.importorskip('assimulo')
+    # Stop once the initially negative A derivative rises to two thirds of
+    # its initial magnitude; both tanks cross this threshold during this run.
+    initial_rate = -RATE_CONSTANT * CONCENTRATIONS[0] * CONCENTRATIONS[1]  # [mol/L/s]
+    threshold = initial_rate * 2 / 3  # [mol/L/s], chosen interior derivative root
+    runtime = 3000.0  # [s], exceeds the fixture's 1800 s initial residence time
+    event = {'callable': lambda time, states, sdot: sdot['mole_conc'][0] - threshold,
+             'direction': 1}
+    reactor = configured(cls, state_events=[event])
+    options = {'rtol': 1e-9, 'atol': 1e-12}  # [-], [state units], isolates event localization
+    time, states = reactor.solve_unit(runtime=runtime, sundials_opts=options,
+                                      verbose=False)
+    assert 0 < time[-1] < runtime
+    final_conc = states[-1, :len(CONCENTRATIONS)]  # [mol/L]
+    final_volume = (states[-1, len(CONCENTRATIONS)]
+                    if cls is Reactors.SemibatchReactor else REACTOR_VOLUME)  # [m**3]
+    # Evaluate the material balance independently at the returned state, not
+    # from the callback's cached derivative or by invoking unit_model again.
+    final_rate = (-RATE_CONSTANT * final_conc[0] * final_conc[1]
+                  + reactor.Inlet.vol_flow / final_volume
+                  * (CONCENTRATIONS[0] - final_conc[0]))  # [mol/L/s]
+    assert final_rate == pytest.approx(threshold, rel=ALGEBRA_RTOL, abs=0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('cls', ALL_TANKS)
+@pytest.mark.parametrize('record', [False, True])
+def test_scalar_temperature_control_rhs_and_retrieval(cls, record):
+    """#232: scalar math callbacks need no vectorized retrieval signature.
+
+    Parameters
+    ----------
+    cls : type
+        Tank reactor class.
+    record : bool
+        Whether to provide the callback in a record with args and kwargs.
+    """
+    amplitude = 1.0  # [K], synthetic sinusoid stays close to the fixture state
+    timescale = 2.0  # [s], spans one radian on the fixture time grid
+    control = lambda time: TEMPERATURE + amplitude * math.sin(time / timescale)
+    if record:
+        control = {'fun': lambda time, scale, offset: offset + amplitude * math.sin(time / scale),
+                   'args': (timescale,), 'kwargs': {'offset': TEMPERATURE}}
+    reactor = configured(cls, controls={'temp': control})
+    states = profile(reactor)  # [mol/L], optional [m**3]
+    reactor.unit_model(TIMES[0], states[0])
+    reactor.retrieve_results(TIMES, states)
+    expected_temp = TEMPERATURE + amplitude * np.sin(TIMES / timescale)  # [K]
+    np.testing.assert_allclose(reactor.result.temp, expected_temp, rtol=ALGEBRA_RTOL)
+    reaction, flow, capacity = independent_terms(
+        reactor, TIMES, states, expected_temp)  # [W], [W], [J/K]
+    expected_slope = amplitude / timescale * np.cos(TIMES / timescale)  # [K/s]
+    step = TIMES[-1] / 1024  # [s], documented differentiation step
+    third_derivative_bound = amplitude / timescale**3  # [K/s**3]
+    slope_atol = step**2 * third_derivative_bound / 3 + 1e-9  # [K/s], stencil truncation plus temperature subtraction
+    np.testing.assert_allclose(reactor.result.q_ht,
+                               capacity * expected_slope - reaction - flow,
+                               rtol=ALGEBRA_RTOL, atol=np.max(capacity) * slope_atol)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_scalar_temperature_control_completes_solver_retrieval():
+    """#232: a scalar callback survives the solver-to-retrieval handoff."""
+    pytest.importorskip('assimulo')
+    timescale = 2.0  # [s], one radian over the requested run
+    amplitude = 1.0  # [K], synthetic smooth temperature variation
+    reactor = configured(Reactors.CSTR, controls={
+        'temp': lambda time: TEMPERATURE + amplitude * math.sin(time / timescale)})
+    time, states = reactor.solve_unit(runtime=TIMES[-1], verbose=False)
+    time = np.asarray(time)  # [s], backend reports a list
+    assert time[-1] == TIMES[-1]
+    np.testing.assert_allclose(reactor.result.temp,
+                               TEMPERATURE + amplitude * np.sin(time / timescale),
+                               rtol=ALGEBRA_RTOL)
+    np.testing.assert_allclose(reactor.Liquid_1.mole_conc, states[-1], rtol=ALGEBRA_RTOL)
+    assert np.all(np.isfinite(reactor.result.q_ht))

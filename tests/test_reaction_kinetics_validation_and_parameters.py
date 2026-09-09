@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from PharmaPy.Kinetics import RxnKinetics, disect_rxns, gas_ct, get_stoich
+from PharmaPy.Errors import PharmaPyValueError
 
 pytestmark = pytest.mark.unit
 
@@ -82,12 +83,20 @@ def test_integer_stoichiometry_preserves_fractional_custom_order():
 @pytest.mark.parametrize("invalid_row", [[1, 0, 0, 0], [0, 1, 0, 0],
                                           [0, 0, 0, 0]])
 def test_reactantless_row_is_rejected_before_normalization(invalid_row):
-    with pytest.raises(ValueError, match=r"negative.*reactant.*\[1\]"):
+    """Reject an invalid dimensionless stoichiometric row by project exception.
+
+    Parameters
+    ----------
+    invalid_row : list of int
+        Product-only or empty stoichiometric coefficients [-].
+    """
+    with pytest.raises(PharmaPyValueError, match=r"negative.*reactant.*\[1\]"):
         _kinetics(stoich_matrix=[STOICH[0], invalid_row])
 
 
 def test_all_reactantless_row_indexes_are_reported():
-    with pytest.raises(ValueError, match=r"negative.*reactant.*\[1, 2\]"):
+    """Report every invalid dimensionless row in the project exception."""
+    with pytest.raises(PharmaPyValueError, match=r"negative.*reactant.*\[1, 2\]"):
         _kinetics(stoich_matrix=[STOICH[0], [0, 1, 0, 0], [0, 0, 0, 0]])
 
 
@@ -375,3 +384,44 @@ def test_none_reaction_heat_uses_documented_zero_default(batch):
     actual = kinetics.get_rxn_rates(conc, temp)  # [mol/L/s]
     np.testing.assert_array_equal(kinetics.delta_hrxn, [0])
     np.testing.assert_array_equal(actual, zero_heat.get_rxn_rates(conc, temp))
+
+
+@pytest.mark.parametrize("reformulate", [False, True])
+@pytest.mark.parametrize("reversible", [False, True])
+@pytest.mark.parametrize("shared", [False, True])
+def test_batched_sensitivities_preserve_shared_arrhenius_parameters(
+        reformulate, reversible, shared):
+    """Preserve the parameter basis for two first-order reactions.
+
+    Parameters
+    ----------
+    reformulate : bool
+        Use logarithmic Arrhenius parameters [-] instead of k [1/s] and
+        activation energy [J/mol].
+    reversible : bool
+        Include reverse rates using the dimensionless fixture constants.
+    shared : bool
+        Use one Arrhenius pair shared by both first-order reactions, rather
+        than independent parameters for each reaction.
+    """
+    # A -> B -> C gives both reactions the same first-order rate-constant units.
+    stoich = np.array([[-1, 1, 0, 0], [0, -1, 1, 0]])  # [-]
+    rate_constants = K_PARAMS[:1] if shared else K_PARAMS  # [1/s]
+    activation_energies = EA_PARAMS[:1] if shared else EA_PARAMS  # [J/mol]
+    kinetics = _kinetics(
+        stoich_matrix=stoich, k_params=rate_constants,
+        ea_params=activation_energies, keq_params=KEQ if reversible else None,
+        reformulate_kin=reformulate)
+    actual = kinetics.derivatives(
+        AWAY_CONC, TEMPERATURES, dstates=False)  # [rate/parameter units]
+    expected = _parameter_central_difference(
+        kinetics, AWAY_CONC, TEMPERATURES, HEATS)  # [rate/parameter units]
+    assert actual.shape == (len(TEMPERATURES), len(SPECIES),
+                            len(kinetics.concat_params()))
+    np.testing.assert_allclose(actual, expected, rtol=FD_RTOL, atol=FD_ATOL)
+    batched_constants = kinetics.dk_dkparams(
+        TEMPERATURES)  # [rate-constant/parameter units]
+    scalar_constants = np.stack([
+        kinetics.dk_dkparams(temp) for temp in TEMPERATURES
+    ])  # [rate-constant/parameter units]
+    np.testing.assert_array_equal(batched_constants, scalar_constants)

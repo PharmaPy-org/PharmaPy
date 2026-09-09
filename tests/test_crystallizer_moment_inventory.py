@@ -21,7 +21,7 @@ FLOW = 0.02  # [m**3/s], positive flow avoids the deferred zero-flow stream defe
 SOLVER_RTOL = 1e-7  # [-], allowance for default CVode integration error
 
 
-def inventory_unit(data_path, unit_type=BatchCryst, gridless=False):
+def inventory_unit(data_path, unit_type=BatchCryst, gridless=False, num_mom=4):
     """Build a frozen seeded vessel and a matching constant slurry inlet.
 
     Parameters
@@ -32,6 +32,8 @@ def inventory_unit(data_path, unit_type=BatchCryst, gridless=False):
         Batch, Semibatch, or MSMPR crystallizer class.
     gridless : bool, optional
         Omit the seed grid and distribution when True.
+    num_mom : int, optional
+        Number of seed moments for gridless fixtures; four by default.
 
     Returns
     -------
@@ -45,7 +47,8 @@ def inventory_unit(data_path, unit_type=BatchCryst, gridless=False):
     liquid, solid = batch.Liquid_1, batch.Solid_1
     if gridless:
         solid = SolidPhase(solid.path_data, temp=TEMPERATURE, kv=solid.kv,
-                           moments=solid.moments, mass_frac=solid.mass_frac)
+                           moments=solid.getMoments(mom_num=range(num_mom)),
+                           mass_frac=solid.mass_frac)
     unit = unit_type('A', method='moments', controls={
         'temp': lambda time: TEMPERATURE + np.zeros_like(time)})
     unit.Phases = (liquid, solid)
@@ -316,8 +319,9 @@ def test_gridless_feed_continuation_reports_si(data_path, unit_type):
 
 @pytest.mark.unit
 @pytest.mark.parametrize('unit_type', [SemibatchCryst, MSMPR])
-def test_fvm_connection_supplies_missing_moment_feed(data_path, unit_type):
-    """Use stream moments when an FVM connection omits the mu_n field.
+@pytest.mark.parametrize('single_sample', [False, True])
+def test_fvm_connection_supplies_missing_moment_feed(data_path, unit_type, single_sample):
+    """Preserve FVM population histories through a real moment-mode connection.
 
     Parameters
     ----------
@@ -325,28 +329,53 @@ def test_fvm_connection_supplies_missing_moment_feed(data_path, unit_type):
         Repository thermodynamic database paths.
     unit_type : type
         Semibatch or continuous moment-mode destination.
+    single_sample : bool
+        Use one upstream sample, which must remain constant at later times.
     """
     from test_crystallizer_heat_duty import make_unit as make_heat_unit
 
     upstream, initial = make_heat_unit(data_path, MSMPR, ramp=0.0, feed_flow=FLOW)
-    upstream.retrieve_results(np.array([0.0, DURATION]), np.tile(initial, (2, 1)))
+    profiles = np.tile(initial, (2, 1))  # [raw state units], two upstream times
+    # Swap the first two bin populations: preserve values while changing shape.
+    profiles[-1, :upstream.num_distr] = profiles[-1, [1, 0, 2]]
+    upstream.retrieve_results(np.array([0.0, DURATION]), profiles)
     unit, states = inventory_unit(data_path, unit_type, gridless=True)
     Connection(upstream, unit).transfer_data()
+    if single_sample:
+        # Retain one connected sample to exercise the inlet's constant extrapolation.
+        unit.Inlet.time_upstream = unit.Inlet.time_upstream[:1]  # [s]
+        unit.Inlet.y_inlet = {name: values[:1]
+                              for name, values in unit.Inlet.y_inlet.items()}
+        # [field units], preserve one row of each converted field
+        unit.Inlet.y_upstream = {**unit.Inlet.y_upstream,
+                                 'mu_n': unit.Inlet.y_upstream['mu_n'][:1]}
+        # [m**n/m**3], one raw upstream population sample
     assert 'mu_n' not in unit.Inlet.y_inlet
-    # Independent integrals of the FVM fixture; 0.0009 m**3 liquid plus solids.
-    volume = 9e-4 + upstream.Solid_1.kv * 8.85e-6  # [m**3], upstream slurry
-    expected_si = np.array([4.5e8, 1.05e4, 0.285, 8.85e-6]) / volume  # [m**n/m**3]
+    # Independent trapezoids on x=[10,20,40] um have weights [5,15,10] um.
+    # Initial amplitudes are [1,2,1]*1e7; final amplitudes are [2,1,1]*1e7.
+    volume = 9e-4 + upstream.Solid_1.kv * 8.85e-6  # [m**3], fixed upstream slurry
+    endpoint_moments = np.array([[4.5e8, 1.05e4, 0.285, 8.85e-6],
+                                [3.5e8, 8e3, 0.23, 7.7e-6]]) / volume
+    # [m**n/m**3], n=0..3, independent initial and final integrals
+    if single_sample:
+        endpoint_moments[1] = endpoint_moments[0]  # [m**n/m**3], hold sole sample
+    times = np.array([0.0, DURATION / 2, DURATION])  # [s], include interpolation
+    expected_si = np.array([endpoint_moments[0], endpoint_moments.mean(axis=0),
+                            endpoint_moments[1]])  # [m**n/m**3], linear history
     states[:4] = 0  # [um**n] or [um**n/m**3], remove tank outflow of crystals
-    rhs = unit.unit_model(0.0, states)  # [state unit/s], includes real material balance
-    total_feed = rhs[:4]  # [um**n/s], Semibatch population basis
-    if unit_type is MSMPR:
-        total_feed = rhs[:4] * unit.Slurry.vol  # [um**n/s], intensive to total
-    expected_feed = FLOW * np.array([4.5e8, 1.05e10, 2.85e11, 8.85e12]) / volume
-    # [um**n/s], independent feed integrals with the exact micrometre conversion
-    np.testing.assert_allclose(total_feed, expected_feed, rtol=RTOL, atol=0)
-    inputs = unit.get_inputs(np.array([0.0, DURATION]))
-    np.testing.assert_allclose(inputs['Inlet']['mu_n'], np.tile(expected_si, (2, 1)),
+    for time, moments in zip(times, expected_si):
+        # [s], [m**n/m**3], each independently specified inlet state
+        rhs = unit.unit_model(time, states)  # [state unit/s], real material balance
+        total_feed = rhs[:4]  # [um**n/s], Semibatch population basis
+        if unit_type is MSMPR:
+            total_feed = rhs[:4] * unit.Slurry.vol  # [um**n/s], intensive to total
+        expected_feed = FLOW * moments * 1e6**np.arange(4)  # [um**n/s], exact um/m
+        np.testing.assert_allclose(total_feed, expected_feed, rtol=RTOL, atol=0)
+    inputs = unit.get_inputs(times)
+    np.testing.assert_allclose(inputs['Inlet']['mu_n'], expected_si,
                                rtol=RTOL, atol=0)
+    # Input retrieval must not mutate the connection's converted field mapping.
+    assert 'mu_n' not in unit.Inlet.y_inlet
 
 
 @pytest.mark.unit
@@ -369,6 +398,9 @@ def test_connected_mu_n_takes_precedence_over_stream_moments(data_path, unit_typ
     upstream.retrieve_results(np.array([0.0, DURATION]), profiles)
     unit, _ = inventory_unit(data_path, unit_type, gridless=True)
     Connection(upstream, unit).transfer_data()
+    unit.Inlet.y_upstream = {**unit.Inlet.y_upstream,
+                             'mu_n': np.zeros_like(upstream.result.mu_n)}
+    # [m**n/m**3], conflicting raw profile must not replace converted mu_n.
     np.testing.assert_allclose(unit.Inlet.moments, 2 * sentinel, rtol=RTOL, atol=0)
     np.testing.assert_allclose(unit.get_inputs(0.0)['Inlet']['mu_n'], sentinel,
                                rtol=RTOL, atol=0)
@@ -396,3 +428,69 @@ def test_bare_slurry_inlet_keeps_existing_error(data_path, method):
     # Slurry lacks DynamicInlet and vol_flow; preserve the existing error type.
     with pytest.raises(AttributeError):
         unit.get_inputs(0.0)  # [s]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('unit_type', [SemibatchCryst, MSMPR])
+@pytest.mark.parametrize('connected', [False, True])
+def test_moment_feed_selects_required_orders(data_path, unit_type, connected):
+    """Use a six-order feed in a four-order balance without changing the feed.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    unit_type : type
+        Continuous or semibatch four-moment destination.
+    connected : bool
+        Transfer a real six-moment MSMPR profile instead of a static inlet.
+    """
+    upstream, initial = inventory_unit(data_path, MSMPR, gridless=True, num_mom=6)
+    unit, states = inventory_unit(data_path, unit_type, gridless=True)
+    if connected:
+        upstream.retrieve_results(np.array([0.0, DURATION]), np.tile(initial, (2, 1)))
+        Connection(upstream, unit).transfer_data()
+    else:
+        unit.Inlet = upstream.Inlet
+        unit.Inlet.y_upstream = None
+    # Independent trapezoids on the original [10,20,40] um fixture.
+    volume = 2.0 + upstream.Solid_1.kv * 8.85e-6  # [m**3], seed slurry volume
+    expected_si = np.array([4.5e8, 1.05e4, 0.285, 8.85e-6]) / volume
+    # [m**n/m**3], required orders zero through three
+    states[:4] = 0  # [um**n] or [um**n/m**3], no tank crystal outflow
+    rhs = unit.unit_model(0.0, states)  # [state unit/s], public inlet handoff
+    total_feed = rhs[:4]  # [um**n/s], semibatch inventory basis
+    if unit_type is MSMPR:
+        total_feed = total_feed * unit.Slurry.vol  # [um**n/s]
+    expected_feed = FLOW * expected_si * 1e6**np.arange(4)  # [um**n/s]
+    np.testing.assert_allclose(total_feed, expected_feed, rtol=RTOL, atol=0)
+    times = np.array([0.0, DURATION / 2, DURATION])  # [s], unequal time/order axes
+    np.testing.assert_allclose(unit.get_inputs(times)['Inlet']['mu_n'],
+                               np.tile(expected_si, (3, 1)), rtol=RTOL, atol=0)
+    assert len(unit.Inlet.moments) == 6
+    if connected:
+        assert unit.Inlet.y_inlet['mu_n'].shape == (2, 6)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('connected', [False, True])
+def test_moment_feed_rejects_missing_orders(data_path, connected):
+    """Explain why a valid four-moment feed cannot supply a six-moment model.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    connected : bool
+        Transfer a real MSMPR profile instead of using a static slurry stream.
+    """
+    upstream, initial = inventory_unit(data_path, MSMPR, gridless=True)
+    unit, states = inventory_unit(data_path, MSMPR, gridless=True, num_mom=6)
+    if connected:
+        upstream.retrieve_results(np.array([0.0, DURATION]), np.tile(initial, (2, 1)))
+        Connection(upstream, unit).transfer_data()
+    else:
+        unit.Inlet = upstream.Inlet
+        unit.Inlet.y_upstream = None
+    with pytest.raises(ValueError, match=r'Inlet mu_n must provide at least 6 moments.*got 4'):
+        unit.unit_model(0.0, states)  # [s], [raw state units]

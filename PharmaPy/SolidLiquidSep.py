@@ -2029,6 +2029,10 @@ class DisplacementWashing:
         its initial height average is c_zero, recovering the previous effluent
         expression as well. Wash volume is wash_ratio * cake volume [m**3],
         while initial/final pore volumes include porosity and saturation.
+        The attached Cake owns the packing porosity, cake volume, and specific
+        resistance. Use that same porosity for adsorption, Darcy flow, and
+        effluent and retained inventories. The washing diameter sets area and
+        height without repacking the attached cake.
         """
         if not dynamic and time_vals is not None:
             raise ValueError("time_vals cannot be supplied with dynamic=False; "
@@ -2038,11 +2042,10 @@ class DisplacementWashing:
         visc_liq_per_node = self.Liquid_1.getViscosity()
         visc_liq = np.mean(visc_liq_per_node)
         diff_pure = self.Liquid_1.getDiffusivityPure(wrt=self.solvent_idx)
-        epsilon = self.Solid_1.getPorosity(diam_filter=self.diam_unit)
+        epsilon = self.CakePhase.porosity  # [-], same packing as cake volume and resistance
         lambd_ads = 1 / (1 - self.k_ads + self.k_ads/epsilon)
 
         # Solid
-        epsilon = self.Solid_1.getPorosity(diam_filter=self.diam_unit)
         dens_sol = self.Solid_1.getDensity()
         alpha = self.CakePhase.alpha
 

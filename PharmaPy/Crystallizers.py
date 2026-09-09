@@ -474,14 +474,51 @@ class _BaseCryst:
                 'index': list(range(self.num_distr)),
                 'units': 'm**3/m**3'}
 
-    def reset(self):
+    def reset(self) -> None:
+        """Restore the original phase and slurry inventories for a new run.
+
+        Notes
+        -----
+        Keeps the attached phase objects and configured working tank volume.
+        Restores liquid and solid amounts, compositions, and temperatures,
+        then rebuilds the cached slurry population and volume from them.
+        Moment-mode populations use total phase moments [m**n], including
+        when a retained plotting distribution describes a different population.
+        Clears reporting profiles and elapsed time [s].
+        """
         copy_dict = copy.deepcopy(self.__original_prof__)
         self.__dict__.update(copy_dict)
 
         for phase, di in zip(self.Phases, self.__original_phase_dict__):
-            phase.__dict__.update(di)
+            phase.__dict__.update(copy.deepcopy(di))
 
+        self._refresh_slurry_inventory()
         self.profiles_runs = []
+
+    def _refresh_slurry_inventory(self) -> None:
+        """Synchronize slurry caches after restoring or modifying phase amounts.
+
+        Notes
+        -----
+        Rebuilds slurry volume [m**3] and volume-specific population from the
+        attached phase inventories. Moment models use total solid moments
+        [m**n], independently of any retained plotting distribution. Their
+        third moment and shape factor determine solid volume, preserving the
+        charged liquid volume when moments were modified without a mass update.
+        FVM models use the total solid number distribution [#/um]. Phase object
+        identities and the configured working tank volume are preserved.
+        """
+        if self.method == 'moments':
+            solid_volume = self.Solid_1.kv * self.Solid_1.moments[3]  # [m**3]
+            volume = self.Liquid_1.vol + solid_volume  # [m**3], current slurry
+            moments = self.Solid_1.moments / volume  # [m**n/m**3], slurry basis
+            self.Slurry = Slurry(vol=volume, moments=moments)
+        else:
+            self.Slurry = Slurry()
+        self.Slurry.Phases = self.Phases
+        self.vol_slurry = copy.copy(self.Slurry.vol)  # [m**3], current holdup
+        self.vol_phase = (self.vol_slurry[0] if isinstance(self.vol_slurry, np.ndarray)
+                          else self.vol_slurry)  # [m**3], scalar holdup convention
 
     def get_inputs(self, time: "float | np.ndarray") -> dict:
         """Read feed values on the crystallizer's phase and population bases.
@@ -499,17 +536,29 @@ class _BaseCryst:
             Liquid_1 contains species concentrations [kg/m**3]. Array times
             place time on the first axis for interpolated inlet values.
 
+        Raises
+        ------
+        ValueError
+            If the feed provides fewer moments than the downstream population
+            model requires, with orders counted from zero on the final axis.
+
         Notes
         -----
         The dynamic solve_unit path supports a bare LiquidStream as a
         solid-free feed. Its composition belongs to the stream itself;
         missing population fields are zero. solve_steady_state requires an
         inlet with a Liquid_1 phase.
-        For SlurryStream feeds, moments supplies the SI mu_n fallback.
-        Upstream or dynamic inlet mu_n values take precedence for that key;
-        other inlet fields do not suppress the moment fallback. Multiple
+        For SlurryStream feeds, moments supplies the static SI mu_n fallback.
+        If a connection omits mu_n from its converted fields, retain the
+        upstream SI moment profile (also reported by FVM crystallizers) and
+        interpolate it with the other inlet fields. Explicitly converted or
+        dynamic mu_n values take precedence; the original stream is unchanged.
+        Other inlet fields do not suppress the moment fallback. Multiple
         evaluation times broadcast the fallback to (num_times, num_moments);
-        a single evaluation time retains shape (num_moments,).
+        a single evaluation time retains shape (num_moments,). The downstream
+        model uses the lowest num_distr moment orders. Extra feed orders are
+        omitted without changing the source stream; missing orders are rejected
+        rather than reconstructed.
         """
         if self.__class__.__name__ == 'BatchCryst':
             inputs = {}
@@ -524,9 +573,22 @@ class _BaseCryst:
               and 'mu_n' in self.states_in_dict['Inlet']):
             inlet = copy.copy(self.Inlet)
             inlet.mu_n = self.Inlet.moments  # [m**n/m**3], slurry-volume fallback
+            if isinstance(inlet.y_upstream, dict) and 'mu_n' in inlet.y_upstream:
+                inlet.y_inlet = {'mu_n': inlet.y_upstream['mu_n'],
+                                 **(inlet.y_inlet or {})}
+                # [m**n/m**3], retain upstream history and converted-field precedence
             inputs = get_inputs_new(time, inlet, self.states_in_dict)
         else:
             inputs = get_inputs_new(time, self.Inlet, self.states_in_dict)
+
+        if self.method == 'moments' and inputs:
+            moments = np.asarray(inputs['Inlet']['mu_n'])  # [m**n/m**3]
+            supplied_count = moments.shape[-1] if moments.ndim else 0
+            if supplied_count < self.num_distr:
+                raise ValueError(
+                    f"Inlet mu_n must provide at least {self.num_distr} moments "
+                    f"in ascending order from zero; got {supplied_count}.")
+            inputs['Inlet']['mu_n'] = moments[..., :self.num_distr]  # [m**n/m**3]
 
         return inputs
 
@@ -1045,10 +1107,11 @@ class _BaseCryst:
             Integration times [s], shape (num_times,).
         states : ndarray
             State rows at each time in ``name_states`` order: total crystal
-            moments [um**n] or scaled distribution [#/um], liquid species mass
+            moments [um**n] or unscaled distribution [#/um], liquid species mass
             concentrations [kg/m**3], liquid volume [m**3] for Batch/Semibatch,
             and optional phase/jacket temperatures [K]. Continuous units use
-            volume-normalized crystal states instead.
+            volume-normalized crystal states instead. Returned moments retain
+            the solver's micrometre basis; ``result.mu_n`` uses SI moments.
         sensit : list of ndarray, optional
             Parameter sensitivities [state unit / parameter unit], returned
             only when eval_sens is True.
@@ -1271,7 +1334,9 @@ class _BaseCryst:
         -----
         Composition-only liquid modifiers preserve the reset charged volume
         used by geometry, residence time, and initial states, rather than
-        conserving liquid mass. Supplied modifier dictionaries are not changed.
+        conserving liquid mass. Slurry volume and population caches are
+        refreshed from the modified phase inventories before initialization.
+        Supplied modifier dictionaries are not changed.
         This wrapper owns the estimation reset: solve_unit's reset_states flag
         is temporarily disabled so it preserves these modifiers, then restored
         even if the solve raises an exception.
@@ -1297,6 +1362,7 @@ class _BaseCryst:
                 liquid_mod = {'vol': self.Liquid_1.vol, **liquid_mod}  # vol [m**3]
             self.Liquid_1.updatePhase(**liquid_mod)
             self.Solid_1.updatePhase(**solid_mod)
+            self._refresh_slurry_inventory()
 
         if isinstance(modify_controls, dict):
             for key, val in modify_controls.items():
@@ -2388,11 +2454,12 @@ class MSMPR(_BaseCryst):
 
         Assumes constant tank liquid density and holdup, no inlet solids,
         zero-size nuclei, and positive size- and population-independent
-        growth. No Kinetics.alpha_fn impurity factor is applied, although
-        the dynamic model applies it. Density is evaluated at the attached
-        liquid composition and requested temperature. The feed term always
-        uses the inlet liquid's own mass concentration, allowing its density
-        to differ from the tank density.
+        growth. The kinetic target index is initialized here, so no prior
+        dynamic solve is needed. No Kinetics.alpha_fn impurity factor is
+        applied, although the dynamic model applies it. Density is evaluated
+        at the attached liquid composition and requested temperature. The feed
+        term always uses the inlet liquid's own mass concentration, allowing
+        its density to differ from the tank density.
 
         For n(L)=boundary*exp(-D*L/G), the infinite-domain moment factors
         are a_n=n!*(G/D)**(n+1)*(1e-6)**n, so mu_n=boundary*a_n in
@@ -2456,6 +2523,7 @@ class MSMPR(_BaseCryst):
             raise ValueError("basis must be 'mass_conc' or 'mass_frac'")
         if self.rad != 0:
             raise ValueError("finite-radius nuclei are unsupported; rad must be zero")
+        self.Kinetics.target_idx = self.target_ind
         flow_v = self.Inlet.vol_flow / self.vol_slurry  # [1/s]
         x_vec = self.Solid_1.x_distrib  # [um]
         kv = self.Solid_1.kv  # [-]

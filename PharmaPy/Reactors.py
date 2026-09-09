@@ -417,7 +417,17 @@ class _BaseReactor:
         -------
         numpy.ndarray
             Flattened root conditions, in each definition's state units.
+
+        Notes
+        -----
+        Enabled callable events receive derivatives evaluated at the supplied
+        time and states, including the solver's interpolated root candidates.
         """
+        # Root localization supplies interpolated states that need not match
+        # the most recent solver RHS evaluation. Callable events require the
+        # derivative at this exact time/state pair.
+        if any(sw) and any('callable' in event for event in self.state_event_list):
+            self.derivatives = self.unit_model(time, states, sw=sw)  # [state units/s]
         is_PFR = self.__class__.__name__ == 'PlugFlowReactor'
         return eval_state_events(
             time, states, sw, self.dim_states,
@@ -435,6 +445,43 @@ class _BaseReactor:
         if 'temp' in self.states_uo and self.Utility is None:
             raise ValueError(
                 "A Utility is required for an active bath or jacket energy balance")
+
+    def _complete_tank_profiles(self, time: np.ndarray, profiles: dict) -> dict:
+        """Complete tank volume and temperature profiles at reported times.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Absolute reported times [s], shape ``(num_times,)``.
+        profiles : dict
+            Unpacked solver profiles, including integrated concentrations
+            [mol/L] and any active volume [m**3] or temperature [K] states.
+            Missing volume and temperature profiles are added in place.
+
+        Returns
+        -------
+        dict
+            The supplied profiles with volume [m**3] and temperature [K]
+            arrays of shape ``(num_times,)``.
+
+        Notes
+        -----
+        Controls receive one scalar time per call, matching RHS evaluation;
+        their args and kwargs are retained. Uncontrolled values are filled
+        from the retained liquid phase. Integrated states take precedence.
+        """
+        for name in ('vol', 'temp'):
+            if name not in profiles and name in self.controls:
+                control = self.controls[name]
+                profiles[name] = np.asarray([
+                    control['fun'](sample_time, *control['args'], **control['kwargs'])
+                    for sample_time in time])  # sample_time [s]; vol [m**3], temp [K]
+        profiles = complete_dict_states(
+            time, profiles, ('vol', 'temp'), self.Liquid_1, self.controls)
+        for name in ('vol', 'temp'):
+            if np.ndim(profiles[name]) == 0:
+                profiles[name] = np.full(time.shape, profiles[name])  # vol [m**3], temp [K]
+        return profiles
 
     def _prescribed_heat(self, time: np.ndarray, temp: np.ndarray,
                          capacitance: np.ndarray, source: np.ndarray,
@@ -1321,6 +1368,7 @@ class BatchReactor(_BaseReactor):
         Stores ``result`` and outlet data. Heat profiles ``q_rxn`` and ``q_ht``
         have units [W] and the _BaseReactor sign convention. Prescribed
         temperature differentiates the control callable (see _prescribed_heat).
+        Control values are evaluated at scalar times, as in the RHS.
         When the bath energy balance is active, its prescribed utility inlet
         temperature is evaluated at every profile time; no jacket temperature
         is integrated. Jacket mode uses the solved utility temperature.
@@ -1331,11 +1379,7 @@ class BatchReactor(_BaseReactor):
         dp = unpack_states(states, self.dim_states, self.name_states)
         dp['time'] = time
 
-        dp = complete_dict_states(time, dp, ('vol', 'temp'), self.Liquid_1,
-                                  self.controls)
-        for name in ('vol', 'temp'):
-            if np.ndim(dp[name]) == 0:
-                dp[name] = np.full(time.shape, dp[name])  # vol [m**3], temp [K]
+        dp = self._complete_tank_profiles(time, dp)
 
         if 'temp_ht' in self.name_states:
             heat_prof = self.energy_balances(**dp, inputs=None, heat_prof=True)
@@ -1805,6 +1849,7 @@ class CSTR(_BaseReactor):
         Stores ``result`` and outlet data. Heat profiles ``q_rxn`` and ``q_ht``
         have units [W] and the _BaseReactor sign convention. Prescribed
         temperature differentiates the control callable (see _prescribed_heat).
+        Control values are evaluated at scalar times, as in the RHS.
         When the bath energy balance is active, its prescribed utility inlet
         temperature is evaluated at every profile time; no jacket temperature
         is integrated. Jacket mode uses the solved utility temperature.
@@ -1815,11 +1860,7 @@ class CSTR(_BaseReactor):
         dp = unpack_states(states, self.dim_states, self.name_states)
         dp['time'] = time
 
-        dp = complete_dict_states(time, dp, ('vol', 'temp'), self.Liquid_1,
-                                  self.controls)
-        for name in ('vol', 'temp'):
-            if np.ndim(dp[name]) == 0:
-                dp[name] = np.full(time.shape, dp[name])  # vol [m**3], temp [K]
+        dp = self._complete_tank_profiles(time, dp)
 
         inputs = self.get_inputs(time)
 

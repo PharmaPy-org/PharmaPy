@@ -715,17 +715,20 @@ class Evaporator:
         return self._Inlet
 
     @Inlet.setter
-    def Inlet(self, inlet):  # Create an inlet with additional species (N2)
+    def Inlet(self, inlet: LiquidStream) -> None:
+        """Attach the original condensable feed for semibatch operation.
 
-        fields = ['temp', 'pres', 'mole_flow', 'mole_frac',
-                  'controls', 'args_control']
-        inlet_dict = {key: inlet.__dict__.get(key) for key in fields}
-        inlet_dict['mole_frac'] = np.append(inlet_dict['mole_frac'], 0)
-
-        self.inlet_inert_dict = inlet_dict
-
+        Parameters
+        ----------
+        inlet : LiquidStream
+            Feed with temperature [K], flow [mol/s], and mole fractions [-]
+            in the original liquid species order. The inlet, its controller,
+            and its upstream profiles remain attached throughout each solve.
+            Nitrogen is appended only to evaluated model inputs.
+        """
         self._Inlet = inlet
-
+        self.states_in_dict = {'Inlet': dict(zip(
+            self.names_states_in, [inlet.num_species, 1, 1]))}
         self.oper_mode = 'Semibatch'
 
     @property
@@ -744,17 +747,39 @@ class Evaporator:
         self.names_upstream = None
         self.bipartite = None
 
-    def get_inputs(self, time):
+    def get_inputs(self, time: Union[float, np.ndarray]) -> dict:
+        """Evaluate the original feed and append nitrogen in model species order.
 
+        Parameters
+        ----------
+        time : float or ndarray
+            Absolute evaluation times [s], scalar or shape (num_times,).
+
+        Returns
+        -------
+        dict
+            ``Inlet`` contains flow [mol/s], temperature [K], and mole
+            fractions [-], shape (num_species + include_nitrogen,) or
+            (num_times, num_species + include_nitrogen). Nitrogen feed is
+            zero. Static values, controllers, and connected upstream profiles
+            are evaluated on the original inlet without changing ownership
+            or the controller's composition shape. With no inlet, return
+            static zero-feed values for any evaluation time.
+        """
         if self.Inlet is None:
-            inputs = {'mole_flow': 0,
+            inputs = {'mole_flow': 0,  # [mol/s], no feed
                       'mole_frac': np.zeros(
-                          self.num_species + self.include_nitrogen),
-                      'temp': 298.15}
+                          self.num_species + self.include_nitrogen),  # [-]
+                      'temp': 298.15}  # [K], unused reference for absent feed
 
             inputs['Inlet'] = inputs
         else:
             inputs = get_inputs_new(time, self.Inlet, self.states_in_dict)
+            if self.include_nitrogen:
+                fractions = np.asarray(inputs['Inlet']['mole_frac'])  # [-]
+                nitrogen = np.zeros(fractions.shape[:-1] + (1,))  # [-], no inlet nitrogen
+                inputs['Inlet']['mole_frac'] = np.concatenate(
+                    (fractions, nitrogen), axis=-1)  # [-], nitrogen is last
 
         return inputs
 
@@ -904,7 +929,9 @@ class Evaporator:
         mol_i : ndarray
             Component holdups [mol], retained for the packed-state interface.
         u_inputs : dict
-            Feed flow [mol/s], composition [-], and temperature [K].
+            Feed flow [mol/s], composition [-], and temperature [K]. The
+            composition includes the appended zero nitrogen fraction when
+            enabled; inlet enthalpy uses the original condensable species.
         du_dt : float, optional
             Internal-energy derivative [J/s]; None requests heat input only.
 
@@ -916,9 +943,11 @@ class Evaporator:
             closure [J], shape (2,).
         """
 
-        input_flow = u_inputs['mole_flow']
-        input_fracs = u_inputs['mole_frac']
-        input_temp = u_inputs['temp']
+        input_flow = u_inputs['mole_flow']  # [mol/s]
+        # The original inlet has no nitrogen property entry; its appended
+        # zero fraction contributes neither feed material nor enthalpy.
+        input_fracs = np.asarray(u_inputs['mole_frac'])[..., :self.num_species]  # [-]
+        input_temp = u_inputs['temp']  # [K]
 
         # Enthalpies
         if isinstance(input_flow, np.ndarray):
@@ -1070,22 +1099,17 @@ class Evaporator:
             Same shape; component derivatives [mol/s] and energy derivative
             [J/s] are seeded, with zero placeholders for algebraic entries.
             Initial outflow through the vapor valve is neglected on the
-            first solve. Continuations evaluate component and energy rates
-            at the terminal state and current input time.
+            first solve. Feed rates use the current original inlet evaluated
+            at time zero, including controls and upstream profiles, with
+            zero nitrogen appended to component inputs. Continuations evaluate
+            component and energy rates at the terminal state and current input
+            time.
 
         Raises
         ------
         ValueError
             If the liquid volume exceeds the drum volume [m**3].
         """
-        if self.include_nitrogen and self.oper_mode == 'Semibatch':
-            inlet = LiquidStream(self.paths, **self.inlet_inert_dict)
-            inlet.DynamicInlet = self.Inlet.DynamicInlet
-            self._inlet_without_nitrogen = self.Inlet
-            self._Inlet = inlet
-            self.states_in_dict = {'Inlet': dict(zip(
-                self.names_states_in, [self.num_species + 1, 1, 1]))}
-
         if self.elapsed_time > 0:
             states_init = self._terminal_states.copy()  # units in states_di
             values = unpack_states(states_init, self.dim_states, self.name_states)
@@ -1191,9 +1215,13 @@ class Evaporator:
             inlet_flow = 0  # [mol/s]
             hin_init = 0  # [J/mol]
         else:
-            dm_init = self.Inlet.mole_flow * self.Inlet.mole_frac  # [mol/s]
-            inlet_flow = self.Inlet.mole_flow  # [mol/s]
-            hin_init = self.Inlet.getEnthalpy(basis='mole')  # [J/mol]
+            inlet_inputs = self.get_inputs(0)['Inlet']
+            inlet_flow = inlet_inputs['mole_flow']  # [mol/s]
+            dm_init = inlet_flow * inlet_inputs['mole_frac']  # [mol/s]
+            hin_init = self.Inlet.getEnthalpy(
+                temp=inlet_inputs['temp'],
+                mole_frac=inlet_inputs['mole_frac'][..., :self.num_species],
+                basis='mole')  # [J/mol], original condensable feed basis
 
         # ---------- Energy balance states
         # Enthalpies
@@ -1324,12 +1352,6 @@ class Evaporator:
 
         """
 
-        num_comp = len(self.Liquid_1.name_species)
-        len_in = [num_comp, 1, 1]
-        states_in_dict = dict(zip(self.names_states_in, len_in))
-
-        self.states_in_dict = {'Inlet': states_in_dict}
-
         self.args_inputs = (self, self.num_species)
 
         states_init, sdot_init = self.init_unit()
@@ -1403,8 +1425,8 @@ class Evaporator:
         states : ndarray
             Packed profiles, shape (num_times, sum(dim_states)), with units
             and species order in ``states_di``. Nitrogen remains in results
-            and duty calculations; condensable phases and the original
-            inlet are restored afterwards for the next initialization.
+            and duty calculations; condensable phases are restored afterwards
+            for the next initialization. The original inlet remains attached.
         """
         self.elapsed_time = time[-1]  # [s], solver time is already absolute
         self._terminal_states = np.asarray(states[-1]).copy()  # units in states_di
@@ -1438,10 +1460,6 @@ class Evaporator:
                                    mole_frac=xliq_update[-1])
 
             self._set_phases(Liquid_1)
-            if self.oper_mode == 'Semibatch':
-                self._Inlet = self._inlet_without_nitrogen
-                self.Inlet.DynamicInlet = self.Inlet.DynamicInlet
-
         else:
             self.Liquid_1.updatePhase(mole_frac=xliq_update[-1],
                                       moles=dp['mol_liq'][-1],

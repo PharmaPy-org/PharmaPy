@@ -370,9 +370,11 @@ class VaporStream(VaporPhase):
             Mass [kg/s], volume [m**3/s], and molar [mol/s] flow. The first
             positive value in that order controls; all zeros give zero flow.
         mass_frac, mole_frac : array-like, optional
-            Species mass and mole fractions, shape ``(num_species,)`` [-].
+            Species mass and mole fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
         mole_conc : array-like, optional
-            Species molar concentrations, shape ``(num_species,)`` [mol/L].
+            Species molar concentrations [mol/L], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
         check_input, verbose : bool, optional
             Enable zero-flow warnings and composition diagnostics, respectively.
 
@@ -393,7 +395,9 @@ class VaporStream(VaporPhase):
         -----
         Exactly one composition measure is required. Supplied concentrations
         are retained; concentrations derived from fractions use the converters'
-        liquid basis, not gas-EOS values.
+        liquid basis, not gas-EOS values. The first positive flow applies to
+        every composition row. Composition-dependent flows have one value per
+        row; shared flows independent of composition remain scalar.
         """
 
         super().__init__(path_thermo, temp, pres,
@@ -426,9 +430,11 @@ class VaporStream(VaporPhase):
         ----------
         mole_conc, mass_conc : ndarray, optional
             Species molar [mol/L] and mass [kg/m**3] concentrations, shape
-            ``(num_species,)``. Supplied concentrations retain their basis.
+            ``(num_species,)`` or ``(num_points, num_species)``. Supplied
+            concentrations retain their basis.
         mass_frac, mole_frac : ndarray, optional
-            Species mass and mole fractions, shape ``(num_species,)`` [-].
+            Species mass and mole fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
         vol, mass, moles : float, optional
             Phase-style names for volume [m**3/s], mass [kg/s], and molar
             [mol/s] flow. Zero means no amount was supplied.
@@ -454,8 +460,8 @@ class VaporStream(VaporPhase):
         Composition precedence and the retained liquid concentration basis
         follow :meth:`VaporPhase.updatePhase`.
         A zero alias or amount means "not supplied", so flow cannot be set to
-        zero through ``updatePhase``; assign the attribute directly, as with
-        ``LiquidStream``.
+        zero through ``updatePhase``. For composition profiles, conserved flows
+        retain the shared-scalar or per-row form described by the constructor.
         """
         for name, amount in (('mass', mass), ('vol', vol), ('moles', moles),
                              ('mass_flow', mass_flow), ('vol_flow', vol_flow),

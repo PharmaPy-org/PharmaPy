@@ -7,6 +7,13 @@ Liquid heat capacity
 
 :code:`LiquidPhase.getCp` now defaults to the mass basis [J/kg/K], like its siblings; callers needing [J/mol/K] must pass :code:`basis='mole'`.
 
+Vapor density
+=============
+
+:code:`VaporPhase.getDensity` uses the ideal-gas equation at the requested temperature and pressure. The default mass basis returns [kg/m**3]; :code:`basis='mole'` returns [mol/L], equivalently [kmol/m**3]. Earlier releases returned [mol/m**3] regardless of the selected basis.
+
+The positional arguments remain pressure [Pa], temperature [K], phase, and basis. The :code:`pres_gas` and :code:`temp_gas` keywords remain supported. New code can use :code:`pres` and :code:`temp` keywords, with optional :code:`mass_frac` or :code:`mole_frac` composition overrides. Do not supply both spellings of the same pressure or temperature argument.
+
 State events
 ============
 
@@ -37,7 +44,7 @@ More advanced usage of state events is allowed by passing a callable directly to
 
    my_state_event = {'callable': my_function}
 
-where the passed callable function must have the signature :code:`my_function(time, states, sdot, **kwargs)` and must return a scalar whose sign changes only when the event is detected. The passed :code:`state` and :code:`sdot` arguments will be dictionaries that have the names of the states as keys. Any keyword arguments can be optionally specified in the state event dictionary, e.g.:
+where the passed callable function must have the signature :code:`my_function(time, states, sdot, **kwargs)` and must return a scalar whose sign changes only when the event is detected. The passed :code:`states` and :code:`sdot` arguments will be dictionaries that have the names of the states as keys. Reactor callbacks receive derivatives evaluated at the supplied event time and state, including intermediate states used to locate a crossing. Any keyword arguments can be optionally specified in the state event dictionary, e.g.:
 
 .. testcode::
 
@@ -67,18 +74,32 @@ Tank reactors accept a :code:`controls` dictionary mapping state names to callab
        'temp': {'fun': lambda time, initial, rate: initial + rate * time,
                 'args': (320.0,), 'kwargs': {'rate': 0.5}}}
 
-Time is in seconds and the returned temperature is in kelvin. A :code:`temp` control removes :code:`temp` and :code:`temp_ht` from the integrated tank states. PFR accepts these control forms but does not yet apply them to its integrated states. In bath mode, the Utility inlet temperature takes precedence over a :code:`temp_ht` control.
+Time is in seconds and the returned temperature is in kelvin. Tank controls receive scalar times during integration and result retrieval, so scalar Python functions and piecewise schedules are supported. A :code:`temp` control removes :code:`temp` and :code:`temp_ht` from the integrated tank states. PFR accepts these control forms but does not yet apply them to its integrated states. In bath mode, the Utility inlet temperature takes precedence over a :code:`temp_ht` control.
 
-Tank heat rates use positive :code:`q_rxn` for reaction heat generation and positive :code:`q_ht` for utility heat added to the liquid, both in watts. Prescribed-temperature duty uses the control callable's temperature derivative in the energy balance. The differentiation step is 1/1024 of the requested run duration, with a minimum of 1/1024 s. Central differences have second-order error; a second-order forward difference is used when the central stencil would precede the run start. Controls must be evaluable slightly beyond the run end. Discontinuous controls are differentiated across their jumps, so the apparent rate at a jump depends on the differentiation step.
+Tank heat rates use positive :code:`q_rxn` for reaction heat generation and positive :code:`q_ht` for utility heat added to the liquid, both in watts. Prescribed-temperature duty uses the control callable's temperature derivative in the energy balance. The nominal differentiation step is 1/1024 of the requested run duration, with a minimum of 1/1024 s. For a positive-duration run, the step is capped at half the run duration. Central differences are used in the interior, with second-order forward or backward differences near the boundaries; all evaluation points remain inside the run. A zero-duration run uses a forward difference and requires evaluation beyond its single time. Discontinuous controls are differentiated across their jumps, so the apparent rate at a jump depends on the differentiation step.
 
 A single reported time still uses the requested run duration for differentiation. Direct result retrieval without a preceding solve uses the supplied profile's start and span, with the same minimum step. :code:`heat_duty` is the cumulative trapezoidal integral in joules over all tank segments since the last reset; its accuracy also depends on the reporting grid. Each CSTR/Semibatch segment retains its sampled inlet concentration, temperature and flow. At a shared segment endpoint the earlier sample is retained, so replacing an inlet does not rewrite its historical flow profile.
 
 Crystallizers store :code:`heat_duty = [0, Q]` [J], filling the cooling column of :code:`SimExec.GetDuties`. Positive duty means heat removed to the utility, opposite to the reactor heating column. Uncontrolled crystallizers integrate the jacket heat rate; prescribed-temperature crystallizers reconstruct the utility rate from the energy balance and the temperature slope over each reporting interval. The prescribed-temperature Batch duty has changed sign relative to earlier releases.
 
+Crystallizer feeds and steady state
+==================================
+
+Moment-mode crystallizers accept static slurry moments and connected upstream moment profiles on the slurry-volume basis [m**n/m**3]. Connections from FVM crystallizers retain the reported moment history, rather than applying the final population at every time. Explicitly converted inlet moments retain precedence. The inlet must supply all moment orders required by the destination; extra higher orders are ignored, and missing orders raise an explanatory error.
+
+:code:`MSMPR.solve_steady_state` initializes the kinetic target species itself; a prior dynamic solve is not required. Its documented constant-property, solid-free-feed, and growth assumptions still apply. Crystallizer reset restores the original phase inventories and rebuilds the slurry population and volume. Parameter-estimation phase modifiers also refresh those slurry quantities before the next solve.
+
 Evaporator heat duties
-~~~~~~~~~~~~~~~~~~~~~
+=====================
 
 Evaporator :code:`heat_profile` columns are powers [J/s], and :code:`heat_duty` contains their cumulative trapezoidal integrals [J] across segments since the last reset or public :code:`Phases` assignment. For batch evaporators, column 0 is heat into the drum (positive for heating) and column 1 is condensation heat (negative for cooling); the cumulative energies retain their signs. For continuous evaporators, column 0 is jacket/utility duty (positive for heat removed) and column 1 is condenser duty (negative for cooling), evaluated on the vapor-composition basis. This replaces the former liquid-composition basis, so existing zero-reflux runs also report a different column-1 value. Continuous duties accumulate signed energy first and then report its magnitude; each physical duty is counted once. Partition independence holds for a fixed trajectory: continuous :code:`solve_unit` restarts at time zero, so splitting solves need not reproduce the same trajectory.
+
+For nitrogen-enabled semibatch evaporation, the original inlet remains attached throughout each solve. Feed controllers and connected profiles use the original condensable species order; the evaporator appends a zero nitrogen fraction after evaluating the feed. Changes made through the inlet's :code:`updatePhase` method take effect on the next segment.
+
+Washing inventory
+=================
+
+Displacement washing uses the attached cake's packing porosity for flow, adsorption, retained liquid, and effluent balances. The washing-unit diameter sets cross-sectional area and cake height; it does not imply repacking the cake at a different porosity.
 
 
 Interpolators

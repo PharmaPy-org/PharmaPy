@@ -827,7 +827,7 @@ def test_washing_rejects_zero_pore_inventory(separation_phases):
 @pytest.mark.parametrize('uniform', [False, True])
 @pytest.mark.parametrize('dynamic', [False, True])
 def test_washing_bulk_concentrations_close_species_inventory(separation_phases, uniform, dynamic):
-    """Integrate the reconstructed field and close the pore/wash balance.
+    """Close species balances using actual inlet and outlet liquid inventories.
 
     Parameters
     ----------
@@ -837,10 +837,20 @@ def test_washing_bulk_concentrations_close_species_inventory(separation_phases, 
         Use a uniform initial field to check the previous analytical formula.
     dynamic : bool
         Select time-series or final analytical profile evaluation.
+
+    Notes
+    -----
+    A 1 cm unit and one tenth of the fixture population give a cake about
+    6 cm high. This makes unit-diameter packing differ measurably from the
+    Cake-owned porosity, which must set both geometry and liquid inventories.
+    The initial attached liquid exactly fills the pores; no remap or
+    re-saturation adjustment is needed on this unchanged four-node grid.
     """
     liquid, solid = separation_phases
     liquid.diffusivity = np.full((5, 5), 1e-4)  # [m**2/s], resolved review-case dispersion
-    washer = DisplacementWashing(solvent_idx=4, num_nodes=4, diam_unit=.1)  # [m]
+    population_scale = .1  # [-], gives a 6 cm cake in the 1 cm diameter unit
+    solid.updatePhase(distrib=solid.distrib * population_scale)
+    washer = DisplacementWashing(solvent_idx=4, num_nodes=4, diam_unit=.01)  # [m]
     washer.Phases = [liquid, solid]
     # Asymmetric normalized volume fractions give a physically consistent
     # nonuniform field with four positions and five species.
@@ -855,7 +865,14 @@ def test_washing_bulk_concentrations_close_species_inventory(separation_phases, 
     inlet = np.zeros(liquid.num_species)  # [kg/m**3], pure washing solvent
     inlet[washer.solvent_idx] = liquid.rho_liq[washer.solvent_idx]
     cake_volume = washer.CakePhase.cake_vol  # [m**3]
-    porosity = solid.getPorosity(diam_filter=washer.diam_unit)  # [-]
+    porosity = washer.CakePhase.porosity  # [-], also owns cake volume and resistance
+    pore_volume = porosity * cake_volume  # [m**3], saturated initial and final pores
+    initial_mean = (initial[0] + 2 * initial[1]
+                    + 2 * initial[2] + initial[3]) / 6  # [kg/m**3]
+    initial_species_mass = pore_volume * initial_mean  # [kg]
+    liquid.updatePhase(mass=initial_species_mass.sum(),
+                       mass_frac=initial_species_mass / initial_species_mass.sum())
+    attached_initial_species = liquid.mass * liquid.mass_frac  # [kg]
     wash_ratio = .5  # [-], half a cake volume of wash liquid (superficial basis)
     concentration, normalized, retained, effluent = washer.solve_unit(
         deltaP=1e5, wash_ratio=wash_ratio, dynamic=dynamic)  # [Pa], review pressure drop
@@ -863,15 +880,14 @@ def test_washing_bulk_concentrations_close_species_inventory(separation_phases, 
     # Four equally spaced endpoint nodes have trapezoidal weights 1:2:2:1.
     expected_mean = (concentration[0] + 2 * concentration[1]
                      + 2 * concentration[2] + concentration[3]) / 6  # [kg/m**3]
-    initial_mean = (initial[0] + 2 * initial[1]
-                    + 2 * initial[2] + initial[3]) / 6  # [kg/m**3]
     np.testing.assert_allclose(retained, expected_mean, rtol=RTOL)
     np.testing.assert_allclose(washer.concProf[:, -1], concentration, rtol=RTOL)
-    pore_volume = porosity * cake_volume  # [m**3], saturated initial and final pores
+    outlet_liquid = washer.Outlet.Liquid_1
+    attached_final_species = outlet_liquid.mass * outlet_liquid.mass_frac  # [kg]
     wash_volume = wash_ratio * cake_volume  # [m**3], also effluent volume at saturation one
     np.testing.assert_allclose(
-        pore_volume * initial_mean + wash_volume * inlet,
-        pore_volume * retained + wash_volume * effluent, rtol=RTOL)
+        attached_initial_species + wash_volume * inlet,
+        attached_final_species + wash_volume * effluent, rtol=RTOL)
     if uniform:
         mean_normalized = (normalized[0] + 2 * normalized[1]
                            + 2 * normalized[2] + normalized[3]) / 6  # [-]

@@ -50,17 +50,15 @@ def energy_balance(inst, mass_str):
 
 
 class Slurry:
-    """ Create Slurry object.
+    """Represent a homogeneous liquid-solid mixture with a shared temperature.
     
     Parameters
     ----------
     vol : float, optional
         Volume of the Slurry [m**3]. The default is 0.
     moments : array, optional
-        Array of size N, containing the distribution moments in um**n, 
-        for n = 0,...,N - 1. The default is None.
-    # mass_slurry : TYPE, optional
-        DESCRIPTION. The default is 0.
+        Slurry-volume-specific distribution moments [m**n/m**3], shape
+        (num_moments,), ordered from n = 0. The default is None.
     x_distrib : array, optional
         Array of size N, containing the internal grid
         size coordinate of the solids [um]. The default is None
@@ -383,7 +381,7 @@ class Slurry:
 
 
 class SlurryStream(Slurry):
-    """ Create a slurry stream object.
+    """Represent a homogeneous liquid-solid flow with a shared temperature.
     
     Parameters
     ----------
@@ -391,8 +389,8 @@ class SlurryStream(Slurry):
         Volumetric flow rate in which the slurry is transfered [m**3/s]. 
         The default is 0.
     moments : array, optional
-        Array of size N, containing the distribution moments in um**n, 
-        for n = 0,...,N - 1. The default is None.
+        Slurry-volume-specific distribution moments [m**n/m**3], shape
+        (num_moments,), ordered from n = 0. The default is None.
     x_distrib : array, optional
         Array of size N, containing the internal grid
         size coordinate of the solids [um]. The default is None

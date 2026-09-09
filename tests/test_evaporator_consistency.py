@@ -288,11 +288,13 @@ def test_nitrogen_layout_and_postprocessing_preserve_phase_species(thermo_path, 
     np.testing.assert_allclose(unit.result.y_vap[-1], values['y_vap'], rtol=RTOL)
     np.testing.assert_allclose(unit.Outlet.mole_frac, values['x_liq'][:-1], rtol=RTOL)
     assert np.isfinite(unit.heat_duty).all()
-    # Restoration must also support another initialization without a second N2.
+    # Another initialization retains the original feed and adds only one N2.
     next_states, _ = unit.init_unit()
     assert len(next_states) == len(states)
     assert unit.Liquid_1.name_species == expected_names
-    assert unit.Inlet.mole_frac.shape == (3,)
+    assert unit.Inlet is inlet
+    assert unit.Inlet.mole_frac.shape == (2,)
+    assert unit.get_inputs(DURATION)['Inlet']['mole_frac'].shape == (3,)
 
 
 @pytest.mark.integration
@@ -714,3 +716,137 @@ def test_condensate_temperature_uses_configured_activity_model(
         unit.get_heat_duty(np.array([0, DURATION]), np.tile(seed, (2, 1)))
     assert temperatures
     np.testing.assert_allclose(temperatures, expected, rtol=RTOL)
+
+
+@pytest.mark.integration
+@pytest.mark.assimulo
+@pytest.mark.parametrize('source', ['controller', 'upstream'])
+def test_nitrogen_semibatch_evaluates_original_composition_source(thermo_path, source):
+    pytest.importorskip('assimulo')
+    unit = make_unit(thermo_path, include_nitrogen=True)
+    inlet = LiquidStream(thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+                         mole_flow=FEED, mole_frac=FRACTIONS)
+    controller = DynamicInput()
+    final_fractions = FRACTIONS[::-1].copy()  # [-], asymmetric composition ramp
+    controller_owners = []
+
+    def composition(time):
+        """Interpolate the original binary feed over the simulation duration.
+
+        Parameters
+        ----------
+        time : float or ndarray
+            Absolute input time [s].
+
+        Returns
+        -------
+        ndarray
+            Original-species mole fractions [-], shape (2,) or (num_times, 2).
+        """
+        controller_owners.append(controller.parent_instance)
+        progress = np.asarray(time)[..., None] / DURATION  # [-]
+        return FRACTIONS + progress * (final_fractions - FRACTIONS)
+
+    if source == 'controller':
+        controller.add_variable('mole_frac', composition)
+        inlet.DynamicInlet = controller
+    else:
+        inlet.time_upstream = np.array([0, DURATION / 2, DURATION])  # [s], linear ramp samples
+        inlet.y_inlet = {'mole_frac': composition(inlet.time_upstream)}  # [-]
+        inlet.y_upstream = inlet.y_inlet
+    unit.Inlet = inlet
+    times, states = unit.solve_unit(DURATION, verbose=False)
+    assert times[-1] == pytest.approx(DURATION, rel=RTOL)
+    assert np.isfinite(states).all()
+    assert unit.Inlet is inlet
+    if source == 'controller':
+        assert controller.parent_instance is inlet
+        assert controller_owners and all(owner is inlet for owner in controller_owners)
+    inputs = unit.get_inputs(np.array([0, DURATION]))['Inlet']
+    expected = np.column_stack((np.vstack((FRACTIONS, final_fractions)), np.zeros(2)))  # [-]
+    np.testing.assert_allclose(inputs['mole_frac'], expected, rtol=RTOL)
+    if source == 'controller':
+        np.testing.assert_allclose(controller.evaluate_inputs(DURATION)['mole_frac'],
+                                   final_fractions, rtol=RTOL)
+    else:
+        assert unit.Inlet.y_inlet is inlet.y_upstream
+        np.testing.assert_allclose(inlet.y_inlet['mole_frac'][-1], final_fractions, rtol=RTOL)
+
+
+@pytest.mark.integration
+@pytest.mark.assimulo
+def test_nitrogen_continuation_reads_updated_public_inlet(thermo_path):
+    pytest.importorskip('assimulo')
+    unit = make_unit(thermo_path, include_nitrogen=True)
+    inlet = LiquidStream(thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+                         mole_flow=FEED, mole_frac=FRACTIONS)
+    unit.Inlet = inlet
+    # Resolve the small nitrogen inventory on both otherwise identical runs.
+    options = {'rtol': 1e-8, 'atol': 1e-10}  # [-], [native packed-state units]
+    unit.solve_unit(DURATION, verbose=False, sundials_opts=options)
+    reference = deepcopy(unit)
+    changed_flow = 2 * FEED  # [mol/s], double feed after the first segment
+    inlet.updatePhase(mole_flow=changed_flow)
+    reference.Inlet = deepcopy(inlet)
+    times, states = unit.solve_unit(DURATION, verbose=False, sundials_opts=options)
+    reference_times, reference_states = reference.solve_unit(
+        DURATION, verbose=False, sundials_opts=options)
+    assert unit.Inlet is inlet
+    assert times[0] == pytest.approx(DURATION, rel=RTOL)
+    assert times[-1] == pytest.approx(2 * DURATION, rel=RTOL)
+    np.testing.assert_allclose(states[-1], reference_states[-1], rtol=RTOL, atol=ATOL)
+    np.testing.assert_allclose(times, reference_times, rtol=RTOL)
+    np.testing.assert_allclose(states, reference_states, rtol=RTOL, atol=ATOL)
+    assert unit.get_inputs(times[-1])['Inlet']['mole_flow'] == pytest.approx(changed_flow, rel=RTOL)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('source', ['controller', 'upstream'])
+def test_nitrogen_feed_mapping_preserves_current_values_and_axes(thermo_path, source):
+    unit = make_unit(thermo_path, include_nitrogen=True)
+    inlet = LiquidStream(thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+                         mole_flow=FEED, mole_frac=FRACTIONS)
+    times = np.arange(4) * DURATION  # [s], four samples differ from three packed species
+    fractions = np.array([[0.7, 0.3], [0.6, 0.4],
+                          [0.5, 0.5], [0.4, 0.6]])  # [-], linear binary feed profile
+    if source == 'controller':
+        controller = DynamicInput()
+
+        def composition(time):
+            """Evaluate the binary feed's linear composition ramp.
+
+            Parameters
+            ----------
+            time : float or ndarray
+                Absolute input time [s].
+
+            Returns
+            -------
+            ndarray
+                Binary mole fractions [-], shape (2,) or (num_times, 2).
+            """
+            progress = np.asarray(time)[..., None] / times[-1]  # [-]
+            return fractions[0] + progress * (fractions[-1] - fractions[0])
+
+        controller.add_variable('mole_frac', composition)
+        inlet.DynamicInlet = controller
+    else:
+        inlet.time_upstream = times
+        inlet.y_inlet = {'mole_frac': fractions}
+        inlet.y_upstream = inlet.y_inlet
+    unit.Inlet = inlet
+    states, derivatives = unit.init_unit()
+    expected = np.column_stack((fractions, np.zeros(len(times))))  # [-], no feed nitrogen
+    np.testing.assert_allclose(unit.get_inputs(times)['Inlet']['mole_frac'], expected, rtol=RTOL)
+    np.testing.assert_allclose(unit.get_inputs(0)['Inlet']['mole_frac'], expected[0], rtol=RTOL)
+    np.testing.assert_allclose(derivatives[:3], FEED * expected[0], rtol=RTOL)
+    assert unit.Inlet is inlet
+    # A live flow update is visible immediately, including to continuation.
+    changed_flow = 2 * FEED  # [mol/s], double the original flow
+    inlet.updatePhase(mole_flow=changed_flow)
+    assert unit.get_inputs(DURATION)['Inlet']['mole_flow'] == pytest.approx(changed_flow, rel=RTOL)
+    if source == 'controller':
+        assert controller.parent_instance is inlet
+    else:
+        assert inlet.y_inlet['mole_frac'] is fractions
+        assert fractions.shape == (4, 2)
