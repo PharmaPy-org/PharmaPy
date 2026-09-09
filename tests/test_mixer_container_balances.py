@@ -108,7 +108,20 @@ def test_liquid_cp_default_mass_basis(path):
 
 
 @pytest.mark.parametrize('continuous', [False, True])
-def test_public_slurry_mix_preserves_phase_amounts_and_population(path, continuous):
+@pytest.mark.parametrize('solids_first', [False, True])
+def test_public_slurry_mix_preserves_phase_amounts_and_population(
+        path, continuous, solids_first):
+    """Close asymmetric phase balances for either inlet order and amount basis.
+
+    Parameters
+    ----------
+    path : str
+        Shipped five-species thermodynamic database path.
+    continuous : bool
+        Use phase flow rates [kg/s] instead of batch inventories [kg].
+    solids_first : bool
+        Place the slurry before the pure-liquid inlet.
+    """
     liquid_class = LiquidStream if continuous else LiquidPhase
     solid_class = SolidStream if continuous else SolidPhase
     quantity = 'mass_flow' if continuous else 'mass'
@@ -130,7 +143,7 @@ def test_public_slurry_mix_preserves_phase_amounts_and_population(path, continuo
     inlet_energy = sum(getattr(phase, quantity) * phase.getEnthalpy(basis='mass')
                        for phase in [liquid, *slurry.Phases])  # [J/s] or [J]
     mixer = Mixer()
-    mixer.Inlets = [liquid, slurry]
+    mixer.Inlets = [slurry, liquid] if solids_first else [liquid, slurry]
     with warnings.catch_warnings(record=True) as captured:
         warnings.simplefilter('always')
         mixer.solve_unit()
@@ -160,7 +173,21 @@ def test_public_slurry_mix_preserves_phase_amounts_and_population(path, continuo
 
 
 @pytest.mark.parametrize('added_pore_fill', [0.1, 2.0])
-def test_public_partial_cake_mix_uses_attached_inventory(path, added_pore_fill):
+@pytest.mark.parametrize('solids_first', [False, True])
+def test_public_partial_cake_mix_uses_attached_inventory(
+        path, added_pore_fill, solids_first):
+    """Conserve cake inventories and energy independently of inlet order.
+
+    Parameters
+    ----------
+    path : str
+        Shipped five-species thermodynamic database path.
+    added_pore_fill : float
+        Added liquid volume divided by the cake pore volume [-]; the
+        smaller case retains Cake and the larger case produces Slurry.
+    solids_first : bool
+        Place the cake before the pure-liquid inlet.
+    """
     cake = Cake(saturation=np.full(3, 0.2), z_external=np.linspace(0, 1, 3))
     # Saturation metadata is 0.2; attached liquid fills 0.6 of pore volume.
     solid = SolidPhase(path, mass_frac=SOLID_COMPOSITION, temp=COLD,
@@ -169,19 +196,23 @@ def test_public_partial_cake_mix_uses_attached_inventory(path, added_pore_fill):
                                temp=COLD), solid]
     pore_volume = cake.cake_vol * cake.porosity  # [m**3]
     cake.Liquid_1.updatePhase(vol=0.6 * pore_volume)  # [m**3], charged inventory
-    liquid = LiquidPhase(path, mass_frac=COMPOSITION, temp=HOT,
+    liquid = LiquidPhase(path, mass_frac=HOT_COMPOSITION, temp=HOT,
                          vol=added_pore_fill * pore_volume)  # [m**3]
     liquid_mass = liquid.mass + cake.Liquid_1.mass  # [kg]
     solid_mass = solid.mass  # [kg]
+    expected_composition = (liquid.mass * HOT_COMPOSITION
+                            + cake.Liquid_1.mass * COMPOSITION) / liquid_mass  # [-]
     inlet_energy = sum(phase.mass * phase.getEnthalpy(basis='mass')
                        for phase in [liquid, *cake.Phases])  # [J]
     mixer = Mixer()
-    mixer.Inlets = [liquid, cake]
+    mixer.Inlets = [cake, liquid] if solids_first else [liquid, cake]
     mixer.solve_unit()
     assert isinstance(mixer.Outlet, Cake if added_pore_fill < 1 else Slurry)
     assert mixer.Outlet.Liquid_1.mass == pytest.approx(liquid_mass, rel=RTOL)
     assert mixer.Outlet.Solid_1.mass == pytest.approx(solid_mass, rel=RTOL)
     assert mixer.Outlet.Solid_1.kv == KV
+    np.testing.assert_allclose(mixer.Outlet.Liquid_1.mass_frac,
+                               expected_composition, rtol=RTOL)
     np.testing.assert_allclose(mixer.Outlet.Solid_1.distrib, POPULATION, rtol=RTOL)
     assert np.isfinite(mixer.Outlet.Solid_1.moments).all()
     assert COLD < mixer.Outlet.Liquid_1.temp < HOT

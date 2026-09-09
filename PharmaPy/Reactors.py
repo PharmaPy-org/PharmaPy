@@ -147,8 +147,9 @@ class _BaseReactor:
     ``q_ht > 0`` for utility heat added to the liquid, both [W]. The tank
     balance is ``C*dT/dt = q_rxn + q_ht + q_flow`` in every thermal mode.
     Tank ``heat_duty`` [J] is cumulative over all segments since the last
-    reset, using the composite trapezoidal integral of ``q_ht`` and the
-    established ``[integral, 0]`` layout with ``duty_type = [0, 0]``.
+    reset, summing each segment's trapezoidal integral of ``q_ht`` in the
+    established ``[integral, 0]`` layout with ``duty_type = [0, 0]``. Separate
+    segment integrals preserve both heat rates at a discontinuous boundary.
     """
     def __init__(self, mask_params,
                  base_units, temp_ref, isothermal,
@@ -482,6 +483,21 @@ class _BaseReactor:
             if np.ndim(profiles[name]) == 0:
                 profiles[name] = np.full(time.shape, profiles[name])  # vol [m**3], temp [K]
         return profiles
+
+    def _finalize_tank_heat_duty(self) -> None:
+        """Store cumulative utility energy from the retained tank segments.
+
+        Notes
+        -----
+        Integrate each segment's utility heat rate [W] over its own times [s]
+        before summing energy [J]. At a changed feed or utility boundary, both
+        one-sided heat rates contribute to their respective segments, while
+        flattened reporting profiles retain only the earlier endpoint.
+        """
+        self.heat_duty = np.array([
+            sum(trapezoidal_rule(segment['time'], segment['q_ht'])
+                for segment in self.profiles_runs), 0])  # [J]
+        self.duty_type = [0, 0]
 
     def _prescribed_heat(self, time: np.ndarray, temp: np.ndarray,
                          capacitance: np.ndarray, source: np.ndarray,
@@ -1399,8 +1415,7 @@ class BatchReactor(_BaseReactor):
         self.result = DynamicResult(self.states_di, self.fstates_di, **dp)
 
         # Heat duty
-        self.heat_duty = np.array([trapezoidal_rule(dp['time'], dp['q_ht']), 0])  # [J]
-        self.duty_type = [0, 0]
+        self._finalize_tank_heat_duty()
 
         # Final state
         self.elapsed_time = time[-1]
@@ -1843,9 +1858,10 @@ class CSTR(_BaseReactor):
         all segments, with their shared endpoint included once. Each segment
         stores inlet_mole_conc [mol/L], inlet_temp [K], inlet_vol_flow [m**3/s]
         and q_flow [W]. The earlier segment owns the shared endpoint; changing
-        Inlet later does not rewrite these samples or downstream flow history. heat_duty [J]
-        is [the composite trapezoidal integral of q_ht over absolute time, 0];
-        duty_type is [0, 0], matching Batch's existing accounting layout.
+        Inlet later does not rewrite these samples or downstream flow history.
+        heat_duty [J] sums each segment's trapezoidal integral of q_ht, retaining
+        both one-sided rates at a changed inlet boundary for accounting. Its
+        layout is [cumulative integral, 0], with duty_type = [0, 0], as in Batch.
         Stores ``result`` and outlet data. Heat profiles ``q_rxn`` and ``q_ht``
         have units [W] and the _BaseReactor sign convention. Prescribed
         temperature differentiates the control callable (see _prescribed_heat).
@@ -1885,9 +1901,7 @@ class CSTR(_BaseReactor):
         self.profiles_runs.append(dp)
         dp = self.flatten_states()
 
-        self.heat_duty = np.array([
-            trapezoidal_rule(dp['time'], dp['q_ht']), 0])  # [J]
-        self.duty_type = [0, 0]
+        self._finalize_tank_heat_duty()
         self.elapsed_time = time[-1]  # [s], absolute endpoint
         self.Liquid_1.updatePhase(temp=dp['temp'][-1],
                                   mole_conc=dp['mole_conc'][-1],

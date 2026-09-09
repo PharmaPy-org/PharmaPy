@@ -245,6 +245,11 @@ class Mixer:
         ValueError
             If batch inventories and flow rates are combined without a
             duration contract. Supply batch phases or use only streams.
+
+        Notes
+        -----
+        Species metadata comes from the first inlet's liquid phase, whether
+        supplied directly or attached to a slurry or cake.
         """
         incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
         flow_flags = [hasattr(inlet, 'mass_flow')
@@ -274,11 +279,13 @@ class Mixer:
         self.names_upstream.append(None)
         self.bipartite.append(None)
 
+        liquid_inlet = getattr(self.Inlets[0], 'Liquid_1', self.Inlets[0])
+
         if flow_flag:
             self.states_di = {
                 'mass_flow': {'units': 'kg/s', 'dim': 1, 'type': 'alg'},
                 'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': self.Inlets[0].name_species, 'type': 'alg'},
+                              'index': liquid_inlet.name_species, 'type': 'alg'},
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
@@ -286,7 +293,7 @@ class Mixer:
             self.states_di = {
                 'mass': {'units': 'kg', 'dim': 1, 'type': 'alg'},
                 'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': self.Inlets[0].name_species, 'type': 'alg'},
+                              'index': liquid_inlet.name_species, 'type': 'alg'},
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
@@ -889,7 +896,7 @@ class Mixer:
         time_prof = None
 
         if any(solids_flag):
-            self.states_in_dict = {'Inlet': states_in_dict}  # TODO (solids?)
+            self.states_in_dict = {'Inlet': states_in_dict}
             u_input, ind_solids = self.get_inputs_solids()
 
             path = self.Inlets[ind_solids].Liquid_1.path_data

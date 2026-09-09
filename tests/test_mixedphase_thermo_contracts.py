@@ -1,8 +1,9 @@
 """B004 regressions using real phases and no optional solver backend.
 
-The shipped five-species database supplies unequal phase properties. Solver
-initialization is intercepted only at the ODE boundary; #224 still blocks
-trustworthy moment-mode result retrieval, which is outside this packet.
+The shipped five-species database supplies unequal phase properties. These
+tests intercept solver initialization at the ODE boundary. Moment-mode solves
+and inventory retrieval are covered in test_crystallizer_moment_basis.py and
+test_crystallizer_moment_inventory.py.
 """
 
 from unittest.mock import PropertyMock, patch
@@ -149,9 +150,6 @@ def test_crystallizer_initial_state_contains_liquid_volume(
     unit = unit_type(target_comp='A', method='moments', adiabatic=True,
                      vol_tank=slurry.vol)
     unit.Phases = slurry
-    # The moment-only Slurry path has no dx attribute (#224); no size grid is
-    # needed for this solver-boundary test. Do not claim result-retrieval coverage.
-    slurry.dx = None
     unit.Kinetics = CrystKinetics()
     captured = []
 

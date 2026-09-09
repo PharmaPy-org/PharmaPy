@@ -25,13 +25,17 @@ def interpolate_inputs(time: Union[float, np.ndarray],
     Parameters
     ----------
     time : float or numpy.ndarray
-        Evaluation time [s], scalar or shape (num_times,).
+        Evaluation time [s], scalar or an ascending array of shape
+        (num_times,).
     t_inlet : float or numpy.ndarray
         Upstream times [s], shape (num_upstream_times,); a scalar represents
         one sample and requires exactly one row in ``y_inlet``.
     y_inlet : numpy.ndarray
-        Values with time on the first axis. Remaining axes and physical units
-        are preserved (for example mass flow [kg/s] or mass fractions [-]).
+        Values with time on the first axis. Multiple upstream samples support
+        scalar fields of shape (num_upstream_times,) and vector fields of
+        shape (num_upstream_times, num_fields), preserving their physical
+        units (for example mass flow [kg/s] or mass fractions [-]). A single
+        upstream sample may have additional field axes, which are preserved.
     **kwargs_interp_fn : dict
         Keyword arguments forwarded to the selected interpolation routine.
 

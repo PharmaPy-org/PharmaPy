@@ -144,10 +144,13 @@ class _BaseCryst:
             State-event specifications; event values use the units of their
             associated model states.
         param_wrapper : callable or None
-            Transformation accepting a ``DynamicResult`` and sensitivities
-            with shape ``(num_times, num_params)`` in state units per parameter
-            unit, and returning transformed states and sensitivities on the
-            same declared basis.
+            Transformation accepting a ``DynamicResult`` and a sensitivity
+            dictionary whose arrays have shape ``(num_times, num_params)``.
+            Result moments use SI lengths [m**n] or [m**n/m**3]; moment
+            sensitivities retain solver lengths [um**n] or [um**n/m**3] per
+            parameter unit. A callback differentiating reported SI moments
+            must multiply order-n sensitivities by ``(1e-6)**n`` before
+            returning transformed states and sensitivities on the same basis.
 
         Raises
         ------
@@ -553,8 +556,11 @@ class _BaseCryst:
         upstream SI moment profile (also reported by FVM crystallizers) and
         interpolate it with the other inlet fields. Explicitly converted or
         dynamic mu_n values take precedence; the original stream is unchanged.
-        Other inlet fields do not suppress the moment fallback. Multiple
-        evaluation times broadcast the fallback to (num_times, num_moments);
+        Other inlet fields do not suppress the moment fallback. For moment-mode
+        slurry feeds, dynamic concentration overrides belong to Liquid_1;
+        omitted dynamic fields retain static moments, liquid concentration,
+        flow and temperature without modifying the stream. Multiple evaluation
+        times broadcast the fallback to (num_times, num_moments);
         a single evaluation time retains shape (num_moments,). The downstream
         model uses the lowest num_distr moment orders. Extra feed orders are
         omitted without changing the source stream; missing orders are rejected
@@ -577,7 +583,18 @@ class _BaseCryst:
                 inlet.y_inlet = {'mu_n': inlet.y_upstream['mu_n'],
                                  **(inlet.y_inlet or {})}
                 # [m**n/m**3], retain upstream history and converted-field precedence
-            inputs = get_inputs_new(time, inlet, self.states_in_dict)
+            if inlet.DynamicInlet is not None:
+                # DynamicInput supplies flat fields; resolve phase fallbacks
+                # before restoring the crystallizer's grouped input contract.
+                inlet.mass_conc = self.Inlet.Liquid_1.mass_conc  # [kg/m**3]
+                inlet_states = {**self.states_in_dict['Inlet'],
+                                **self.states_in_dict['Liquid_1']}
+                inputs = get_inputs_new(time, inlet, {'Inlet': inlet_states})
+                inputs['Liquid_1'] = {
+                    name: inputs['Inlet'].pop(name)
+                    for name in self.states_in_dict['Liquid_1']}
+            else:
+                inputs = get_inputs_new(time, inlet, self.states_in_dict)
         else:
             inputs = get_inputs_new(time, self.Inlet, self.states_in_dict)
 
@@ -817,9 +834,48 @@ class _BaseCryst:
 
             return dcsd_dt, np.array(mass_transfer)
 
-    def unit_model(self, time, states, params=None, sw=None,
-                   mat_bce=False, enrgy_bce=False):
+    def unit_model(self, time: float, states: np.ndarray, params=None, sw=None,
+                   mat_bce: bool = False,
+                   enrgy_bce: bool = False) -> np.ndarray:
+        """Evaluate balances in the declared raw solver state order.
 
+        Parameters
+        ----------
+        time : float
+            Evaluation time [s].
+        states : numpy.ndarray
+            Packed state vector, shape (num_states,). Population states use
+            [um**n] or scaled [#/um] for Batch/Semibatch and the corresponding
+            slurry-volume-specific basis for MSMPR. Remaining states are
+            liquid composition on the configured basis ([kg/m**3] for
+            mass_conc or [kg/kg] for mass_frac), liquid volume [m**3] when
+            applicable, and tank then jacket temperatures [K] when integrated.
+        params : array-like or None, optional
+            Active kinetic parameters in the kinetics model's native units;
+            None retains the configured values.
+        sw : sequence of bool or None, optional
+            Solver event switches, retained for the callback interface.
+        mat_bce : bool, optional
+            Return only material derivatives; takes precedence over enrgy_bce.
+        enrgy_bce : bool, optional
+            Return energy terms for duty retrieval instead of derivatives.
+
+        Returns
+        -------
+        numpy.ndarray
+            Flat derivatives in state units per second, or material-only
+            derivatives. With enrgy_bce, return the unit's energy diagnostic
+            unchanged. Batch/MSMPR diagnostics contain crystallization and
+            utility terms [W], plus feed heat [W] for MSMPR; prescribed-
+            temperature utility entries instead contain tank heat capacity
+            [J/K]. The diagnostic option is supported by Batch and MSMPR.
+
+        Notes
+        -----
+        Updates phase composition and temperature for property evaluation.
+        Jacket derivatives are flattened individually so scalar and length-one
+        thermal rates retain the tank-then-jacket state order.
+        """
         di_states = unpack_states(states, self.dim_states, self.name_states)
 
         # Inputs
@@ -909,6 +965,8 @@ class _BaseCryst:
                     time, params, cryst_rate, u_input, rhos, **di_states,
                     h_in=h_in)
 
+                if isinstance(energy_bce, tuple):
+                    energy_bce = np.hstack(energy_bce)  # [K/s], tank then jacket
                 balances = np.append(material_bces, energy_bce)
             else:
                 balances = material_bces
@@ -1340,6 +1398,12 @@ class _BaseCryst:
         This wrapper owns the estimation reset: solve_unit's reset_states flag
         is temporarily disabled so it preserves these modifiers, then restored
         even if the solve raises an exception.
+        A custom moments callback receives SI ``DynamicResult`` moments
+        [m**n] or [m**n/m**3], while its sensitivity dictionary retains raw
+        solver moments [um**n] or [um**n/m**3] per parameter unit. The callback
+        owns any conversion: multiply order-n sensitivities by ``(1e-6)**n``
+        when differentiating the reported SI moments. Runtime callback values
+        retain this established convention.
         """
         self.reset()
 
@@ -1399,10 +1463,9 @@ class _BaseCryst:
                                                            verbose=False,
                                                            **run_args)
 
-                    # dy/dt for each state separately
+                    # Group parameter sensitivities by state.
                     sens_sep = reorder_sens(sens, separate_sens=True)
 
-                    # TODO: is this the better way of naming the states?
                     di_keys = ['mu_%s' % ind for ind in range(self.num_distr)]
                     di_keys += ['w_%s' % name for name in self.name_species]
                     di_keys.append('vol')
@@ -1418,7 +1481,7 @@ class _BaseCryst:
         return result
 
     def _store_heat_duty(self, time: np.ndarray, heat_terms: np.ndarray) -> None:
-        """Integrate utility heat under the common crystallizer profile contract.
+        """Integrate utility heat for the latest Batch or MSMPR solve segment.
 
         Parameters
         ----------
@@ -1437,6 +1500,9 @@ class _BaseCryst:
         Retains these components in heat_prof with the units above. Stores
         heat_duty = [0, integrated utility heat] [J], positive for heat
         removed and negative for heat supplied, with legacy duty_type [0, -2].
+        Both heat_prof and heat_duty cover only the latest solve segment;
+        each call replaces the previous segment's values, even when stored
+        result profiles include earlier segments.
         Q fills the cooling column of SimExec.GetDuties; positive Q means
         heat removed to the utility, opposite to the reactor heating column.
         For prescribed temperature, C*dT/dt = flow - source - Q gives
@@ -3164,7 +3230,8 @@ class MSMPR(_BaseCryst):
                     vol_flow=vol_flow,
                     moments=dp['mu_n'][-1])
 
-            self.get_heat_duty(time, states)  # TODO: allow for semi-batch
+            # Duty diagnostics are published for MSMPR; Semibatch has none.
+            self.get_heat_duty(time, states)
 
         else:
             liquid_out = copy.deepcopy(self.Liquid_1)

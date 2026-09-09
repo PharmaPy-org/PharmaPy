@@ -1038,8 +1038,10 @@ class Filter:
         ------
         ValueError
             If numeric alpha is nonfinite or nonpositive, or numeric medium
-            resistance is nonfinite or negative. A zero medium resistance is
-            valid for simulation, but cannot seed logarithmic estimation.
+            resistance is nonfinite or negative. Zero medium resistance is
+            accepted for constructor compatibility, but the zero-filtrate
+            initial condition makes the current ODE singular at startup.
+            Estimation seeds therefore require positive medium resistance.
         """
         if alpha is not None and not callable(alpha) and (not np.isfinite(alpha) or alpha <= 0):
             raise ValueError("Cake resistance alpha [m/kg] must be finite and strictly positive.")
@@ -1198,8 +1200,9 @@ class Filter:
         ------
         ValueError
             If a configured resistance is callable or nonfinite, alpha is
-            nonpositive, or medium resistance is negative. A zero medium
-            resistance is allowed only when log_params=False.
+            nonpositive, or medium resistance is nonpositive. Positive medium
+            resistance is required for the zero-filtrate ODE startup in either
+            parameterization.
 
         Notes
         -----
@@ -1212,11 +1215,12 @@ class Filter:
                 "alpha [m/kg] and medium resistance [1/m] before estimation.")
         physical_params = np.array((self.alpha, self.r_medium), dtype=float)  # [m/kg, 1/m]
         if (not np.all(np.isfinite(physical_params)) or physical_params[0] <= 0
-                or physical_params[1] < 0 or (self.log_params and physical_params[1] == 0)):
+                or physical_params[1] <= 0):
             raise ValueError(
                 "Estimation seeds require finite alpha [m/kg] (strictly positive) "
-                "and medium resistance [1/m] (nonnegative); medium resistance "
-                "must be strictly positive when log_params=True; "
+                "and medium resistance [1/m] (strictly positive); positive medium "
+                "resistance is required for the zero-filtrate startup in either "
+                "parameterization; "
                 f"received {physical_params}.")
         return np.log(physical_params) if self.log_params else physical_params
 
@@ -2144,14 +2148,14 @@ class DisplacementWashing:
         therefore have half-width control volumes. The spatial field remains
         on Cake.mass_concentr [kg/m**3]. No conservation is assumed during
         spatial remapping; deliquoring carries its initial adjustment explicitly.
+        ``result.mass_conc`` maps liquid species names to independent arrays
+        [kg/m**3] with shape (num_times, num_nodes), including a singleton
+        time axis for static output.
         """
-        indexes = {key: self.states_di[key].get('index', None)
-                   for key in self.name_states}
-
-        conc_T = np.transpose(conc, (1, 0, 2))
-
-        dp= unpack_discretized(conc_T, self.dim_states, self.name_states,
-                               indexes=indexes)
+        dp = {'mass_conc': {
+            name: conc[:, :, column].T.copy()
+            for column, name in enumerate(self.name_species)
+        }}  # [kg/m**3], time rows and node columns in liquid species order
 
         self.zProf = z_coord
         self.timeProf = time_coord

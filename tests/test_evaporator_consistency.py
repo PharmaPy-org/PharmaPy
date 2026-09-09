@@ -417,6 +417,66 @@ def test_batch_continuation_matches_uninterrupted_run(thermo_path, nitrogen, mon
 
 @pytest.mark.integration
 @pytest.mark.assimulo
+def test_batch_continuation_preserves_volume_event_feed_stop(thermo_path):
+    """Preserve a real fill-event feed stop across continuation and retrieval.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic binary property database used by the real IDA model.
+    """
+    pytest.importorskip('assimulo')
+    fill_threshold = 0.95  # [-], Evaporator's established liquid-volume event
+    fill_margin = 0.001  # [-], small initial gap makes the event occur in the first segment
+    inlet_flow = 10 * FEED  # [mol/s], fills the gap before evaporation dominates
+    segment_duration = 20.0  # [s], includes filling and subsequent evaporation after feed stops
+    solver_rtol = 1e-8  # [-], resolves the excess feed caused by resetting the event state
+    options = {'rtol': solver_rtol, 'atol': 1e-10}  # [-], [native state units]
+    whole = make_unit(thermo_path, stop_at_maxvol=False)
+    split = make_unit(thermo_path, stop_at_maxvol=False)
+    for unit in (whole, split):
+        unit.Phases = LiquidPhase(
+            thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+            vol=(fill_threshold - fill_margin) * VOLUME, mole_frac=FRACTIONS)
+        unit.Inlet = LiquidStream(
+            thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+            mole_flow=inlet_flow, mole_frac=FRACTIONS)
+
+    whole_time, whole_states = whole.solve_unit(
+        2 * segment_duration, verbose=False, sundials_opts=options)  # [s], state units in states_di
+    split.solve_unit(segment_duration, verbose=False, sundials_opts=options)
+    split_time, split_states = split.solve_unit(
+        segment_duration, verbose=False, sundials_opts=options)  # [s], state units in states_di
+
+    # Separate adaptive integrations may accumulate ten local relative tolerances.
+    comparison_rtol = 10 * solver_rtol  # [-], same budget as the other continuation regression
+    np.testing.assert_allclose(split_states[-1], whole_states[-1],
+                               rtol=comparison_rtol, atol=solver_rtol)
+    assert split_time[-1] == pytest.approx(whole_time[-1], rel=RTOL)
+    assert not whole.allow_flow
+    assert not split.allow_flow
+    assert split.Liquid_1.vol < fill_threshold * VOLUME
+
+    # Duty diagnostics use the current vapor state and utility, independent
+    # of whether the event has disabled the inlet. Re-enable only for this
+    # comparison, then restore the terminal mode before testing reset.
+    stopped_diagnostics = split.unit_model(
+        split_time[-1], split_states[-1], None, None)  # (([mol/s], [m**3]), [J/s])
+    split.allow_flow = True
+    enabled_diagnostics = split.unit_model(
+        split_time[-1], split_states[-1], None, None)  # (([mol/s], [m**3]), [J/s])
+    np.testing.assert_allclose(stopped_diagnostics[0], enabled_diagnostics[0], rtol=RTOL)
+    assert stopped_diagnostics[1] == pytest.approx(enabled_diagnostics[1], rel=RTOL)
+    split.allow_flow = False
+
+    split.reset()
+    assert split.allow_flow
+    whole.Phases = deepcopy(whole.__original_phase__)
+    assert whole.allow_flow
+
+
+@pytest.mark.integration
+@pytest.mark.assimulo
 def test_nitrogen_initial_residual_is_square_and_ida_integrates(thermo_path):
     pytest.importorskip('assimulo')
     unit = make_unit(thermo_path, include_nitrogen=True)

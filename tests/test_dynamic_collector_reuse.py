@@ -482,3 +482,54 @@ def test_moment_alias_without_attached_phases():
     assert inputs['vol_flow'] == pytest.approx(FLOW, rel=RTOL, abs=0)
     assert not hasattr(collector.Inlet, 'mu_n')
     assert not hasattr(collector.Inlet, 'mass_conc')
+
+
+@pytest.mark.assimulo
+@pytest.mark.parametrize('dynamic_field', ['mu_n', 'mass_conc'])
+def test_dynamic_moment_feed_reaches_delegated_solve(data_path, dynamic_field):
+    """Integrate partial dynamic slurry inputs through the real collector.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    dynamic_field : str
+        Override SI moments [m**n/m**3] or liquid concentration [kg/m**3];
+        remaining feed fields retain the static stream values.
+    """
+    pytest.importorskip('assimulo')
+    collector = make_collector(data_path, 'moments', connected=False)
+    inlet = collector.Inlet
+    original_moments = inlet.moments.copy()  # [m**n/m**3]
+    original_concentration = inlet.Liquid_1.mass_conc.copy()  # [kg/m**3]
+    expected_moments = (original_moments / 2 if dynamic_field == 'mu_n'
+                        else original_moments)  # [m**n/m**3], distinct override
+    expected_concentration = (original_concentration[::-1].copy()
+                              if dynamic_field == 'mass_conc'
+                              else original_concentration)  # [kg/m**3]
+    supplied = (expected_moments if dynamic_field == 'mu_n'
+                else expected_concentration)  # [m**n/m**3] or [kg/m**3]
+    dynamic = DynamicInput()
+    dynamic.add_variable(dynamic_field, lambda time: supplied)
+    inlet.DynamicInlet = dynamic
+    collector.solve_unit(runtime=DURATION, verbose=False,
+                         sundials_opts=INTEGRATION_OPTIONS)
+    delegated = collector.CrystInst.get_inputs(0.0)
+    np.testing.assert_allclose(delegated['Inlet']['mu_n'], expected_moments,
+                               rtol=RTOL, atol=0)
+    np.testing.assert_allclose(delegated['Liquid_1']['mass_conc'],
+                               expected_concentration, rtol=RTOL, atol=0)
+    assert delegated['Inlet']['vol_flow'] == pytest.approx(FLOW, rel=RTOL)
+    assert delegated['Inlet']['temp'] == pytest.approx(TEMPERATURE, rel=RTOL)
+    seed_volume = np.sqrt(np.finfo(float).eps)  # [m**3], established seed policy
+    expected_inventory = expected_moments * (seed_volume + FLOW * DURATION)
+    # [m**n], exact constant-feed integral with zero kinetic rates
+    np.testing.assert_allclose(collector.Outlet.Solid_1.moments,
+                               expected_inventory, rtol=SOLVER_RTOL, atol=0)
+    np.testing.assert_allclose(collector.result.mass_conc[0],
+                               expected_concentration, rtol=RTOL, atol=0)
+    np.testing.assert_array_equal(inlet.moments, original_moments)
+    np.testing.assert_array_equal(inlet.Liquid_1.mass_conc, original_concentration)
+    assert inlet.DynamicInlet is dynamic
+    assert not hasattr(inlet, 'mu_n')
+    assert not hasattr(inlet, 'mass_conc')

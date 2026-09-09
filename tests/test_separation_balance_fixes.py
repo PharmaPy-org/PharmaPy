@@ -494,25 +494,50 @@ def test_scaled_erfc_product_matches_finite_naive_expression():
 
 
 @pytest.mark.parametrize('log_params', [False, True])
-def test_filter_zero_medium_seed_requires_physical_space(separation_phases, log_params):
-    unit = Filter(station_diam=0.1, alpha=1e11, resist_medium=0., log_params=log_params)
+def test_filter_estimation_rejects_zero_medium_seed(separation_phases, log_params):
+    """Reject the singular zero-filtrate startup through the public seed handoff.
+
+    Parameters
+    ----------
+    separation_phases : tuple
+        Real liquid and solid phases with positive inventories [kg].
+    log_params : bool
+        Select physical or logarithmic estimation parameters.
+    """
+    from PharmaPy.SimExec import SimulationExec
+
+    unit = Filter(station_diam=0.1, alpha=1e11, resist_medium=0.,
+                  log_params=log_params)  # diameter [m], alpha [m/kg], medium [1/m]
     unit.Phases = separation_phases
+    simulation = SimulationExec(unit.Liquid_1.path_data, {'F01': []})
+    simulation.F01 = unit
     with np.errstate(all='raise'):
-        if log_params:
-            with pytest.raises(ValueError, match='strictly positive'):
-                unit.param_seed
-        else:
-            np.testing.assert_array_equal(unit.param_seed, [1e11, 0.])  # [m/kg, 1/m]
+        with pytest.raises(ValueError, match='strictly positive.*zero-filtrate startup'):
+            simulation.SetParamEstimation(np.array([0., 0.01]), np.array([0., 0.001]))  # [s], [kg], positive filtration probe
+    assert unit.r_medium == 0  # [1/m], constructor compatibility remains
 
 
 @pytest.mark.parametrize('resistance_name, invalid', [('alpha', 0.), ('alpha', -1.), ('r_medium', -1.)])
 @pytest.mark.parametrize('log_params', [False, True])
 def test_filter_seed_rejects_unphysical_resistances(
         separation_phases, resistance_name, invalid, log_params):
+    """Reject configured resistances that cannot seed a physical filtration run.
+
+    Parameters
+    ----------
+    separation_phases : tuple
+        Real phases with positive liquid and solid inventories [kg].
+    resistance_name : str
+        Configured cake or medium resistance attribute.
+    invalid : float
+        Invalid resistance [m/kg] for alpha or [1/m] for medium resistance.
+    log_params : bool
+        Select physical or logarithmic estimation parameters.
+    """
     unit = Filter(station_diam=0.1, alpha=1e11, log_params=log_params)  # [m/kg]
     unit.Phases = separation_phases
     setattr(unit, resistance_name, invalid)  # [m/kg] or [1/m], invalid configured resistance
-    with pytest.raises(ValueError, match='alpha.*positive.*medium.*nonnegative'):
+    with pytest.raises(ValueError, match='alpha.*strictly positive.*medium.*strictly positive'):
         unit.param_seed
 
 

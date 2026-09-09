@@ -15,6 +15,7 @@ from scipy.interpolate import interp1d
 
 from PharmaPy import Reactors
 from PharmaPy.ProcessControl import DynamicInput
+from PharmaPy.Streams import LiquidStream
 from PharmaPy.Commons import (eval_state_events, handle_events, TerminateSimulation,
                              unpack_states, check_steady_state)
 from test_reactor_correctness import (
@@ -646,6 +647,78 @@ def test_solver_retains_inlet_history_after_flow_change(cls):
                                   TEMPERATURE + RAMP * np.array([0., 0., 0., 1., 1.]))
     np.testing.assert_array_equal(reactor.result.inlet_mole_conc,
                                   np.tile(CONCENTRATIONS, (5, 1)))
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+@pytest.mark.parametrize('cls', TANKS)
+def test_changed_feed_duty_integrates_each_segment(cls):
+    """#234: a constant hot-feed load keeps its full energy at continuation.
+
+    A solvent-only charge removes reaction heat. The second one-second run
+    receives solvent 10 K hotter than the isothermal tank. Integrating the
+    shipped solvent Cp polynomial independently gives its exact cooling load.
+    """
+    pytest.importorskip('assimulo')
+    reactor = configured(cls)
+    solvent_concentration = CONCENTRATIONS[-1]  # [mol/L], shared inert fixture
+    concentrations = np.array([0., 0., 0., solvent_concentration])  # [mol/L]
+    reactor.Liquid_1.updatePhase(mole_conc=concentrations)
+    feed_flow = reactor.Inlet.vol_flow  # [m**3/s]
+    reactor.Inlet = LiquidStream(
+        THERMO_PATH, temp=TEMPERATURE, mole_conc=concentrations,
+        vol_flow=feed_flow)
+    duration = 1.0  # [s], each constant-duty segment lasts one second
+    offsets = np.array([0., duration])  # [s], endpoints integrate constants exactly
+    options = {'report_continuously': True}
+    reactor.solve_unit(time_grid=offsets, sundials_opts=options, verbose=False)
+    initial_heat = reactor.result.q_ht.copy()  # [W]
+    temperature_rise = 10.0  # [K], synthetic hot-feed step distinguishes the segments
+    reactor.Inlet.temp = TEMPERATURE + temperature_rise  # [K]
+    reactor.solve_unit(time_grid=offsets, sundials_opts=options, verbose=False)
+
+    with open(THERMO_PATH) as stream:
+        properties = json.load(stream)
+    solvent_name = reactor.Liquid_1.name_species[-1]
+    solvent_enthalpy = np.polynomial.Polynomial(
+        properties[solvent_name]['cp_liq']).integ()  # polynomial integral [J/mol]
+    enthalpy_rise = (solvent_enthalpy(TEMPERATURE + temperature_rise)
+                     - solvent_enthalpy(TEMPERATURE))  # [J/mol]
+    liters_per_cubic_meter = 1000  # [L/m**3], exact volume conversion
+    expected_heat = (-feed_flow * liters_per_cubic_meter
+                     * solvent_concentration * enthalpy_rise)  # [W]
+    expected_energy = expected_heat * duration  # [J], zero first-segment load
+    np.testing.assert_allclose(reactor.profiles_runs[1]['q_ht'],
+                               expected_heat, rtol=ALGEBRA_RTOL)
+    np.testing.assert_array_equal(reactor.result.q_ht[:2], initial_heat)
+    assert reactor.heat_duty[0] == pytest.approx(expected_energy, rel=ALGEBRA_RTOL)
+
+
+@pytest.mark.unit
+def test_batch_changed_bath_duty_integrates_each_segment():
+    """Batch shares the segment accounting while retaining the earlier boundary.
+
+    Constant synthetic temperature profiles isolate quadrature from the solver;
+    each segment's heat rate follows the cylindrical tank's wetted-wall area.
+    """
+    reactor = configured(Reactors.BatchReactor, isothermal=False, ht_mode='bath')
+    duration = 1.0  # [s], each constant-rate profile segment
+    time = np.array([0., duration])  # [s]
+    states = profile(reactor, time)  # concentrations [mol/L], temperature [K]
+    states[:, -1] = TEMPERATURE  # [K], fixed synthetic liquid temperature
+    reactor.retrieve_results(time, states)
+    first_heat = reactor.result.q_ht.copy()  # [W]
+    temperature_rise = 10.0  # [K], synthetic change in prescribed bath temperature
+    reactor.Utility.temp_in += temperature_rise  # [K]
+    reactor.retrieve_results(time + duration, states)
+    area = (4 * REACTOR_VOLUME / reactor.diam
+            + np.pi * reactor.diam**2 / 4)  # [m**2], side wall plus bottom
+    first_difference = UTILITY_TEMPERATURE - TEMPERATURE  # [K]
+    second_difference = first_difference + temperature_rise  # [K]
+    expected_energy = (reactor.u_ht * area * duration
+                       * (first_difference + second_difference))  # [J]
+    np.testing.assert_array_equal(reactor.result.q_ht[:2], first_heat)
+    assert reactor.heat_duty[0] == pytest.approx(expected_energy, rel=ALGEBRA_RTOL)
 
 
 @pytest.mark.assimulo

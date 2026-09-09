@@ -492,9 +492,8 @@ class Evaporator:
         PharmaPy.Commons.eval_state_events documentation.
         The default is None.
     stop_at_maxvol : bool, optional
-        whether or not to automatically stop integration when liquid volume
-        reaches tank volume. This can be important for semi-batch
-        vaporization. is important for
+        Action when liquid reaches 95% of the drum volume. True terminates
+        integration; False stops the inlet and continues evaporation.
         The default is True.
     flash_kwargs : dict, optional
         Keyword arguments passed to the ``AdiabaticFlash`` constructor
@@ -536,7 +535,9 @@ class Evaporator:
         state_events : list of dict or dict, optional
             Event specifications passed to ``eval_state_events``.
         stop_at_maxvol : bool, optional
-            Stop when liquid volume reaches the drum volume.
+            Action when liquid reaches 95% of the drum volume. True
+            terminates integration; False stops the inlet and continues
+            evaporation. Defaults to True.
         flash_kwargs : dict, optional
             Keyword arguments passed to the ``AdiabaticFlash`` constructor
             used by ``init_unit``.
@@ -1334,6 +1335,9 @@ class Evaporator:
         runtime : float
             Duration of this simulation segment [s]. Continuations retain
             the previous terminal state and advance absolute time by runtime.
+            With ``stop_at_maxvol=False``, an inlet stopped by the liquid
+            volume event remains stopped on continuation. ``reset()`` or a
+            new public ``Phases`` assignment re-enables it.
         verbose : bool, optional
             if True, integrator statistics will be displayed after the model
             is solved. The default is True.
@@ -1407,8 +1411,6 @@ class Evaporator:
 
         # Solve
         time, states, sdot = solver.simulate(runtime)
-
-        self.allow_flow = True  # Restore value for further analysis
 
         self.retrieve_results(time, states)
 
