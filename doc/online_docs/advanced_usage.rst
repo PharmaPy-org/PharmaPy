@@ -85,6 +85,8 @@ Batch and MSMPR crystallizers store :code:`heat_duty = [0, Q]` [J], filling the 
 Crystallizer feeds and steady state
 ===================================
 
+:code:`Slurry.Phases` rejects phase-only initialization with zero combined liquid and solid volume before normalizing moments or distributions. Supply a positive phase inventory first; a positive liquid inventory with zero crystals remains supported. Empty-slurry temperature initialization is not defined.
+
 Moment-mode crystallizers accept static slurry moments and connected upstream moment profiles on the slurry-volume basis [m**n/m**3]. Connections from FVM crystallizers retain the reported moment history, rather than applying the final population at every time. Explicitly converted inlet moments retain precedence. The inlet must supply all moment orders required by the destination; extra higher orders are ignored, and missing orders raise an explanatory error.
 
 :code:`MSMPR.solve_steady_state` initializes the kinetic target species itself; a prior dynamic solve is not required. Its documented constant-property, solid-free-feed, and growth assumptions still apply. Crystallizer reset restores the original phase inventories and rebuilds the slurry population and volume. Parameter-estimation phase modifiers also refresh those slurry quantities before the next solve.

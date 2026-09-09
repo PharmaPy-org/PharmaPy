@@ -105,6 +105,65 @@ def test_phase_only_slurry_normalizes_total_solid_moments(thermo_path, has_distr
         assert slurry.distrib is None
 
 
+@pytest.mark.parametrize('population', ['zero_moments', 'stored_distribution',
+                                      'nonzero_count'])
+def test_phase_only_slurry_rejects_zero_volume_before_normalization(
+        thermo_path, population):
+    """Reject empty phase inventories without corrupting their populations.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Thermophysical database path.
+    population : str
+        Zero total moments [m**n], a stored zero distribution [#/um], or
+        one zero-size nucleus with nonzero count but zero material volume.
+    """
+    with pytest.warns(RuntimeWarning, match='all set to zero'):
+        liquid = LiquidPhase(thermo_path, mass_frac=LIQUID_COMPOSITION,
+                             temp=TEMPERATURE)
+    moments = np.zeros(4)  # [m**n], orders zero through three, no solid volume
+    if population == 'nonzero_count':
+        moments[0] = 1.0  # [#], one zero-size nucleus still has no material volume
+    distribution = np.zeros(3) if population == 'stored_distribution' else None
+    # [#/um], optional retained zero population without a size grid
+    solid = SolidPhase(thermo_path, mass_frac=SOLID_COMPOSITION,
+                       moments=moments.copy(), distrib=distribution,
+                       kv=KV, temp=TEMPERATURE)
+    slurry = Slurry()
+    with np.errstate(divide='raise', invalid='raise'):
+        with pytest.raises(ValueError, match='zero combined phase volume'):
+            slurry.Phases = [liquid, solid]
+    assert slurry.moments is None
+    assert slurry.distrib is None
+    np.testing.assert_array_equal(solid.moments, moments)
+    if distribution is not None:
+        np.testing.assert_array_equal(solid.distrib, distribution)
+
+
+def test_phase_only_slurry_accepts_liquid_without_crystals(thermo_path):
+    """Keep a positive liquid inventory usable with a zero crystal population.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Thermophysical database path.
+    """
+    liquid_volume = 1e-3  # [m**3], one litre of crystal-free liquid
+    liquid = LiquidPhase(thermo_path, mass_frac=LIQUID_COMPOSITION,
+                         vol=liquid_volume, temp=TEMPERATURE)
+    moments = np.zeros(4)  # [m**n], no crystals
+    solid = SolidPhase(thermo_path, mass_frac=SOLID_COMPOSITION,
+                       moments=moments, kv=KV, temp=TEMPERATURE)
+    slurry = Slurry()
+    with np.errstate(divide='raise', invalid='raise'):
+        slurry.Phases = [liquid, solid]
+    assert slurry.vol == pytest.approx(liquid_volume, rel=RTOL, abs=0)
+    assert slurry.temp == pytest.approx(TEMPERATURE, rel=RTOL, abs=0)
+    np.testing.assert_array_equal(slurry.moments, moments)
+    np.testing.assert_array_equal(slurry.getFractions(), [1.0, 0.0])
+
+
 def test_total_volume_uses_reconciled_phase_volumes(thermo_path):
     slurry = make_slurry(thermo_path)
     # A phase inventory update changes liquid volume independently of stored

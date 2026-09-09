@@ -276,14 +276,15 @@ def test_two_complete_solves(data_path, mode):
     that policy would also touch PR #207's liquid initialization hunks.
 
     For the nearly solid-free slurry fixture, the temperature assertion is a
-    solver-error bound, not an energy-balance invariant. The inherited
-    SemibatchCryst.energy_balances accumulation-term basis defect uses inlet
-    liquid density with slurry-basis enthalpy, producing a real converged
-    temperature residual of about 2e-6 K. This is blocked by the lead's separate
-    crystallizer follow-up recorded in B009c iteration 028. After that fix,
-    replace this provisional bound with an energy-balance invariant tested at
-    a substantial solid volume fraction; do not retain the dilute fixture as
-    evidence of energy conservation.
+    provisional deviation bound, not an energy-balance invariant. Issue #265
+    tracks the inherited SemibatchCryst.energy_balances accumulation defect:
+    inlet liquid density is combined with slurry-basis enthalpy, producing a
+    converged temperature residual of about 2e-6 K in this dilute fixture.
+    The current relative bound allows 3.1e-5 K at 310 K; it includes this
+    model error and is not explained solely by solver tolerance. After #265,
+    replace it with an energy-balance invariant tested at a substantial solid
+    volume fraction; do not retain the dilute fixture as evidence of energy
+    conservation. The issue records a 10 vol-% case with about 0.26 K drift.
 
     Parameters
     ----------

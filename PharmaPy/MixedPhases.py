@@ -109,7 +109,8 @@ class Slurry:
         Raises
         ------
         ValueError
-            If volume-specific moments are supplied for a zero-volume slurry.
+            If volume-specific moments are supplied for a zero-volume slurry,
+            or phase-only input has zero combined liquid and solid volume.
 
         Notes
         -----
@@ -121,6 +122,9 @@ class Slurry:
         combined liquid and solid volume to obtain slurry moments [m**n/m**3].
         A supplied solid number distribution [#/um] is also divided by that
         volume to obtain [#/m**3/um]; an absent distribution remains None.
+        Phase-only input requires positive combined volume: an empty mixture
+        has neither defined volume-specific moments nor a thermal inventory
+        from which to determine its mixture temperature.
         """
         if isinstance(phases_list, (list, tuple)):
             phases_list = list(phases_list)
@@ -134,7 +138,6 @@ class Slurry:
 
         classify_phases(self)
 
-        # TODO: this is not general enough (Dan - Energetics)
         if self.moments is not None:
             if self.vol == 0:
                 raise ValueError('If the moments are provided, Slurry volume needs to be larger than 0.')
@@ -156,7 +159,13 @@ class Slurry:
             mass_liq = self.Liquid_1.mass
             mass_sol = self.Solid_1.mass
 
-            self.vol = vol_sol + vol_liq
+            total_volume = vol_sol + vol_liq  # [m**3], combined phase inventory
+            if np.any(total_volume == 0):
+                raise ValueError(
+                    "Cannot initialize Slurry from zero combined phase volume; "
+                    "provide a positive liquid or solid inventory before "
+                    "assigning Phases.")
+            self.vol = total_volume  # [m**3]
             self.mass_slurry = mass_liq + mass_sol
 
             self.x_distrib = self.Solid_1.x_distrib
