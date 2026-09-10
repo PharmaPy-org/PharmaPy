@@ -68,46 +68,39 @@ class IntraPhaseProcess:
 class MaterialContributionBuffer:
 
     __slots__ = (
-        "n_material",
+        "n_values",
         "contributions",
         "rates",
         "aux",
     )
 
-    # Contribution indices
     INLET = 0
     OUTLET = 1
     INTRAPHASE = 2
     CROSSPHASE = 3
 
-    def __init__(self, n_material):
+    def __init__(self, n_values):
 
-        self.n_material = n_material
+        self.n_values = n_values
 
-        # [contribution_type, flattened material states]
-        self.contributions = np.zeros((4, n_material))
+        self.contributions = np.zeros(
+            (4, n_values),
+            dtype=float,
+        )
 
-        # Sum of all contribution types
-        self.rates = np.zeros(n_material)
+        self.rates = np.zeros(
+            n_values,
+            dtype=float,
+        )
 
-        # These are intentionally Python objects because they contain
-        # arbitrary diagnostic/connection information.
-        self.aux = [
-            [],  # inlet
-            [],  # outlet
-            [],  # intraphase
-            [],  # crossphase
-        ]
+        self.aux = [[], [], [], []]
 
     def reset(self):
-
         self.contributions.fill(0.0)
         self.rates.fill(0.0)
 
-        self.aux[0].clear()
-        self.aux[1].clear()
-        self.aux[2].clear()
-        self.aux[3].clear()
+        for aux in self.aux:
+            aux.clear()
 
 @dataclass
 class StateVariable:
@@ -210,6 +203,7 @@ class ResolvedPhaseTransfer:
     species_flow: np.ndarray
 
     direction: str
+    material_slice: slice | None = None
     def scale(self, factor, basis):
 
         self.species_flow *= factor
@@ -233,148 +227,190 @@ class TransferResult:
 class StateCollection:
     states: dict[StateKey, StateVariable] = field(default_factory=dict)
 
-   
-    def add(self, state: StateVariable,overwrite=False,error_on_conflict=False):
-        key = StateKey(state.name,state.phaseref)
+    # Compiled numerical layout
+    _keys: tuple = field(default_factory=tuple, init=False, repr=False)
+    _material_keys: tuple = field(default_factory=tuple, init=False, repr=False)
+    _state_values: tuple = field(default_factory=tuple, init=False, repr=False)
+    _slices: dict = field(default_factory=dict, init=False, repr=False)
+    _material_slices: dict = field(default_factory=dict, init=False, repr=False)
+    _dim: int = field(default=0, init=False, repr=False)
+    _compiled: bool = field(default=False, init=False, repr=False)
+    _material_dim: int = field(default=0, init=False, repr=False)
+
+    def add(self, state, overwrite=False, error_on_conflict=False):
+        key = StateKey(state.name, state.phaseref)
+
         existing = self.states.get(key)
 
-        if existing is None:
-            self.states[key] = state
-            return
+        if existing is not None:
+            if error_on_conflict:
+                raise ValueError(
+                    f"State {key} already exists."
+                )
+            if not overwrite:
+                return
 
-        same = state == existing
-
-        if same:
-            return
-
-        if overwrite:
-            self.states[key] = state
-            return
-
-        if error_on_conflict:
-            raise ValueError(
-                f"State {state.name} already exists "
-                f"for phase {state.phaseref} and overwrite was False"
-            )
+        self.states[key] = state
+        self._compiled = False
 
     def names(self):
-        return [k.name for k in self.states]
+        return [key.name for key in self.states]
 
     def dims(self):
         return [state.dim for state in self.states.values()]
 
     def __contains__(self, name):
-
         if isinstance(name, str):
-            return any(k.name == name for k in self.states)
-
+            return any(key.name == name for key in self.states)
         return name in self.states
-    
+
+    def compile(self):
+        """
+        Compile the immutable numerical layout used during integration.
+        """
+
+        keys = []
+        state_values = []
+        slices = {}
+        material_slices = {}
+
+        start = 0
+        material_start = 0
+        for key, state in self.states.items():
+
+            end = start + state.dim
+            state_slice = slice(start, end)
+
+            keys.append(key)
+            state_values.append(state)
+            slices[key] = state_slice
+
+            if state.state_type == "diff" and key.phaseref is not None:
+                material_slices[key] = slice(
+                    material_start,
+                    material_start + state.dim,
+                )
+                material_start += state.dim
+
+            start = end
+
+        self._keys = tuple(keys)
+        self._material_keys = tuple(key for key in keys if key in material_slices)
+        self._state_values = tuple(state_values)
+        self._slices = slices
+        self._material_slices = material_slices
+        self._dim = start
+        self._material_dim = material_start
+        self._compiled = True
+
+    @property
+    def material_dim(self):
+        if not self._compiled:
+            self.compile()
+        return self._material_dim
+    @property
+    def keys(self):
+        if not self._compiled:
+            self.compile()
+        return self._keys
+
+    @property
+    def state_values(self):
+        if not self._compiled:
+            self.compile()
+        return self._state_values
+
+    @property
+    def slices(self):
+        if not self._compiled:
+            self.compile()
+        return self._slices
+
+    @property
+    def material_slices(self):
+        if not self._compiled:
+            self.compile()
+        return self._material_slices
+
+    @property
+    def dim(self):
+        if not self._compiled:
+            self.compile()
+        return self._dim
+    @property
+    def material_keys(self):
+        if not self._compiled:
+            self.compile()
+        return self._material_keys
     def unpack(self, y):
+        if not self._compiled:
+            self.compile()
 
         states = {}
 
-        start = 0
-
-        for key,state in self.states.items():
-
-            end = start + state.dim
-
-            value = y[start:end]
+        for key, state_slice, state in zip(
+            self._keys,
+            self._slices.values(),
+            self._state_values,
+        ):
+            value = y[state_slice]
 
             if state.dim == 1:
                 value = value[0]
 
             states[key] = value
 
-            start = end
-
         return states
+
     def pack(self, state_dict):
+        if not self._compiled:
+            self.compile()
 
-        values = []
+        y = np.empty(self._dim)
 
-        for key,state in self.states.items():
-
-            value = np.asarray(
+        for key, state_slice in self._slices.items():
+            y[state_slice] = np.asarray(
                 state_dict[key]
-            ).flatten()
+            ).reshape(-1)
 
-            values.extend(value)
+        return y
 
-        return np.asarray(values)
     def unpack_history(self, y_history):
-        """
-        Parameters
-        ----------
-        y_history : ndarray
-            Shape (num_times, num_solver_states)
-
-        Returns
-        -------
-        dict
-            state_name -> full time history
-        """
+        if not self._compiled:
+            self.compile()
 
         history = {}
-        start = 0
 
-        for key,state in self.states.items():
+        for key, state_slice, state in zip(
+            self._keys,
+            self._slices.values(),
+            self._state_values,
+        ):
+            values = y_history[:, state_slice]
 
-            end = start + state.dim
-            values = y_history[:, start:end]
             if state.dim == 1:
                 values = values[:, 0]
 
             history[key] = values
-            start = end
 
         return history
-    def flatten(self, state_dict):
 
+    def flatten(self, state_dict):
         flat = {}
 
         for key, value in state_dict.items():
-            if isinstance(key,str):
-                flat[key]=value
-                continue
-            
-            flat[self.format_key(key)] = value
+            if isinstance(key, str):
+                flat[key] = value
+            else:
+                flat[self.format_key(key)] = value
 
         return flat
+
     @staticmethod
     def format_key(key):
-
         if key.phaseref is None:
             return key.name
-
-        return (
-            f"{key.name}_"
-            f"{key.phaseref.phase_type}"
-            f"{key.phaseref.index}"
-        )
-    def get_static_statekey_slices(self):
-
-        state_slices = {}
-
-        start = 0
-
-        for key, state in self.states.items():
-
-            if state.state_type != "diff":
-                continue
-
-            # Material states only
-            if key.phaseref is None:
-                continue
-
-            end = start + state.dim
-
-            state_slices[key] = slice(start, end)
-
-            start = end
-
-        return state_slices, start
+        return f"{key.name}_{key.phaseref.phase_type}{key.phaseref.index}"
 @dataclass
 class PhaseStateVariable:
     phaseref: PhaseRef
@@ -384,19 +420,50 @@ class PhaseStateVariable:
 class PhaseStateCollection:
     phasestates: dict[PhaseRef, StateCollection] = field(default_factory=dict)
 
-    def add(self, phase: PhaseRef, state: StateVariable):
+    _phase_by_ref: dict = field(default_factory=dict, init=False, repr=False)
+    _ref_by_phase_id: dict = field(default_factory=dict, init=False, repr=False)
+    _compiled: bool = field(default=False, init=False, repr=False)
+
+    def add(self, phase, state):
         if phase not in self.phasestates:
             self.phasestates[phase] = StateCollection()
 
         self.phasestates[phase].add(state)
+        self._compiled = False
 
     def __getitem__(self, phase):
         return self.phasestates[phase]
+
     def __iter__(self):
         for phaseref, collection in self.phasestates.items():
             for state in collection.states.values():
                 yield PhaseStateVariable(phaseref, state)
 
+    def compile(self, phases):
+        """
+        Compile O(1) phase/reference lookup and each phase's state layout.
+        """
+
+        self._phase_by_ref = {}
+        self._ref_by_phase_id = {}
+
+        for phaseref, collection in self.phasestates.items():
+
+            phase = phases.get_phase_from_ref(phaseref)
+
+            self._phase_by_ref[phaseref] = phase
+            self._ref_by_phase_id[id(phase)] = phaseref
+
+            collection.compile()
+
+        self._compiled = True
+
+    def get_phase(self, phaseref):
+        return self._phase_by_ref[phaseref]
+
+    def get_ref(self, phase):
+        return self._ref_by_phase_id[id(phase)]
+    
 
 @dataclass
 class StateEvent:

@@ -6,6 +6,7 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   TransferResult
 )
 from PharmaPy.Phases import BasePhase
+from time import perf_counter
 
 eps = np.finfo(float).eps
 
@@ -25,24 +26,21 @@ class Mechanism:
     solver_states = ()
     output_states = ()
     owning_phase = None
+    _solver_state_keys=()
+    
 
     def __init__(self):
         self.exposed_attributes = set()
 
     def _update_exposed_attributes(self):
-        self.exposed_attributes.update(
-            state.name for state in self.solver_states
-        )
+        self.exposed_attributes.update(state.name for state in self.solver_states)
 
     def expose(self, *names):
         self.exposed_attributes.update(names)
 
     @property
     def solver_state_keys(self):
-        return tuple(
-            StateKey(state.name, state.phaseref)
-            for state in self.solver_states
-        )
+        return self._solver_state_keys
     def owns_state(self, state_key):
         """
         Return True if this mechanism owns this transported state.
@@ -53,7 +51,7 @@ class Mechanism:
         pass
 
     def update_state(self, completed_state,**kwargs):
-
+        t0 = perf_counter()
         for variable in self.solver_states:
 
             key = StateKey(variable.name, variable.phaseref)
@@ -64,7 +62,7 @@ class Mechanism:
                     variable.name,
                     completed_state[key]
                 )
-
+        self._timers['update_state'] = self._timers.get('update_state',0)+perf_counter()-t0
     def add_solver_state_variables(
         self,
         collection,
@@ -77,6 +75,13 @@ class Mechanism:
             copiedState = copy.deepcopy(state)
             copiedState.phaseref = phase_ref
             collection.add(copiedState, overwrite)
+            self._solver_state_keys = tuple(StateKey(state.name, phase_ref) for state in self.solver_states)
+
+    def compile_solver_state_keys(self):
+        self._solver_state_keys = tuple(
+            StateKey(state.name, state.phaseref)
+            for state in self.solver_states
+        )
 
     def add_output_state_variables(
             self,
@@ -404,6 +409,8 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             fraction[self.target_ind] = np.full(len(self.target_components),1/len(self.target_components))
         self.fraction = fraction
 
+        self._timers = {}
+
     @property
     def mechanism_kinetics(self):
         if self._mechanism_kinetics is not None:
@@ -547,8 +554,9 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         The solid phase is the sink.
         """
-
+        t0 = perf_counter()
         result= self.solve_population_balance(source_phase,sink_phase,completed_state,time,connection)
+        self._timers['pop_balance_solve_total'] = self._timers.get('pop_balance_solve_total',0)+perf_counter()-t0
         if not hasattr(self,"liquid_phase_ref"):
             self.liquid_phase_ref = connection.source_phaseref
 
@@ -741,9 +749,11 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         moms = self.compute_moments(csd,self.x_grid)
 
         mu2 = moms[2] #total surface area
-
+        t0 = perf_counter()
         conc, supersat, solubility = self.compute_supersaturation(liquid)
+        self._timers['pop_balance_compute_supersat'] = self._timers.get('pop_balance_compute_supersat',0)+perf_counter()-t0
 
+        t0 = perf_counter()
         nucl, growth, dissol = (
             self.mechanism_kinetics.get_kinetics(
                 conc,
@@ -752,15 +762,17 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
                 moms,
             )
         )
+        self._timers['pop_balance_compute_kinetics'] = self._timers.get('pop_balance_compute_kinetics',0)+perf_counter()-t0
         nucl *= self.scale*liquid.vol
         impurity_factor = self.mechanism_kinetics.alpha_fn(conc) #TODO check if con is the right units
         growth *= impurity_factor
-
+        t0 = perf_counter()
         gparams = self.mechanism_kinetics.params["growth"]
 
         boundary = nucl / np.maximum(growth, eps)
         f_aug = np.concatenate(([boundary, boundary],csd,[csd[-1]]))
-
+        self._timers['pop_balance_compute_boundary'] = self._timers.get('pop_balance_compute_boundary',0)+perf_counter()-t0
+        t0 = perf_counter()
         # Flux source terms
         f_diff = np.diff(f_aug)
         if growth > 0:
@@ -771,7 +783,9 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         #Van-Leer limiter
         limiter = np.zeros_like(f_diff)
         limiter[:-1] = ((np.abs(theta) + theta)/ (1 + np.abs(theta)))
+        self._timers['pop_balance_compute_limiter'] = self._timers.get('pop_balance_compute_limiter',0)+perf_counter()-t0
 
+        # t0 = perf_counter()
         # Constant growth
         if len(gparams) == 3:
 
@@ -784,23 +798,37 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
 
             alpha = gparams[3]
             beta = gparams[4]
-
+            t0 = perf_counter()
             growth_dep = (growth* (1 + beta * self.x_grid) ** alpha)
+            self._timers['pop_balance_compute_growth_dep'] = self._timers.get('pop_balance_compute_growth_dep',0)+perf_counter()-t0
+            t0 = perf_counter()
             dissol_dep = dissol* np.ones_like(self.x_grid)
+            self._timers['pop_balance_compute_dissol_dep'] = self._timers.get('pop_balance_compute_dissol_dep',0)+perf_counter()-t0
+            t0 = perf_counter()
             growth_pad = np.append(growth_dep,growth_dep[-1],)
             dissol_pad = np.append(dissol_dep,dissol_dep[-1])
+            self._timers['pop_balance_compute_growth_dissol_pad'] = self._timers.get('pop_balance_compute_growth_dissol_pad',0)+perf_counter()-t0
+            t0 = perf_counter()
             growth_term = growth_pad* (f_aug[1:-1]+ 0.5 * f_diff[1:] * limiter[:-1])
             dissol_term = dissol_pad* (f_aug[2:]- 0.5 * f_diff[1:] * limiter[1:])
+            self._timers['pop_balance_compute_growth_dissol_term'] = self._timers.get('pop_balance_compute_growth_dissol_term',0)+perf_counter()-t0
+            t0 = perf_counter()
             r = self.x_grid
             growth_int = np.trapezoid(growth_dep * csd * r**2,r)
             dissol_int = np.trapezoid(dissol_dep * csd * r**2,r)
+            self._timers['pop_balance_compute_growth_dissol_int'] = self._timers.get('pop_balance_compute_growth_dissol_int',0)+perf_counter()-t0
+            t0 = perf_counter()
             mass_transfer = (self.density* self.kv* 3* 
                              (growth_int+ dissol_int+ nucl * self.rad**3)* 1e-18)
-
+            self._timers['pop_balance_compute_mass_transfer'] = self._timers.get('pop_balance_compute_mass_transfer',0)+perf_counter()-t0
+        # self._timers['pop_balance_handle_growth'] = self._timers.get('pop_balance_handle_growth',0)+perf_counter()-t0
+        t0 = perf_counter()
         flux = growth_term + dissol_term
-
+        self._timers['pop_balance_flux_sum'] = self._timers.get('pop_balance_flux_sum',0)+perf_counter()-t0
+        t0 = perf_counter()
         dcsd_dt = -np.diff(flux) / self.dx
-
+        self._timers['pop_balance_compute_dcsd_dt'] = self._timers.get('pop_balance_compute_dcsd_dt',0)+perf_counter()-t0
+        t0 = perf_counter()
         aux = {
             "supersaturation": supersat,
             "solubility": solubility,
@@ -810,11 +838,15 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             "nucleation": nucl,
             "flux": flux,
         }
+        self._timers['pop_balance_compute_flux'] = self._timers.get('pop_balance_compute_flux',0)+perf_counter()-t0
+        t0 = perf_counter()
         species_rates_out = self.compute_species_transfer(mass_transfer,liquid)
-
+        self._timers['pop_balance_compute_species_transfer'] = self._timers.get('pop_balance_compute_species_transfer',0)+perf_counter()-t0
+        t0 = perf_counter()
         state_rates = {StateKey(self.solver_states[0].name,self.owning_phase): dcsd_dt} #if phaseref is a phase instead of a PhaseRef, the vessel will determine the phaseref
         state_rates.update({StateKey('mass_j',connection.source_phaseref):species_rates_out})
         result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer)
+        self._timers['pop_balance_format'] = self._timers.get('pop_balance_format',0)+perf_counter()-t0
         return result
     def get_solid_mass(self):
 

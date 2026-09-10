@@ -101,7 +101,7 @@ vessel.CrystKinetics = Ckinetics
 # -----------------------------
 # Solve
 # -----------------------------
-
+print('solving...')
 vessel.solve_unit(runtime=150)
 
 
@@ -111,6 +111,8 @@ vessel.solve_unit(runtime=150)
 
 print(vessel.result.Total_m_in_vessel[-5:])
 print('model_calls', vessel.model_call_count)
+# print(vessel._timers)
+print(vessel.Phases[1].mechanisms[0]._timers)
 print("done")
 
 # print(
