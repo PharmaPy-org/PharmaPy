@@ -36,11 +36,10 @@ temp_control = SimpleTemperatureController(temp_func=temp_profile)
 
 integrator = AssimuloBackend(options={'maxh':0.1})
 
-vessel = BatchCrystallizer(
+vessel = ContinuousReactor(
     integrator=integrator,
     h_conv=10000,
     diam=.01,
-    controller=temp_control
 
 )
 
@@ -52,18 +51,11 @@ m = 1
 liquid1 = LiquidPhase(
     dpath,
     mass=m,
-    mass_frac=[0,0,0.01,0,0.99],
+    mass_frac=[0,.5,0,0,.5],
 
 )
 print("starting vol:", liquid1.vol)
-solid1 = SolidPhase(
-    dpath,
-    mass=0,
-    mass_frac=[0,0,1,0,0],
-)
-fvm = OneDFVMMechanism(solid1,target_components='C',solvent_name='solvent',x_grid=np.arange(1,200),distrib_init=np.zeros(199))
-solid1.mechanisms = fvm
-vessel.Phases = [liquid1,solid1]
+vessel.Phases = liquid1#[liquid1,solid1]
 
 
 # -----------------------------
@@ -79,15 +71,12 @@ rxns = ['A + B --> C', 'C + A --> D']
 kvals_rxns = np.array([1,1e-1])#, 1e2]) #psuedo instantaneous
 ea_vals = np.array([1e3,1e4])#,1e4]) #psuedo no activation energy
 Rkinetics = RxnKinetics(path=dpath,rxn_list=rxns, k_params=kvals_rxns,ea_params=ea_vals)
-fitted_kinetics = np.array([3e2, 3, 5e3, 1.32]) # HP volfunc big bounds
-cryst_kinetics =build_crysts(fitted_kinetics)
-Ckinetics = CrystKinetics(np.array((2.269e2,-1.88,3.89e-3)),**cryst_kinetics)
 Utility = CoolingWater(mass_flow=100, temp_in=273.55)
-# vessel.Utility = Utility
-# vessel.RxnKinetics = Rkinetics
-vessel.CrystKinetics = Ckinetics
-# vessel.controller.target_volume=1e-2
-# vessel.Inlet = inlet
+vessel.Utility = Utility
+vessel.RxnKinetics = Rkinetics
+# vessel.CrystKinetics = Ckinetics
+vessel.controller.target_volume=1e-3
+vessel.Inlet = inlet
 
 
 # -----------------------------
@@ -135,18 +124,10 @@ import matplotlib.pyplot as plt
 
 if True:
     for mj,spec in zip(vessel.result.mass_j_liquid0.T,['A','B','C','D','Solvent']):
-        if spec=='Solvent':continue
+        # if spec=='Solvent':continue
         plt.plot(vessel.result.time,mj,label=spec)
     plt.plot(vessel.result.time,vessel.result.Total_m_in_vessel, label='Total m')
 
     plt.legend()
     plt.show()
-    plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[-1],label='end')
-    plt.loglog(solid1.x_grid,vessel.result.distrib_solid0[0],label='start')
-    plt.title('Solid distribution')
-    plt.show()
-    # plt.plot(vessel.result.mu_n[:,1])
-    plt.plot(vessel.result.supersat)
-    plt.title('Supersaturation')
-    plt.show()
-    print(vessel.result.time,vessel.result.Total_m_in_vessel)
+    

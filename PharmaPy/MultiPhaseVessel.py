@@ -1453,7 +1453,7 @@ class MultiPhaseVessel():
                 buffer.contributions[
                     buffer.OUTLET,
                     material_slice,
-                ] += transfer.species_flow
+                ] -= transfer.species_flow
 
                 for mechanism in transfer.vessel_phase.mechanisms:
 
@@ -1472,7 +1472,7 @@ class MultiPhaseVessel():
                             buffer.contributions[
                                 buffer.OUTLET,
                                 state_slice,
-                            ] += value
+                            ] -= value
 
                 buffer.aux[
                     buffer.OUTLET
