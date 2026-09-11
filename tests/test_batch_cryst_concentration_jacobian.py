@@ -5,41 +5,13 @@ mass concentrations in [kg/m**3], liquid volume in [m**3], temperature in [K],
 growth in [um/s], and densities in [kg/m**3].
 """
 
-import sys
-from types import ModuleType
-
 import numpy as np
 import pytest
 
+from PharmaPy.Crystallizers import BatchCryst
+
 
 pytestmark = pytest.mark.unit
-
-
-def _stub_assimulo_modules(monkeypatch):
-    assimulo = ModuleType("assimulo")
-
-    solvers = ModuleType("assimulo.solvers")
-    solvers.CVode = object
-
-    problem = ModuleType("assimulo.problem")
-    problem.Explicit_Problem = object
-
-    monkeypatch.setitem(sys.modules, "assimulo", assimulo)
-    monkeypatch.setitem(sys.modules, "assimulo.solvers", solvers)
-    monkeypatch.setitem(sys.modules, "assimulo.problem", problem)
-
-
-def _import_batch_cryst(monkeypatch):
-    try:
-        from PharmaPy.Crystallizers import BatchCryst
-    except ModuleNotFoundError as exc:
-        if exc.name != "assimulo":
-            raise
-        _stub_assimulo_modules(monkeypatch)
-
-        from PharmaPy.Crystallizers import BatchCryst
-
-    return BatchCryst
 
 
 class _Liquid:
@@ -71,9 +43,7 @@ class _Kinetics:
         return 0.25
 
 
-def test_batch_cryst_concentration_jacobian_diagonal_matches_material_balance(monkeypatch):
-    BatchCryst = _import_batch_cryst(monkeypatch)
-
+def test_batch_cryst_concentration_jacobian_matches_material_balance():
     crystallizer = BatchCryst.__new__(BatchCryst)
     crystallizer.num_distr = 4
     crystallizer.num_species = 2

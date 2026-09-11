@@ -36,6 +36,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
+      - name: Verify Assimulo is absent from the core lane
+        run: |
+          python -c "import importlib.util; assert importlib.util.find_spec('assimulo') is None, 'Assimulo belongs only in the explicit integration lane'"
+
       - name: Collect tests
         run: python -m pytest --collect-only
 

@@ -5,10 +5,16 @@ therefore are not suitable for ``isinstance`` checks or subclassing.
 Module-level lazy attributes were rejected because ``from ... import`` would
 resolve them eagerly at the existing model call sites; factories preserve those
 imports without loading Assimulo.
+
+Notes
+-----
+Previously generated MetaModeler templates may import ``CVode``, ``IDA``,
+``Explicit_Problem``, and ``Implicit_Problem`` from this module. Keep these
+private compatibility exports while new templates use :mod:`PharmaPy.solvers`.
 """
 
 from importlib import import_module
-from typing import Any
+from typing import Any, NoReturn
 
 # Source: the supported backend pin documented in DEPENDENCIES.md and
 # environment.yml. Keep all user-facing solver diagnostics synchronized here.
@@ -24,6 +30,31 @@ _BROKEN_INSTALL_MESSAGE = (
     f"{_SUPPORTED_ASSIMULO_VERSION} and its compiled SUNDIALS libraries are "
     "compatible with this Python environment."
 )
+
+
+def _raise_assimulo_import_error(
+    module_name: str, exc: ImportError
+) -> NoReturn:
+    """Raise the user-facing error for an Assimulo import failure.
+
+    Parameters
+    ----------
+    module_name : str
+        Fully qualified Assimulo module that failed to import.
+    exc : ImportError
+        Import failure raised by Python's module loader.
+
+    Raises
+    ------
+    ImportError
+        Actionable missing-install or broken-install error, chained to ``exc``.
+    """
+    if isinstance(exc, ModuleNotFoundError) and exc.name == "assimulo":
+        raise ImportError(_INSTALL_MESSAGE) from exc
+
+    raise ImportError(
+        f"{_BROKEN_INSTALL_MESSAGE} Failed while importing {module_name}."
+    ) from exc
 
 
 def _load_assimulo_symbol(module_name: str, symbol_name: str) -> Any:
@@ -50,11 +81,7 @@ def _load_assimulo_symbol(module_name: str, symbol_name: str) -> Any:
     try:
         module = import_module(module_name)
     except ImportError as exc:
-        if isinstance(exc, ModuleNotFoundError) and exc.name == "assimulo":
-            raise ImportError(_INSTALL_MESSAGE) from exc
-        raise ImportError(
-            f"{_BROKEN_INSTALL_MESSAGE} Failed while importing {module_name}."
-        ) from exc
+        _raise_assimulo_import_error(module_name, exc)
 
     try:
         return getattr(module, symbol_name)
