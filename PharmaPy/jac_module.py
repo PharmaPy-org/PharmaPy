@@ -63,7 +63,39 @@ def numerical_jac(func, x, args=(), dx=None, abs_tol=None, rel_tol=None,
     return jac
 
 
-def numerical_jac_central(func, x, rel_tol, abs_tol, dx=None, args=()):
+def numerical_jac_central(func, x, rel_tol=None, abs_tol=None, dx=None,
+                          args=(), num_nonnegative=0):
+    """Approximate a vector-valued Jacobian with second-order differences.
+
+    Parameters
+    ----------
+    func : callable
+        Function mapping ``x`` to a one-dimensional output vector.
+    x : array-like
+        Differentiated coordinates [coordinate-dependent units].
+    rel_tol : float, optional
+        Relative tolerance passed to a callable ``dx`` rule [-].
+    abs_tol : float or array-like, optional
+        Absolute tolerance passed to a callable ``dx`` rule [coordinate
+        units].
+    dx : float, array-like, or callable, optional
+        Difference step [coordinate units], or a step-selection callable.
+    args : tuple, optional
+        Additional function arguments [argument-dependent units].
+    num_nonnegative : int, optional
+        Number of leading coordinates constrained to be nonnegative [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        Jacobian [output units / coordinate units].
+
+    Notes
+    -----
+    Interior coordinates use centered differences. A leading nonnegative
+    coordinate uses the second-order forward stencil when a centered step
+    would cross zero.
+    """
 
     if dx is None:
         dx = np.ones_like(x) * eps
@@ -75,10 +107,23 @@ def numerical_jac_central(func, x, rel_tol, abs_tol, dx=None, args=()):
     num_x = len(x)
     jac = []
     delx = np.zeros_like(x)
+    f_zero = None
 
     for j in range(num_x):
         delx[j] = dx[j]
-        jac.append((func(x + delx, *args) - func(x - delx, *args)) /2. / dx[j])
+        if j < num_nonnegative and x[j] < dx[j]:
+            if f_zero is None:
+                f_zero = np.atleast_1d(func(x, *args))
+            jac.append((
+                -3 * f_zero
+                + 4 * np.atleast_1d(func(x + delx, *args))
+                - np.atleast_1d(func(x + 2 * delx, *args))
+            ) / 2. / dx[j])
+        else:
+            jac.append((
+                np.atleast_1d(func(x + delx, *args))
+                - np.atleast_1d(func(x - delx, *args))
+            ) / 2. / dx[j])
         delx[j] = 0
 
     return np.column_stack(jac)

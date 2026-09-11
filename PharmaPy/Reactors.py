@@ -16,6 +16,7 @@ from PharmaPy.Connections import get_inputs_new
 from PharmaPy.Plotting import plot_function, plot_distrib
 from PharmaPy.Results import DynamicResult
 from PharmaPy.CheckModule import check_modeling_objects
+from PharmaPy.jac_module import numerical_jac_central
 
 import numpy as np
 # from numpy.core.umath_tests import inner1d
@@ -26,11 +27,13 @@ from matplotlib.animation import FFMpegWriter
 
 import copy
 from itertools import cycle
+from typing import Optional, Sequence, Tuple
 
 linestyles = cycle(['-', '--', '-.', ':'])
 
 gas_ct = 8.314  # J/mol/K
 eps = np.finfo(float).eps
+_CENTRAL_DIFFERENCE_REL_STEP = np.cbrt(eps)  # [-], optimal for O(h**2) error
 
 
 def check_stoichiometry(stoich, mws):
@@ -447,44 +450,193 @@ class _BaseReactor:
 
         return balances
 
-    def get_jacobians(self, time, states, sw, sens, params, wrt_states=True):
+    def _evaluate_balances_for_jacobian(
+            self, variable_values: np.ndarray, time: float,
+            fixed_values: np.ndarray, sw: Optional[Sequence[bool]],
+            differentiate_params: bool) -> np.ndarray:
+        """Evaluate balances while perturbing states or kinetic parameters.
+
+        Parameters
+        ----------
+        variable_values : array-like
+            Perturbed state values [state-dependent units] or kinetic
+            parameter values [parameter-dependent units].
+        time : float
+            Integration time [s].
+        fixed_values : array-like
+            Unperturbed kinetic parameters [parameter-dependent units] when
+            differentiating states, or state values [state-dependent units]
+            when differentiating parameters.
+        sw : sequence of bool or None
+            Current event-switch states [-].
+        differentiate_params : bool
+            If True, ``variable_values`` contains kinetic parameters;
+            otherwise it contains model states [-].
+
+        Returns
+        -------
+        numpy.ndarray
+            Reactor balance rates [mol/L/s for species and K/s for thermal
+            states].
         """
-        Function that calculates df/dy (jac_states) or the rhs of the
-        sensitivity system, i.e. df/dy * sens + df/dtheta
-        where df/dtheta is jac_params
+        if differentiate_params:
+            parameters = variable_values  # [parameter-dependent units]
+            states = fixed_values  # [mol/L for species; K for temperatures]
+        else:
+            states = variable_values  # [mol/L for species; K for temperatures]
+            parameters = fixed_values  # [parameter-dependent units]
+
+        self.Kinetics.set_params(parameters)
+        balances = self.unit_model(time, states, sw=sw, params=parameters)
+
+        return np.asarray(balances, dtype=float)
+
+    def _get_nonisothermal_jacobians(
+            self, time: float, states: np.ndarray,
+            sw: Optional[Sequence[bool]], params: Optional[np.ndarray],
+            include_params: bool) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """Calculate complete non-isothermal state and parameter Jacobians.
 
         Parameters
         ----------
         time : float
-            integration time.
+            Integration time [s].
         states : array-like
-            states of the ODE system.
-        sw : list of bools
-            list indicating the states of the switches.
-        sens : array-like
-            current sensitivities of the system.
-        params : array-like
-            value of the kinetic parameters.
-        wrt_states : bool, optional
-            if True, jac_states is returned (function called by problem.jac).
-            Otherwise, the rhs of the sensitivity system is returned
-            (function called by problem.rhs). The default is True.
+            Reactor states ordered as participating-species concentrations
+            [mol/L], reactor temperature [K], and, for jacket mode, utility
+            temperature [K].
+        sw : sequence of bool or None
+            Current event-switch states [-].
+        params : array-like or None
+            Kinetic parameters [parameter-dependent units]. If None, use the
+            parameters currently stored by ``self.Kinetics``.
+        include_params : bool
+            If True, also calculate derivatives with respect to kinetic
+            parameters [-].
 
         Returns
         -------
-        See 'wrt_states' argument above
+        jac_states : numpy.ndarray
+            Balance-rate derivatives with respect to states [row-rate units /
+            column-state units].
+        jac_params : numpy.ndarray or None
+            Balance-rate derivatives with respect to kinetic parameters
+            [row-rate units / parameter units], or None when
+            ``include_params`` is False.
 
+        Notes
+        -----
+        The finite-difference calculation evaluates ``unit_model`` directly,
+        so it includes temperature-dependent kinetics, reaction enthalpy,
+        heat capacity, vessel heat transfer, and jacket dynamics without
+        duplicating those balance equations. The original kinetic parameters
+        and nominal reactor state are restored before returning.
+
+        An explicit stencil is used instead of CVodeS' internal difference
+        quotients so concentration perturbations can remain in the physical
+        nonnegative domain and the same formulation can supply the state
+        Jacobian required by ``problem.jac``.
         """
-        num_states = len(states)
+        state_values = np.asarray(states, dtype=float)  # [mol/L; K]
+        original_params = self.Kinetics.concat_params().copy(
+        )  # [parameter-dependent units]
+        if params is None:
+            parameter_values = original_params  # [parameter-dependent units]
+        else:
+            parameter_values = np.asarray(
+                params, dtype=float)  # [parameter-dependent units]
 
-        # ---------- w.r.t. states
+        try:
+            state_args = (
+                time, parameter_values, sw, False
+            )  # [s; parameter-dependent units; -; -]
+            state_steps = _CENTRAL_DIFFERENCE_REL_STEP * np.maximum(
+                1.0, np.abs(state_values)
+            )  # [mol/L for species; K for temperatures]
+            jac_states = numerical_jac_central(
+                self._evaluate_balances_for_jacobian,
+                state_values,
+                dx=state_steps,
+                args=state_args,
+                num_nonnegative=self.Kinetics.num_species,
+            )  # [mixed balance-rate/state units]
+
+            if include_params:
+                parameter_args = (
+                    time, state_values, sw, True
+                )  # [s; mol/L and K; -; -]
+                parameter_steps = (
+                    _CENTRAL_DIFFERENCE_REL_STEP
+                    * np.maximum(1.0, np.abs(parameter_values))
+                )  # [parameter-dependent units]
+                jac_params = numerical_jac_central(
+                    self._evaluate_balances_for_jacobian,
+                    parameter_values,
+                    dx=parameter_steps,
+                    args=parameter_args,
+                )  # [mixed balance-rate/parameter units]
+            else:
+                jac_params = None
+        finally:
+            self.Kinetics.set_params(original_params)
+            self.unit_model(time, state_values, sw=sw, params=original_params)
+
+        return jac_states, jac_params
+
+    def get_jacobians(
+            self, time: float, states: np.ndarray,
+            sw: Optional[Sequence[bool]], sens: Optional[np.ndarray],
+            params: np.ndarray, wrt_states: bool = True) -> np.ndarray:
+        """Calculate the state Jacobian or sensitivity-system right-hand side.
+
+        Parameters
+        ----------
+        time : float
+            Integration time [s].
+        states : array-like
+            Reactor states ordered as participating-species concentrations
+            [mol/L], followed by thermal states [K] when non-isothermal.
+        sw : sequence of bool or None
+            Current event-switch states [-].
+        sens : array-like or None
+            Current state sensitivities [state units / parameter units].
+            Required when ``wrt_states`` is False.
+        params : array-like
+            Kinetic parameters [parameter-dependent units]. The
+            non-isothermal finite-difference path evaluates these values. The
+            legacy isothermal analytic path uses the parameters already stored
+            by ``self.Kinetics``; in-tree callers synchronize them first.
+        wrt_states : bool, optional
+            If True, return ``df/dy``. Otherwise return
+            ``df/dy * sens + df/dtheta``. The default is True [-].
+
+        Returns
+        -------
+        numpy.ndarray
+            State Jacobian [row-rate units / column-state units] when
+            ``wrt_states`` is True, or sensitivity rates [state units /
+            parameter units / s] otherwise.
+
+        Raises
+        ------
+        ValueError
+            If sensitivity values are omitted when ``wrt_states`` is False.
+        """
+        if not wrt_states and sens is None:
+            raise ValueError("sens must be provided when wrt_states is False")
+
+        if not self.isothermal:
+            jac_states, jac_params = self._get_nonisothermal_jacobians(
+                time, states, sw, params, include_params=not wrt_states)
+
+            if wrt_states:
+                return jac_states
+
+            return jac_states.dot(sens) + jac_params
+
         num_species = self.Kinetics.num_species
         conc = states[:num_species]
-        if self.isothermal:
-            temp = self.Liquid_1.temp
-        else:
-            temp = states[num_species]
-            jac_states = np.zeros((num_states, num_states))
+        temp = self.Liquid_1.temp
 
         if self.Kinetics.keq_params is None:
             deltah_rxn = None
@@ -496,10 +648,7 @@ class _BaseReactor:
         jac_r_kin = self.Kinetics.derivatives(
             conc, temp, delta_hrxn=deltah_rxn)
 
-        if self.isothermal:
-            jac_states = jac_r_kin
-        else:
-            jac_states[:num_states - 1, :num_states - 1] = jac_r_kin
+        jac_states = jac_r_kin
 
         if wrt_states:
             return jac_states
@@ -507,11 +656,7 @@ class _BaseReactor:
             jac_theta_kin = self.Kinetics.derivatives(
                 conc, temp, dstates=False, delta_hrxn=deltah_rxn)
 
-            if self.isothermal:
-                jac_params = jac_theta_kin
-            else:
-                # jac_params = np.zeros((num_states, num_par))
-                pass  # TODO: include temp row in the jacobian
+            jac_params = jac_theta_kin
 
             dsens_dt = jac_states.dot(sens) + jac_params
 
