@@ -740,6 +740,7 @@ class Mixer:
 
         temp_seed = sum(temp_in) / 2
 
+        # TODO: investigate temperature-solve performance.
         temp_seed = temp_seed[0]
         temp_bce = np.zeros(massfrac.shape[0])
         for idx in range(len(temp_bce)):

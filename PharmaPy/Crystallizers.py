@@ -1503,6 +1503,7 @@ class _BaseCryst:
                     # Group parameter sensitivities by state.
                     sens_sep = reorder_sens(sens, separate_sens=True)
 
+                    # TODO: review state names without breaking callbacks.
                     di_keys = ['mu_%s' % ind for ind in range(self.num_distr)]
                     di_keys += ['w_%s' % name for name in self.name_species]
                     di_keys.append('vol')
@@ -3307,7 +3308,7 @@ class MSMPR(_BaseCryst):
                     vol_flow=vol_flow,
                     moments=dp['mu_n'][-1])
 
-            # Duty diagnostics are published for MSMPR; Semibatch has none.
+            # TODO: extend these heat-duty diagnostics to SemibatchCryst.
             self.get_heat_duty(time, states)
 
         else:

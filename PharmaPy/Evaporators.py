@@ -1623,7 +1623,8 @@ class Evaporator:
         segment_duty = trapezoidal_rule(time, self.heat_profile)  # [J]
         self.heat_duty = getattr(self, 'heat_duty', np.zeros(2)) + segment_duty  # [J]
 
-        self.duty_type = [0, 0]  # Classification deferred to the SimExec duty-type work.
+        # TODO: select duty types from operating temperature.
+        self.duty_type = [0, 0]
 
     def plot_profiles(self, pick_comp=None, **fig_kwargs):
         """
@@ -2746,7 +2747,8 @@ class ContinuousEvaporator:
         segment_duty = trapezoidal_rule(time, self.heat_profile)  # [J]
         self._signed_heat_duty = getattr(self, '_signed_heat_duty', np.zeros(2)) + segment_duty  # [J]
         self.heat_duty = np.abs(self._signed_heat_duty)  # [J]
-        self.duty_type = [0, 0]  # Classification deferred to the SimExec duty-type work.
+        # TODO: select duty types from operating temperature.
+        self.duty_type = [0, 0]
 
         self.liqFlowProf = flow_liq
         self.vapFlowProf = flow_vap
