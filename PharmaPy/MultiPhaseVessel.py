@@ -676,7 +676,7 @@ class MultiPhaseVessel():
             )
             self._timers['update_phases_from_solver_state'] = self._timers.get('update_phases_from_solver_state',0)+perf_counter()-t0
 
-    def pack_state_rates(self, material_rates, global_rates=None):
+    def pack_state_rates(self, material_rates=None, global_rates=None):
 
         buffer = self._solver_rate_buffer
         buffer.fill(0.0)
@@ -684,14 +684,34 @@ class MultiPhaseVessel():
         material_slices = self.solver_state_collection.material_slices
         solver_slices = self.solver_state_collection.slices
 
-        for key in self.solver_state_collection.material_keys:
+        # Every solver state must be visited, not just the material ones.
+        # Iterating the material keys alone silently leaves states without an
+        # owning phase, currently the vessel temperature, at the zero the
+        # buffer was filled with, discarding the energy balance.
+        for key in self.solver_state_collection.states:
+
+            material_slice = material_slices.get(key)
+
+            if material_slice is not None:
+                # Phase-owned differential states come from the flat material
+                # vector. A material-only request supplies nothing else, so the
+                # remaining states stay zero.
+                if material_rates is not None:
+                    buffer[solver_slices[key]] = material_rates[material_slice]
+                continue
+
+            if global_rates is None:
+                continue
+
             try:
-                buffer[solver_slices[key]] = material_rates[material_slices[key]]
+                value = global_rates[key]
             except KeyError:
-                try:
-                    buffer[solver_slices[key]] = np.asarray(global_rates[key]).reshape(-1)
-                except KeyError:
-                    raise KeyError(f"StateKey {key} not found in material_rates or global_rates")
+                raise KeyError(
+                    f"StateKey {key} is a solver state but was not produced "
+                    "by the global balances"
+                ) from None
+
+            buffer[solver_slices[key]] = np.asarray(value).reshape(-1)
 
         return buffer
 
