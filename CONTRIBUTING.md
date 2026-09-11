@@ -13,8 +13,6 @@ every contribution, whether written by a person or a coding agent.
 - [TESTING.md](TESTING.md) — test environments and how to run each lane.
 - [DEPENDENCIES.md](DEPENDENCIES.md) — dependency policy and environments.
 - [INSTALLATION.md](INSTALLATION.md) — installation instructions.
-- [PR #263 review record](doc/review_notes/pr263.md) — model-policy decisions,
-  scoped issue-closure rationale, and reproducible verification evidence.
 
 ## Development setup
 
@@ -34,6 +32,10 @@ to install pixi and create the development environments, then use
 - Request maintainer review after the applicable required CI checks pass. The
   `Assimulo integration tests` job is informational; see
   [TESTING.md](TESTING.md). A maintainer merges accepted changes.
+
+Historical model decisions and verification evidence are indexed in
+[review notes](doc/review_notes/README.md). These records provide context for
+future work; the standards above and the linked issues govern current work.
 
 ## Integration contract for parallel workstreams
 
