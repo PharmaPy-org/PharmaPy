@@ -13,6 +13,8 @@ every contribution, whether written by a person or a coding agent.
 - [TESTING.md](TESTING.md) — test environments and how to run each lane.
 - [DEPENDENCIES.md](DEPENDENCIES.md) — dependency policy and environments.
 - [INSTALLATION.md](INSTALLATION.md) — installation instructions.
+- [PR #263 review record](doc/review_notes/pr263.md) — model-policy decisions,
+  scoped issue-closure rationale, and reproducible verification evidence.
 
 ## Development setup
 
