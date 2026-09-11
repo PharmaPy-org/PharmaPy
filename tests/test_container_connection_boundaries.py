@@ -1,7 +1,13 @@
-"""B009b review regressions for real container/connection boundaries.
+"""review regressions for real container/connection boundaries.
 
 Core tests use synthetic profiles, real phases, and the holdup RHS. Constant
 and linear profiles give independent interpolation and endpoint expectations.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/220
+https://github.com/PharmaPy-org/PharmaPy/issues/231
+https://github.com/PharmaPy-org/PharmaPy/issues/243
 """
 
 from pathlib import Path
@@ -27,7 +33,7 @@ from test_container_liquid_continuation import (
 
 @pytest.mark.integration
 def test_batch_filter_connection_initializes_lazy_drying_names(thermo_path):
-    grid = np.array([0., 100., 200., 300.])  # [um], B009 four-bin crystal fixture
+    grid = np.array([0., 100., 200., 300.])  # [um], test_mixer_container_balances.py four-bin crystal fixture
     population = np.array([0., 1e6, 1.25e5, 0.])  # [#/um], third moment 2e-4 m**3
     solid = SolidPhase(thermo_path, mass_frac=[1, 0, 0, 0, 0],
                         x_distrib=grid, distrib=population)
@@ -289,3 +295,22 @@ def test_single_sample_interpolation_rejects_multiple_value_rows(scalar_query):
     times = 7.0 if scalar_query else np.array([1., 2., 7.])  # [s]
     with pytest.raises(ValueError, match=r'y_inlet.*exactly one.*row.*t_inlet'):
         interpolate_inputs(times, upstream, values)
+
+
+@pytest.mark.integration
+def test_raw_dynamic_feed_uses_connected_mixer_grid(thermo_path):
+    from PharmaPy.ProcessControl import DynamicInput
+    times = np.array([0., 1., 2.])  # [s], a connected source supplies the horizon
+    mixer = Mixer()
+    source = profile_source(thermo_path, constant_feed(times), times)
+    Connection(source, mixer).transfer_data()
+    stream = LiquidStream(thermo_path, mass_flow=FEED_FLOW,
+                          mass_frac=COLD_FRAC, temp=COLD_TEMP)
+    stream.DynamicInlet = DynamicInput()
+    stream.DynamicInlet.add_variable('mass_flow', lambda time: FEED_FLOW * (1 + time))
+    mixer.Inlets = stream
+    flow, fractions, temperature = mixer.solve_unit()  # [kg/s], [-], [K]
+    np.testing.assert_array_equal(mixer.result.time, times)
+    np.testing.assert_allclose(flow, FEED_FLOW * (2 + times), rtol=RTOL)
+    np.testing.assert_allclose(fractions, np.tile(COLD_FRAC, (len(times), 1)), rtol=RTOL)
+    np.testing.assert_allclose(temperature, COLD_TEMP, rtol=RTOL)

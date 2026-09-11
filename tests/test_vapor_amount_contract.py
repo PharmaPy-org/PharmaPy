@@ -2,6 +2,12 @@
 
 Synthetic unequal species masses and asymmetric compositions expose basis and
 ordering errors. Tests exercise real converters without an optional ODE solver.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/45
+https://github.com/PharmaPy-org/PharmaPy/issues/183
+https://github.com/PharmaPy-org/PharmaPy/issues/216
 """
 
 import json
@@ -211,18 +217,11 @@ def test_update_composition_branches(vapor, composition, explicit_amount):
     assert_amounts(vapor, TWO_MOLES if explicit_amount else ONE_MOLE, UPDATED_MW)
     np.testing.assert_allclose(vapor.mole_frac, UPDATED_FRACTIONS, rtol=REL_TOL)
     np.testing.assert_allclose(vapor.mass_frac, inputs['mass_frac'], rtol=REL_TOL)
-    if 'conc' in composition:
-        np.testing.assert_allclose(vapor.mole_conc, inputs['mole_conc'], rtol=REL_TOL)
-        np.testing.assert_allclose(vapor.mass_conc, inputs['mass_conc'], rtol=REL_TOL)
-    else:
-        # Retained liquid-volume basis: a mole occupies sum_i(y_i MW_i/rho_i).
-        # Gas-basis concentrations are deferred by B018 (#45/#183/#216).
-        liquid_volume = 10.8 / 1000.0 + 40.0 / 900.0  # [L/mol], g/L = kg/m**3
-        expected_conc = UPDATED_FRACTIONS / liquid_volume  # [mol/L]
-        np.testing.assert_allclose(vapor.mole_conc, expected_conc, rtol=REL_TOL)
-        np.testing.assert_allclose(vapor.mass_conc,
-                                   expected_conc * np.array([18.0, 100.0]),
-                                   rtol=REL_TOL)  # [kg/m**3], g/L = kg/m**3
+    expected_conc = UPDATED_FRACTIONS / MOLAR_VOLUME / 1000  # [mol/L], gas EOS
+    np.testing.assert_allclose(vapor.mole_conc, expected_conc, rtol=REL_TOL)
+    np.testing.assert_allclose(vapor.mass_conc,
+                               expected_conc * np.array([18.0, 100.0]),
+                               rtol=REL_TOL)  # [kg/m**3], g/L = kg/m**3
 
 
 @pytest.mark.parametrize('amount', ['mass', 'vol', 'moles'])
@@ -445,7 +444,7 @@ def test_evaporator_initialization_preserves_moles_and_fractions(thermo_path):
     """Exercise the real initialization handoff without an ODE/DAE solve.
 
     Vapor enthalpy (#177/#178, PR #179) and intensive-state synchronization in
-    the evaporator are outside B018; only its molar inventory and fractions
+    the evaporator are outside https://github.com/PharmaPy-org/PharmaPy/issues/216; only its molar inventory and fractions
     are asserted here, not its energy initialization or vapor temperature.
 
     Parameters
@@ -583,3 +582,31 @@ def test_density_both_bases_return_one_value_per_composition_row(vapor, composit
         expected = expected_molar * expected_mw if basis == 'mass' else expected_molar  # [kg/m**3] or [mol/L]
         assert np.shape(density) == (2,)
         np.testing.assert_allclose(density, expected, rtol=REL_TOL)
+
+
+@pytest.mark.parametrize('amount', [0.0, ONE_MOLE])
+@pytest.mark.parametrize('composition', ['mole_frac', 'mass_frac', 'mole_conc', 'mass_conc'])
+def test_vapor_concentrations_obey_gas_eos(thermo_path, amount, composition):
+    # One mole of the asymmetric binary has species amounts [0.25, 0.75] mol.
+    inputs = {'mole_frac': INITIAL_FRACTIONS,
+              'mass_frac': INITIAL_FRACTIONS * np.array([18., 100.]) / INITIAL_MW,
+              'mole_conc': INITIAL_FRACTIONS / MOLAR_VOLUME / 1000,
+              'mass_conc': INITIAL_FRACTIONS * np.array([18., 100.]) / MOLAR_VOLUME / 1000}
+    # Fractions [-], molar concentrations [mol/L], mass concentrations [kg/m**3].
+    vapor = VaporPhase(thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+                       moles=amount, check_input=False,
+                       **{composition: inputs[composition]} if composition != 'mass_conc'
+                       else {'mole_frac': INITIAL_FRACTIONS})
+    if composition == 'mass_conc':
+        vapor.updatePhase(mass_conc=inputs[composition])
+    for temperature, pressure in [(TEMPERATURE, PRESSURE),
+                                  (2 * TEMPERATURE, PRESSURE),
+                                  (2 * TEMPERATURE, 3 * PRESSURE)]:
+        # [K], [Pa], independent temperature and pressure changes.
+        vapor.updatePhase(temp=temperature, pres=pressure)
+        expected = INITIAL_FRACTIONS * pressure / (GAS_CONSTANT * temperature) / 1000  # [mol/L]
+        np.testing.assert_allclose(vapor.mole_conc, expected, rtol=REL_TOL)
+        np.testing.assert_allclose(vapor.mass_conc, expected * [18., 100.], rtol=REL_TOL)
+        if amount:
+            assert vapor.mole_conc.sum() == pytest.approx(vapor.moles / vapor.vol / 1000, rel=REL_TOL)
+            assert vapor.mass_conc.sum() == pytest.approx(vapor.mass / vapor.vol, rel=REL_TOL)

@@ -2,6 +2,10 @@
 
 Synthetic species have unequal densities and molar masses. Expected inventories
 come from adding species volumes and mole amounts, independently of phase APIs.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/217
 """
 
 import json
@@ -453,11 +457,11 @@ def test_paramest_modifier_preserves_charged_volume(thermo_path, monkeypatch,
             Always, with a sentinel identifying the reached solver boundary.
         """
         solve_calls.append(kwargs)
-        raise RuntimeError("B020 stop at solve boundary")
+        raise RuntimeError("liquid inventory probe stopped at solve boundary")
 
     monkeypatch.setattr(unit, "solve_unit", stop_before_solve)
     time_grid = np.array([0.0, 1.0])  # [s], dummy start and end; never integrated
-    with pytest.raises(RuntimeError, match="B020 stop at solve boundary"):
+    with pytest.raises(RuntimeError, match="liquid inventory probe stopped at solve boundary"):
         unit.paramest_wrapper(parameters, time_grid, modify_phase=modifications)
     assert len(solve_calls) == 1
     assert solve_calls[0]["time_grid"] is time_grid

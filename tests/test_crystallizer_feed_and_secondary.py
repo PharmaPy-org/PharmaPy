@@ -1,4 +1,9 @@
-"""B008d bare-liquid feed and FVM secondary-nucleation basis regressions."""
+"""bare-liquid feed and FVM secondary-nucleation basis regressions.
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/224
+https://github.com/PharmaPy-org/PharmaPy/issues/227
+"""
 
 import numpy as np
 import pytest

@@ -1,13 +1,22 @@
-"""B005 shared-thermo regressions using real phases and synthetic JSON data.
+"""shared-thermo regressions using real phases and synthetic JSON data.
 
 No Assimulo is imported: evaporator residuals use real constructors and phases,
 with phase attributes assigned directly to isolate initialization issue #258.
 These tests specify thermodynamic residuals, not a provisional solver contract.
 The synthetic constants are contract fixtures, not measured property data.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/27
+https://github.com/PharmaPy-org/PharmaPy/issues/62
+https://github.com/PharmaPy-org/PharmaPy/issues/89
+https://github.com/PharmaPy-org/PharmaPy/issues/122
 """
 
 from copy import deepcopy
 import json
+import warnings
+from PharmaPy.Distillation import DistillationColumn, DynamicDistillation
 import math
 from pathlib import Path
 
@@ -274,6 +283,9 @@ def test_invalid_selector_has_shared_error(liquid, boundary):
     (Evaporator, 'activity_model', {'vol_drum': 1.0}),  # [m**3]
     (ContinuousEvaporator, 'activity_model', {'vol_drum': 1.0}),  # [m**3]
     (IsothermalFlash, 'gamma_method', {}),
+    *[(cls, 'gamma_model', dict(pres=PRESSURE, q_feed=1., LK='light', HK='heavy',
+                              perc_LK=95., perc_HK=95.))
+      for cls in (DistillationColumn, DynamicDistillation)],
     (AdiabaticFlash, 'gamma_method', {'pres_drum': PRESSURE}),  # [Pa]
 ])
 @pytest.mark.parametrize('model', [*VALID_ACTIVITY_MODELS, 'uniquac'])
@@ -583,12 +595,17 @@ def test_uniquac_qip_fallback_at_both_boundaries(thermo_path, boundary):
                         pres=PRESSURE, moles=1.)
     assert not hasattr(phase, 'qip')
     expected_gamma = np.full(2, 4/3)  # [-], analytic symmetric UNIQUAC fixture
-    if boundary == 'activity':
-        np.testing.assert_allclose(phase.getActivityCoeff(method='UNIQUAC'),
-                                   expected_gamma, rtol=RTOL, atol=0)
-    else:
-        expected_k = (expected_gamma * phase.AntoineEquation(TEMPERATURE)
-                      / PRESSURE)  # [-]
-        np.testing.assert_allclose(phase.getKeqVLE(gamma_model='UNIQUAC'),
-                                   expected_k, rtol=RTOL, atol=0)
-    np.testing.assert_array_equal(phase.qip, phase.qi)
+    with pytest.warns(UserWarning, match="qip.*qi.*water.*alcohol"):
+        if boundary == 'activity':
+            np.testing.assert_allclose(phase.getActivityCoeff(method='UNIQUAC'),
+                                       expected_gamma, rtol=RTOL, atol=0)
+        else:
+            expected_k = (expected_gamma * phase.AntoineEquation(TEMPERATURE)
+                          / PRESSURE)  # [-]
+            np.testing.assert_allclose(phase.getKeqVLE(gamma_model='UNIQUAC'),
+                                       expected_k, rtol=RTOL, atol=0)
+    assert not hasattr(phase, 'qip')
+    with warnings.catch_warnings(record=True) as repeated:
+        warnings.simplefilter('always')
+        phase.getActivityCoeff(method='UNIQUAC')
+    assert not repeated

@@ -1,8 +1,19 @@
-"""B010 evaporator contracts with synthetic thermodynamics and real phases.
+"""evaporator contracts with synthetic thermodynamics and real phases.
 
 Core tests exercise initialization, residuals, and synthetic result profiles.
 Solver regressions are marked assimulo and use the optional IDA backend.
 The synthetic UNIQUAC interaction is a contract fixture, not measured data.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/27
+https://github.com/PharmaPy-org/PharmaPy/issues/40
+https://github.com/PharmaPy-org/PharmaPy/issues/41
+https://github.com/PharmaPy-org/PharmaPy/issues/63
+https://github.com/PharmaPy-org/PharmaPy/issues/85
+https://github.com/PharmaPy-org/PharmaPy/issues/228
+https://github.com/PharmaPy-org/PharmaPy/issues/244
+https://github.com/PharmaPy-org/PharmaPy/issues/258
 """
 
 from copy import deepcopy
@@ -212,19 +223,22 @@ def test_reflux_level_control_conserves_material(thermo_path, reflux, feed_facto
     assert rates.sum() == pytest.approx(expected_accumulation, abs=ATOL)
     if reflux == 0:
         old_liquid = max(0, unit.k_liq * (LIQUID_VOLUME - unit.vol_liq_set)
-                         + input_flow - vapor_flow)  # [mol/s], pre-B010 equation
+                         + input_flow - vapor_flow)  # [mol/s], pre-fix equation for https://github.com/PharmaPy-org/PharmaPy/issues/228
         old_rates = input_flow * FRACTIONS - old_liquid * FRACTIONS - vapor_flow * values['y_vap']  # [mol/s]
         np.testing.assert_allclose(rates, old_rates, rtol=RTOL, atol=ATOL)
 
 @pytest.mark.unit
-def test_real_steady_state_has_small_residual(thermo_path):
-    unit = make_unit(thermo_path, ContinuousEvaporator)
+@pytest.mark.parametrize('reflux', [0., .3])  # [-], bypass and active reflux
+def test_real_steady_state_has_small_residual(thermo_path, reflux):
+    unit = make_unit(thermo_path, ContinuousEvaporator, reflux_ratio=reflux)
     seed, _ = unit.init_unit()
     # Inverse initial magnitudes scale the mixed mol, fraction, Pa, J and K
     # unknowns to order one. All seed entries are nonzero in this fixture.
+    # A small initial trust-region factor keeps this synthetic active-reflux
+    # solve inside its property domain; it is a fixture-specific solver setting.
     inverse_scales = 1 / abs(seed)  # [inverse packed-state units]
     states = unit.solve_unit(DURATION, steady_state=True,
-                             fsolve_opts={'diag': inverse_scales, 'xtol': RTOL})
+                             fsolve_opts={'diag': inverse_scales, 'xtol': RTOL, 'factor': .001})
     residual = unit.unit_model(0, states, None, None)
     # Each equation must close within one micro-unit in its native basis:
     # mol/s, mol, mole fraction, m**3, Pa, J/s, and J, respectively.
@@ -910,3 +924,43 @@ def test_nitrogen_feed_mapping_preserves_current_values_and_axes(thermo_path, so
     else:
         assert inlet.y_inlet['mole_frac'] is fractions
         assert fractions.shape == (4, 2)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_terminating_fill_event_blocks_unsafe_continuation(thermo_path):
+    """Keep the default physical volume cap effective after its IDA event."""
+    pytest.importorskip('assimulo')
+    unit = make_unit(thermo_path)
+    unit.Phases = LiquidPhase(thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+                              vol=.949 * VOLUME, mole_frac=FRACTIONS)  # [m**3], just below 95% cap
+    unit.Inlet = LiquidStream(thermo_path, temp=TEMPERATURE, pres=PRESSURE,
+                              mole_flow=10 * FEED, mole_frac=FRACTIONS)  # [mol/s], fills before evaporation
+    options = {'rtol': 1e-8, 'atol': 1e-10}  # [-], native state units
+    time, _ = unit.solve_unit(20., verbose=False, sundials_opts=options)  # [s]
+    assert time[-1] < 20
+    assert unit.Outlet.vol == pytest.approx(.95 * VOLUME, rel=1e-8)
+    previous_state = unit._terminal_states.copy()  # state units in states_di
+    previous_time = unit.elapsed_time  # [s]
+    for direction in [-1, 1]:
+        # Bracket the event surface by four float64 ulps in volume, so the
+        # guard cannot depend on an exact ==0 or <=0 root-condition comparison.
+        unit.Liquid_1.vol = .95 * VOLUME + direction * 4 * np.finfo(float).eps * VOLUME  # [m**3]
+        with pytest.raises(ValueError, match='liquid-volume cap.*reset.*drain'):
+            unit.solve_unit(20., verbose=False, sundials_opts=options)
+        np.testing.assert_array_equal(unit._terminal_states, previous_state)
+        assert unit.elapsed_time == previous_time
+        assert unit.Outlet.vol < VOLUME
+
+
+@pytest.mark.unit
+def test_steady_reflux_property_failure_has_solver_context(thermo_path):
+    unit = make_unit(thermo_path, ContinuousEvaporator, reflux_ratio=.3)  # [-]
+    seed, _ = unit.init_unit()
+    with pytest.raises(RuntimeError, match='property evaluation.*fsolve_opts') as error:
+        unit.solve_unit(DURATION, steady_state=True,
+                        fsolve_opts={'diag': 1/abs(seed), 'factor': .1})
+    # The unscaled trust step reaches supercritical conditions for which this
+    # fixture supplies no Henry data. Keep the original diagnostic as its cause.
+    assert isinstance(error.value.__cause__, AttributeError)
+    assert 'henry_constant' in str(error.value.__cause__)

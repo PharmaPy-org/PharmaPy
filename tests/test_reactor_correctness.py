@@ -134,8 +134,8 @@ def test_cstr_equilibrium_rate_through_unit_model():
 def test_tank_initial_state_metadata(monkeypatch, reactor_cls, ht_mode, controlled):
     """#54: metadata and unpacking match the actual solve_unit initial vector.
 
-    Controls are checked only through problem construction: #232 owns their
-    normalization and result heat reconstruction, not this metadata contract.
+    Tank controls are checked through problem construction. PFR controls
+    explicitly reject construction until the distributed contract is supported.
     """
     controls = {"temp": lambda time: TEMPERATURE} if controlled else None
     kwargs = {}
@@ -143,6 +143,10 @@ def test_tank_initial_state_metadata(monkeypatch, reactor_cls, ht_mode, controll
         kwargs["vol_tank"] = REACTOR_VOLUME  # [m**3]
     elif reactor_cls is Reactors.PlugFlowReactor:
         kwargs = {"diam_in": TUBE_DIAMETER, "num_discr": NUM_CELLS}
+    if reactor_cls is Reactors.PlugFlowReactor and controlled:
+        with pytest.raises(NotImplementedError, match='PlugFlowReactor controls'):
+            reactor_cls(isothermal=False, ht_mode=ht_mode, controls=controls, **kwargs)
+        return
     reactor = _configured_reactor(reactor_cls(
         isothermal=False, ht_mode=ht_mode, controls=controls, **kwargs))
     problem = Mock(side_effect=_ProblemCaptured)
@@ -165,7 +169,7 @@ def test_tank_initial_state_metadata(monkeypatch, reactor_cls, ht_mode, controll
     expected_conc = (CONCENTRATIONS[:3] if reactor_cls is Reactors.BatchReactor
                      else CONCENTRATIONS)  # [mol/L]
     np.testing.assert_array_equal(unpacked["mole_conc"], expected_conc)
-    # Known PFR gap: accepted controls do not yet replace its integrated temperature.
+    # Uncontrolled PFR retains its integrated temperature.
     has_temperature = not controlled or is_pfr
     assert ("temp" in unpacked) == has_temperature
     assert ("temp_ht" in unpacked) == (ht_mode == "jacket" and has_temperature and not is_pfr)

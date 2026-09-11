@@ -1,7 +1,13 @@
-"""B009c collector configuration and static moment-feed regressions.
+"""collector configuration and static moment-feed regressions.
 
 Real phases and crystallizers reach ODE construction in the core lane. Marked
 Assimulo tests integrate frozen populations and constant liquid feeds.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/157
+https://github.com/PharmaPy-org/PharmaPy/issues/224
+https://github.com/PharmaPy-org/PharmaPy/issues/259
 """
 
 from copy import deepcopy
@@ -28,9 +34,9 @@ SIZE = 20e-6  # [m], monodisperse crystal length
 MOMENTS = NUMBER_DENSITY * SIZE ** np.arange(4)  # [m**n/m**3], n = 0,...,3
 DURATION = 0.01  # [s], short interval isolates accumulation from long dynamics
 RTOL = 1e-12  # [-], float64 roundoff allowance for direct algebra
-SOLVER_RTOL = 1e-7  # [-], reused from B008d's collector inventory test
+SOLVER_RTOL = 1e-7  # [-], reused from test_crystallizer_moment_inventory.test_msmpr_moment_output_collects_without_grid
 INTEGRATION_OPTIONS = {'rtol': 1e-9, 'atol': 1e-10}
-# Relative [-] and absolute [state units] tolerances from B008d's collector
+# Relative [-] and absolute [state units] tolerances from test_crystallizer_moment_inventory.py collector
 # regression: resolve the sqrt(eps) seed volume below the default absolute floor.
 
 
@@ -375,7 +381,7 @@ def test_connected_values_override_static_aliases(data_path, profile):
 def test_static_moment_feed_full_solve(data_path):
     """Verify static population accumulation through the real solver.
 
-    Solver tolerances resolve the small seed volume, as in B008d's connected
+    Solver tolerances resolve the small seed volume, as in test_crystallizer_moment_inventory.py connected
     collector regression. Frozen kinetics give an exact population integral.
 
     Parameters

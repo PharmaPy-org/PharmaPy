@@ -1,9 +1,15 @@
-"""B011 real CVode filter regressions for parameters, time grids and division."""
+"""real CVode filter regressions for parameters, time grids and division.
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/249
+"""
 
 import numpy as np
 import pytest
 
 pytestmark = [pytest.mark.assimulo, pytest.mark.integration]
+
+pytest.importorskip('assimulo')
 
 from PharmaPy.SolidLiquidSep import Filter
 from PharmaPy.SimExec import SimulationExec

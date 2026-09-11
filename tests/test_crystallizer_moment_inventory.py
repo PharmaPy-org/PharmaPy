@@ -1,7 +1,11 @@
-"""B008d moment inventory, continuation, and collector handoff regressions.
+"""moment inventory, continuation, and collector handoff regressions.
 
 Synthetic frozen populations separate inventory accounting from kinetics.
 Collector and continuation tests use real CVode in the Assimulo lane.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/224
 """
 
 import numpy as np

@@ -739,9 +739,13 @@ class DeliquoringStep:
         ``liquid_removed`` [kg] and ``liquid_removed_mass_frac`` [-] measure
         species inventory decreases from the REMAPPED initial field to the
         final field. ``result.mass_liquid_removed`` [kg] starts at zero.
-        Species inventories are non-increasing under the drainage model;
-        negative numerical differences and the removal history are floored
-        at zero. No inlet-versus-final species check is made.
+        Only roundoff-sized negative removals are floored at zero. The
+        existing nonconservative transport defect in
+        https://github.com/PharmaPy-org/PharmaPy/issues/29 can increase discrete
+        species inventories. Such runs warn and set removal_diagnostics_valid
+        to False; liquid_removed_species and total/history retain signed
+        decreases, while liquid_removed_mass_frac becomes NaN. This exposes
+        invalid removal accounting without claiming that transport is repaired.
 
         Linear remapping is not conservative. The signed difference between
         attached inlet species masses and remapped initial species masses is
@@ -791,13 +795,30 @@ class DeliquoringStep:
                               - species_inventory[0])  # [kg], signed basis adjustment
         self.liquid_initial_adjustment_species = adjustment_species.copy()  # [kg]
         self.liquid_initial_adjustment = float(adjustment_species.sum())  # [kg]
-        removed_species = species_inventory[0] - species_inventory[-1]  # [kg]
-        removed_species = np.maximum(removed_species, 0)  # [kg], subtraction roundoff only
-        self.liquid_removed = float(removed_species.sum())  # [kg]
-        self.liquid_removed_mass_frac = np.divide(
-            removed_species, self.liquid_removed,
-            out=np.zeros_like(removed_species), where=self.liquid_removed != 0)  # [-]
-        removed_history = np.maximum(retained_mass[0] - retained_mass, 0)  # [kg]
+        removed_by_time = species_inventory[0] - species_inventory  # [kg], signed species decreases
+        # At most eight arithmetic operations per cell enter each weighted
+        # inventory; allow their accumulated float64 subtraction roundoff.
+        removal_roundoff = 8 * len(self.delta_z) * eps * retained_mass[0]  # [kg]
+        self.removal_diagnostics_valid = bool(np.all(removed_by_time >= -removal_roundoff))
+        if not self.removal_diagnostics_valid:
+            warnings.warn(
+                "Deliquoring removal diagnostics are invalid: nonconservative "
+                "species transport increased an inventory (known #29, "
+                "https://github.com/PharmaPy-org/PharmaPy/issues/29). "
+                "Signed removals are retained; removal mass fractions are NaN.",
+                RuntimeWarning, stacklevel=2)
+        roundoff_only = (removed_by_time < 0) & (removed_by_time >= -removal_roundoff)
+        removed_by_time[roundoff_only] = 0  # [kg], only demonstrated roundoff excursions
+        removed_species = removed_by_time[-1]  # [kg], may expose a model inventory increase
+        self.liquid_removed_species = removed_species.copy()  # [kg]
+        self.liquid_removed = float(removed_species.sum())  # [kg], signed net decrease
+        if self.removal_diagnostics_valid:
+            self.liquid_removed_mass_frac = np.divide(
+                removed_species, self.liquid_removed,
+                out=np.zeros_like(removed_species), where=self.liquid_removed != 0)  # [-]
+        else:
+            self.liquid_removed_mass_frac = np.full_like(removed_species, np.nan)  # [-], undefined physical composition
+        removed_history = removed_by_time.sum(axis=1)  # [kg], same signed accounting as terminal removal
         self.mean_sat = saturation @ self.delta_z  # [-], full cell volumes
         self.timeProf = time  # [s]
         self.satProf = saturation  # [-]
@@ -821,7 +842,9 @@ class DeliquoringStep:
             saturation=saturation, mass_conc=concentrations,
             mean_saturation_value=self.mean_sat, mass_liquid_removed=removed_history,
             liquid_initial_adjustment=self.liquid_initial_adjustment,
-            liquid_initial_adjustment_species=adjustment_species.copy())
+            liquid_initial_adjustment_species=adjustment_species.copy(),
+            removal_diagnostics_valid=self.removal_diagnostics_valid,
+            liquid_removed_species=self.liquid_removed_species.copy())
         self.mass_conc = concentration_field[-1].copy()  # [kg/m**3]
         bulk_fractions = species_inventory[-1] / retained_mass[-1]  # [-]
         self.Liquid_1.updatePhase(mass=float(retained_mass[-1]), mass_frac=bulk_fractions)
@@ -1072,6 +1095,31 @@ class Filter:
         self.deltaP = None
         self.outputs = None
 
+    def _validate_solid_population(self) -> None:
+        """Require a current distribution for population-dependent filtration.
+
+        Raises
+        ------
+        ValueError
+            If the size distribution is absent or inconsistent with the
+            attached moments [m**n] or solid mass [kg]. A moment-mode
+            crystallizer may retain its original seed distribution; choosing
+            a replacement distribution from its evolved moments requires an
+            explicit reconstruction model outside Filter's contract.
+        """
+        solid = self.Solid_1
+        message = ("Filter requires a size distribution consistent with current solid "
+                   "moments and mass; moment-mode crystallizers may retain a stale "
+                   "seed. Supply a validated reconstruction or a distribution-mode output.")
+        if solid.x_distrib is None or solid.distrib is None:
+            raise ValueError(message)
+        population_moments = solid.getMoments(mom_num=range(len(solid.moments)))  # [m**n]
+        distribution_mass = solid.kv * population_moments[3] * solid.getDensity()  # [kg]
+        population_rtol = np.sqrt(np.finfo(float).eps)  # [-], accumulated conversion roundoff allowance
+        if (not np.allclose(population_moments, solid.moments, rtol=population_rtol, atol=0)
+                or not np.isclose(distribution_mass, solid.mass, rtol=population_rtol, atol=0)):
+            raise ValueError(message)
+
     @property
     def Phases(self):
         return self._Phases
@@ -1095,6 +1143,10 @@ class Filter:
         ------
         RuntimeError
             If phases is neither a Slurry nor a phase sequence.
+        ValueError
+            If a retained distribution is missing or inconsistent with the
+            current solid moments/mass. Supply a validated reconstruction
+            or a distribution-mode crystallizer output.
         """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
@@ -1109,6 +1161,10 @@ class Filter:
                                'objects')
         classify_phases(self)  # Enumerate phases: Liquid_1,..., Solid_1, ...
 
+        if self.Solid_1.mass <= 0:
+            raise ValueError("Filter requires positive solid mass [kg]; "
+                             "use a liquid transfer for a zero-solid feed.")
+        self._validate_solid_population()
         epsilon = self.Solid_1.getPorosity(diam_filter=self.station_diam)
         dens_sol = self.Solid_1.getDensity()
         if self.alpha is None:
@@ -1279,7 +1335,8 @@ class Filter:
             to saturate the packed cake and leave positive filtrate volume.
             These feed checks precede changes to deltaP and params. Also
             raised before any mutation if estimation supplies neither runtime
-            nor time_grid.
+            nor time_grid, or pressure/resolved resistances/completion time
+            leave their physical finite domains.
         RuntimeError
             If CVode omits requested estimation samples. Tighten rtol/atol
             in sundials_opts; output-grid coverage depends on solver tolerances.
@@ -1301,10 +1358,16 @@ class Filter:
         can omit samples inside its final step, especially on dense grids at
         default tolerances. Estimation checks exact time coverage before
         returning; callers may need tighter rtol/atol in sundials_opts.
+        Physical-parameter optimizers must constrain alpha > 0 and Rm >= 0.
+        Use the existing log_params=True option for unconstrained positive
+        trials; invalid physical trials raise instead of producing a plateau.
         """
+        if not np.isscalar(deltaP) or not np.isfinite(deltaP) or deltaP <= 0:
+            raise ValueError("Filter deltaP must be finite and strictly positive [Pa]")
         if model_params is not None and runtime is None and time_grid is None:
             raise ValueError("Filter estimation requires runtime or time_grid; "
                              "an unbounded estimation solve is not supported.")
+        self._validate_solid_population()
         if self.Solid_1.mass <= 0:
             raise ValueError(
                 "Filter requires positive solid mass [kg]; "
@@ -1332,13 +1395,19 @@ class Filter:
                 "Add liquid or reduce solids.")
 
         if model_params is not None:
-            resolved_params = (np.exp(model_params) if self.log_params
-                               else model_params)  # [m/kg, 1/m]
+            with np.errstate(over='ignore', under='ignore', invalid='ignore'):
+                resolved_params = (np.exp(model_params) if self.log_params
+                                   else model_params)  # [m/kg, 1/m]
         else:
             resolved_params = (
                 self.alpha(deltaP) if callable(self.alpha) else self.alpha,
                 self.r_medium(deltaP) if callable(self.r_medium) else self.r_medium,
             )  # [m/kg, 1/m]
+        resolved_params = np.asarray(resolved_params, dtype=float)  # [m/kg, 1/m]
+        if (resolved_params.shape != (2,) or not np.all(np.isfinite(resolved_params))
+                or resolved_params[0] <= 0 or resolved_params[1] < 0):
+            raise ValueError("Filter resistances require finite positive alpha [m/kg] "
+                             "and finite nonnegative medium resistance [1/m]")
         self.params = tuple(resolved_params)  # [m/kg, 1/m]
         alpha, resistance = self.params  # [m/kg], [1/m]
 
@@ -1359,6 +1428,13 @@ class Filter:
         mass_up_init = vol_liq_slur * dens_liq
 
         mass_init = [mass_filtr_init, mass_up_init]
+
+        self.time_filt = visc_liq/self.deltaP * (
+            alpha*self.c_solids/2 * (vol_filtrate/self.area_filt)**2 +
+            resistance * (vol_filtrate/self.area_filt))  # [s]
+        if not np.isfinite(self.time_filt) or self.time_filt <= 0:
+            raise ValueError("Filter completion time must be finite and strictly positive [s]; "
+                             "check pressure, resistances, feed, and viscosity")
 
         # Solve ODE
         problem = Explicit_Problem(self.unit_model, y0=mass_init,
@@ -1393,9 +1469,6 @@ class Filter:
             duration = runtime  # [s]
             final_time = runtime + self.elapsed_time  # [s]
 
-        self.time_filt = visc_liq/self.deltaP * (
-            alpha*self.c_solids/2 * (vol_filtrate/self.area_filt)**2 +
-            resistance * (vol_filtrate/self.area_filt))  # [s]
         holds_plateau = model_params is not None and duration >= self.time_filt
         integration_grid = time_grid  # [s]
         integration_end = final_time  # [s]

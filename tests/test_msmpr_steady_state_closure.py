@@ -400,8 +400,8 @@ def test_inlet_density_uses_stream_concentration(data_path, basis, inlet_density
     assert_dynamic_closure(unit, composition, distribution, 100.0)  # [um/s]
 
 
-def test_final_residual_exposes_dynamic_impurity_factor(data_path):
-    """Return the real dynamic residual when an omitted growth factor matters.
+def test_steady_population_applies_dynamic_impurity_factor(data_path):
+    """Apply the same impurity correction in steady and dynamic growth.
 
     Parameters
     ----------
@@ -409,12 +409,16 @@ def test_final_residual_exposes_dynamic_impurity_factor(data_path):
         Repository database paths.
     """
     unit = make_unit(data_path)
-    unit.Kinetics.alpha_fn = lambda conc: 2.0  # [-], synthetic doubled dynamic growth
-    _, _, composition, _, residual = unit.solve_steady_state(0.15, TEMPERATURE)
-    # Nominal transfer is 60 kg/m**3/s. Doubling it adds this negative term
-    # to the dynamic target equation; phi=.97 for the nominal exponential.
-    expected = -60 * (1 - composition) / (0.97 * DENSITY)  # [kg/kg/s]
-    assert residual == pytest.approx(expected, rel=ROUND_OFF, abs=0)
+    # Solvent mass concentration is 200 kg/m**3, on either kinetic basis.
+    unit.Kinetics.alpha_fn = lambda conc: 1 + conc[4] / 2000  # [-]
+    _, distribution, composition, _, residual = unit.solve_steady_state(
+        0.15, TEMPERATURE)
+    # Exponential moments give kv*mu_3 = 3e-8*G**3 for B=1e10 and tau=1 s.
+    solid_fraction = 3e-8 * 110**3  # [-], corrected G=110 um/s
+    expected = (0.2 - 2 * solid_fraction) / (1 - 3 * solid_fraction)  # [kg/kg]
+    assert composition == pytest.approx(expected, rel=ROUND_OFF)
+    assert abs(residual) < ROUND_OFF
+    assert_dynamic_closure(unit, composition, distribution, 110.0)  # [um/s]
 
 
 def test_finite_radius_is_rejected(data_path):
@@ -636,6 +640,47 @@ def test_composition_dependent_solubility_domain(data_path, seed):
     # [kg/kg], synthetic solubility; positive growth starts at w=.1.
     _, distribution, composition, _, _ = unit.solve_steady_state(seed, TEMPERATURE)
     assert composition == pytest.approx(2 / 13, rel=ROUND_OFF, abs=0)
+    assert_dynamic_closure(unit, composition, distribution, 100.0)  # [um/s]
+
+
+@pytest.mark.parametrize('basis', ['mass_frac', 'mass_conc'])
+def test_solubility_scan_preserves_non_target_species(data_path, basis):
+    """Keep the solvent input identical in steady and dynamic kinetics.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository database paths.
+    basis : str
+        Kinetic composition basis, [kg/kg] or [kg/m**3].
+    """
+    unit = make_unit(data_path, basis=basis)
+    basis_scale = DENSITY if basis == 'mass_conc' else 1.0  # [kg/m**3] or [-]
+
+    def solvent_solubility(temp, conc):
+        """Return synthetic solubility proportional to the solvent content.
+
+        Parameters
+        ----------
+        temp : float
+            Temperature [K], unused in this isothermal fixture.
+        conc : ndarray
+            Full species composition [configured basis], shape (5,).
+
+        Returns
+        -------
+        float
+            Target solubility [configured basis], one twentieth of solvent.
+        """
+        assert np.shape(conc) == (5,)
+        assert conc[4] == pytest.approx(0.2 * basis_scale)
+        return conc[4] / 20
+
+    unit.Kinetics.get_solubility = solvent_solubility
+    _, distribution, composition, _, residual = unit.solve_steady_state(
+        0.15 * basis_scale, TEMPERATURE)
+    assert composition / basis_scale == pytest.approx(2 / 13, rel=ROUND_OFF)
+    assert abs(residual) < ROUND_OFF * basis_scale
     assert_dynamic_closure(unit, composition, distribution, 100.0)  # [um/s]
 
 

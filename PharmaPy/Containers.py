@@ -423,7 +423,8 @@ class Mixer:
         deferred: the mixer keeps attached masses authoritative, but Slurry
         enthalpy weights phases by moment-derived fractions, so inconsistent
         solids cannot be mixed conservatively.
-        Profiled multiphase mixing remains outside this static path (#221).
+        Profiled multiphase mixing remains outside this static path
+        (https://github.com/PharmaPy-org/PharmaPy/issues/221).
         """
 
         timeseries_flag = []
@@ -789,7 +790,7 @@ class Mixer:
         geometry, identical to the mass basis for validated inputs, and
         assumes uniform filling. An inlet Cake supplies a copied float
         spatial grid, so later changes to its grid cannot affect the outlet.
-        The mixed cake carries the first solid inlet's z_external coordinates
+        The mixed cake carries the first actual Cake inlet's z_external coordinates
         [m] and no cake_height; downstream remapping uses the coordinate-span
         fallback.
         Continuous inputs always produce a SlurryStream: Cake has no flow
@@ -825,9 +826,10 @@ class Mixer:
                 pore_volume = solid_volume * porosity / (1 - porosity)  # [m**3]
                 make_cake = liquid_out.vol <= pore_volume
             if make_cake:
-                solid_inlet = self.Inlets[ind_solids]
-                z_external = (np.asarray(solid_inlet.z_external, dtype=float).copy()
-                              if isinstance(solid_inlet, Cake) else None)  # [m]
+                cake_inlet = next((inlet for inlet in self.Inlets
+                                   if isinstance(inlet, Cake)), None)
+                z_external = (np.asarray(cake_inlet.z_external, dtype=float).copy()
+                              if cake_inlet is not None else None)  # [m]
                 self.Outlet = Cake(z_external=z_external)
             else:
                 self.Outlet = Slurry()
@@ -878,7 +880,9 @@ class Mixer:
         numerical roundoff allowance for independently propagated clocks,
         not a physical extrapolation allowance. Values past an inlet's last
         time within the grid are held at its endpoint. Static streams
-        broadcast to the chosen grid.
+        broadcast to the chosen grid. Nonempty DynamicInlet controls require
+        a multi-sample connected evaluation grid; without one solve_unit raises
+        ValueError instead of silently evaluating only at time zero.
 
         Entirely static liquid mixing publishes a single time [s]
         and contributes no duration. Duration-based flowsheet accounting of
@@ -908,10 +912,10 @@ class Mixer:
                 # batch inventory [kg] or continuous mass flow [kg/s].
                 if self.is_continuous:
                     self.Liquid_1 = LiquidStream(
-                        path, mass_frac=states[2], mass_flow=states[0])
+                        path, mass_frac=states[2], mass_flow=states[0], temp=states[-1])
                 else:
                     self.Liquid_1 = LiquidPhase(
-                        path, mass_frac=states[2], mass=states[0])
+                        path, mass_frac=states[2], mass=states[0], temp=states[-1])
         else:
             self.states_in_dict = {'Inlet': states_in_dict}
             time_prof = [0]  # [s], instantaneous static mixing
@@ -924,6 +928,14 @@ class Mixer:
                     if inlet_time is not None and np.size(inlet_time) > 1:
                         time_prof = np.atleast_1d(inlet_time)  # [s]
                         break
+
+                if len(time_prof) < 2:
+                    for index, inlet in enumerate(self.Inlets):
+                        dynamic = getattr(inlet, 'DynamicInlet', None)
+                        if dynamic is not None and getattr(dynamic, 'controls', {}):
+                            raise ValueError(
+                                f"Mixer dynamic inlet {index} requires a multi-sample "
+                                "connected evaluation grid; a static snapshot has no horizon.")
 
                 clock_tolerance = np.sqrt(eps) * (
                     time_prof[-1] - time_prof[0])  # [s], clock roundoff allowance

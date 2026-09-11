@@ -14,6 +14,23 @@ from test_crystallizer_parameter_evaluations import InitializationCaptured, RTOL
 
 
 @pytest.mark.unit
+def test_reset_charge_arrays_do_not_alias_live_phases(data_path):
+    """Restore the charge after in-place mutation of an already-reset phase.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    """
+    unit, _ = inventory_unit(data_path, BatchCryst, gridless=True)
+    original = unit.Liquid_1.mass_conc.copy()  # [kg/m**3], immutable charge oracle
+    unit.reset()
+    unit.Liquid_1.mass_conc *= 2  # [-], expose aliasing with the stored charge
+    unit.reset()
+    np.testing.assert_allclose(unit.Liquid_1.mass_conc, original, rtol=RTOL)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize('case', ['msmpr_moments', 'msmpr_fvm', 'semibatch_moments'])
 def test_reset_restores_cached_slurry_at_solver_boundary(data_path, monkeypatch, case):
     """Restore a changed population or volume before capturing the next state.

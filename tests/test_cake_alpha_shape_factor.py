@@ -94,12 +94,9 @@ def _make_cake(thermo_path: str, shape_factor: float) -> Cake:
 
 
 def test_cake_alpha_is_invariant_to_real_phase_shape_factor(thermo_path):
-    """Verify shape-factor cancellation at fixed porosity with real phases.
+    """Verify the packing-to-resistance handoff with real phase shape factors.
 
-    #165 makes the packing model use phase-owned kv. Its epsilon-regularized
-    weights have a small kv dependence, so exact alpha invariance applies
-    only at fixed porosity. Hold the historical porosity constant to isolate
-    alpha's cancellation; separate packing regressions cover that dependence.
+    Normalized volume weights cancel kv in both packing and resistance.
 
     Parameters
     ----------
@@ -110,19 +107,18 @@ def test_cake_alpha_is_invariant_to_real_phase_shape_factor(thermo_path):
     alpha_values = []  # [m/kg]
     for shape_factor in SHAPE_FACTOR_PROBES:
         cake = _make_cake(thermo_path, shape_factor)
-        cake.porosity = reference.porosity  # [-], isolate resistance weights
         alpha_values.append(cake.get_alpha())
     alpha_values = np.array(alpha_values)  # [m/kg]
-    assert alpha_values[0] == pytest.approx(
-        EXPECTED_LEGACY_ALPHA,
-        rel=ALPHA_RELATIVE_TOLERANCE,
-    )
-    np.testing.assert_allclose(
-        alpha_values,
-        EXPECTED_LEGACY_ALPHA,
-        rtol=ALPHA_RELATIVE_TOLERANCE,
-        atol=0.0,
-    )
+    # Carman--Kozeny reduces to a ratio of CSD first and third midpoint
+    # moments, times 180(1-e)/(e**3 rho_s); kv is absent from this expression.
+    size = reference.Solid_1.x_distrib * 1e-6  # [m]
+    centers = (size[1:] + size[:-1]) / 2  # [m]
+    counts = np.diff(size) * (reference.Solid_1.distrib[1:] + reference.Solid_1.distrib[:-1]) / 2  # [common number basis]
+    porosity = reference.porosity  # [-], independently checked packing model
+    expected = (180 * (1-porosity) / porosity**3 / reference.Solid_1.getDensity()
+                * np.dot(counts, centers) / np.dot(counts, centers**3))  # [m/kg]
+    np.testing.assert_allclose(alpha_values, expected,
+                               rtol=ALPHA_RELATIVE_TOLERANCE, atol=0)
 
 
 def test_cake_alpha_reads_shape_factor_from_solid_phase(thermo_path):

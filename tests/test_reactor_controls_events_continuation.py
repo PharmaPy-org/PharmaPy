@@ -512,10 +512,14 @@ def test_nonlinear_prescribed_duty_uses_callable(cls, kind, count):
     else:
         control = lambda time: TEMPERATURE + amplitude * np.sin(time / timescale)
         slope = lambda time: amplitude / timescale * np.cos(time / timescale)
-    # A lone point must also have a defined derivative when no solve preceded it.
+    # A lone point has no completed interval on which to estimate a derivative.
     time = np.linspace(0., duration, count)  # [s]
     reactor = configured(cls, isothermal=False, controls={'temp': {'fun': control, 'args': (), 'kwargs': {}}})
     states = profile(reactor, time)  # [mol/L], optional [m**3]
+    if count == 1:
+        with pytest.raises(ValueError, match='at least two finite increasing'):
+            reactor.retrieve_results(time, states)
+        return
     reactor.retrieve_results(time, states)
     reaction, flow, capacity = independent_terms(reactor, time, states, control(time))  # [W], [W], [J/K]
     expected = capacity * slope(time) - reaction - flow  # [W]
@@ -794,7 +798,7 @@ def test_prescribed_solver_segments_share_rates_and_duties(cls, kind):
 @pytest.mark.unit
 @pytest.mark.parametrize('cls', ALL_TANKS)
 @pytest.mark.parametrize('duration', [0., 32.])
-def test_single_reported_point_uses_requested_run_duration(monkeypatch, cls, duration):
+def test_single_reported_point_rejects_unavailable_control_derivative(monkeypatch, cls, duration):
     evaluations = []  # Each entry is a scalar or vector of times [s].
     def control(time):
         """Record evaluations of a smooth control defined only after run start.
@@ -850,13 +854,11 @@ def test_single_reported_point_uses_requested_run_duration(monkeypatch, cls, dur
             np.array([problem.time]), np.atleast_2d(problem.initial)))
     monkeypatch.setattr(Reactors, 'Explicit_Problem', problem)
     monkeypatch.setattr(Reactors, 'CVode', solver)
-    reactor.solve_unit(runtime=duration, verbose=False)
-    # The documented forward stencil samples t+h and t+2h, even though the
-    # returned profile has zero span. The zero-duration case uses the 1 ms floor.
-    expected_step = max(duration, 1.) / 1024  # [s], documented differentiation rule
-    assert max(float(np.max(value)) for value in evaluations) == 2 * expected_step
-    assert reactor.result.time.size == 1
-    assert np.isfinite(reactor.result.q_ht[0])
+    with pytest.raises(ValueError, match='at least two finite increasing'):
+        reactor.solve_unit(runtime=duration, verbose=False)
+    # A stopped run supplies no interval on which a derivative can be obtained.
+    # In particular, reconstruction must not call controls beyond that interval.
+    assert max(float(np.max(value)) for value in evaluations) == 0
 
     reactor.reset()
     assert not ({'_run_start', '_run_duration'} & reactor.__dict__.keys())

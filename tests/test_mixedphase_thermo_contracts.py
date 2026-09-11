@@ -1,9 +1,18 @@
-"""B004 regressions using real phases and no optional solver backend.
+"""regressions using real phases and no optional solver backend.
 
 The shipped five-species database supplies unequal phase properties. These
 tests intercept solver initialization at the ODE boundary. Moment-mode solves
 and inventory retrieval are covered in test_crystallizer_moment_basis.py and
 test_crystallizer_moment_inventory.py.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/159
+https://github.com/PharmaPy-org/PharmaPy/issues/165
+https://github.com/PharmaPy-org/PharmaPy/issues/226
+https://github.com/PharmaPy-org/PharmaPy/issues/246
+https://github.com/PharmaPy-org/PharmaPy/issues/247
+https://github.com/PharmaPy-org/PharmaPy/issues/248
 """
 
 from unittest.mock import PropertyMock, patch
@@ -429,7 +438,7 @@ def test_porosity_matches_independent_two_bin_model(thermo_path):
     # Yu/Zou/Standish model attributed in commit 9b646f2. For two bins with
     # identical initial specific volume V, the candidates reduce to
     # V-(V-1)*g(r)*w_small and V-V*f(r)*w_large. A common diameter scale
-    # cancels from r=150/250; kv remains only in epsilon-regularized weights.
+    # cancels from r=150/250 and normalized bin volume weights.
     ratio = 150 / 250  # [-], ratio of midpoint diameters
     large_interaction = (1 - ratio)**2 + 0.4 * ratio * (1 - ratio)**3.7  # [-]
     small_interaction = (1 - ratio)**3.3 + 2.8 * ratio * (1 - ratio)**2.7  # [-]
@@ -442,7 +451,7 @@ def test_porosity_matches_independent_two_bin_model(thermo_path):
     actual_values = []  # [-]
     for kv in shape_factors:
         weights = unscaled_bin_volumes / (
-            unscaled_bin_volumes.sum() + np.finfo(float).eps / kv)  # [-]
+            unscaled_bin_volumes.sum())  # [-]
         candidates = [specific_volume - (specific_volume - 1) * large_interaction * weights[0],
                       specific_volume - specific_volume * small_interaction * weights[1]]  # [-]
         expected = 1 - 1 / max(candidates)  # [-]
@@ -451,14 +460,8 @@ def test_porosity_matches_independent_two_bin_model(thermo_path):
         assert actual == pytest.approx(expected, rel=0, abs=4*np.finfo(float).eps)
         assert 0 < actual < 1
         actual_values.append(actual)
-    # The packing model is kv-invariant by construction. The only departure
-    # is the +eps weight denominator: its largest relative perturbation in
-    # this sweep is eps / (sum(unscaled volumes) * min(kv)).
-    regularization_tolerance = (np.finfo(float).eps
-                                / unscaled_bin_volumes.sum()
-                                / min(shape_factors))  # [-]
     np.testing.assert_allclose(actual_values, actual_values[0],
-                               rtol=regularization_tolerance, atol=0)
+                               rtol=4*np.finfo(float).eps, atol=0)
 
 
 def test_filter_reads_phase_shape_factor(thermo_path):
@@ -476,12 +479,11 @@ def test_filter_reads_phase_shape_factor(thermo_path):
     assert filter_unit.alpha == pytest.approx(expected, rel=RTOL, abs=0)
 
 
-def test_porosity_is_exact_at_legacy_shape_factor(thermo_path):
-    # Captured on HEAD 40d2f4a for this uniform two-bin fixture. Allow four
-    # float64 epsilon for a few ulp of reassociation, as the cake-alpha test does.
-    legacy_porosity = 0.3679903311462239  # [-]
-    assert make_solid(thermo_path, 0.524).getPorosity() == pytest.approx(
-        legacy_porosity, rel=4 * np.finfo(float).eps, abs=0)
+def test_porosity_rejects_zero_population(thermo_path):
+    solid = make_solid(thermo_path, 0.524)
+    solid.distrib[:] = 0  # [#/um], no particle packing can be defined
+    with pytest.raises(ValueError, match='finite positive particle volume'):
+        solid.getPorosity()
 
 
 def test_saturation_matches_volume_weights_without_shape_factor():

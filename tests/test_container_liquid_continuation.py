@@ -1,8 +1,13 @@
-"""B009b liquid Mixer and ContinuousHoldup contracts with real streams.
+"""liquid Mixer and ContinuousHoldup contracts with real streams.
 
 Shipped five-species thermodynamics give asymmetric mixing fixtures. Core tests
 use synthetic profiles and the real holdup RHS; the Assimulo test additionally
-exercises continuation through the public solver. Existing B009 tests stay intact.
+exercises continuation through the public solver. Related static mixing tests use the same physical fixtures.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/220
+https://github.com/PharmaPy-org/PharmaPy/issues/243
 """
 
 import json

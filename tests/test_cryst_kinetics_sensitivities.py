@@ -1,8 +1,14 @@
-"""B006 signed driving forces and parameter partials, without solver backends.
+"""signed driving forces and parameter partials, without solver backends.
 
 Synthetic power laws exercise both sides of a constant 2 kg/m**3 solubility.
 A monodisperse population gives independently specified non-unit moment factors.
 The physical prefactors below are numerical test cases, not calibrated kinetics.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/32
+https://github.com/PharmaPy-org/PharmaPy/issues/35
+https://github.com/PharmaPy-org/PharmaPy/issues/43
 """
 
 import warnings

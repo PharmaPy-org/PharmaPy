@@ -1,8 +1,16 @@
-"""B021 regressions using synthetic reaction networks without a solver backend.
+"""regressions using synthetic reaction networks without a solver backend.
 
 The distinct reactions A <-> B and 2 B <-> 2 C expose species, reaction,
 parameter, and time ordering, including the normalized extent of reaction 2.
 All fixture values are contract examples, not calibrated physical data.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/36
+https://github.com/PharmaPy-org/PharmaPy/issues/44
+https://github.com/PharmaPy-org/PharmaPy/issues/60
+https://github.com/PharmaPy-org/PharmaPy/issues/166
+https://github.com/PharmaPy-org/PharmaPy/issues/235
 """
 
 from pathlib import Path

@@ -174,7 +174,8 @@ class _BaseReactor:
             controlled state's units as output (temperature [K]). Values may
             be callables or records with ``fun`` and optional ``args`` and
             ``kwargs`` (defaulting to an empty tuple and dictionary).
-            Bath temperature always comes from ``Utility``; a ``temp_ht``
+            At scalar time a tank control must return a finite scalar;
+            singleton arrays are rejected. Bath temperature comes from ``Utility``; a ``temp_ht``
             control does not override it.
         h_conv : float
             Liquid-side convective heat-transfer coefficient [W/m**2/K].
@@ -394,7 +395,7 @@ class _BaseReactor:
         """
         copy_dict = copy.deepcopy(self.__original_prof__)
 
-        self.Liquid_1.__dict__.update(self.__original_phase_dict__)
+        self.Liquid_1.__dict__.update(copy.deepcopy(self.__original_phase_dict__))
         self.__dict__.update(copy_dict)
 
         self.profiles_runs = []
@@ -447,6 +448,32 @@ class _BaseReactor:
             raise ValueError(
                 "A Utility is required for an active bath or jacket energy balance")
 
+    def _tank_control_value(self, name: str, time: float) -> float:
+        """Evaluate one prescribed tank state with a scalar return boundary.
+
+        Parameters
+        ----------
+        name : str
+            Controlled state name: volume [m**3] or temperature [K].
+        time : float
+            Absolute evaluation time [s].
+
+        Returns
+        -------
+        float
+            Finite scalar in the controlled state's units.
+
+        Raises
+        ------
+        ValueError
+            If the control returns an array, a nonnumeric value, or NaN/Inf.
+        """
+        control = self.controls[name]
+        value = np.asarray(control['fun'](time, *control['args'], **control['kwargs']))  # [state units]
+        if value.ndim != 0 or not np.issubdtype(value.dtype, np.number) or not np.isfinite(value):
+            raise ValueError(f"Tank control {name!r} must return a finite scalar at scalar time")
+        return float(value)
+
     def _complete_tank_profiles(self, time: np.ndarray, profiles: dict) -> dict:
         """Complete tank volume and temperature profiles at reported times.
 
@@ -473,9 +500,8 @@ class _BaseReactor:
         """
         for name in ('vol', 'temp'):
             if name not in profiles and name in self.controls:
-                control = self.controls[name]
                 profiles[name] = np.asarray([
-                    control['fun'](sample_time, *control['args'], **control['kwargs'])
+                    self._tank_control_value(name, sample_time)
                     for sample_time in time])  # sample_time [s]; vol [m**3], temp [K]
         profiles = complete_dict_states(
             time, profiles, ('vol', 'temp'), self.Liquid_1, self.controls)
@@ -502,15 +528,15 @@ class _BaseReactor:
     def _prescribed_heat(self, time: np.ndarray, temp: np.ndarray,
                          capacitance: np.ndarray, source: np.ndarray,
                          flow: Union[np.ndarray, float] = 0,
-                         step_fraction: float = 1 / 1024,
-                         minimum_step: float = 1 / 1024) -> np.ndarray:
+                         step_fraction: Optional[float] = None,
+                         minimum_step: Optional[float] = None) -> np.ndarray:
         """Reconstruct utility heat by differentiating the temperature control.
 
         Parameters
         ----------
         time : numpy.ndarray
             Finite, increasing absolute times [s], shape ``(num_times,)``.
-            A single sample is supported.
+            At least two distinct samples are required.
         temp : numpy.ndarray
             Prescribed temperatures [K], same shape as time.
         capacitance : numpy.ndarray
@@ -519,16 +545,12 @@ class _BaseReactor:
             Reaction heat generation [W], same shape as time.
         flow : numpy.ndarray or float, optional
             Net sensible feed contribution [W]; zero for Batch.
-        step_fraction : float, optional
-            Fraction of the run duration [-] used as the differentiation
-            step. The default 1/1024 is about 0.1 percent: a numerical design
-            choice balancing local curvature and subtraction roundoff, with
-            a binary fraction to preserve representable time increments.
-        minimum_step : float, optional
-            Nominal minimum step [s], default 1/1024 s (about 1 ms). This
-            numerical floor avoids zero steps for zero-duration runs and
-            limits cancellation at ordinary process temperatures; positive
-            run boundaries take precedence over this floor.
+        step_fraction : float or None, optional
+            Fraction of the smallest reporting interval [-]. None uses the
+            public solve_unit control_step_fraction (default 1/1024).
+        minimum_step : float or None, optional
+            Nominal step floor [s]. None uses control_minimum_step (default
+            1/1024 s). Completed interval boundaries override this floor.
 
         Returns
         -------
@@ -538,65 +560,61 @@ class _BaseReactor:
         Raises
         ------
         ValueError
-            If times are empty, nonfinite or not increasing, or either step
+            If fewer than two times are supplied, times are nonfinite or
+            not increasing, or either step
             parameter is nonpositive or nonfinite.
 
         Notes
         -----
-        h = max(step_fraction * run_duration, minimum_step), where solve_unit
-        records run_duration = final_time - t0 before integration. Thus even
-        a single reported point uses the requested run duration. For direct
-        retrieval without a solve, the profile start and span are used.
-        The control's args and kwargs are passed at each evaluation.
-
-        For positive-duration runs, cap h at half the run duration.
-        Interior derivatives use (f(t+h)-f(t-h))/(2h), with O(h**2) error.
-        Near the start use (-3*f(t)+4*f(t+h)-f(t+2*h))/(2*h); near the end
-        use (3*f(t)-4*f(t-h)+f(t-2*h))/(2*h). Reduce the local one-sided step
-        further if needed to keep both evaluations inside the run. Central
-        and one-sided truncation bounds are h**2*max|d**3 f/dt**3|/6 and /3,
-        respectively, plus subtraction roundoff. Controls need only be
-        evaluable on [run_start, run_end]. A zero-duration run retains the
-        forward stencil with the nominal minimum step, requiring evaluation
-        beyond its single time. Discontinuous controls are differentiated
-        across their jumps; the resulting finite rate is step-dependent.
-        Duties still have the reporting grid's trapezoidal quadrature error.
+        The step uses the smallest reporting interval, capped to fit inside
+        the completed run. An early event shortens this interval even when a
+        longer horizon was requested. Centered differences and three-point
+        one-sided endpoint stencils have O(h**2) truncation error. The
+        one-sided error is bounded by h**2 * max|d**3 T/dt**3| / 3, plus
+        subtraction roundoff. The control's args and kwargs are retained.
+        A single-point profile cannot determine a derivative within the
+        completed interval and raises ValueError. Discontinuous controls have
+        step-dependent derivatives; duty integration also retains reporting
+        grid quadrature error.
         """
         time = np.asarray(time)  # [s]
-        if (time.ndim != 1 or time.size == 0 or not np.all(np.isfinite(time))
+        if (time.ndim != 1 or time.size < 2 or not np.all(np.isfinite(time))
                 or np.any(np.diff(time) <= 0)):
-            raise ValueError("Prescribed heat duty requires finite increasing time samples")
+            raise ValueError("Prescribed heat duty requires at least two finite increasing time samples")
+        if step_fraction is None:
+            step_fraction = getattr(self, 'control_step_fraction', 1 / 1024)  # [-]
+        if minimum_step is None:
+            minimum_step = getattr(self, 'control_minimum_step', 1 / 1024)  # [s]
         if (not np.isfinite(step_fraction) or step_fraction <= 0
                 or not np.isfinite(minimum_step) or minimum_step <= 0):
             raise ValueError("Control differentiation steps must be finite and positive")
-        run_start = getattr(self, '_run_start', time[0])  # [s]
-        duration = getattr(self, '_run_duration', time[-1] - time[0])  # [s]
-        run_end = run_start + duration  # [s]
-        step = max(step_fraction * duration, minimum_step)  # [s]
-        if duration > 0:
-            step = min(step, duration / 2)  # [s], fit a three-point stencil
-        control = self.controls['temp']
-        function, args, kwargs = control['fun'], control['args'], control['kwargs']
+        run_start = time[0]  # [s], actual completed profile boundary
+        run_end = time[-1]  # [s], includes early event termination
+        duration = run_end - run_start  # [s]
+        sampling_interval = np.min(np.diff(time))  # [s]
+        step = max(step_fraction * sampling_interval, minimum_step)  # [s]
+        step = min(step, sampling_interval, duration / 2)  # [s]
+        function = partial(self._tank_control_value, 'temp')
         slope = np.empty(time.shape)  # [K/s]
         for index, eval_time in enumerate(time):  # eval_time [s]
             if eval_time - step < run_start:
                 local_step = (min(step, (run_end - eval_time) / 2)
                               if duration > 0 else step)  # [s]
-                forward = function(eval_time + local_step, *args, **kwargs)  # [K]
+                forward = function(eval_time + local_step)  # [K]
                 outer_time = eval_time + 2 * local_step  # [s]
                 if duration > 0:
                     outer_time = min(outer_time, run_end)  # [s], clip endpoint roundoff
-                forward_twice = function(outer_time, *args, **kwargs)  # [K]
+                forward_twice = function(outer_time)  # [K]
                 slope[index] = (-3 * temp[index] + 4 * forward - forward_twice) / (2 * local_step)
             elif eval_time + step > run_end:
                 local_step = min(step, (eval_time - run_start) / 2)  # [s]
-                backward = function(eval_time - local_step, *args, **kwargs)  # [K]
+                backward = function(eval_time - local_step)  # [K]
                 outer_time = max(eval_time - 2 * local_step, run_start)  # [s], clip endpoint roundoff
-                backward_twice = function(outer_time, *args, **kwargs)  # [K]
+                backward_twice = function(outer_time)  # [K]
                 slope[index] = (3 * temp[index] - 4 * backward + backward_twice) / (2 * local_step)
             else:
-                forward = function(eval_time + step, *args, **kwargs)  # [K]
-                backward = function(eval_time - step, *args, **kwargs)  # [K]
+                forward = function(eval_time + step)  # [K]
+                backward = function(eval_time - step)  # [K]
                 slope[index] = (forward - backward) / (2 * step)
         return capacitance * slope - source - flow
 
@@ -763,9 +781,12 @@ class _BaseReactor:
         # Decompose states
         di_states = unpack_states(states, self.dim_states, self.name_states)
 
+        for name in ('vol', 'temp', 'temp_ht'):
+            if name not in di_states and name in self.controls:
+                di_states[name] = self._tank_control_value(name, time)  # [state units]
         di_states = complete_dict_states(time, di_states,
                                          ('vol', 'temp', 'temp_ht'),
-                                         self.Liquid_1, self.controls)
+                                         self.Liquid_1, {})
 
         self._require_utility()
         if self.ht_mode == 'bath' and 'temp' in self.states_uo:
@@ -1216,7 +1237,9 @@ class BatchReactor(_BaseReactor):
             return output
 
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
-                   params_control=None, verbose=True, sundials_opts=None):
+                   params_control=None, verbose=True, sundials_opts=None,
+                   control_step_fraction: float = 1 / 1024,
+                   control_minimum_step: float = 1 / 1024):
         """Integrate Batch balances and store cumulative tank results.
 
         Parameters
@@ -1224,8 +1247,8 @@ class BatchReactor(_BaseReactor):
         runtime : float or None, optional
             Run duration [s], added to elapsed time.
         time_grid : array-like or None, optional
-            Requested output times [s]; preserves the existing Batch time-grid
-            convention. Use runtime for continuation without a supplied grid.
+            Output offsets [s] from elapsed time. The last offset overrides
+            runtime; repeated grids continue from the retained final state.
         eval_sens : bool, optional
             Whether to solve parameter sensitivities.
         params_control : dict or None, optional
@@ -1234,6 +1257,15 @@ class BatchReactor(_BaseReactor):
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
             CVode options in the backend's units and conventions.
+
+        control_step_fraction : float, optional
+            Fraction of the smallest output interval [-] for temperature
+            differentiation. Default 1/1024 is a numerical design choice
+            resolving local curvature while limiting subtraction roundoff.
+        control_minimum_step : float, optional
+            Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
+            for cancellation control at ordinary process temperatures. Reduce
+            it for faster controls; completed boundaries take precedence.
 
         Returns
         -------
@@ -1255,17 +1287,27 @@ class BatchReactor(_BaseReactor):
 
         Notes
         -----
-        The requested duration is recorded before integration for control
-        differentiation, including when an event leaves a single output point.
+        reset_states=True restores the original charge before each solve.
+        Otherwise continuation retains liquid and jacket states and appends
+        cumulative heat duty. Control differentiation uses the completed span.
         """
 
         check_modeling_objects(self)
 
         self.set_names()
         self._require_utility()
+        for name in self.controls:
+            if name in ('vol', 'temp', 'temp_ht'):
+                self._tank_control_value(name, self.elapsed_time)
 
-        # check_stoichiometry(self.Kinetics.stoich_matrix,
-        #                     self.Liquid_1.mw[self.mask_species])
+        if self.reset_states:
+            self.reset()
+
+        if (not np.isfinite(control_step_fraction) or control_step_fraction <= 0
+                or not np.isfinite(control_minimum_step) or control_minimum_step <= 0):
+            raise ValueError("Control differentiation steps must be finite and positive")
+        self.control_step_fraction = control_step_fraction  # [-]
+        self.control_minimum_step = control_minimum_step  # [s]
 
         self.params_control = params_control
 
@@ -1273,8 +1315,8 @@ class BatchReactor(_BaseReactor):
             final_time = runtime + self.elapsed_time
 
         if time_grid is not None:
-            final_time = time_grid[-1] + self.elapsed_time
-            self.elapsed_time = time_grid[0]
+            time_grid = np.asarray(time_grid) + self.elapsed_time  # [s]
+            final_time = time_grid[-1]  # [s]
 
         self._run_start = self.elapsed_time  # [s], absolute start for control differentiation
         self._run_duration = final_time - self._run_start  # [s], requested duration
@@ -1291,7 +1333,10 @@ class BatchReactor(_BaseReactor):
             states_init = np.append(states_init, self.Liquid_1.temp)
 
             if 'temp_ht' in self.states_uo:
-                tht_init = self.Utility.temp_in
+                if self.profiles_runs:
+                    tht_init = self.profiles_runs[-1]['temp_ht'][-1]  # [K]
+                else:
+                    tht_init = self.Utility.temp_in  # [K], nominal fresh charge
                 states_init = np.append(states_init, tht_init)
 
         # Create problem
@@ -1704,7 +1749,9 @@ class CSTR(_BaseReactor):
 
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
                    params_control=None, verbose=True, sundials_opts=None,
-                   any_event: bool = True):
+                   any_event: bool = True,
+                   control_step_fraction: float = 1 / 1024,
+                   control_minimum_step: float = 1 / 1024):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -1725,6 +1772,15 @@ class CSTR(_BaseReactor):
         any_event : bool, optional
             Stop on any eligible event condition (default). False requires all
             conditions in the current notification, as in SimExec steady-state runs.
+
+        control_step_fraction : float, optional
+            Fraction of the smallest output interval [-] for temperature
+            differentiation. Default 1/1024 is a numerical design choice
+            resolving local curvature while limiting subtraction roundoff.
+        control_minimum_step : float, optional
+            Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
+            for cancellation control at ordinary process temperatures. Reduce
+            it for faster controls; completed boundaries take precedence.
 
         Returns
         -------
@@ -1761,9 +1817,18 @@ class CSTR(_BaseReactor):
                 "with return_sens=False to use finite-difference "
                 "sensitivities")
 
+        if (not np.isfinite(control_step_fraction) or control_step_fraction <= 0
+                or not np.isfinite(control_minimum_step) or control_minimum_step <= 0):
+            raise ValueError("Control differentiation steps must be finite and positive")
+        self.control_step_fraction = control_step_fraction  # [-]
+        self.control_minimum_step = control_minimum_step  # [s]
+
         self.params_control = params_control
         self.set_names()
         self._require_utility()
+        for name in self.controls:
+            if name in ('vol', 'temp', 'temp_ht'):
+                self._tank_control_value(name, self.elapsed_time)
 
         self.num_concentr = len(self.Liquid_1.mole_conc)
         self.args_inputs = (self, self.num_concentr, 0)
@@ -2022,7 +2087,9 @@ class SemibatchReactor(CSTR):
 
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
                    params_control=None, verbose=True, sundials_opts=None,
-                   any_event: bool = True):
+                   any_event: bool = True,
+                   control_step_fraction: float = 1 / 1024,
+                   control_minimum_step: float = 1 / 1024):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -2043,6 +2110,15 @@ class SemibatchReactor(CSTR):
         any_event : bool, optional
             Stop on any eligible event condition (default). False requires all
             conditions in the current notification, as in SimExec steady-state runs.
+
+        control_step_fraction : float, optional
+            Fraction of the smallest output interval [-] for temperature
+            differentiation. Default 1/1024 is a numerical design choice
+            resolving local curvature while limiting subtraction roundoff.
+        control_minimum_step : float, optional
+            Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
+            for cancellation control at ordinary process temperatures. Reduce
+            it for faster controls; completed boundaries take precedence.
 
         Returns
         -------
@@ -2080,9 +2156,18 @@ class SemibatchReactor(CSTR):
                 "construct with return_sens=False to use finite-difference "
                 "sensitivities")
 
+        if (not np.isfinite(control_step_fraction) or control_step_fraction <= 0
+                or not np.isfinite(control_minimum_step) or control_minimum_step <= 0):
+            raise ValueError("Control differentiation steps must be finite and positive")
+        self.control_step_fraction = control_step_fraction  # [-]
+        self.control_minimum_step = control_minimum_step  # [s]
+
         self.params_control = params_control
         self.set_names()
         self._require_utility()
+        for name in self.controls:
+            if name in ('vol', 'temp', 'temp_ht'):
+                self._tank_control_value(name, self.elapsed_time)
 
         if self.reset_states:
             self.reset()
@@ -2233,9 +2318,8 @@ class PlugFlowReactor(_BaseReactor):
         State names mapped to callables ``f(time)`` or records
         ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
         in a record. Time is [s] and the returned state uses its physical
-        units (temperature [K]). PFR accepts and documents these forms but
-        does not yet apply controls to its integrated states. The tank
-        behavior of removing ``temp``/``temp_ht`` does not apply to PFR.
+        units (temperature [K]). Nonempty controls are not implemented for
+        PFR and raise NotImplementedError; None and empty mappings are valid.
     h_conv : float (optional, default = 1000)
         Convective heat transfer coefficient for the liquid phase in the reactor (W m\ :sup:`-2` K\ :sup:`-1`). 
     ht_mode : str (optional, default = 'bath')
@@ -2259,7 +2343,43 @@ class PlugFlowReactor(_BaseReactor):
                  reset_states=False, controls=None,
                  h_conv=1000, ht_mode='bath', return_sens=True,
                  state_events=None):
-        
+        """Initialize a discretized tubular reactor.
+
+        Parameters
+        ----------
+        diam_in : float
+            Internal tube diameter [m].
+        num_discr : int
+            Number of finite volumes [-].
+        mask_params : array-like of bool or None, optional
+            Active kinetic parameter mask.
+        base_units : str, optional
+            Material-state basis; concentration denotes [mol/L].
+        temp_ref : float, optional
+            Enthalpy reference temperature [K].
+        isothermal, adiabatic, reset_states : bool, optional
+            Thermal assumptions and repeated-solve reset policy.
+        controls : dict or None, optional
+            Reserved for prescribed states; only None or an empty mapping
+            is supported by this distributed model.
+        h_conv : float, optional
+            Liquid heat-transfer coefficient [W/m**2/K].
+        ht_mode : str, optional
+            Heat-transfer geometry selector, bath or jacket (tube area).
+        return_sens : bool, optional
+            Parameter-estimation sensitivity return policy.
+        state_events : list of dict or None, optional
+            Termination conditions in the named states' physical units.
+
+        Raises
+        ------
+        NotImplementedError
+            If nonempty controls or coil heat transfer are requested.
+        ValueError
+            If ht_mode is unknown.
+        """
+        if controls:
+            raise NotImplementedError("PlugFlowReactor controls are not implemented")
 
         super().__init__(mask_params,
                          base_units, temp_ref, isothermal,

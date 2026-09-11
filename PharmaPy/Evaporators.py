@@ -27,6 +27,7 @@ import copy
 
 gas_ct = 8.314
 eps = np.finfo(float).eps
+MAX_LIQUID_VOLUME_FRACTION = 0.95  # [-], legacy drum design reserves 5% vapor headspace
 
 
 def merge_supercritical(flags, x_liq, y_vap, z_super):
@@ -39,6 +40,52 @@ def merge_supercritical(flags, x_liq, y_vap, z_super):
     y[~flags] = y_vap
 
     return x, y
+
+
+def _solve_flash(model, seed: np.ndarray, vapor_index: int,
+                 residual_tolerance: float) -> np.ndarray:
+    """Solve and validate a flash before publishing phase amounts.
+
+    Parameters
+    ----------
+    model : callable
+        Scaled flash residual (material fractions [-], energy divided by
+        the configured energy scale for an adiabatic flash).
+    seed : numpy.ndarray
+        Initial state: fractions [-] and optional temperature [K].
+    vapor_index : int
+        Position of the vapor fraction; liquid fraction is at index zero.
+    residual_tolerance : float
+        Positive maximum absolute scaled residual and phase-bound allowance
+        [-]. The public default sqrt(float64 epsilon) is a numerical design
+        choice consistent with MINPACK's default relative step tolerance.
+
+    Returns
+    -------
+    numpy.ndarray
+        Converged state with only tolerance-sized phase-bound excursions clipped.
+
+    Raises
+    ------
+    ValueError
+        If the residual tolerance is not finite and positive.
+    RuntimeError
+        If convergence fails, residuals are too large, or phase fractions
+        materially violate [0, 1].
+    """
+    if not np.isfinite(residual_tolerance) or residual_tolerance <= 0:
+        raise ValueError("Flash residual_tolerance must be finite and positive")
+    solution, info, status, message = fsolve(model, seed, full_output=True)
+    if status != 1 or not np.all(np.isfinite(solution)):
+        raise RuntimeError(f"Flash failed to converge: {message}")
+    fractions = solution[[0, vapor_index]]  # [-]
+    if np.any(fractions < -residual_tolerance) or np.any(fractions > 1 + residual_tolerance):
+        raise RuntimeError("Flash returned phase fractions outside [0, 1]")
+    solution[[0, vapor_index]] = np.clip(fractions, 0, 1)  # [-], boundary roundoff only
+    residual = model(solution)  # [-], after configured energy scaling
+    if not np.all(np.isfinite(residual)) or np.max(np.abs(residual)) > residual_tolerance:
+        raise RuntimeError("Flash scaled residual exceeds residual_tolerance")
+    return solution
 
 
 class IsothermalFlash:
@@ -172,7 +219,29 @@ class IsothermalFlash:
 
         return balance
 
-    def solve_unit(self):
+    def solve_unit(self, residual_tolerance: float = np.sqrt(eps)) -> tuple:
+        """Solve the isothermal flash and publish validated phase amounts.
+
+        Parameters
+        ----------
+        residual_tolerance : float, optional
+            Absolute scaled residual and phase-bound allowance [-]. Default
+            sqrt(float64 epsilon) matches MINPACK's relative step scale.
+
+        Returns
+        -------
+        solution : numpy.ndarray
+            Liquid fraction, species liquid/vapor fractions, vapor fraction [-].
+        heat_bce : float
+            Required heat [W] for a stream, or energy [J] for a batch inventory.
+
+        Raises
+        ------
+        RuntimeError
+            If the solve does not converge or fails residual/phase-bound checks.
+        ValueError
+            If residual_tolerance is not finite and positive.
+        """
 
         # Set seeds
         l_seed = 0.5
@@ -187,7 +256,7 @@ class IsothermalFlash:
         # jac_eqns = jacauto(self.unit_model)
 
         # Solve nonlinear system
-        solution = fsolve(self.unit_model, seed, full_output=False)
+        solution = _solve_flash(self.unit_model, seed, -1, residual_tolerance)
         # fprime=jac_eqns,
 
         # Retrieve solution
@@ -382,7 +451,8 @@ class AdiabaticFlash:
 
         return balances
 
-    def solve_unit(self, v_seed=0.5):
+    def solve_unit(self, v_seed: float = 0.5,
+                   residual_tolerance: float = np.sqrt(eps)) -> np.ndarray:
         """ Solve AdiabaticFlash unit
 
 
@@ -390,12 +460,22 @@ class AdiabaticFlash:
         ----------
         v_seed : float, optional
             A seed for output fraction of vapor with respect to feed material
-            to the flash. It must be in the range 0-1. The default is 0.5.
+            to the flash [-]. It must be in the range 0-1. The default is 0.5.
+        residual_tolerance : float, optional
+            Scaled residual and phase-bound allowance [-]. Default
+            sqrt(float64 epsilon) matches MINPACK's relative step scale.
 
         Returns
         -------
-        solution : SciPy OptimizerResult object
-            solution of the root finding algorithm.
+        solution : numpy.ndarray
+            Phase/species fractions [-], followed by equilibrium temperature [K].
+
+        Raises
+        ------
+        RuntimeError
+            If convergence, scaled residual, or phase-bound validation fails.
+        ValueError
+            If residual_tolerance is not finite and positive.
 
         """
 
@@ -425,7 +505,7 @@ class AdiabaticFlash:
         seed = np.concatenate(([l_seed], x_seed, y_seed, [v_seed, temp_seed]))
 
         # jac_eqns = jacauto(self.unit_model)
-        solution = fsolve(self.unit_model, seed)
+        solution = _solve_flash(self.unit_model, seed, -2, residual_tolerance)
         # fprime=jac_eqns)
 
         # Retrieve solution
@@ -1109,8 +1189,20 @@ class Evaporator:
         Raises
         ------
         ValueError
-            If the liquid volume exceeds the drum volume [m**3].
+            If liquid volume reaches the drum volume, or a terminating
+            95% fill cap is already reached within sqrt(float64 epsilon)
+            times drum volume [m**3]. This root-surface allowance covers
+            roundoff on both sides of the event. Reset or drain before
+            continuing; no state is advanced on rejection.
         """
+        liquid_volume = self.Liquid_1.vol  # [m**3], checked on every initialization path
+        volume_tolerance = np.sqrt(eps) * self.vol_tot  # [m**3], root-surface roundoff allowance
+        if not np.isfinite(liquid_volume) or liquid_volume >= self.vol_tot:
+            raise ValueError("Drum volume must exceed the finite liquid volume [m**3]")
+        volume_cap = MAX_LIQUID_VOLUME_FRACTION * self.vol_tot  # [m**3]
+        if self.stop_at_maxvol and liquid_volume >= volume_cap - volume_tolerance:
+            raise ValueError("Evaporator liquid-volume cap reached; reset or drain the "
+                             "vessel before another filling solve")
         if self.elapsed_time > 0:
             states_init = self._terminal_states.copy()  # units in states_di
             values = unpack_states(states_init, self.dim_states, self.name_states)
@@ -1290,7 +1382,7 @@ class Evaporator:
 
             vol_liq = dict_states['mol_liq'][0] / rho_liq / 1000  # m**3
 
-            events.append(0.95 * self.vol_tot - vol_liq)
+            events.append(MAX_LIQUID_VOLUME_FRACTION * self.vol_tot - vol_liq)
 
         return np.array(events)
 
@@ -2406,8 +2498,11 @@ class ContinuousEvaporator:
         Raises
         ------
         RuntimeError
-            If the steady solver does not converge. The message contains
-            SciPy's termination code ``ier`` and diagnostic ``msg``.
+            If the steady solver does not converge or a trial leaves the
+            thermophysical property's supported domain. Convergence failures
+            include SciPy's ``ier`` and ``msg``; property failures preserve
+            the original exception as their cause and identify solver scaling
+            and initial trust-region settings as diagnostic inputs.
 
         """
 
@@ -2443,7 +2538,14 @@ class ContinuousEvaporator:
                     [mol], volume [m**3], pressure [Pa], zero energy rate
                     [J/s], and internal-energy closure [J].
                 """
-                return self.unit_model(0, states, states_dot=None, sw=None)
+                try:
+                    return self.unit_model(0, states, states_dot=None, sw=None)
+                except (AttributeError, ValueError, RuntimeError) as error:
+                    raise RuntimeError(
+                        "Steady evaporator property evaluation failed; check "
+                        "thermophysical data and fsolve_opts (state scaling "
+                        "and initial trust-region factor)."
+                    ) from error
             options = {} if fsolve_opts is None else dict(fsolve_opts)
             options['full_output'] = True
             steady_solution, info, ier, msg = fsolve(obj_fn, states_initial,

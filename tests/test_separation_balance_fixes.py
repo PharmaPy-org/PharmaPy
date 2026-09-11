@@ -1,7 +1,15 @@
-"""B011 balance and washing regressions with real phases and no ODE backend.
+"""balance and washing regressions with real phases and no ODE backend.
 
 Synthetic transport probes isolate units; the five-species shipped database
 supplies separation properties. Drying uses the existing synthetic vapor table.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/37
+https://github.com/PharmaPy-org/PharmaPy/issues/65
+https://github.com/PharmaPy-org/PharmaPy/issues/86
+https://github.com/PharmaPy-org/PharmaPy/issues/230
+https://github.com/PharmaPy-org/PharmaPy/issues/249
 """
 
 import json
@@ -318,12 +326,10 @@ def test_filter_rejects_zero_solid_feed_before_integration(separation_phases):
     liquid, solid = separation_phases
     solid.updatePhase(distrib=np.zeros_like(POPULATION))  # [#/um], pure-liquid feed
     unit = Filter(station_diam=0.1, alpha=1e11)  # [m/kg], avoids estimating an empty cake
-    unit.Phases = [liquid, solid]
-    original_params = unit.params
     with pytest.raises(ValueError, match='positive solid mass.*zero-solid'):
-        unit.solve_unit(runtime=0.01, verbose=False)
+        unit.Phases = [liquid, solid]
     assert unit.deltaP is None
-    assert unit.params == original_params
+    assert not hasattr(unit, 'result')
     np.testing.assert_array_equal(solid.distrib, np.zeros_like(POPULATION))
 
 

@@ -7,6 +7,7 @@ Created on Sun Apr  5 17:28:24 2020
 
 import json
 import pathlib
+import warnings
 from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
@@ -942,8 +943,9 @@ class ThermoPhysicalManager:
             Database molecular surface area constants [-], shape (num_species,).
         qip : ndarray
             Database molecular surface area constants [-] for systems with
-            water or alcohols, shape (num_species,). If absent, store ``qi``
-            as ``qip`` to retain the established activity-coefficient fallback.
+            water or alcohols, shape (num_species,). If absent, use ``qi`` locally
+            and warn once per instance. This inherited fallback is an explicit
+            assumption and may be unsuitable for water/alcohol mixtures.
 
         Returns
         -----------
@@ -997,13 +999,17 @@ class ThermoPhysicalManager:
 
         """
 
-        if 'qip' not in self.__dict__:
-            self.qip = self.qi  # [-], established qi=qip fallback
+        if not hasattr(self, 'qip') and not getattr(self, '_warned_qip_fallback', False):
+            warnings.warn(
+                "UNIQUAC qip is absent; assuming qip = qi. This fallback may "
+                "be unsuitable for water or alcohol mixtures; supply validated "
+                "qip values for those systems.", UserWarning, stacklevel=2)
+            self._warned_qip_fallback = True
 
         # Rename
         ri = self.ri
         qi = self.qi
-        qip = self.qip
+        qip = getattr(self, 'qip', self.qi)  # [-], local fallback leaves database fields unchanged
         amk = self.amk
 
         x_liq = mole_frac

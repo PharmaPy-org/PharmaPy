@@ -884,7 +884,6 @@ class VaporPhase(ThermoPhysicalManager):
     def __set_amounts(self, mass: float, vol: float,
                       moles: Union[float, np.ndarray],
                       massfrac: np.ndarray, molefrac: np.ndarray,
-                      conc: np.ndarray, mass_conc: np.ndarray,
                       temp: float, pres: float) -> None:
         """Store composition and reconcile positive amounts with the gas EOS.
 
@@ -899,9 +898,6 @@ class VaporPhase(ThermoPhysicalManager):
         massfrac, molefrac : ndarray
             Species mass and mole fractions [-], shape ``(num_species,)`` or
             ``(num_points, num_species)``.
-        conc, mass_conc : ndarray
-            Stored species concentrations on molar [mol/L] and mass
-            [kg/m**3] bases, respectively, with the same shape as fractions.
         temp, pres : float
             Proposed vapor temperature [K] and pressure [Pa], stored only
             after the amount/composition validation succeeds.
@@ -926,8 +922,9 @@ class VaporPhase(ThermoPhysicalManager):
         self.pres = pres  # [Pa]
         self.mass_frac = massfrac  # [-]
         self.mole_frac = molefrac  # [-]
-        self.mole_conc = conc  # [mol/L], retained converter basis
-        self.mass_conc = mass_conc  # [kg/m**3], retained converter basis
+        molar_density = np.asarray(pres) / (VAPOR_GAS_CONSTANT * temp) / 1000  # [mol/L], 1000 L/m**3
+        self.mole_conc = molefrac * molar_density[..., None]  # [mol/L], species on the last axis
+        self.mass_conc = self.mole_conc * self.mw  # [kg/m**3], g/L equals kg/m**3
         self.mw_av = mw_av  # [g/mol]
 
         if mass > 0 or vol > 0 or np.any(moles > 0):
@@ -956,7 +953,8 @@ class VaporPhase(ThermoPhysicalManager):
             Species concentrations, shape ``(num_species,)`` or
             ``(num_points, num_species)``, on molar [mol/L] and mass
             [kg/m**3] bases, respectively. No solvent is inferred. Supplied
-            concentrations are retained on their basis.
+            concentrations determine normalized composition; their total is
+            reconciled with the specified gas temperature and pressure.
         mass_frac, mole_frac : array-like, optional
             Species mass and mole fractions [-], shape ``(num_species,)`` or
             ``(num_points, num_species)``.
@@ -986,8 +984,8 @@ class VaporPhase(ThermoPhysicalManager):
         stored state unchanged. A no-argument update leaves all amounts
         unchanged. Composition inputs take precedence in the order mole_conc,
         mass_conc, mass_frac, mole_frac.
-        Concentrations derived from fractions are the converters' liquid-basis
-        values, not gas-EOS values. Stream amounts use per-second units.
+        All concentrations use the ideal-gas EOS, including zero-inventory
+        phases. Stream amounts use per-second units.
         """
         for name, amount in (('mass', mass), ('vol', vol), ('moles', moles)):
             # amount uses [kg], [m**3], or [mol], respectively (rates on streams).
@@ -1014,27 +1012,20 @@ class VaporPhase(ThermoPhysicalManager):
             mole_conc = mass_conc / self.mw  # [mol/L], kg/m**3 equals g/L
         elif mass_frac is not None:
             mass_frac = _as_float_array(mass_frac)  # [-]
-            mole_conc = self.frac_to_conc(mass_frac)  # [mol/L]
-            mass_conc = mole_conc * self.mw  # [kg/m**3], g/L equals kg/m**3
             mole_frac = self.frac_to_frac(mass_frac)  # [-]
         elif mole_frac is not None:
             mole_frac = _as_float_array(mole_frac)  # [-]
             if np.any(mole_frac):
-                mole_conc = self.frac_to_conc(mole_frac=mole_frac)  # [mol/L]
                 mass_frac = self.frac_to_frac(mole_frac=mole_frac)  # [-]
             else:
-                # Empty evaporator placeholders have no normalized composition.
-                mole_conc = np.zeros_like(mole_frac)  # [mol/L]
-                mass_frac = np.zeros_like(mole_frac)  # [-]
-            mass_conc = mole_conc * self.mw  # [kg/m**3], g/L equals kg/m**3
+                mass_frac = np.zeros_like(mole_frac)  # [-], empty placeholder
         else:
             mass_frac = self.mass_frac  # [-]
             mole_frac = self.mole_frac  # [-]
             mole_conc = self.mole_conc  # [mol/L]
             mass_conc = self.mass_conc  # [kg/m**3]
 
-        self.__set_amounts(mass, vol, moles, mass_frac, mole_frac,
-                           mole_conc, mass_conc, temp, pres)
+        self.__set_amounts(mass, vol, moles, mass_frac, mole_frac, temp, pres)
 
     def getCp(self, temp, mass_frac=None, mole_frac=None, basis='mass'):
         if mass_frac is None and mole_frac is None:
@@ -1846,6 +1837,12 @@ class SolidPhase(ThermoPhysicalManager):
         float
             Pore fraction of total packed-bed volume [-].
 
+        Raises
+        ------
+        ValueError
+            If the distribution represents zero, negative, or nonfinite
+            particle volume and therefore cannot define normalized weights.
+
         Notes
         -----
         Repository commit 9b646f2 attributes this model and its empirical
@@ -1853,9 +1850,9 @@ class SolidPhase(ThermoPhysicalManager):
         calibrated range. The existing Jeschar initial-porosity relation is
         ``0.375 + 0.34 * mean_size / diam_filter``. The equivalent packing
         diameter uses the phase-owned volume factor ``kv`` [-]. Common
-        diameter scaling cancels in pairwise size ratios, but ``kv`` does not
-        exactly cancel from volume weights because their denominator retains
-        the existing machine-epsilon regularization.
+        diameter scaling cancels in pairwise size ratios, and ``kv`` does not
+        affect normalized volume weights. A zero or invalid particle volume
+        cannot define packing and raises ValueError.
         """
 
         if distrib is None:
@@ -1878,8 +1875,11 @@ class SolidPhase(ThermoPhysicalManager):
         node_CSD = (distrib[:-1] + distrib[1:]) / 2
 
         # Volume of crystals in each bin
-        vol_cry = node_CSD * del_x_dist * (kv * node_x_dist**3)
-        frac_vol_cry = vol_cry / (np.sum(vol_cry) + eps)
+        vol_cry = node_CSD * del_x_dist * (kv * node_x_dist**3)  # [m**4/um], per-um CSD with meter grid; common factor cancels
+        total_volume = np.sum(vol_cry)  # [m**4/um], same common scale as bin volumes
+        if not np.isfinite(total_volume) or total_volume <= 0:
+            raise ValueError("Porosity requires a finite positive particle volume")
+        frac_vol_cry = vol_cry / total_volume  # [-], common kv cancels exactly
 
         vol_particle = kv * node_x_dist**3
         d_part_sphere = (6 * vol_particle / np.pi)**(1/3)

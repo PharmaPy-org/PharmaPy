@@ -3,6 +3,7 @@ import warnings
 import numpy as np
 from PharmaPy._assimulo import IDA, Implicit_Problem
 from PharmaPy.Phases import classify_phases
+from PharmaPy.ThermoModule import validate_activity_model
 from PharmaPy.Streams import VaporStream
 from PharmaPy.Connections import get_inputs_new
 from PharmaPy.Commons import (unpack_discretized, retrieve_pde_result,
@@ -56,7 +57,7 @@ class _BaseDistillation:
             Equilibrium-stage count [-]. If None, shortcut design estimates it.
             If negative, its absolute value multiplies the minimum stage count.
         gamma_model : str, optional
-            Activity-coefficient model name.
+            Activity-coefficient model: 'ideal', 'UNIFAC', or 'UNIQUAC'.
         num_feed : int, optional
             Feed tray number counted from the top [-].
         reflux_to_minimum_ratio : float, optional
@@ -66,6 +67,11 @@ class _BaseDistillation:
         -------
         None
             The constructor stores the shared configuration on the instance.
+
+        Raises
+        ------
+        ValueError
+            If gamma_model is not ideal, UNIFAC, or UNIQUAC.
         """
 
         self.num_plates = num_plates  # [-]
@@ -79,6 +85,7 @@ class _BaseDistillation:
         self.frac_HK = perc_HK/100  # [-]
         self.frac_LK = perc_LK/100  # [-]
 
+        validate_activity_model(gamma_model)
         self.gamma_model = gamma_model
 
         self.num_feed = num_feed  # [-], plate number from bottom.

@@ -1,8 +1,17 @@
-"""B009 mass, population, and energy contracts with real phase collaborators.
+"""mass, population, and energy contracts with real phase collaborators.
 
 The five-species shipped database supplies thermodynamics. No ODE solver is
 needed: collector derivatives and instantaneous mixer balances are evaluated
 directly. Continuous liquid solve/profile routing remains owned by #220.
+
+
+Related issue scope:
+https://github.com/PharmaPy-org/PharmaPy/issues/38
+https://github.com/PharmaPy-org/PharmaPy/issues/84
+https://github.com/PharmaPy-org/PharmaPy/issues/88
+https://github.com/PharmaPy-org/PharmaPy/issues/186
+https://github.com/PharmaPy-org/PharmaPy/issues/187
+https://github.com/PharmaPy-org/PharmaPy/issues/188
 """
 
 import json
@@ -20,6 +29,7 @@ from test_crystallizer_moment_inventory import inventory_unit
 from PharmaPy.MixedPhases import Cake, Slurry, SlurryStream
 from PharmaPy.Phases import LiquidPhase, SolidPhase
 from PharmaPy.Streams import LiquidStream, SolidStream
+from PharmaPy.ProcessControl import DynamicInput
 
 pytestmark = pytest.mark.unit
 
@@ -170,6 +180,7 @@ def test_public_slurry_mix_preserves_phase_amounts_and_population(
                         for phase in mixer.Outlet.Phases)  # [J/s] or [J]
     assert outlet_energy == pytest.approx(inlet_energy, rel=RTOL)
     assert mixer.Outlet.temp == pytest.approx(mixer.Outlet.Liquid_1.temp, rel=RTOL)
+    assert mixer.Liquid_1.temp == pytest.approx(mixer.Outlet.temp, rel=RTOL)
 
 
 @pytest.mark.parametrize('added_pore_fill', [0.1, 2.0])
@@ -220,6 +231,7 @@ def test_public_partial_cake_mix_uses_attached_inventory(
                         for phase in mixer.Outlet.Phases)  # [J]
     assert outlet_energy == pytest.approx(inlet_energy, rel=RTOL)
     assert mixer.Outlet.temp == pytest.approx(mixer.Outlet.Liquid_1.temp, rel=RTOL)
+    assert mixer.Liquid_1.temp == pytest.approx(mixer.Outlet.temp, rel=RTOL)
     if isinstance(mixer.Outlet, Cake):
         np.testing.assert_allclose(mixer.Outlet.saturation, 0.6 + added_pore_fill,
                                    rtol=RTOL)
@@ -516,3 +528,48 @@ def test_mixer_rejects_gridless_distribution(path):
             r'inlet 1.*requires a size-distributed solid on a size grid.*'
             r'moment-only or gridless populations are not supported')):
         mixer.solve_unit()
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_slurry_cake_mix_uses_actual_cake_coordinates(path, reverse):
+    inlets = []
+    coordinates = np.linspace(0, 0.02, 5)  # [m], non-default cake grid
+    for container in (Slurry(), Cake(z_external=coordinates.copy())):
+        solid = SolidPhase(path, mass_frac=SOLID_COMPOSITION, temp=COLD,
+                           x_distrib=GRID, distrib=POPULATION, kv=KV)
+        pore_volume = solid.vol * solid.getPorosity() / (1-solid.getPorosity())  # [m**3]
+        liquid = LiquidPhase(path, mass_frac=COMPOSITION, temp=COLD,
+                             vol=pore_volume / 4)  # [m**3], quarter-filled bed
+        container.Phases = [liquid, solid]
+        inlets.append(container)
+    mixer = Mixer()
+    mixer.Inlets = inlets[::-1] if reverse else inlets
+    mixer.solve_unit()
+    assert isinstance(mixer.Outlet, Cake)
+    np.testing.assert_array_equal(mixer.Outlet.z_external, coordinates)
+    np.testing.assert_allclose(mixer.Outlet.saturation, 0.25, rtol=RTOL)
+    inlets[1].z_external[:] = 0  # [m], output must own its grid
+    np.testing.assert_array_equal(mixer.Outlet.z_external, coordinates)
+
+
+@pytest.mark.parametrize('connected_samples', [0, 1])
+def test_raw_dynamic_mixer_feed_requires_an_evaluation_grid(path, connected_samples):
+    stream = LiquidStream(path, mass_flow=FLOW, mass_frac=COMPOSITION, temp=COLD)
+    stream.DynamicInlet = DynamicInput()
+    stream.DynamicInlet.add_variable('mass_flow', lambda time: FLOW * (1 + time))
+    if connected_samples:
+        stream.time_upstream = np.array([0.0])  # [s], a lone point supplies no horizon
+    mixer = Mixer()
+    mixer.Inlets = [stream]
+    with pytest.raises(ValueError, match='dynamic.*multi-sample.*grid'):
+        mixer.solve_unit()
+
+
+def test_empty_dynamic_mixer_input_retains_static_contract(path):
+    stream = LiquidStream(path, mass_flow=FLOW, mass_frac=COMPOSITION, temp=COLD)
+    stream.DynamicInlet = DynamicInput()
+    mixer = Mixer()
+    mixer.Inlets = [stream]
+    mixer.solve_unit()
+    assert mixer.Outlet.mass_flow == pytest.approx(FLOW, rel=RTOL)
+    assert mixer.Outlet.temp == pytest.approx(COLD, rel=RTOL)

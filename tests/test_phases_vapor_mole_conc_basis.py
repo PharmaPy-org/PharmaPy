@@ -36,7 +36,8 @@ def test_vapor_phase_mole_conc_uses_molar_basis(tmp_path):
 
     phase = VaporPhase(str(path), moles=moles, mole_conc=mole_conc)
 
-    np.testing.assert_allclose(phase.mole_conc, mole_conc)
+    expected_concentration = expected_mole_frac * phase.pres / (8.314 * phase.temp) / 1000  # [mol/L], ideal gas, R [J/mol/K]
+    np.testing.assert_allclose(phase.mole_conc, expected_concentration)
     np.testing.assert_allclose(phase.mole_frac, expected_mole_frac)
     np.testing.assert_allclose(phase.mass_frac, expected_mass_frac)
     assert phase.mw_av == pytest.approx(expected_mw_av)

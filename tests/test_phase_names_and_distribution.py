@@ -113,9 +113,9 @@ def test_mass_fraction_distribution_conserves_mass(thermo_path):
     rule, which halves end-node weights. With an end-loaded profile the bases
     disagree, and re-applying the phase's own distribution through
     ``updatePhase`` changes its mass. This pre-existing quadrature mismatch is
-    outside this change and recorded as follow-up work on this branch; no
-    tracking issue number exists yet. Revisit the moment-based mass assertion
-    when that defect is fixed.
+    tracked in https://github.com/PharmaPy-org/PharmaPy/issues/269. This
+    zero-ended fixture is a provisional compatibility case; add end-loaded
+    profiles and update the moment-based mass expectation when #269 is fixed.
     """
     grid = np.array([100.0, 200.0, 300.0, 400.0, 500.0])  # [um]
     weights = np.array([0.0, 2.0, 3.0, 4.0, 0.0])  # [-], unnormalized

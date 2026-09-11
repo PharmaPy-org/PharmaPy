@@ -895,3 +895,36 @@ def test_washing_bulk_concentrations_close_species_inventory(separation_phases, 
         previous_effluent = porosity / wash_ratio * (initial[0] - previous_retained) + inlet  # [kg/m**3]
         np.testing.assert_allclose(retained, previous_retained, rtol=RTOL)
         np.testing.assert_allclose(effluent, previous_effluent, rtol=RTOL)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_nonconservative_deliquoring_surfaces_invalid_removal(data_path):
+    """Expose the unresolved species-advection defect in #29 during accounting.
+
+    The synthetic 1 Pa wash creates a nonuniform field that makes the existing
+    deliquoring equation increase a species inventory. Once
+    https://github.com/PharmaPy-org/PharmaPy/issues/29 is repaired, replace this
+    provisional invalid-diagnostic expectation with valid, nonnegative removal.
+    """
+    pytest.importorskip('assimulo')
+    from PharmaPy.Phases import LiquidPhase, SolidPhase
+    path = str(data_path['flowsheet'] / 'compound_database.json')
+    liquid = LiquidPhase(path, mass_frac=[.1, .1, .1, .1, .6], vol=1e-3)  # [-], [m**3]
+    liquid.diffusivity = np.full((5, 5), 1e-9)  # [m**2/s], synthetic diffusivity
+    solid = SolidPhase(path, mass_frac=[1, 0, 0, 0, 0],
+                       x_distrib=[100, 200, 300], distrib=[1e4, 2e4, 1e4])
+    # Grid [um], population [#/um], chosen to retain a heterogeneous wash field.
+    washer = DisplacementWashing(solvent_idx=0, num_nodes=4, diam_unit=.1)  # [m]
+    washer.Phases = [liquid, solid]
+    washer.solve_unit(deltaP=1., wash_ratio=.1, dynamic=False)  # [Pa], [-]
+    unit = DeliquoringStep(num_nodes=4, diam_unit=.1)  # [m]
+    unit.Phases = washer.Outlet
+    with pytest.warns(RuntimeWarning, match='nonconservative.*#29'):
+        unit.solve_unit(deltaP=5e4, runtime=.03, verbose=False)  # [Pa], [s]
+    assert not unit.removal_diagnostics_valid
+    assert np.any(unit.liquid_removed_species < 0)
+    assert np.isnan(unit.liquid_removed_mass_frac).all()
+    assert unit.liquid_removed == pytest.approx(unit.liquid_removed_species.sum(), rel=1e-12)
+    assert unit.result.mass_liquid_removed[-1] == pytest.approx(unit.liquid_removed, rel=1e-12)
+    assert unit.result.mass_liquid_removed[0] == 0

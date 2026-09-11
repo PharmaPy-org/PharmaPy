@@ -38,11 +38,11 @@ import numpy as np
 eps = np.finfo(float).eps
 gas_ct = 8.314  # J/mol/K
 
-# Design assumption: jacket volume as a fraction of Batch slurry volume or
-# MSMPR/Semibatch vessel volume (working vol_tank / vol_offset). Introduced
-# by the original author in e1e8164 without a cited source; issue #113 asks
-# the author to confirm it. It affects only the jacket thermal transient:
-# jacket volume cancels at jacket steady state.
+# Legacy design assumption retained for reproducible jacket transients:
+# jacket volume is 14% of the model's slurry/working reference volume.
+# Specify vol_ht from equipment data; historical provenance and model-specific
+# reference volumes are documented under "Crystallizer jacket volume" in
+# doc/online_docs/advanced_usage.rst.
 DEFAULT_JACKET_VOLUME_RATIO = 0.14  # [-]
 
 
@@ -125,16 +125,17 @@ class _BaseCryst:
             energy balance.
         rad_zero : float
             Nucleation size [um], on the same length basis as the CSD grid.
-            Zero represents point nuclei.
+            Zero retains legacy point nuclei. Nonzero FVM nuclei must match
+            the first size-grid point; analytical sensitivities require zero.
         reset_states : bool
             If True, reset model states before a subsequent simulation.
         h_conv : float
             Vessel-side convective heat-transfer coefficient [W/m**2/K].
         vol_ht : float or None
             Finite, strictly positive cooling-jacket volume [m**3].
-            If None, use the historical 0.14 design ratio: current slurry
-            volume for Batch, vessel volume (working vol_tank / vol_offset)
-            for MSMPR and Semibatch. See DEFAULT_JACKET_VOLUME_RATIO and #113.
+            None uses DEFAULT_JACKET_VOLUME_RATIO times current slurry
+            volume (Batch) or working vol_tank / vol_offset (MSMPR/Semibatch).
+            Design assumptions and provenance are in the advanced usage guide.
         basis : {'mass_conc', 'mass_frac'}
             Composition basis, respectively [kg/m**3] or [kg/kg].
         jac_type : {'finite_diff', 'analytical', 'AD', None}
@@ -383,7 +384,7 @@ class _BaseCryst:
         -----
         Public states_di describes SI reported/phase moments: [m**n] for
         Batch/Semibatch and [m**n/m**3] for MSMPR. Internally, solve_unit
-        seeds the raw solver vector in micrometre lengths, and
+        seeds the raw solver vector in micrometer lengths, and
         retrieve_results converts these moments back to SI for reporting.
         """
         name_class = self.__class__.__name__
@@ -717,6 +718,23 @@ class _BaseCryst:
 
         return dmu_dt, mass_transf
 
+    def _validate_nucleus_grid(self) -> None:
+        """Check that finite-radius nuclei enter the matching FVM boundary.
+
+        Raises
+        ------
+        ValueError
+            If rad_zero [um] is nonzero and differs from the first grid point
+            [um] beyond four float64 rounding units. The legacy point-nucleus
+            convention rad_zero=0 is retained for existing positive grids;
+            it remains a discretization approximation at the first cell.
+        """
+        if self.rad != 0:
+            grid = self.Slurry.x_distrib  # [um]
+            if (grid is None or not len(grid)
+                    or not np.isclose(self.rad, grid[0], rtol=4*eps, atol=0)):
+                raise ValueError("Finite rad_zero must equal the first FVM grid point [um]")
+
     def fvm_method(self, csd: np.ndarray, moms: np.ndarray,
                    conc: np.ndarray, temp: float, params: "np.ndarray | None",
                    rho_cry: float, output: str = 'dstates',
@@ -776,6 +794,7 @@ class _BaseCryst:
         slurry-volume-specific SI moments, matching method_of_moments;
         total moments remain available for the physical mass source.
         """
+        self._validate_nucleus_grid()
 
         if output not in ('flux', 'dstates'):
             raise ValueError("output must be 'flux' or 'dstates'.")
@@ -1068,6 +1087,13 @@ class _BaseCryst:
             If ``jac_type`` is not ``'finite_diff'``, ``'analytical'``, or
             None after constructor normalization.
         """
+        if eval_sens and self.jac_type == 'analytical':
+            if (not isinstance(self, BatchCryst) or self.method != 'moments'
+                    or self.rad != 0 or self.basis != 'mass_conc' or 'temp' not in self.controls):
+                raise NotImplementedError(
+                    "analytical sensitivities require BatchCryst, method='moments', "
+                    "rad_zero=0, mass_conc basis, and prescribed temperature; "
+                    "use jac_type='finite_diff' for other supported models")
         if eval_sens:
             problem = Explicit_Problem(self.unit_model, states_init,
                                        t0=self.elapsed_time,
@@ -1156,6 +1182,9 @@ class _BaseCryst:
             Legacy unused option.
         sundials_opts : dict, optional
             CVode solver options; units follow the named solver option.
+            Caller sensmethod and suppress_sens override sensitivity defaults
+            SIMULTANEOUS and False. eval_sens=True always enables continuous
+            reporting because Assimulo requires it to collect p_sol.
         any_event : bool, optional
             Stop on any state event when True (default), otherwise all events.
 
@@ -1169,7 +1198,7 @@ class _BaseCryst:
             concentrations [kg/m**3], liquid volume [m**3] for Batch/Semibatch,
             and optional phase/jacket temperatures [K]. Continuous units use
             volume-normalized crystal states instead. Returned moments retain
-            the solver's micrometre basis; ``result.mu_n`` uses SI moments.
+            the solver's micrometer basis; ``result.mu_n`` uses SI moments.
         sensit : list of ndarray, optional
             Parameter sensitivities [state unit / parameter unit], returned
             only when eval_sens is True.
@@ -1183,10 +1212,13 @@ class _BaseCryst:
         geometry does not expand that volume by the headspace factor.
         Stored kinetic parameters are restored after integration, before heat
         retrieval, so sensitivity difference-quotient probes cannot persist.
-        The raw solver vector carries micrometre moments internally, seeded
+        The raw solver vector carries micrometer moments internally, seeded
         from SI phase moments here. retrieve_results converts them back to SI;
-        public states_di describes those reported values. Result retrieval
-        updates the attached phases and stores the profiles. Moment solves do
+        Analytical sensitivities support only BatchCryst moments with zero
+        nucleus radius, mass-concentration basis, prescribed temperature,
+        built-in kinetics, and unit impurity factor; use numerical Jacobians
+        outside that model. Public states_di describes reported values.
+        Result retrieval updates the attached phases and stores the profiles. Moment solves do
         not require a size grid or slurry grid-spacing metadata.
         """
 
@@ -1203,7 +1235,7 @@ class _BaseCryst:
         if 'vol' in self.states_uo:
             if self.method == 'moments':
                 init_solid = self.Solid_1.moments * 1e6**np.arange(self.num_distr)
-                # SI phase moments converted to [um**n]; exactly 1e6 um per metre
+                # SI phase moments converted to [um**n]; exactly 1e6 um per meter
 
             elif self.method == '1D-FVM':
                 x_grid = self.Solid_1.x_distrib
@@ -1220,6 +1252,8 @@ class _BaseCryst:
 
         self.dx = self.Slurry.dx if self.method == '1D-FVM' else None  # [um]
         self.x_grid = self.Slurry.x_distrib
+        if self.method == '1D-FVM':
+            self._validate_nucleus_grid()
 
         # ---------- Liquid phase states
         init_liquid = self.Liquid_1.mass_conc.copy()
@@ -1300,6 +1334,10 @@ class _BaseCryst:
         solver.iter = 'Newton'
         solver.discr = 'BDF'
 
+        if eval_sens:
+            solver.sensmethod = 'SIMULTANEOUS'
+            solver.suppress_sens = False
+
         if sundials_opts is not None:
             for name, val in sundials_opts.items():
                 setattr(solver, name, val)
@@ -1307,12 +1345,11 @@ class _BaseCryst:
                 if name == 'time_limit':
                     solver.report_continuously = True
 
-        self.sundials_opt = solver.get_options()
-
         if eval_sens:
-            solver.sensmethod = 'SIMULTANEOUS'
-            solver.suppress_sens = False
+            # Assimulo stores p_sol through continuous reporting. This is an
+            # output requirement, while method and error control stay tunable.
             solver.report_continuously = True
+        self.sundials_opt = solver.get_options()
 
         if self.method == '1D-FVM':
             solver.linear_solver = 'SPGMR'  # large, sparse systems
@@ -2255,7 +2292,7 @@ class BatchCryst(_BaseCryst):
 
         Notes
         -----
-        Raw solver moments are seeded in micrometre lengths by solve_unit.
+        Raw solver moments are seeded in micrometer lengths by solve_unit.
         Retrieval converts them to total SI moments [m**n] for reported and
         phase values. Public states_di and result metadata both describe SI.
         Each run is converted before storage so continuation preserves SI.
@@ -2521,8 +2558,10 @@ class MSMPR(_BaseCryst):
         Assumes constant tank liquid density and holdup, no inlet solids,
         zero-size nuclei, and positive size- and population-independent
         growth. The kinetic target index is initialized here, so no prior
-        dynamic solve is needed. No Kinetics.alpha_fn impurity factor is
-        applied, although the dynamic model applies it. Density is evaluated
+        dynamic solve is needed. Solubility receives the full species vector
+        on the configured kinetic basis. Kinetics.alpha_fn receives mass
+        concentrations [kg/m**3], matching the dynamic growth correction.
+        Only the target entry varies during the scan. Density is evaluated
         at the attached liquid composition and requested temperature. The feed
         term always uses the inlet liquid's own mass concentration, allowing
         its density to differ from the tank density.
@@ -2575,10 +2614,10 @@ class MSMPR(_BaseCryst):
         secondary nucleation sees kv*mu=0 at every population, and B/G is
         evaluated directly without iteration at c_in/concentration_scale.
         With kv>0, the cancellation feed c_in=c* is unsupported; use a
-        slightly different feed. The final dynamic residual can expose
-        omitted impurity effects, but uses the same constant-density
-        approximation. Evaluation restores phase temperatures and solid
-        moments, including on failure; the usual kinetic caches are refreshed.
+        slightly different feed. The final dynamic residual uses the same
+        constant-density approximation. Evaluation restores phase temperatures
+        and solid moments, including on failure; the usual kinetic caches are
+        refreshed.
         """
         if isinstance(self.Inlet, LiquidStream):
             raise ValueError(
@@ -2612,7 +2651,10 @@ class MSMPR(_BaseCryst):
         orders = np.arange(num_moments)
         factorials = np.cumprod(np.maximum(orders, 1), dtype=float)
         # [-], n! including 0!=1
-        metre_per_um = 1e-6  # [m/um], exact SI prefix conversion
+        meter_per_um = 1e-6  # [m/um], exact SI prefix conversion
+
+        concentrations = self.Liquid_1.mass_conc.copy()  # [kg/m**3]
+        kinetic_composition = concentrations / concentration_scale  # [basis unit]
 
         def population_data(composition: float) -> "tuple | None":
             """Evaluate growth and analytical exponential moment factors.
@@ -2631,14 +2673,18 @@ class MSMPR(_BaseCryst):
                 Returns None when growth is nonpositive or nonfinite.
             """
             empty_moments = np.zeros(num_moments)  # [m**n/m**3]
+            concentrations[self.target_ind] = composition * concentration_scale
+            # [kg/m**3], change only the target in the retained species vector
+            kinetic_composition[self.target_ind] = composition  # [basis unit]
             nucl_seed, growth, _ = self.Kinetics.get_kinetics(
-                composition, temp, kv, empty_moments)
+                kinetic_composition, temp, kv, empty_moments)
             # [#/m**3/s], [um/s], [um/s]
+            growth *= self.Kinetics.alpha_fn(concentrations)  # [um/s]
             if not np.isfinite(growth) or growth <= 0:
                 return None
             factors = (factorials * (growth / flow_v)**(orders + 1)
-                       * metre_per_um**orders)  # [m**n*um]
-            mass_factor = 3 * kv * rho_solid * growth * factors[2] * metre_per_um
+                       * meter_per_um**orders)  # [m**n*um]
+            mass_factor = 3 * kv * rho_solid * growth * factors[2] * meter_per_um
             # [kg*um/s], crystal mass source per unit boundary number density
             concentration = composition * concentration_scale  # [kg/m**3]
             coefficient = (mass_factor * (1 - concentration / rho_liquid)
@@ -2669,9 +2715,35 @@ class MSMPR(_BaseCryst):
             # [kg/m**3/s]
             boundary = feed_difference / coefficient  # [#/m**3/um]
             moments = boundary * factors  # [m**n/m**3]
-            nucl, _, _ = self.Kinetics.get_kinetics(composition, temp, kv, moments)
+            nucl, _, _ = self.Kinetics.get_kinetics(
+                kinetic_composition, temp, kv, moments)
             # [#/m**3/s], total population-dependent nucleation
             return feed_difference - coefficient * nucl / growth
+
+        def finite_composition_residual(concentration: float) -> float:
+            """Require a finite residual at every scalar-solver evaluation.
+
+            Parameters
+            ----------
+            concentration : float
+                Trial target concentration [kg/m**3].
+
+            Returns
+            -------
+            float
+                Rescaled population-closure residual [kg/m**3/s].
+
+            Raises
+            ------
+            ValueError
+                If the solver crosses a growth gap. Older SciPy versions do
+                not reject NaN callback values themselves, so this check is
+                required independently of the installed brentq version.
+            """
+            value = composition_residual(concentration)  # [kg/m**3/s]
+            if not np.isfinite(value):
+                raise ValueError("Steady-state scalar solve crossed an inadmissible growth gap")
+            return value
 
         if population_data(frac_seed) is None:
             raise ValueError(
@@ -2695,8 +2767,13 @@ class MSMPR(_BaseCryst):
             # [#/m**3/s], [um/s], [m**n*um], [kg*um/s], [kg*um/s]
             composition = composition_in  # [configured composition unit]
             boundary = nucl_seed / growth  # [#/m**3/um], kv*mu=0 at every population
-            info = RootResults(boundary, iterations=0, function_calls=1,
-                               flag=0, method='closed-form')
+            result_options = dict(iterations=0, function_calls=1, flag=0)
+            # SciPy 1.9 has a four-argument constructor; modern SciPy requires
+            # method. Preserve both the declared floor and consistent metadata.
+            if 'method' in inspect.signature(RootResults).parameters:
+                result_options['method'] = 'closed-form'
+            info = RootResults(boundary, **result_options)
+            info.method = 'closed-form'
             # flag=0 is SciPy's success code; one evaluation of B/G, no iteration.
         else:
             upper = min(concentration_in, critical_concentration)  # [kg/m**3]
@@ -2742,7 +2819,7 @@ class MSMPR(_BaseCryst):
                     continue
                 try:
                     concentration, root_info = brentq(
-                        composition_residual, left, right,
+                        finite_composition_residual, left, right,
                         xtol=concentration_xtol, full_output=True)  # [kg/m**3]
                 except (ValueError, RuntimeError):
                     # An unsampled growth gap or solver failure invalidates
@@ -2827,7 +2904,7 @@ class MSMPR(_BaseCryst):
                   'Liquid_1': {'mass_conc': self.Inlet.Liquid_1.mass_conc.copy()}}
         # [m**3/s], [kg/m**3], solid-free feed as consumed by material_balances
         if self.method == 'moments':
-            population_state = moments_si / metre_per_um**orders  # [um**n/m**3]
+            population_state = moments_si / meter_per_um**orders  # [um**n/m**3]
             inputs['Inlet']['mu_n'] = np.zeros(num_moments)  # [m**n/m**3]
         else:
             population_state = f_convg * self.scale  # scaled [#/m**3/um]
@@ -3092,7 +3169,7 @@ class MSMPR(_BaseCryst):
 
         Notes
         -----
-        solve_unit seeds raw solver moments in micrometre lengths. Retrieval
+        solve_unit seeds raw solver moments in micrometer lengths. Retrieval
         converts them to SI [m**n/m**3] for MSMPR profiles or total [m**n]
         for Semibatch profiles. Public states_di and result metadata describe
         these SI reported values; phase moments also retain SI lengths.
@@ -3403,7 +3480,7 @@ class SemibatchCryst(MSMPR):
         self.Liquid_1.updatePhase(mass_conc=mass_conc)
 
         if self.method == 'moments':
-            # [um**n/m**3], exact SI-to-micrometre inlet conversion
+            # [um**n/m**3], exact SI-to-micrometer inlet conversion
             input_distrib = u_inputs['Inlet']['mu_n'] * 1e6**np.arange(self.num_distr)
             ddistr_dt, transf = self.method_of_moments(distrib, mass_conc, temp,
                                                        params, rho_sol,
