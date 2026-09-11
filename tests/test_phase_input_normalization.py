@@ -1,4 +1,7 @@
-"""Type normalization at public phase construction and update boundaries."""
+"""Type normalization at public phase construction and update boundaries.
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/173
+"""
 
 import json
 from pathlib import Path

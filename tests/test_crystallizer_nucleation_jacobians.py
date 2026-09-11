@@ -2,6 +2,10 @@
 
 Real phases and kinetics drive unit_model without a solver. Parameter probes
 use its params argument to exercise the #222 solver-vector handoff.
+
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/39
+https://github.com/PharmaPy-org/PharmaPy/issues/222
 """
 
 import numpy as np

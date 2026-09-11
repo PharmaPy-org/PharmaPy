@@ -3,6 +3,11 @@
 Core cases drive the RHS and retrieval directly; only solver construction is
 intercepted for callback registration. Marked cases use the real CVode backend.
 Synthetic ramps and profiles test balances, not calibrated process predictions.
+
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/232
+https://github.com/PharmaPy-org/PharmaPy/issues/233
+https://github.com/PharmaPy-org/PharmaPy/issues/234
 """
 
 from types import SimpleNamespace

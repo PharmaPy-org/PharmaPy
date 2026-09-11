@@ -2,6 +2,9 @@
 
 Synthetic fixed profiles isolate jacket heat, prescribed storage, and feed
 enthalpy. Solver tests exercise uncontrolled Batch retrieval end to end.
+
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/225
 """
 
 import numpy as np

@@ -2,6 +2,9 @@
 
 Real result retrieval creates changed populations; optional CVode coverage checks
 repeatability through complete solves. Core probes stop at solver construction.
+
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/222
 """
 
 import numpy as np

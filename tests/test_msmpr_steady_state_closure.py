@@ -4,6 +4,9 @@ Tests check the dynamic MSMPR balance under the helper's documented constant
 property and growth assumptions, not stream mass conservation. Exponential
 moments satisfy mu_j = j! B G**j tau**(j+1). Independent Simpson integration
 of the returned distribution checks the dynamic moment and solute equations.
+
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/223
 """
 
 from types import SimpleNamespace

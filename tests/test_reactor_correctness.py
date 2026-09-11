@@ -3,6 +3,12 @@
 Real thermodynamics and elementary A + B -> C kinetics use the shipped PFR
 property data. Only the optional solver problem boundary is replaced. The
 Assimulo case additionally checks complete steady-to-dynamic reuse.
+
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/34
+https://github.com/PharmaPy-org/PharmaPy/issues/54
+https://github.com/PharmaPy-org/PharmaPy/issues/169
+https://github.com/PharmaPy-org/PharmaPy/issues/245
 """
 
 from pathlib import Path

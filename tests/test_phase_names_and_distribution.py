@@ -3,6 +3,11 @@
 The shared thermodynamic database supplies pure solid A (1230 kg/m**3).
 No optional solver backend is needed. Analytic bin masses and trapezoidal
 moments distinguish number density, bin fractions, and slurry volume bases.
+
+Refs:
+https://github.com/PharmaPy-org/PharmaPy/issues/64
+https://github.com/PharmaPy-org/PharmaPy/issues/66
+https://github.com/PharmaPy-org/PharmaPy/issues/162
 """
 
 from types import SimpleNamespace
