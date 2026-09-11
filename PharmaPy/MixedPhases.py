@@ -786,7 +786,7 @@ class MixedPhase:
         # Everything else defaults to mass-weighted average
         return np.dot(weights, values)
     
-    def getCP(self):
+    def getCp(self, basis='mass'):
 
         total_cp = 0.0
 
@@ -794,7 +794,7 @@ class MixedPhase:
 
             total_cp += (
                 phase.mass
-                * phase.getCP()
+                * phase.getCp(basis='mass')
             )
 
         return total_cp

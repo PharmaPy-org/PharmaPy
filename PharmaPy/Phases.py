@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from PharmaPy.Mechanisms import Mechanism
     from PharmaPy.DataClasses import PhaseRef,StateCollection,StateKey
 import warnings
+from time import perf_counter
 
 eps = np.finfo(float).eps
 
@@ -84,10 +85,13 @@ def getPropsPhaseMix(phases, basis='mass'):
 def overridable(func):
     @wraps(func)
     def wrapper(self, *args, **kwargs):
-        override = self._call_override(func.__name__,*args,**kwargs)
+        override = self._overrides.get(func.__name__)
+
         if override is not None:
-            return override
+            return override(*args, **kwargs)
+
         return func(self, *args, **kwargs)
+
     return wrapper
 
 def overridable_property(func):
@@ -96,14 +100,12 @@ def overridable_setter(func):
 
     @wraps(func)
     def wrapper(self, value):
-
-        override = self._call_override(
-            'set_' + func.__name__,
-            value,
-        )
+        if value is None:
+            return
+        override = self._overrides.get("set_" + func.__name__)
 
         if override is not None:
-            return override
+            return override(value)
 
         return func(self, value)
 
@@ -144,25 +146,31 @@ class BasePhase(ThermoPhysicalManager):
         # Check extensive specification
         # ----------------------------------------------------------
 
-        if self._count_specified(locals(),self.amount_names) != 1:
+        amount_count = (
+            (mass is not None)
+            + (vol is not None)
+            + (moles is not None)
+        )
+        if amount_count > 1:
+            raise ValueError("Only one amount update allowed")
+
+        composition_count = (
+            (mass_j is not None)
+            + (mass_frac is not None)
+            + (mole_frac is not None)
+            + (mass_conc is not None)
+            + (mole_conc is not None)
+        )
+        if composition_count > 1:
             raise ValueError(
-                f"Specify exactly one of {self.amount_names}"
-            )
-
-
-        # ----------------------------------------------------------
-        # Check composition specification
-        # ----------------------------------------------------------
-
-        if self._count_specified(locals(),self.composition_names) != 1:
-            raise ValueError(
-                "Specify exactly one composition basis: "
-                f"{self.composition_names}"
+                "Specify one or fewer composition basis: "
+                "mass_j, mass_frac, mole_frac, mass_conc, or mole_conc"
             )
 
         self._mass_frac=None
         self._mass=None
         self._mechanisms = []
+        self._overrides = {}
         # ----------------------------------------------------------
         # Initialize composition
         # ----------------------------------------------------------
@@ -190,8 +198,7 @@ class BasePhase(ThermoPhysicalManager):
         
 
 
-    def _count_specified(self, namespace, names):
-        return sum(namespace.get(name) is not None for name in names)
+
 
     # ==============================================================
     # Composition truth
@@ -263,9 +270,6 @@ class BasePhase(ThermoPhysicalManager):
     @overridable_setter
     def mass_frac(self,value):
 
-        if value is None:
-            return
-
         value=np.asarray(value,dtype=float)
 
         if not np.isclose(value.sum(),1):
@@ -288,8 +292,6 @@ class BasePhase(ThermoPhysicalManager):
     @mole_frac.setter
     @overridable_setter
     def mole_frac(self,value):
-        if value is None:
-            return
         mass_frac=self.frac_to_frac(
             mole_frac=np.asarray(value)
         )
@@ -312,8 +314,6 @@ class BasePhase(ThermoPhysicalManager):
     @mole_conc.setter
     @overridable_setter
     def mole_conc(self,value):
-        if value is None:
-            return
 
         mass_frac,mole_frac=self.conc_to_frac(
             value
@@ -337,7 +337,6 @@ class BasePhase(ThermoPhysicalManager):
     @mass_conc.setter
     @overridable_setter
     def mass_conc(self,value):
-        if value is None:return
 
         mass_frac=self.mass_conc_to_frac(value)
 
@@ -361,8 +360,6 @@ class BasePhase(ThermoPhysicalManager):
     @moles.setter
     @overridable_setter
     def moles(self,value):
-        if value is None:
-            return
         self.mass = value*self.mw_av
 
 
@@ -377,7 +374,6 @@ class BasePhase(ThermoPhysicalManager):
     @vol.setter
     @overridable_setter
     def vol(self,value):
-        if value is None:return
         self.mass=value*self.density
 
 
@@ -554,24 +550,43 @@ class BasePhase(ThermoPhysicalManager):
 
         # composition update
 
-        if self._count_specified(locals(),self.amount_names)>1:
+        amount_count = (
+            (mass is not None)
+            + (vol is not None)
+            + (moles is not None)
+        )
+        if amount_count > 1:
             raise ValueError("Only one amount update allowed")
 
-        if self._count_specified(locals(),self.composition_names) > 1:
-            raise ValueError("Specify one or fewer composition basis: mass_j, mass_frac, mole_frac, mass_conc, or mole_conc")
+        composition_count = (
+            (mass_j is not None)
+            + (mass_frac is not None)
+            + (mole_frac is not None)
+            + (mass_conc is not None)
+            + (mole_conc is not None)
+        )
+        if composition_count > 1:
+            raise ValueError(
+                "Specify one or fewer composition basis: "
+                "mass_j, mass_frac, mole_frac, mass_conc, or mole_conc"
+            )
+        if mass_frac is not None:
+            self.mass_frac = mass_frac
+        elif mole_frac is not None:
+            self.mole_frac = mole_frac
+        elif mass_conc is not None:
+            self.mass_conc = mass_conc
+        elif mole_conc is not None:
+            self.mole_conc = mole_conc
+        elif mass_j is not None:
+            self.mass_j = mass_j
 
-        self.mass_frac=mass_frac
-        self.mole_frac=mole_frac
-        self.mass_conc=mass_conc
-        self.mole_conc=mole_conc
-        self.mass_j=mass_j
-
-
-
-        # amount update
-        self.mass=mass
-        self.moles=moles
-        self.vol=vol
+        if mass is not None:
+            self.mass = mass
+        elif moles is not None:
+            self.moles = moles
+        elif vol is not None:
+            self.vol = vol
     
     @overridable_property
     def default_composition_name(self):
@@ -666,28 +681,37 @@ class BasePhase(ThermoPhysicalManager):
     @mechanisms.setter
     def mechanisms(self, value):
         if value is None:
-            self._mechanisms = []
+            mechanisms = []
         elif isinstance(value, (list, tuple, set)):
-            self._mechanisms = list(value)
+            mechanisms = list(value)
         else:
-            self._mechanisms = [value]
+            mechanisms = [value]
+
+        self._mechanisms = mechanisms
+
+        overrides = {}
+        for mechanism in mechanisms:
+            for name, override in mechanism.get_overrides().items():
+                if override is None:
+                    continue
+
+                if name in overrides:
+                    raise AttributeError(
+                        f"Multiple mechanisms override {name!r}"
+                    )
+
+                overrides[name] = override
+
+        self._overrides = overrides
     def get_mechanism(self,mechanismClass):
         for m in self.mechanisms:
             if isinstance(m,mechanismClass):
                 return m
-    def _call_override(
-        self,
-        name,
-        *args,
-        **kwargs
-    ):
-        "Lets mechanisms override properties/methods"
-        for mech in self.mechanisms:
+    def _call_override(self, name, *args, **kwargs):
+        override = self._overrides.get(name)
 
-            override = mech.get_override(name)
-
-            if override is not None:
-                return override(*args, **kwargs)
+        if override is not None:
+            return override(*args, **kwargs)
 
         return None
 
@@ -724,11 +748,14 @@ class BasePhase(ThermoPhysicalManager):
         )
     ##### Vessel API
     def update_from_solver_state(self,updates:dict,completed_state:dict["StateKey"],unit=None):
+        t0 = perf_counter()
         if updates:
             self.updatePhase(**updates)
-
+        unit._timers['updatePhase0'] = unit._timers.get('updatePhase0',0)+perf_counter()-t0
+        t0 = perf_counter()
         for mech in self.mechanisms:
             mech.update_state(completed_state,unit=unit)
+        unit._timers['updatePhaseMech'] = unit._timers.get('updatePhaseMech',0)+perf_counter()-t0
 
 class LiquidPhase(BasePhase):
     def __init__(

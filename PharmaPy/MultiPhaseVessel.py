@@ -745,10 +745,11 @@ class MultiPhaseVessel():
         if mat_bce:
             return self.pack_state_rates(material_rates)
         global_rates = {}
-        t0 = perf_counter()
-        energy_rates = self.energy_balances(time,completed_state, material_buffer)
-        self._timers['energy_balances_total'] = self._timers.get('energy_balances_total',0)+perf_counter()-t0
-        global_rates.update(energy_rates)
+        if self.has_energy_balance:
+            t0 = perf_counter()
+            energy_rates = self.energy_balances(time,completed_state, material_buffer)
+            self._timers['energy_balances_total'] = self._timers.get('energy_balances_total',0)+perf_counter()-t0
+            global_rates.update(energy_rates)
 
         # utility_rates = self.utility_energy_balance(
         #     time,completed_state)

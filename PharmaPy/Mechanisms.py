@@ -115,7 +115,7 @@ class Mechanism:
         Differential-only mechanisms simply return {}.
         """
         return TransferResult({},{},0)
-    def get_override(self,name):
+    def get_overrides(self,name):
         return None
     def get_inlet_contributions(
         self,
@@ -421,6 +421,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     def mechanism_kinetics(self,value):
         if value is not None:
             self._mechanism_kinetics = value
+            
 
     def getDensity(self):
         return self.density
@@ -431,15 +432,16 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             return self._density
         return self.owning_phase.density
     
-    def get_override(self, name):
-
+    def get_overrides(self):
         overrides = {
             "mass": self.get_mass,
             "set_mass": self.set_mass,
-            "getDensity": self.getDensity if self._density is not None else None,
         }
 
-        return overrides.get(name)
+        if self._density is not None:
+            overrides["getDensity"] = self.getDensity
+
+        return overrides
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -690,6 +692,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             kv=kv)
 
         self.x_grid = np.asarray(x_grid)
+        self.x_grid_sq = self.x_grid**2
+        self.x_grid_cu = self.x_grid**3
         self.dx = self.x_grid[1] - self.x_grid[0]
         self.rad = self.x_grid[0]
         self.distribution_state_name = distribution_state_name
@@ -711,8 +715,25 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self._update_exposed_attributes()
         self.expose('x_grid')
 
+    def compute_second_moment(
+            self,
+            distrib,
+        ):
+            """
+            Compute second moment from a number density distribution.
+            """
+    
+            return np.trapezoid(distrib * self.x_grid_sq, self.x_grid)
+    def compute_third_moment(
+            self,
+            distrib,
+        ):
+        """
+        Compute third moment from a number density distribution.
+        """
+        return np.trapezoid(distrib * self.x_grid_cu, self.x_grid)
     def get_mass(self):
-        m3 = self.compute_moments(getattr(self,self.distribution_state_name),self.x_grid)[3]
+        m3 = self.compute_third_moment(getattr(self,self.distribution_state_name))
         return self.getDensity()*self.kv*m3*self.reference_vol
     def set_mass(self, mass):
 
@@ -722,11 +743,17 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         target_m3 = mass/ (self.getDensity()* self.kv* self.reference_vol)
 
         self.set_third_moment(target_m3)
+    @PopulationBalanceMechanism.mechanism_kinetics.setter
+    def mechanism_kinetics(self,value):
+        if value is not None:
+            self._mechanism_kinetics = value
+            if len(value.params['growth'])>3:
+                self._growth_size_factor = (1 + value.params['growth'][4] * self.x_grid) ** value.params['growth'][3]
     def set_third_moment(self, target_m3):
 
         distribution = getattr(self,self.distribution_state_name)
 
-        current_m3 = self.compute_moments(distribution,self.x_grid)[3]
+        current_m3 = self.compute_third_moment(distribution)
 
         if current_m3 <= 0:
             raise ValueError("Cannot scale a distribution with zero third moment.")
@@ -743,10 +770,13 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         time:float,
         connection:PhaseConnection
     ) -> TransferResult:
-        
+        t0=perf_counter()
         statekey =  StateKey(self.distribution_state_name,connection.sink_phaseref)
         csd = completed_state[statekey]
+        self._timers['statekey_construct'] = self._timers.get('statekey_construct',0)+perf_counter()-t0
+        t0 = perf_counter()
         moms = self.compute_moments(csd,self.x_grid)
+        self._timers['pop_balance_compute_moments'] = self._timers.get('pop_balance_compute_moments',0)+perf_counter()-t0
 
         mu2 = moms[2] #total surface area
         t0 = perf_counter()
@@ -799,26 +829,24 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             alpha = gparams[3]
             beta = gparams[4]
             t0 = perf_counter()
-            growth_dep = (growth* (1 + beta * self.x_grid) ** alpha)
+            growth_dep = (growth* self._growth_size_factor)
             self._timers['pop_balance_compute_growth_dep'] = self._timers.get('pop_balance_compute_growth_dep',0)+perf_counter()-t0
             t0 = perf_counter()
-            dissol_dep = dissol* np.ones_like(self.x_grid)
-            self._timers['pop_balance_compute_dissol_dep'] = self._timers.get('pop_balance_compute_dissol_dep',0)+perf_counter()-t0
-            t0 = perf_counter()
             growth_pad = np.append(growth_dep,growth_dep[-1],)
-            dissol_pad = np.append(dissol_dep,dissol_dep[-1])
             self._timers['pop_balance_compute_growth_dissol_pad'] = self._timers.get('pop_balance_compute_growth_dissol_pad',0)+perf_counter()-t0
             t0 = perf_counter()
             growth_term = growth_pad* (f_aug[1:-1]+ 0.5 * f_diff[1:] * limiter[:-1])
-            dissol_term = dissol_pad* (f_aug[2:]- 0.5 * f_diff[1:] * limiter[1:])
+            dissol_term = dissol* (f_aug[2:]- 0.5 * f_diff[1:] * limiter[1:])
             self._timers['pop_balance_compute_growth_dissol_term'] = self._timers.get('pop_balance_compute_growth_dissol_term',0)+perf_counter()-t0
             t0 = perf_counter()
-            r = self.x_grid
-            growth_int = np.trapezoid(growth_dep * csd * r**2,r)
-            dissol_int = np.trapezoid(dissol_dep * csd * r**2,r)
+            growth_int = np.trapezoid(growth_dep * csd * self.x_grid_sq,self.x_grid)
+            dissol_int = dissol *mu2
             self._timers['pop_balance_compute_growth_dissol_int'] = self._timers.get('pop_balance_compute_growth_dissol_int',0)+perf_counter()-t0
             t0 = perf_counter()
-            mass_transfer = (self.density* self.kv* 3* 
+            dens = self.density
+            self._timers['pop_balance_get_density'] = self._timers.get('pop_balance_get_density',0)+perf_counter()-t0
+            t0 = perf_counter()
+            mass_transfer = (dens* self.kv* 3* 
                              (growth_int+ dissol_int+ nucl * self.rad**3)* 1e-18)
             self._timers['pop_balance_compute_mass_transfer'] = self._timers.get('pop_balance_compute_mass_transfer',0)+perf_counter()-t0
         # self._timers['pop_balance_handle_growth'] = self._timers.get('pop_balance_handle_growth',0)+perf_counter()-t0
