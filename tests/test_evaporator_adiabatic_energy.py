@@ -1,3 +1,5 @@
+"""Adiabatic drum energy includes the enthalpy carried by reflux condensate."""
+
 import numpy as np
 import pytest
 
@@ -5,6 +7,8 @@ from PharmaPy.Evaporators import ContinuousEvaporator
 
 
 pytestmark = pytest.mark.unit
+
+BALANCE_RTOL = 1e-12  # [-], roundoff allowance for the short enthalpy sum
 
 
 class _EnthalpySource:
@@ -24,11 +28,24 @@ class _EnthalpySource:
     "reflux_ratio, expected_energy_rate",
     [
         (0, -40.0),  # [-], [J/s]
-        (0.25, -10.0),  # [-], [J/s]
+        (0.25, -30.0),  # [-], [J/s]
     ],
 )
 def test_adiabatic_energy_residual_includes_vapor_enthalpy(
         reflux_ratio, expected_energy_rate):
+    """Check F*h_F - L*h_L - V*h_V + r*V*h_top for an adiabatic drum.
+
+    The fixture gives 4*10 - 1*20 - 2*30 + r*2*20 [J/s], hence -40 J/s
+    without reflux and -30 J/s at r=0.25. The external condenser removes
+    2*(30-20)=20 J/s when reflux is enabled; adiabatic means no jacket duty.
+
+    Parameters
+    ----------
+    reflux_ratio : float
+        Fraction of vapor returned as condensate [-].
+    expected_energy_rate : float
+        Independently derived drum energy accumulation [J/s].
+    """
     # Enthalpies are J/mol; flows are mol/s, amounts are mol, pressure is Pa,
     # and volume is m^3. Thus the two residuals are J/s and J, respectively.
     evaporator = ContinuousEvaporator.__new__(ContinuousEvaporator)
@@ -36,6 +53,7 @@ def test_adiabatic_energy_residual_includes_vapor_enthalpy(
     evaporator.Liquid_1 = _EnthalpySource(20.0)  # [J/mol]
     evaporator.Vapor_1 = _EnthalpySource(30.0)  # [J/mol]
     evaporator.reflux_ratio = reflux_ratio  # [-]
+    evaporator.activity_model = 'ideal'
     evaporator.adiabatic = True  # [-]
     evaporator.vol_tot = 2.0  # [m^3]
 
@@ -64,4 +82,5 @@ def test_adiabatic_energy_residual_includes_vapor_enthalpy(
     np.testing.assert_allclose(
         result,
         [expected_energy_rate, expected_internal_energy],
+        rtol=BALANCE_RTOL,
     )

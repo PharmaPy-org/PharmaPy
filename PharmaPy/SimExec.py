@@ -19,7 +19,7 @@ from PharmaPy.Commons import trapezoidal_rule, check_steady_state
 from PharmaPy.CheckModule import check_modeling_objects
 
 import time
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Union
 
 
 class SimulationExec:
@@ -332,7 +332,7 @@ class SimulationExec:
         if hasattr(target_unit, 'Kinetics'):
             param_seed = target_unit.Kinetics.concat_params()
         else:
-            param_seed = target_unit.params
+            param_seed = getattr(target_unit, 'param_seed', target_unit.params)
 
         name_params = inputs_paramest.get('name_params')
 
@@ -835,29 +835,44 @@ class SimulationExec:
 
         return raw_df
 
-    def GetDuties(self, full_output=False):
-        """
-        Get heat duties for all equipment that calculates an energy balance.
+    def GetDuties(self, full_output: bool = False) -> Union[pd.DataFrame, tuple]:
+        """Collect unit-reported energies without changing their time/sign basis.
 
         Parameters
         ----------
         full_output : bool, optional
-            if True, duties and duty types are returened. The default is False.
+            Return utility-type identifiers alongside the energy table.
 
         Returns
         -------
-        heat_duties : pandas dataframe
-            heat duties [J].
+        heat_duties : pandas.DataFrame
+            Unit-reported energies [J], rows in equipment order and columns
+            ``heating``, ``cooling``. These labels do not normalize signs or
+            guarantee a common accumulation interval; see Notes.
+        duties_ids : numpy.ndarray, optional
+            Utility identifiers [-], shape (num_equipment, 2), returned only
+            with full_output=True. Refrigeration uses -3, -2, -1; cooling water
+            uses 0; heating uses 1, 2, 3 (1 is low-pressure steam).
 
-        duties_ids : numpy array
-            2D array with first column containing heating type and
-            second column containing refrigeration type, according to the
-            following convention:
+        Notes
+        -----
+        BatchReactor, CSTR, and SemibatchReactor accumulate since reset in
+        column 0, positive for heat added to liquid. PFR uses the same sign
+        and column but reports only its latest run. Batch/MSMPR crystallizers
+        report the latest segment in column 1, positive for heat removed;
+        SemibatchCryst does not publish these energy diagnostics.
 
-            refrigeration: -3, -2, -1
-            cooling water: 0
-            heating: 1, 2, 3 (1 corresponding to low pressure steam)
+        Batch evaporators accumulate since reset or new Phases: column 0 is
+        signed drum heat (positive inward), column 1 signed condenser heat
+        (negative for cooling). Continuous evaporators accumulate signed
+        utility/condenser energies and then report magnitudes in their two
+        columns; utility heat is positive outward before taking the magnitude.
 
+        This collector neither integrates profiles nor sums earlier PFR or
+        crystallizer segments. Before duration-based comparisons or GetOPEX,
+        accumulate those per-run energies externally over the intended common
+        horizon. Mixing cumulative and last-segment rows otherwise undercounts
+        repeated PFR/crystallizer operation.
         """
         heat_duties = []
         equipment_ids = []

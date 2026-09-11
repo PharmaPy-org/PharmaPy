@@ -6,6 +6,7 @@ Created on Tue Jun 16 15:43:14 2020
 """
 
 from collections.abc import Sequence
+from typing import Union
 
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Interpolation import NewtonInterpolation
@@ -49,17 +50,15 @@ def energy_balance(inst, mass_str):
 
 
 class Slurry:
-    """ Create Slurry object.
+    """Represent a homogeneous liquid-solid mixture with a shared temperature.
     
     Parameters
     ----------
     vol : float, optional
         Volume of the Slurry [m**3]. The default is 0.
     moments : array, optional
-        Array of size N, containing the distribution moments in um**n, 
-        for n = 0,...,N - 1. The default is None.
-    # mass_slurry : TYPE, optional
-        DESCRIPTION. The default is 0.
+        Slurry-volume-specific distribution moments [m**n/m**3], shape
+        (num_moments,), ordered from n = 0. The default is None.
     x_distrib : array, optional
         Array of size N, containing the internal grid
         size coordinate of the solids [um]. The default is None
@@ -110,14 +109,22 @@ class Slurry:
         Raises
         ------
         ValueError
-            If volume-specific moments are supplied for a zero-volume slurry.
+            If volume-specific moments are supplied for a zero-volume slurry,
+            or phase-only input has zero combined liquid and solid volume.
 
         Notes
         -----
         The physical solid volume fraction is ``kv * moments[3]`` [-].
         For moment-based input, the solid mass [kg] is derived from that
         physical volume [m**3] and the solid mixture density [kg/m**3], then
-        reconciled with the solid mole amount [mol].
+        reconciled with the solid mole amount [mol]. With phase-only input
+        and no size grid, total solid moments [m**n] are divided by the
+        combined liquid and solid volume to obtain slurry moments [m**n/m**3].
+        A supplied solid number distribution [#/um] is also divided by that
+        volume to obtain [#/m**3/um]; an absent distribution remains None.
+        Phase-only input requires positive combined volume: an empty mixture
+        has neither defined volume-specific moments nor a thermal inventory
+        from which to determine its mixture temperature.
         """
         if isinstance(phases_list, (list, tuple)):
             phases_list = list(phases_list)
@@ -131,7 +138,6 @@ class Slurry:
 
         classify_phases(self)
 
-        # TODO: this is not general enough (Dan - Energetics)
         if self.moments is not None:
             if self.vol == 0:
                 raise ValueError('If the moments are provided, Slurry volume needs to be larger than 0.')
@@ -153,14 +159,21 @@ class Slurry:
             mass_liq = self.Liquid_1.mass
             mass_sol = self.Solid_1.mass
 
-            self.vol = vol_sol + vol_liq
+            total_volume = vol_sol + vol_liq  # [m**3], combined phase inventory
+            if np.any(total_volume == 0):
+                raise ValueError(
+                    "Cannot initialize Slurry from zero combined phase volume; "
+                    "provide a positive liquid or solid inventory before "
+                    "assigning Phases.")
+            self.vol = total_volume  # [m**3]
             self.mass_slurry = mass_liq + mass_sol
 
             self.x_distrib = self.Solid_1.x_distrib
             if self.Solid_1.x_distrib is None:
-                self.distrib = self.Solid_1.distrib
+                self.distrib = (None if self.Solid_1.distrib is None
+                                else self.Solid_1.distrib / self.vol)  # [#/m**3/um]
                 self.dx = None
-                self.moments = self.Solid_1.moments
+                self.moments = self.Solid_1.moments / self.vol  # [m**n/m**3]
             else:
                 self.distrib = self.Solid_1.distrib / self.vol
 
@@ -189,11 +202,11 @@ class Slurry:
 
             self.moments = self.Solid_1.getMoments(distrib=self.distrib)
 
-            if self.vol > 0:
-                dens_liq = self.Liquid_1.getDensity()
-                dens_sol = self.Solid_1.getDensity()
-                dens_phases = np.array([dens_liq, dens_sol])
+            dens_liq = self.Liquid_1.getDensity()  # [kg/m**3]
+            dens_sol = self.Solid_1.getDensity()  # [kg/m**3]
+            dens_phases = np.array([dens_liq, dens_sol])  # [kg/m**3]
 
+            if self.vol > 0:
                 vol_share = self.getFractions()
                 vol_phases = vol_share * self.vol
 
@@ -214,48 +227,6 @@ class Slurry:
 
         self.num_species = self.Liquid_1.num_species
         self.temp = energy_balance(self, 'mass')
-
-    def __check_distrib(self):
-        if self.distrib is None:
-            vol_sol = self.Solid_1.vol
-            vol_liq = self.Liquid_1.vol
-
-            mass_liq = self.Liquid_1.mass
-            mass_sol = self.Solid_1.mass
-
-            self.vol = vol_sol + vol_liq
-            self.mass_slurry = mass_liq + mass_sol
-
-            self.x_distrib = self.Solid_1.x_distrib
-            if self.Solid_1.x_distrib is None:
-                self.distrib = self.Solid_1.distrib
-                self.dx = None
-                self.moments = self.Solid_1.moments
-            else:
-                self.distrib = self.Solid_1.distrib / self.vol
-
-                self.dx = self.Solid_1.dx
-                self.moments = self.Solid_1.getMoments(distrib=self.distrib)
-        else:
-            delta_x = np.diff(self.x_distrib)
-            equal = np.isclose(delta_x[1:], delta_x[:-1]).all()
-
-            if equal:
-                self.dx = delta_x[0]
-            else:  # assume geometric series and make adjustments
-                ratio = self.x_distrib[1] / self.x_distrib[0]
-                x_grid = np.zeros(len(self.x_distrib) + 1)
-                x_gr = np.sqrt(self.x_distrib[1:] * self.x_distrib[:-1])
-
-                x_grid[0] = x_gr[0] / ratio
-                x_grid[-1] = x_gr[-1] * ratio
-
-                x_grid[1:-1] = x_gr
-
-                self.dx = np.diff(x_grid)
-
-            self.Solid_1.x_distrib = self.x_distrib
-            self.moments = self.Solid_1.getMoments(distrib=self.distrib)
 
     def getDensity(self, temp=None, basis='mass', total=False):
 
@@ -314,13 +285,23 @@ class Slurry:
 
             return mass_fracs
 
-    def getTotalVol(self):
-        vol_liq = self.Liquid_1.vol
-        epsilon = 1 - self.Solid_1.kv * self.Solid_1.moments[3]
+    def getTotalVol(self) -> Union[float, np.ndarray]:
+        """Return total liquid-plus-solid slurry volume.
 
-        vol_total = vol_liq / epsilon
+        Returns
+        -------
+        float or ndarray
+            Sum of the reconciled phase volumes [m**3], retaining their
+            scalar or array shape. No conversion from stored slurry moments
+            is needed.
 
-        return vol_total
+        Notes
+        -----
+        ``Slurry.vol`` records the initialized volume and is not refreshed by
+        in-place phase updates. This method is the authoritative current
+        total, computed from the reconciled liquid and solid phase volumes.
+        """
+        return self.Liquid_1.vol + self.Solid_1.vol
 
     def getEnthalpy(self, temp, volfracs=None, densMass=None, volumetric=True):
         # Individual phases
@@ -344,8 +325,43 @@ class Slurry:
 
         return hSlurry
 
-    def getCp(self, temp, volfracs=None, density=None, times_vliq=False,
-              basis='mass'):
+    def getCp(self, temp: float, volfracs=None, density=None,
+              times_vliq: bool = False, basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Return mixture heat capacitance on the selected volume basis.
+
+        Parameters
+        ----------
+        temp : float
+            Common phase temperature [K].
+        volfracs : array-like, optional
+            Liquid and solid fractions of slurry volume [-], shape (2,).
+            Defaults to the attached slurry fractions.
+        density : array-like, optional
+            Liquid and solid densities, shape (2,). Defaults to attached
+            phase densities in the selected basis: [kg/m**3] for mass or
+            [kmol/m**3] (equivalently [mol/L]) for mole.
+        times_vliq : bool, optional
+            If True, divide the entire slurry-volume capacitance by the
+            liquid volume fraction. Multiplication by liquid volume then
+            recovers total phase capacitance [J/K] for mass or [kJ/K] for
+            mole, when volume is in [m**3]. Default False.
+        basis : {'mass', 'mole'}, optional
+            Basis passed to the phase Cp providers: [J/kg/K] or [J/mol/K].
+            Default mass matches the default density basis.
+
+        Returns
+        -------
+        float or ndarray
+            Capacitance per slurry volume, or per liquid volume when
+            ``times_vliq=True``. Mass basis returns [J/m**3/K]; mole basis
+            returns [J/L/K] (equivalently [kJ/m**3/K]), since phase providers
+            express molar density in [mol/L] and Cp in [J/mol/K].
+
+        Notes
+        -----
+        Liquid-volume normalization requires a positive liquid fraction.
+        Supplied fractions are copied and are not modified in place.
+        """
 
         # Individual phases
         cpLiq = self.Liquid_1.getCp(temp=temp, basis=basis)
@@ -359,22 +375,22 @@ class Slurry:
         volfracs = np.array(volfracs, copy=True)
 
         if density is None:
-            density = self.getDensity()
+            density = self.getDensity(basis=basis)
         density = np.asarray(density)
 
         self.epsilon = volfracs.copy()
         self.densities = density
 
         if times_vliq:
-            volfracs[1] *= 1/volfracs[0]
+            volfracs = volfracs / volfracs[0]  # [m**3 phase/m**3 liquid]
 
-        cpSlurry = sum(volfracs * density * cpPhases)  # J/m**3/K
+        cpSlurry = sum(volfracs * density * cpPhases)  # [J/m**3/K] mass; [J/L/K] mole
 
         return cpSlurry
 
 
 class SlurryStream(Slurry):
-    """ Create a slurry stream object.
+    """Represent a homogeneous liquid-solid flow with a shared temperature.
     
     Parameters
     ----------
@@ -382,8 +398,8 @@ class SlurryStream(Slurry):
         Volumetric flow rate in which the slurry is transfered [m**3/s]. 
         The default is 0.
     moments : array, optional
-        Array of size N, containing the distribution moments in um**n, 
-        for n = 0,...,N - 1. The default is None.
+        Slurry-volume-specific distribution moments [m**n/m**3], shape
+        (num_moments,), ordered from n = 0. The default is None.
     x_distrib : array, optional
         Array of size N, containing the internal grid
         size coordinate of the solids [um]. The default is None
@@ -439,6 +455,13 @@ class SlurryStream(Slurry):
         :meth:`Slurry.getFractions`, which applies ``kv`` when converting the
         third moment to a solid volume fraction [-]. Solid-stream mass and
         mole flow are reconciled through :meth:`SolidStream.updatePhase`.
+        After every assignment, ``vol`` and ``vol_flow`` [m**3/s] and
+        ``mass_slurry`` and ``mass_flow`` [kg/s] equal the constituent flow
+        sums. With no distribution or moments supplied, constituent flows
+        determine the total, replacing the constructor's flow value.
+        Solid volume uses the inherited ``SolidStream.vol`` [m**3/s]; that
+        stream need not expose a ``vol_flow`` alias. Liquid volume and mass
+        use flow aliases because liquid updates delete phase amount attributes.
         """
         if isinstance(phases_list, tuple):
             phases_list = list(phases_list)
@@ -459,8 +482,6 @@ class SlurryStream(Slurry):
             vol_phases = vol_share * self.vol
 
             mass_liq, mass_sol = vol_phases * dens_phases  # [kg/s] each
-            self.mass_slurry = np.dot(vol_phases, dens_phases)
-            self.mass_flow = self.mass_slurry
 
             self.Liquid_1.updatePhase(mass_flow=mass_liq)
 
@@ -471,14 +492,10 @@ class SlurryStream(Slurry):
             self.Solid_1.vol_flow = vol_phases[1]
 
         elif self.distrib is None:
-            vol_sol = self.Solid_1.vol
-            vol_liq = self.Liquid_1.vol
+            vol_sol = self.Solid_1.vol  # [m**3/s]
+            vol_liq = self.Liquid_1.vol_flow  # [m**3/s]
 
-            mass_liq = self.Liquid_1.mass
-            mass_sol = self.Solid_1.mass
-
-            self.vol = vol_sol + vol_liq
-            self.mass_slurry = mass_liq + mass_sol
+            self.vol = vol_sol + vol_liq  # [m**3/s]
 
             self.x_distrib = self.Solid_1.x_distrib
             self.distrib = self.Solid_1.distrib / self.vol
@@ -509,15 +526,11 @@ class SlurryStream(Slurry):
 
             if self.vol > 0:
                 dens_liq = self.Liquid_1.getDensity()
-                dens_sol = self.Solid_1.getDensity()
-                dens_phases = np.array([dens_liq, dens_sol])
 
                 vol_share = self.getFractions()
                 vol_phases = vol_share * self.vol
 
                 mass_liq = vol_phases[0] * dens_liq  # [kg/s]
-                self.mass_slurry = np.dot(vol_phases, dens_phases)
-                self.mass_flow = self.mass_slurry
 
             elif self.mass_slurry > 0:
                 dens_liq = self.Liquid_1.getDensity()  # [kg/m**3]
@@ -532,7 +545,6 @@ class SlurryStream(Slurry):
                 mass_liq = mass_phases[0]  # [kg/s]
 
                 self.vol = vol_phases.sum()  # [m**3/s]
-                self.mass_flow = self.mass_slurry  # [kg/s]
 
             f_distr = self.vol * self.distrib
 
@@ -545,6 +557,12 @@ class SlurryStream(Slurry):
                 distrib=f_distr,
             )
             self.Solid_1.vol_flow = vol_phases[1]
+
+        self.vol = self.Liquid_1.vol_flow + self.Solid_1.vol  # [m**3/s]
+        self.mass_slurry = (self.Liquid_1.mass_flow
+                            + self.Solid_1.mass_flow)  # [kg/s]
+        self.vol_flow = self.vol  # [m**3/s]
+        self.mass_flow = self.mass_slurry  # [kg/s]
 
         self.num_species = self.Liquid_1.num_species
         self.temp = energy_balance(self, 'mass_flow')
@@ -713,24 +731,47 @@ class Cake:
 
         return alpha
 
-    def getEnthalpy(self, temp=None, mass_frac=None, distrib=None):
+    def getEnthalpy(self, temp=None, mass_frac=None,
+                    distrib=None) -> Union[float, np.ndarray]:
+        """Return the mass-specific enthalpy of liquid and solid in a cake.
+
+        Parameters
+        ----------
+        temp : float or ndarray, optional
+            Common phase temperature [K], scalar or temperature profile;
+            defaults to the liquid temperature.
+        mass_frac : array-like, optional
+            Liquid species mass fractions [-], shape (num_species,).
+            Defaults to the attached liquid composition.
+        distrib : array-like, optional
+            Legacy unused distribution argument [#/um].
+
+        Returns
+        -------
+        float or ndarray
+            Enthalpy [J/kg of liquid plus solid inventory], relative to the
+            phase providers' default reference temperature of 298.15 K. Array
+            temperatures retain the providers' temperature axis.
+
+        Notes
+        -----
+        The attached liquid and solid masses set the weights, matching the
+        total inventory used by Mixer.energy_balance. Porosity and saturation
+        metadata do not change these inventories. Gas mass and enthalpy are
+        neglected.
+        """
         if temp is None:
-            temp = self.Liquid_1.temp
+            temp = self.Liquid_1.temp  # [K]
 
         if mass_frac is None:
-            mass_frac = self.Liquid_1.mass_frac
+            mass_frac = self.Liquid_1.mass_frac  # [-]
 
-        # Individual phases
-        hLiq = self.Liquid_1.getEnthalpy(temp=temp, mass_frac=mass_frac)
-        hSol = self.Solid_1.getEnthalpy(temp=temp)
+        hLiq = self.Liquid_1.getEnthalpy(
+            temp=temp, mass_frac=mass_frac, basis='mass')  # [J/kg liquid]
+        hSol = self.Solid_1.getEnthalpy(temp=temp, basis='mass')  # [J/kg solid]
 
-        porosity = self.Solid_1.getPorosity()
-        porosities = [porosity, 1 - porosity]
-
-        densities = self.getDensity()
-
-        frac_mass = porosities * densities / np.dot(densities, porosities)
-
-        enthalpy = np.dot(frac_mass, [hLiq, hSol])
+        mass_liq = self.Liquid_1.mass  # [kg]
+        mass_sol = self.Solid_1.mass  # [kg]
+        enthalpy = (mass_liq * hLiq + mass_sol * hSol) / (mass_liq + mass_sol)  # [J/kg]
 
         return enthalpy
