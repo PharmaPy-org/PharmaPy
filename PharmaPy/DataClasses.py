@@ -204,6 +204,12 @@ class ResolvedPhaseTransfer:
 
     direction: str
     material_slice: slice | None = None
+
+    # (material_slice, rate) written by this transfer's phase mechanisms.
+    # The positivity limiter replays these to undo part of a contribution
+    # without having to re-evaluate the mechanism.
+    material_writes: list = field(default_factory=list)
+
     def scale(self, factor, basis):
 
         self.species_flow *= factor

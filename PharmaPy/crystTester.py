@@ -90,12 +90,12 @@ rxns = ['A + B --> C', 'C + A --> D']
 fitted_kinetics = np.array([6.26855218e+18, 8.30671806e+00, 1.45782420e+06, 4.52241037e+00, 3.93676056e+00]) 
 cryst_kinetics =build_crysts(fitted_kinetics)
 Ckinetics = CrystKinetics(np.array([-28.13909202,	0.001,	5.900800253]),**cryst_kinetics, solubility_type='apelblat')
-# Utility = CoolingWater(mass_flow=100, temp_in=273.55)
-# vessel.Utility = Utility
+Utility = CoolingWater(mass_flow=100, temp_in=273.55)
+vessel.Utility = Utility
 # vessel.RxnKinetics = Rkinetics
 vessel.CrystKinetics = Ckinetics
 # vessel.controller.target_volume=1e-2
-# vessel.Inlet = inlet
+vessel.Inlet = inlet
 
 
 # -----------------------------
@@ -111,8 +111,8 @@ vessel.solve_unit(runtime=150)
 
 print(vessel.result.Total_m_in_vessel[-5:])
 print('model_calls', vessel.model_call_count)
-# print(vessel._timers)
-print(vessel.Phases[1].mechanisms[0]._timers)
+print(vessel._timers)
+# print(vessel.Phases[1].mechanisms[0]._timers)
 print("done")
 
 # print(

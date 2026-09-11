@@ -31,6 +31,7 @@ class Mechanism:
 
     def __init__(self):
         self.exposed_attributes = set()
+        self._timers = {}
 
     def _update_exposed_attributes(self):
         self.exposed_attributes.update(state.name for state in self.solver_states)
@@ -52,9 +53,22 @@ class Mechanism:
 
     def update_state(self, completed_state,**kwargs):
         t0 = perf_counter()
-        for variable in self.solver_states:
 
-            key = StateKey(variable.name, variable.phaseref)
+        # solver_states carries the template definitions, whose phaseref is
+        # still None; the vessel stamps the owning phase onto the copies it
+        # registers and records the resulting keys in solver_state_keys.
+        # Rebuilding a key from the template here looks up
+        # StateKey(name, None), which is never in completed_state, so the
+        # mechanism silently kept its initial value for the whole solve.
+        keys = self.solver_state_keys
+
+        if not keys:
+            keys = tuple(
+                StateKey(variable.name, variable.phaseref)
+                for variable in self.solver_states
+            )
+
+        for variable, key in zip(self.solver_states, keys):
 
             if key in completed_state:
                 setattr(
@@ -62,6 +76,7 @@ class Mechanism:
                     variable.name,
                     completed_state[key]
                 )
+
         self._timers['update_state'] = self._timers.get('update_state',0)+perf_counter()-t0
     def add_solver_state_variables(
         self,
@@ -732,15 +747,32 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         Compute third moment from a number density distribution.
         """
         return np.trapezoid(distrib * self.x_grid_cu, self.x_grid)
+    # x_grid is in microns, so the third moment is in micron**3 per m**3 of
+    # liquid. get_solid_mass and the population balance's mass_transfer both
+    # carry this factor; get_mass and set_mass did not, which made the solid
+    # inventory 1e18 times too large the moment it became nonzero.
+    VOLUME_UNIT_FACTOR = 1e-18
+
     def get_mass(self):
         m3 = self.compute_third_moment(getattr(self,self.distribution_state_name))
-        return self.getDensity()*self.kv*m3*self.reference_vol
+        return (
+            self.getDensity()
+            * self.kv
+            * m3
+            * self.reference_vol
+            * self.VOLUME_UNIT_FACTOR
+        )
     def set_mass(self, mass):
 
         if mass is None:
             return
 
-        target_m3 = mass/ (self.getDensity()* self.kv* self.reference_vol)
+        target_m3 = mass / (
+            self.getDensity()
+            * self.kv
+            * self.reference_vol
+            * self.VOLUME_UNIT_FACTOR
+        )
 
         self.set_third_moment(target_m3)
     @PopulationBalanceMechanism.mechanism_kinetics.setter
@@ -754,7 +786,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         distribution = getattr(self,self.distribution_state_name)
 
         current_m3 = self.compute_third_moment(distribution)
-
+        if target_m3==0 and current_m3 == 0:
+            return
         if current_m3 <= 0:
             raise ValueError("Cannot scale a distribution with zero third moment.")
 

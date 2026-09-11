@@ -420,6 +420,10 @@ class MultiPhaseVessel():
 
         self.reset_states = reset
 
+        # Populated lazily by unit_model, but update_phases_from_state can run
+        # before the first right-hand side evaluation (reset, replay).
+        self._timers = {}
+
         self.state_variables = StateCollection()
 
         self.input_states = StateCollection()
@@ -676,6 +680,9 @@ class MultiPhaseVessel():
             )
             self._timers['update_phases_from_solver_state'] = self._timers.get('update_phases_from_solver_state',0)+perf_counter()-t0
 
+        for mechanism in getattr(self, "_workspace_mechanisms", ()):
+            mechanism.update_state(completed_state, unit=self)
+
     def pack_state_rates(self, material_rates, global_rates=None):
 
         buffer = self._solver_rate_buffer
@@ -684,7 +691,7 @@ class MultiPhaseVessel():
         material_slices = self.solver_state_collection.material_slices
         solver_slices = self.solver_state_collection.slices
 
-        for key in self.solver_state_collection.material_keys:
+        for key in self.solver_state_collection.keys:
             try:
                 buffer[solver_slices[key]] = material_rates[material_slices[key]]
             except KeyError:
@@ -819,6 +826,132 @@ class MultiPhaseVessel():
             if connection.mechanism is None:
                 connection.mechanism = DirectTransfer()
 
+        self._compile_stream_workspaces()
+        self._compile_positivity_layout()
+
+    def _compile_stream_workspaces(self):
+        """
+        Allocate one reusable stream per connection.
+
+        Resolving a connection used to deep-copy its stream on every
+        right-hand side evaluation. For a stream carrying a discretized
+        phase that copy dominated the run time, so each connection now owns
+        a single scratch stream that is overwritten in place instead. The
+        copy still exists, so the user's connection stream is never mutated;
+        it is just made once rather than tens of thousands of times.
+        """
+
+        self._inlet_workspaces = [
+            copy.deepcopy(connection.stream)
+            for connection in self.inlet_connections
+        ]
+
+        self._outlet_workspaces = [
+            copy.deepcopy(connection.stream)
+            for connection in self.outlet_connections
+        ]
+
+        # Which inlet fields a controller last overrode, per connection and
+        # phase, so they can be put back when it stops overriding them.
+        self._inlet_overrides_applied = {}
+
+        # A stream phase shares its vessel phase's mechanisms by reference
+        # (to_stream is a shallow copy), so the workspaces hold their own
+        # copies and those copies have to be advanced alongside the vessel's.
+        # Sharing the live mechanism instead would let resolving an outlet
+        # write back into the vessel's own distribution.
+        self._workspace_mechanisms = [
+            mechanism
+            for workspaces in (self._inlet_workspaces, self._outlet_workspaces)
+            for workspace in workspaces
+            for phase in workspace
+            for mechanism in phase.mechanisms
+        ]
+
+    def _apply_inlet_overrides(
+        self,
+        stream_phase,
+        template_phase,
+        ops,
+        workspace_key,
+    ):
+        """
+        Apply controller overrides to a reused inlet stream.
+
+        The workspace persists between calls, so a field the controller
+        overrode on one evaluation and left alone on the next has to be
+        restored from the connection's own stream. A fresh copy used to do
+        that implicitly.
+        """
+
+        previous = self._inlet_overrides_applied.get(workspace_key)
+
+        if previous:
+
+            stale = previous - ops.keys()
+
+            if stale:
+                stream_phase.updatePhase(
+                    **{
+                        name: getattr(template_phase, name)
+                        for name in stale
+                    }
+                )
+
+        if ops:
+            stream_phase.updatePhase(**ops)
+
+        self._inlet_overrides_applied[workspace_key] = set(ops)
+
+    def _get_inlet_workspace(self, connection_num, connection):
+
+        workspaces = getattr(self, "_inlet_workspaces", None)
+
+        if workspaces is None or connection_num >= len(workspaces):
+            self._compile_stream_workspaces()
+            workspaces = self._inlet_workspaces
+
+        return workspaces[connection_num]
+
+    def _get_outlet_workspace(self, connection_num, connection):
+
+        workspaces = getattr(self, "_outlet_workspaces", None)
+
+        if workspaces is None or connection_num >= len(workspaces):
+            self._compile_stream_workspaces()
+            workspaces = self._outlet_workspaces
+
+        return workspaces[connection_num]
+
+    def _compile_positivity_layout(self):
+        """
+        Precompute the flat layout used by the positivity limiter.
+
+        The limiter runs on every right-hand side evaluation, so everything
+        that depends on the state layout rather than on the state values is
+        resolved once, here.
+        """
+
+        collection = self.solver_state_collection
+
+        limited = np.zeros(collection.material_dim, dtype=bool)
+        groups = []
+
+        for key, material_slice in collection.material_slices.items():
+
+            if not collection.states[key].limit_negative_inventory:
+                continue
+
+            limited[material_slice] = True
+            groups.append((key, material_slice))
+
+        self._positivity_limited = limited
+        self._positivity_groups = tuple(groups)
+        self._has_positivity_limits = bool(groups)
+
+        self._inventory_buffer = np.zeros(collection.material_dim)
+        self._scale_buffer = np.ones(collection.material_dim)
+
     def compile_integrator(self, **kwargs):
         self.compile_structure()
         return self.integrator.compile_integrator(
@@ -928,131 +1061,104 @@ class MultiPhaseVessel():
 
         return rates, buffer
 
-    def check_negative_inventory(
-            self,
-            rates,
-            completed_state,
-            limiter_dt=1.0,
-            inventory_atol=1e-12):
+    def gather_inventory(self, completed_state):
+        """Pack the current phase inventories into the material layout."""
 
-        violations = {}
+        inventory = self._inventory_buffer
 
-        for state_key,material_slice in self.solver_state_collection.material_slices.items():
-            if not self.solver_state_collection.states[state_key].limit_negative_inventory:
-                continue
+        for state_key, material_slice in self._positivity_groups:
+            inventory[material_slice] = completed_state[state_key]
 
-            inventory = completed_state[state_key]
-            rate = rates[material_slice]
+        return inventory
 
-            mask = (inventory + rate * limiter_dt < -inventory_atol)
+    @staticmethod
+    def soft_saturate(ratio, width=0.1):
+        """
+        C1-continuous stand-in for ``min(ratio, 1)``.
 
-            if np.any(mask):
-                violations[state_key] = mask
+        A hard minimum puts a kink in the right-hand side, so the integrator
+        has to cut its step every time the limiter engages or disengages and
+        the Jacobian it extrapolates from is wrong on one side of the
+        switch. This version equals ``ratio`` below ``1 - width`` and ``1``
+        above ``1 + width``, bridged by a quadratic whose value and slope
+        match at both ends, so the derivative stays continuous.
+        """
 
-        return violations
-    
+        lower = 1.0 - width
+        upper = 1.0 + width
+
+        blended = ratio - (ratio - lower) ** 2 / (4.0 * width)
+
+        return np.where(
+            ratio <= lower,
+            ratio,
+            np.where(ratio >= upper, 1.0, blended),
+        )
+
     def calculate_scale(
             self,
-            violations,
-            completed_state,
             buffer,
+            completed_state,
             limiter_dt=1.0,
-            inventory_atol=1e-12
         ):
+        """
+        Compute one throttling factor per phase inventory.
 
-        scalable_terms = [
-            buffer.CROSS_PHASE,
-            buffer.OUTLET,
-        ]
+        Inlet and intraphase terms are treated as fixed; cross-phase and
+        outlet terms compete for whatever inventory is left over
+        ``limiter_dt`` and share a single factor per phase, which keeps an
+        outlet composition consistent with the phase it drains.
 
-        fixed_terms = [
-            buffer.INLET,
-            buffer.INTRAPHASE,
-        ]
+        Returns ``None`` when nothing needs throttling, so the common case
+        costs one vectorized comparison and no allocation of scale vectors.
+        """
 
-        scales = {}
+        contributions = buffer.contributions
 
-        # Only phases that violated need correction
-        for state_key in violations:
+        inventory = self.gather_inventory(completed_state)
 
-            material_slice = self.solver_state_collection.material_slices[state_key]
+        fixed = (
+            contributions[buffer.INLET]
+            + contributions[buffer.INTRAPHASE]
+        )
 
-            inventory = completed_state[state_key]
+        scalable = (
+            contributions[buffer.CROSSPHASE]
+            + contributions[buffer.OUTLET]
+        )
 
-            fixed = (
-                buffer.contributions[buffer.INLET, material_slice]
-                + buffer.contributions[buffer.INTRAPHASE, material_slice]
-            )
+        available = inventory + fixed * limiter_dt
+        demand = -scalable * limiter_dt
 
-            scalable = (
-                buffer.contributions[buffer.CROSSPHASE, material_slice]
-                + buffer.contributions[buffer.OUTLET, material_slice]
-            )
+        active = self._positivity_limited & (demand > 0.0)
 
-            # How much inventory remains after unavoidable mechanisms
-            allowable = inventory + fixed*limiter_dt
+        if not active.any():
+            return None
 
+        scales = self._scale_buffer
+        scales.fill(1.0)
 
-            violating = violations[state_key] & (scalable < 0)
+        scales[active] = self.soft_saturate(
+            np.maximum(available[active], 0.0) / demand[active]
+        )
 
-            species_scales = np.ones_like(inventory, dtype=float)
+        engaged = False
 
-            species_scales[violating] = (
-                allowable[violating]
-                / (-scalable[violating] * limiter_dt + eps)
-            )
+        for _, material_slice in self._positivity_groups:
 
-            phase_scale = np.min(species_scales)
+            phase_scale = scales[material_slice].min()
 
+            if phase_scale < 1.0:
+                engaged = True
 
+            scales[material_slice] = phase_scale
 
-            scales[state_key] = np.full_like(
-                inventory,
-                phase_scale,
-                dtype=float
-            )
+        if not engaged:
+            return None
+
+        return scales
 
 
-        return scales,scalable_terms,fixed_terms
-    
-    def scale_phase_inventory(
-            self,
-            scales):
-
-        for state_key, scale_vector in scales.items():
-
-            phase = self.phase_states.get_phase(
-                state_key.phaseref
-            )
-
-            new_mass = (
-                phase.mass_j
-                * scale_vector
-            )
-
-            phase.updatePhase(
-                mass_j=new_mass
-            )
-                
-    def restore_effective_inventory(
-            self,
-            original_inventory:dict[PhaseRef],
-            scales,
-        ):
-
-        for phase_ref, mass in original_inventory.items():
-
-            phase = self.phase_states.get_phase(
-                phase_ref
-            )
-
-            phase.updatePhase(
-                **{
-                    self.basis:
-                        mass * scales[phase_ref]
-                }
-            )
-    
     def limit_material_rates(
                 self,
                 time,
@@ -1074,66 +1180,114 @@ class MultiPhaseVessel():
                 resolved_outlets,
             )
 
-            rates = self.sum_material_contributions(buffer.contributions)
-
-            buffer = self.apply_linear_rate_scaling(
+            self.apply_rate_scaling(
                 buffer,
-                rates,
                 completed_state,
                 limiter_dt
             )
 
             return buffer
-    def apply_linear_rate_scaling(
+
+    def apply_rate_scaling(
             self,
             buffer,
-            rates,
             completed_state,
             limiter_dt=1.0,
         ):
         """
-        Linearly scale consuming contributions to prevent negative inventory.
+        Throttle consuming contributions to keep phase inventories positive.
 
-        Assumes dt is the expected integration step. This does not modify
-        phases and does not regenerate nonlinear mechanisms.
+        ``limiter_dt`` is the horizon over which depletion is anticipated.
+        Phases and nonlinear mechanisms are not re-evaluated: each mechanism
+        that drains a throttled phase is scaled down at both ends, so the
+        transfer stays closed even while it is being limited.
+
+        Returns True when the limiter engaged.
         """
 
-        violations = self.check_negative_inventory(
-            rates,
-            completed_state,
-            limiter_dt=limiter_dt
-        )
-
-        if not violations:
-            return buffer
-
-        scales,scalable_terms,fixed_terms = self.calculate_scale(
-            violations,
-            completed_state,
+        scales = self.calculate_scale(
             buffer,
-            dt=limiter_dt
+            completed_state,
+            limiter_dt=limiter_dt,
         )
 
-        
+        if scales is None:
+            return False
 
-        for term in scalable_terms:
+        self.scale_crossphase_transfers(buffer, scales)
+        self.scale_outlet_transfers(buffer, scales)
 
-            for state_key, rate in buffer.contributions[term].items():
+        return True
 
-                if state_key not in scales:
-                    continue
+    def _transfer_scale(self, scales, material_writes):
+        """
+        The factor a single mechanism may run at.
 
-                buffer.contributions[term][state_key] *= scales[state_key]
-        for item in buffer.aux["outlet"]:
-            phase_ref = item.mapping.sink_phaseref
-            key = self.material_key(phase_ref)
+        A mechanism is held to the tightest limit among the phases it
+        drains, so it can never take more from a phase than that phase's own
+        factor allows.
+        """
 
-            if key in scales:
-                item.scale(scales[key][0], self.basis)
-                assert np.allclose(
-                    item.species_flow,
-                    getattr(item.stream_phase, self.basis+"_flow"))
-        return buffer
+        factor = 1.0
+
+        for material_slice, rate in material_writes:
+            factor = min(factor, scales[material_slice.start])
+
+        return factor
+
+    def scale_crossphase_transfers(self, buffer, scales):
+        """
+        Scale each cross-phase mechanism down by a single factor.
+
+        Both ends of a transfer move together, so throttling the source
+        drain also throttles what arrives in the sink. Scaling the flat
+        contribution rows independently would credit the sink with material
+        the source never gave up.
+        """
+
+        row = buffer.contributions[buffer.CROSSPHASE]
+
+        for aux in buffer.aux[buffer.CROSSPHASE]:
+
+            material_writes = aux.get("material_writes")
+
+            if not material_writes:
+                continue
+
+            factor = self._transfer_scale(scales, material_writes)
+
+            if factor >= 1.0:
+                continue
+
+            for material_slice, rate in material_writes:
+                row[material_slice] -= (1.0 - factor) * rate
+
+    def scale_outlet_transfers(self, buffer, scales):
+        """Scale outlet draws, and the streams that report them, together."""
+
+        row = buffer.contributions[buffer.OUTLET]
+
+        for transfer in buffer.aux[buffer.OUTLET]:
+
+            material_slice = self._material_slice_by_phase.get(
+                transfer.mapping.sink_phaseref
+            )
+
+            if material_slice is None:
+                continue
+
+            factor = scales[material_slice.start]
+
+            if factor >= 1.0:
+                continue
+
+            row[material_slice] += (1.0 - factor) * transfer.species_flow
+
+            for mechanism_slice, rate in transfer.material_writes:
+                row[mechanism_slice] += (1.0 - factor) * rate
+
+            transfer.scale(factor, self.basis)
+            transfer.vol_flow *= factor
 
     def sum_material_contributions(self,contributions):
         return contributions.sum(axis=0)
@@ -1161,12 +1315,20 @@ class MultiPhaseVessel():
 
         return total
     
+    # Operating conditions that describe a whole connection rather than one
+    # phase within it. A controller that asks for an outlet vol_flow means
+    # the stream's total, which the caller distributes over the mapped
+    # phases; handing the same number to every phase as its own flow would
+    # multiply the draw by the number of phases.
+    connection_level_operating_names = ("vol_flow",)
+
     def get_phase_operating_conditions(
         self,
         operating_conditions:dict[OperatingKey,Any],
         connection:int,
         phase_ref:PhaseRef,
-        port:str
+        port:str,
+        skip_connection_level=False,
     )->dict[OperatingKey,Any]:
 
         updates = {}
@@ -1177,8 +1339,11 @@ class MultiPhaseVessel():
             if key.connection != connection:
                 continue
 
-            if (key.phaseref is not None
-                and key.phaseref != phase_ref):
+            if key.phaseref is None:
+                if (skip_connection_level
+                    and key.name in self.connection_level_operating_names):
+                    continue
+            elif key.phaseref != phase_ref:
                 continue
 
             if (key.port is not None
@@ -1226,12 +1391,17 @@ class MultiPhaseVessel():
         """
         Compute the physically achievable outlet flow for a vessel phase.
 
-        The default implementation assumes the requested flow is
-        achievable. Subclasses may override this to enforce additional
-        constraints (e.g. settling, phase disengagement, hydraulics).
+        The default implementation only rejects backflow. Draining a phase
+        faster than it can supply is left to the positivity limiter, which
+        throttles smoothly; clamping here would need a volumetric flow
+        (m3/s) to be compared against a volume (m3), and the hard corner it
+        introduced cost the integrator a step every time it was reached.
+
+        Subclasses may override this to enforce additional constraints
+        (e.g. settling, phase disengagement, hydraulics).
         """
 
-        return min(max(requested_flow, 0.0),vessel_phase.vol)
+        return max(requested_flow, 0.0)
     
     def _resolve_outlets(
         self,
@@ -1245,7 +1415,7 @@ class MultiPhaseVessel():
 
         for connection_num, connection in enumerate(self.outlet_connections):# iterate over outlet streams
 
-            outlet_stream = copy.deepcopy(connection.stream)
+            outlet_stream = self._get_outlet_workspace(connection_num, connection)
 
             total_outlet_flow = outlet_flows.get(connection_num)
             transfers=[]
@@ -1253,31 +1423,37 @@ class MultiPhaseVessel():
 
                 vessel_phase = self.phase_states.get_phase(mapping.sink_phaseref)
                 outlet_phase = outlet_stream.get_phase_from_ref(mapping.source_phaseref)
-                
+
                 # Default outlet request
                 requested_flow = self.compute_requested_phase_outlet_flow(vessel_phase,total_outlet_flow,connection)
 
-                # Controller (or other operating conditions) may override the request
+                # Controller (or other operating conditions) may override the
+                # request, but only a phase-specific vol_flow does: the
+                # connection's total has already been distributed above.
                 ops =self.get_phase_operating_conditions(
                     operating_conditions,
                     connection_num,
                     mapping.source_phaseref,
                     "outlet",
+                    skip_connection_level=True,
                 )
                 requested_flow = ops.pop("vol_flow", requested_flow)
 
                 # Apply physical limits once
                 actual_flow = self.compute_actual_phase_outlet_flow(vessel_phase,requested_flow)
-                updates = vessel_phase.state_dict
 
-                # Amounts are determined from the resolved outlet flow
-                for name in outlet_phase.amount_names:
-                    updates.pop(name, None)
+                # Only the intensive state is inherited from the vessel
+                # phase: the amount is set by the resolved outlet flow, and
+                # one composition basis fixes the rest. Reading the vessel
+                # phase's full state_dict here evaluated every composition
+                # representation just to discard all but one of them.
+                composition_name = outlet_phase.default_composition_name
 
-                # Keep only the preferred composition representation
-                for name in outlet_phase.composition_names:
-                    if name != outlet_phase.default_composition_name:
-                        updates.pop(name, None)
+                updates = {
+                    "temp": vessel_phase.temp,
+                    "pres": vessel_phase.pres,
+                    composition_name: getattr(vessel_phase, composition_name),
+                }
 
                 # Add any remaining operating-condition overrides
                 updates.update(ops)
@@ -1309,7 +1485,7 @@ class MultiPhaseVessel():
 
         for connection_num, connection in enumerate(self.inlet_connections):
 
-            inlet_stream = copy.deepcopy(connection.stream)
+            inlet_stream = self._get_inlet_workspace(connection_num, connection)
             transfers= []
             for mapping in connection.phase_mappings:
                 stream_phase = inlet_stream.get_phase_from_ref(mapping.source_phaseref)
@@ -1324,7 +1500,14 @@ class MultiPhaseVessel():
                     "inlet",
                 )
 
-                stream_phase.updatePhase(**ops)
+                self._apply_inlet_overrides(
+                    stream_phase,
+                    connection.stream.get_phase_from_ref(
+                        mapping.source_phaseref
+                    ),
+                    ops,
+                    (connection_num, mapping.source_phaseref),
+                )
 
 
                 species_flow = getattr(stream_phase,self.basis+"_flow")
@@ -1446,14 +1629,14 @@ class MultiPhaseVessel():
         for resolved_connection in resolved_outlets:
             for transfer in resolved_connection:
 
-                material_slice = self._material_slice_by_phase[
+                material_slice = self._material_slice_by_phase.get(
                     transfer.mapping.sink_phaseref
-                ]
-
-                buffer.contributions[
-                    buffer.OUTLET,
-                    material_slice,
-                ] -= transfer.species_flow
+                )
+                if material_slice is not None:
+                    buffer.contributions[
+                        buffer.OUTLET,
+                        material_slice,
+                    ] -= transfer.species_flow
 
                 for mechanism in transfer.vessel_phase.mechanisms:
 
@@ -1473,6 +1656,10 @@ class MultiPhaseVessel():
                                 buffer.OUTLET,
                                 state_slice,
                             ] -= value
+
+                            transfer.material_writes.append(
+                                (state_slice, value)
+                            )
 
                 buffer.aux[
                     buffer.OUTLET
@@ -1534,6 +1721,8 @@ class MultiPhaseVessel():
             self._timers['crossphase_mechanism'] = self._timers.get('crossphase_mechanism',0)+perf_counter()-t0
 
             t0 = perf_counter()
+            material_writes = []
+
             for state_key, rate in crossphase_result.state_rates.items():
 
                 if isinstance(state_key.phaseref, BasePhase):
@@ -1556,8 +1745,13 @@ class MultiPhaseVessel():
                         buffer.CROSSPHASE,
                         material_slice,
                     ] += rate
+
+                    material_writes.append((material_slice, rate))
+
             self._timers['crossphase_contributions'] = self._timers.get('crossphase_contributions',0)+perf_counter()-t0
-            
+
+            crossphase_result.aux["material_writes"] = material_writes
+
             buffer.aux[buffer.CROSSPHASE].append(crossphase_result.aux)
     
     def energy_balances(
@@ -1818,8 +2012,11 @@ class MultiPhaseVessel():
         completed_state = self.complete_state(completed_state,time[-1])
         resolved_inlets,operating_conditions = self.get_operating_conditions(time,completed_state)
         resolved_outlets = self._resolve_outlets(completed_state,operating_conditions)
-        self.outlet_conditions =resolved_outlets
-        
+
+        # The resolved streams live in a workspace that later evaluations
+        # overwrite, so the reported final condition takes its own copy.
+        self.outlet_conditions = copy.deepcopy(resolved_outlets)
+
         self.elapsed_time = time[-1]
 
         

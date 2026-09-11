@@ -4,6 +4,8 @@ from PharmaPy.DataClasses import (PhaseConnection,PhaseMapping,PhaseRef,PhaseSta
 from typing import Any
 import numpy as np
 
+eps = np.finfo(float).eps
+
 
 class Controller:
 
@@ -115,17 +117,39 @@ class SimpleTemperatureController(Controller):
         
     
 class DefaultContinuousVesselVolume(Controller):
+    """
+    Hold vessel volume by trimming the outlet around the inlet flow.
+
+    The outlet request is ``inlet + K * (V - V_target)``, so the volume
+    error decays with time constant ``1 / K``. That time constant is the
+    fastest mode in the model, and it is created entirely by this
+    controller rather than by the process: pushing it far below the
+    residence time buys no extra level control and costs the integrator
+    proportionally many steps.
+
+    ``tau`` therefore sets the gain from a settling time rather than
+    exposing a bare gain. The default settles a level upset in a hundredth
+    of a residence time, which is tight control and still ~1e4 times less
+    stiff than a gain of 1e4 on a vessel of this size.
+    """
 
     def __init__(
         self,
         target_volume=None,
-        K=1e4,
+        tau=None,
+        K=None,
     ):
 
         super().__init__()
 
         self.target_volume = target_volume
+        self.tau = tau
         self.K = K
+
+        # Blend width, as a fraction of the inlet flow, over which the
+        # no-backflow floor is applied. A hard max() puts a kink in the
+        # right-hand side at the point the controller normally sits on.
+        self.floor_width = 1e-3
 
 
     def observe(
@@ -139,7 +163,55 @@ class DefaultContinuousVesselVolume(Controller):
 
         if self.target_volume is None:
             self.target_volume = unit.Phases.vol
-        
+
+
+    def get_gain(self, inlet_flow):
+        """
+        Proportional gain, in 1/s.
+
+        An explicit K wins. Otherwise the gain is derived from the
+        residence time, so the controller stays equally tight on vessels of
+        any size instead of being ferociously stiff on small ones.
+        """
+
+        if self.K is not None:
+            return self.K
+
+        tau = self.tau
+
+        if tau is None:
+
+            if inlet_flow > 0 and self.target_volume:
+                residence_time = self.target_volume / inlet_flow
+            else:
+                residence_time = 1.0
+
+            tau = 0.01 * residence_time
+
+        return 1.0 / tau
+
+    @staticmethod
+    def soft_floor(value, width):
+        """
+        C1-continuous stand-in for ``max(value, 0)``.
+
+        Equals ``value`` above ``width`` and ``0`` below ``-width``, with a
+        quadratic bridge whose slope matches at both ends. The controller
+        sits near its floor whenever the vessel is at target, so a hard
+        corner there is one the integrator keeps rediscovering.
+        """
+
+        if width <= 0:
+            return max(value, 0.0)
+
+        if value >= width:
+            return value
+
+        if value <= -width:
+            return 0.0
+
+        return (value + width) ** 2 / (4.0 * width)
+
 
     def actuate(
         self,
@@ -160,7 +232,7 @@ class DefaultContinuousVesselVolume(Controller):
 
         volume_error = unit.Phases.vol - self.target_volume
 
-        outlet_flow = inlet_flow + self.K * volume_error
+        outlet_flow = inlet_flow + self.get_gain(inlet_flow) * volume_error
 
         self.operating_conditions[
             OperatingKey(
@@ -168,17 +240,10 @@ class DefaultContinuousVesselVolume(Controller):
                 connection=0,
                 port='outlet'
             )
-        ] = max(outlet_flow,0.0)
-    def get_events(self, unit):
-
-        return [
-            StateEvent(
-                name='outlet_flow',
-                function=lambda t, state, unit: unit.Phases.vol - 2,
-                direction=0,
-                terminal=False,
-            )
-        ]
+        ] = self.soft_floor(
+            outlet_flow,
+            self.floor_width * max(inlet_flow, eps),
+        )
 
 class TankLevelController(Controller):
 
