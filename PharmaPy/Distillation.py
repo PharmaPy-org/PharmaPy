@@ -56,7 +56,9 @@ class _BaseDistillation:
             Equilibrium-stage count [-]. If None, shortcut design estimates it.
             If negative, its absolute value multiplies the minimum stage count.
         gamma_model : str, optional
-            Activity-coefficient model name.
+            Activity-coefficient model applied to every vapor-liquid
+            equilibrium calculation of the column. It can be
+            'UNIQUAC', 'UNIFAC' or 'ideal'. The default is 'ideal'.
         num_feed : int, optional
             Feed tray number counted from the top [-].
         reflux_to_minimum_ratio : float, optional
@@ -189,7 +191,8 @@ class _BaseDistillation:
         ndarray
             Component relative volatilities normalized to the heavy key [-].
         """
-        temp_bubble = self.Inlet.getBubblePoint(pres, mole_frac=x_frac)  # [K]
+        temp_bubble = self.Inlet.getBubblePoint(
+            pres, mole_frac=x_frac, thermo_method=self.gamma_model)  # [K]
 
         k_vals = self.Inlet.getKeqVLE(temp=temp_bubble,
                                       pres=pres, x_liq=x_frac,
@@ -227,10 +230,13 @@ class _BaseDistillation:
         feed_flow = self.feed_flowrate  # [mol/s]
 
         # ---------- Determine Light Key and Heavy Key component numbers
-        temp_bubble_feed = self.Inlet.getBubblePoint(pres=self.pres,
-                                                     mole_frac=z_feed)  # [K]
+        temp_bubble_feed = self.Inlet.getBubblePoint(
+            pres=self.pres, mole_frac=z_feed,
+            thermo_method=self.gamma_model)  # [K]
 
-        k_feed = self.Inlet.getKeqVLE(temp=temp_bubble_feed, pres=self.pres)  # [-]
+        k_feed = self.Inlet.getKeqVLE(temp=temp_bubble_feed,
+                                      pres=self.pres, x_liq=z_feed,
+                                      gamma_model=self.gamma_model)  # [-]
         volatility_order = np.argsort(k_feed)[::-1]  # [-]
         self.sorted_by_volatility = [self.name_species[ind]
                                      for ind in volatility_order]
@@ -1224,7 +1230,8 @@ class DynamicDistillation(_BaseDistillation):
 
         dx_dt = np.zeros_like(x)  # [1/s]
 
-        k_vals = self._Inlet.getKeqVLE(pres=self.pres, temp=temp, x_liq=x)  # [-]
+        k_vals = self._Inlet.getKeqVLE(pres=self.pres, temp=temp, x_liq=x,
+                                       gamma_model=self.gamma_model)  # [-]
 
         residuals_temp = (x * (k_vals - 1)).sum(axis=1)  # [-]
         y = k_vals * x  # [-]
@@ -1320,8 +1327,9 @@ class DynamicDistillation(_BaseDistillation):
         self.len_states = len(self.name_species) + 1
 
         x_init = self.Liquid_1.mole_frac.copy()  # [-]
-        temp_init = self.Liquid_1.getBubblePoint(pres=self.pres,
-                                                 mole_frac=x_init)  # [K]
+        temp_init = self.Liquid_1.getBubblePoint(
+            pres=self.pres, mole_frac=x_init,
+            thermo_method=self.gamma_model)  # [K]
 
         init_states = np.tile(np.hstack((temp_init, x_init)),
                               (self.num_plates + 1, 1))  # [K], [-]
@@ -1408,8 +1416,9 @@ class DynamicDistillation(_BaseDistillation):
             x_liquid = np.column_stack(
                 [val[ind] for val in dp['x_liq'].values()])  # [-]
 
-            k_vals = self.Liquid_1.getKeqVLE(pres=self.pres, temp=row,
-                                             x_liq=x_liquid)  # [-]
+            k_vals = self.Liquid_1.getKeqVLE(
+                pres=self.pres, temp=row, x_liq=x_liquid,
+                gamma_model=self.gamma_model)  # [-]
             y_vals = k_vals * x_liquid  # [-]
 
             for idx, key in enumerate(y_vap):
