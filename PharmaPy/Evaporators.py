@@ -1161,9 +1161,9 @@ class Evaporator:
         pick_comp : list of int, optional
             indexes of states to be plot. If None, all the states are plotted.
             The default is None.
-        **fig_kwargs : keyword arguments
+        fig_kwargs : keyword arguments
             keyword arguments to be passed to the construction of fig and
-            axes object of matplotlib (plt.subplots(**kwargs)).
+            axes object of matplotlib (``plt.subplots(**fig_kwargs)``).
             Do not use nrows or ncols arguments, since the plot grid is already
             defined by PharmaPy
 
@@ -1964,9 +1964,9 @@ class ContinuousEvaporator:
         vol_plot : bool, optional
             If True, vol_liq-vol_vap vs t is plotted. Otherwise,
             mol_liq-mol_vap vs t is plotted.
-        **fig_kwargs : keyword arguments
+        fig_kwargs : keyword arguments
             keyword arguments to be passed to the construction of fig and
-            axes objects of matplotlib (plt.subplots(**kwargs)).
+            axes objects of matplotlib (``plt.subplots(**fig_kwargs)``).
             Do not use nrows or ncols arguments, since the plot grid is already
             defined by PharmaPy
 

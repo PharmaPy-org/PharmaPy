@@ -1,5 +1,6 @@
 # Sphinx documentation
 docs/_build/
+site/
 
 # PyBuilder
 target/
@@ -81,8 +82,10 @@ ENV/
 # Some output files
 *.pdf
 *.png
+!doc/online_docs/**/*.png
 *.wav
 *.jpg
+!doc/online_docs/**/*.jpg
 *.mp4
 
 # MS Office files

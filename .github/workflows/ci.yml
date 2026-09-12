@@ -85,6 +85,14 @@ jobs:
           pixi run python -c "import PharmaPy"
           pixi run -e assimulo python -c "import PharmaPy, assimulo"
 
+      # Executes the `docs` task itself, not only its environment, so the
+      # locked command cannot drift away from the pip-based Sphinx docs job
+      # and Read the Docs. Linux only: it is the platform the Sphinx job and
+      # Read the Docs build on, and one run is enough to catch drift.
+      - name: Verify the locked documentation build
+        if: matrix.os == 'ubuntu-latest'
+        run: pixi run docs
+
   integration-assimulo:
     name: Assimulo integration tests
     runs-on: ubuntu-latest

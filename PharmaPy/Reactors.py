@@ -802,24 +802,31 @@ class BatchReactor(_BaseReactor):
                    params_control=None, verbose=True, sundials_opts=None):
         """
         Batch reactor method for solving the individual unit directly.
-        runtime : float (default = None)
+
+        Parameters
+        ----------
+        runtime : float, optional
             Value for total unit runtime.
-        time_grid : list of float (optional, default = None)
+        time_grid : list of float, optional
             Optional list of time values for the integrator to use
             during simulation.
-        eval_sens : bool (optional, default = False)
+        eval_sens : bool, optional
             Boolean value indicating whether the parametric
             sensitivity system will be included during simulation.
-            Must be true to access sensitivity information.     
-        verbose : bool (optional, default = True)
+            Must be true to access sensitivity information.
+        params_control : dict, optional
+            Controller parameters used during simulation.
+        verbose : bool, optional
             Boolean value indicating whether the simulator will
             output run statistics after simulation is complete.
             Use true if you want to see the number of function
             evaluations and wall-clock runtime for the unit.
-        timesim_limit : float (optional, default = 0)
-            Float value of the maximum wall-clock time for the
-            simulator to use before aborting the simulation.
-        return : default 2 arrays (3 if eval_sens is True)
+        sundials_opts : dict, optional
+            Options passed to the SUNDIALS solver.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
             Returns 2 or 3 indexed data structures. First, the
             integrator time points. Second, the state values
             corresponding to those integrator time points. And
