@@ -53,11 +53,19 @@ def test_liquid_mixer_requires_an_integration_end(data_path):
 def test_liquid_mixer_result_labels_match_state_vector(data_path):
     """``result`` must label holdup mass [kg] and composition [-] correctly.
 
+    Parameters
+    ----------
+    data_path : dict of pathlib.Path
+        Repository test-data directories.
+
+    Notes
+    -----
     The holdup is created from the inlet stream, so its initial composition is
     the inlet composition and its temperature is the inlet temperature. With a
     constant inlet the only balance that moves is the total mass, whose exact
     solution over the integration interval is ``mass_flow * elapsed_time``
-    [kg].
+    [kg]. The zero-amount warning is an error because the real liquid phase
+    must receive the positive initial mass used by the ODE state.
     """
     pytest.importorskip("assimulo")
     path = str(data_path["integration"] / "pfr_test_pure_comp.json")
@@ -68,15 +76,12 @@ def test_liquid_mixer_result_labels_match_state_vector(data_path):
     collector = DynamicCollector()
     collector.Inlet = inlet
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "error",
-            message=(
-                "The 'mass', 'moles' and 'vol' are all set to zero"
-            ),
-            category=RuntimeWarning,
-        )
+    # #284: LiquidPhase changes warning filters while emitting its zero-amount
+    # diagnostic, so a filter alone cannot enforce this initialization contract.
+    with warnings.catch_warnings(record=True) as initialization_warnings:
         time, _ = collector.solve_unit(runtime=RUNTIME, verbose=False)
+    assert not initialization_warnings, [
+        str(warning.message) for warning in initialization_warnings]
     step = time[-1] - time[0]  # [s]
 
     result = collector.result
