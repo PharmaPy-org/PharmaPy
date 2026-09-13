@@ -5,6 +5,9 @@ import pytest
 
 from PharmaPy.Crystallizers import MSMPR
 from PharmaPy.Kinetics import CrystKinetics
+from PharmaPy.MixedPhases import Slurry, SlurryStream
+from PharmaPy.Phases import LiquidPhase, SolidPhase
+from PharmaPy.Streams import LiquidStream, SolidStream
 
 
 pytestmark = pytest.mark.unit
@@ -95,79 +98,89 @@ def test_get_kinetics_uses_secondary_parameters_from_vector_update():
     np.testing.assert_allclose(dissol, [0.0, 0.0])
 
 
-def test_msmpr_steady_state_accepts_scalar_seed():
-    """MSMPR steady-state solve accepts a scalar seed fraction."""
+def test_msmpr_steady_state_accepts_scalar_seed(data_path):
+    """A real, positive-volume crystal population accepts a scalar seed.
 
-    crystallizer = MSMPR.__new__(MSMPR)
-    crystallizer.basis = 'mass_frac'
-    crystallizer.method = 'moments'
-    crystallizer.rad = 0.0  # [um], zero-size nuclei
-    crystallizer.kron_jtg = np.array([1.0])  # [-], one target species
-    crystallizer.num_distr = 4  # zeroth through third population moments
-    crystallizer.vol_slurry = 1.0  # [m**3]
-    crystallizer.target_ind = 0  # [-]
-    crystallizer._Kinetics = _primary_growth_kinetics()
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic data paths.
 
-    class Solid:
-        """Solid-phase fixture for MSMPR steady-state solve."""
+    Notes
+    -----
+    The synthetic primary prefactor gives B/G = 1e15 #/m**3/um. With a
+    one-second residence time and growth near 0.4 um/s, the exponential
+    population has third moment about 6 * 1e15 * 0.4**4 * 1e-18 m**3/m**3.
+    This resolves nonzero crystal volume with the positive phase shape factor
+    required by #165/#263, instead of bypassing that boundary with kv=0.
+    """
+    thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
+    size_grid = np.array([0.0, 1.0])  # [um]
+    distribution = np.zeros(2)  # [#/um]
+    liquid_mass_fraction = np.array([0.5, 0.5, 0.0, 0.0])  # [-]
+    solid_mass_fraction = np.array([1.0, 0.0, 0.0, 0.0])  # [-]
 
-        x_distrib = np.array([0.0, 1.0])  # [um]
-        temp = 298.15  # [K], initial phase temperature
-        kv = 0.0  # [-]
-        num_mom = 4  # zeroth through third moments
+    liquid = LiquidPhase(
+        thermo_path,
+        temp=298.15,  # [K]
+        vol=1.0,  # [m**3]
+        mass_frac=liquid_mass_fraction,
+        verbose=False,
+    )
+    solid = SolidPhase(
+        thermo_path,
+        temp=298.15,  # [K]
+        x_distrib=size_grid,
+        distrib=distribution,
+        mass_frac=solid_mass_fraction,
+    )
+    slurry = Slurry(vol=1.0, x_distrib=size_grid, distrib=distribution)
+    slurry.Phases = [liquid, solid]
 
-        def getDensity(self, temp):
-            """Return a constant solid density.
+    inlet_liquid = LiquidStream(
+        thermo_path,
+        temp=298.15,  # [K]
+        mass_frac=liquid_mass_fraction,
+        verbose=False,
+    )
+    inlet_solid = SolidStream(
+        thermo_path,
+        temp=298.15,  # [K]
+        x_distrib=size_grid,
+        distrib=distribution,
+        mass_frac=solid_mass_fraction,
+    )
+    inlet = SlurryStream(
+        vol_flow=1.0,  # [m**3/s]
+        x_distrib=size_grid,
+        distrib=distribution,
+    )
+    inlet.Phases = [inlet_liquid, inlet_solid]
 
-            Parameters
-            ----------
-            temp : float
-                Temperature [K].
-
-            Returns
-            -------
-            float
-                Solid density [kg/m**3].
-            """
-            return 1.0  # [kg/m**3]
-
-    class Liquid:
-        """Liquid-phase fixture with one mass fraction."""
-
-        temp = 298.15  # [K], initial phase temperature
-        mass_frac = np.array([0.5])  # [-]
-        mass_conc = np.array([0.5])  # [kg/m**3], density is 1 kg/m**3
-
-        def getDensity(self, temp=None):
-            """Return the synthetic liquid density.
-
-            Parameters
-            ----------
-            temp : float or None, optional
-                Liquid temperature [K]; omitted for the constant-density RHS.
-
-            Returns
-            -------
-            float
-                Constant liquid density [kg/m**3].
-            """
-            return 1.0  # [kg/m**3], immaterial when kv=0
-
-    class Inlet:
-        """Inlet fixture for the MSMPR steady-state solve."""
-
-        vol_flow = 1.0  # [m**3/s]
-        Liquid_1 = Liquid()
-
-    crystallizer.Solid_1 = Solid()
-    crystallizer._Inlet = Inlet()
-    crystallizer.Liquid_1 = crystallizer.Inlet.Liquid_1
+    crystallizer = MSMPR(
+        "A",
+        method="moments",
+        basis="mass_frac",
+        vol_tank=1.0,  # [m**3]
+        adiabatic=True,
+    )
+    crystallizer.Phases = slurry
+    crystallizer.Kinetics = CrystKinetics(
+        coeff_solub=[0.1, 0.0, 0.0],  # [-], constant solubility mass fraction
+        nucl_prim=[1e15, 0.0, 1.0],  # [#/m**3/s], [J/mol], [-]
+        growth=[1.0, 0.0, 1.0],  # [um/s], [J/mol], [-]
+        sup_sat_type="absolute",
+    )
+    crystallizer.Kinetics.target_idx = crystallizer.target_ind
+    crystallizer.Inlet = inlet
 
     x_vec, f_convg, w_convg, info, final_fn = crystallizer.solve_steady_state(
         0.3, 298.15)  # [um], [#/m**3/um], [-], [-], [-]
 
     np.testing.assert_allclose(x_vec, [0.0, 1.0])
-    np.testing.assert_allclose(f_convg, [1.0, np.exp(-2.5)])
-    assert w_convg == pytest.approx(0.5)
+    expected_population = 1e15 * np.exp(
+        -size_grid / (w_convg - 0.1))  # [#/m**3/um], B/G * exp(-x/(G*tau))
+    np.testing.assert_allclose(f_convg, expected_population)
+    assert 0.1 < w_convg < liquid_mass_fraction[0]
     assert info.converged
     assert final_fn == pytest.approx(0.0)
