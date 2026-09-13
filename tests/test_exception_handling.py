@@ -1,9 +1,10 @@
 """Regressions for narrowed exception handling in three package modules.
 
-The crystallizer tests import ``PharmaPy.Crystallizers`` directly: since the
-lazy Assimulo backend landed, that module imports without the optional solver.
-Monkeypatching is limited to the problem-construction boundary; the real
-``BatchCryst.set_ode_problem`` routing remains under test.
+The crystallizer fallback test uses the real Assimulo problem in the optional
+backend lane. Warning-attribution cases construct production crystallizers in
+the core lane because they do not invoke a solver boundary. Bootstrap exception
+tests inject failures at the user-model callback because this small linear fit
+does not naturally construct a singular Levenberg--Marquardt system.
 """
 
 import inspect
@@ -14,114 +15,74 @@ import numpy as np
 import pytest
 
 from PharmaPy import Crystallizers
+from PharmaPy.ParamEstim import ParameterEstimation
 from PharmaPy.StatsModule import StatisticsClass
 from PharmaPy.ThermoModule import ParseDatabase
 
 pytestmark = pytest.mark.unit
 
 
-class _FakeEstimationInstance:
-    """Minimal parameter-estimation collaborator for bootstrap tests."""
-
-    def __init__(self, optimize_fn):
-        """Store the optimizer callable used by ``bootstrap_params``.
-
-        Parameters
-        ----------
-        optimize_fn : callable
-            Optimizer double returning model parameters in their configured
-            physical units or raising a test-specific exception.
-        """
-        self.num_params = 2
-        self.opt_method = "LM"
-        self.optim_options = {}
-        self.y_data = None
-        self.optimize_fn = optimize_fn
-
-
-class _BootstrapStatistics(StatisticsClass):
-    """Statistics test double with deterministic dimensionless samples."""
-
-    def __init__(self, optimize_fn):
-        """Initialize only the state needed for bootstrap optimization.
-
-        Parameters
-        ----------
-        optimize_fn : callable
-            Optimizer double returning model parameters in their configured
-            physical units or raising a test-specific exception.
-        """
-        self.inst = _FakeEstimationInstance(optimize_fn)
-
-    def get_bootsamples(self, num_samples, fix_initial=False):
-        """Return one deterministic response sample per bootstrap iteration.
-
-        Parameters
-        ----------
-        num_samples : int
-            Number of bootstrap samples to construct.
-        fix_initial : bool, optional
-            Unused compatibility argument matching the production helper.
-
-        Returns
-        -------
-        list of numpy.ndarray
-            One synthetic response vector with ``num_samples`` entries [-].
-        """
-        del fix_initial
-        response_samples = np.zeros(num_samples)  # [-]
-        return [response_samples]
-
-
-class _ExplicitProblemStub:
-    """Record the sensitivity callbacks assigned at the Assimulo boundary."""
-
-    def __init__(self, rhs, y0, t0, p0):
-        """Store the ODE problem inputs without invoking an optional solver.
-
-        Parameters
-        ----------
-        rhs : callable
-            Crystallizer right-hand-side function.
-        y0 : numpy.ndarray
-            Initial model state vector [state-dependent units].
-        t0 : float
-            Initial simulation time [s].
-        p0 : numpy.ndarray
-            Kinetic parameter vector [parameter-dependent units].
-        """
-        self.rhs = rhs
-        self.y0 = y0  # [state-dependent units]
-        self.t0 = t0  # [s]
-        self.p0 = p0  # [parameter-dependent units]
-        self.jac = None
-        self.rhs_sens = None
-
-
-def _import_crystallizers(monkeypatch):
-    """Return crystallizers with only the Assimulo problem boundary replaced.
+def _statistics_with_failing_model(error):
+    """Build real estimation and statistics objects for a model failure.
 
     Parameters
     ----------
-    monkeypatch : pytest.MonkeyPatch
-        Cleanup fixture for the temporary problem-class substitution.
+    error : BaseException
+        Exception raised by the user-supplied model after the nominal fit.
 
     Returns
     -------
-    module
-        ``PharmaPy.Crystallizers`` module.
-
-    Notes
-    -----
-    ``PharmaPy._assimulo`` exposes ``Explicit_Problem`` as a factory that only
-    imports Assimulo when called, so no import-time stub is needed. Replacing
-    the module attribute keeps this regression in the core lane and lets it
-    assert the exact callbacks configured by the real ``set_ode_problem``
-    method. Solver execution remains covered by the Assimulo-marked
-    integration lane.
+    StatisticsClass
+        Production bootstrap-statistics object configured with a fitted
+        :class:`ParameterEstimation` collaborator.
     """
-    monkeypatch.setattr(Crystallizers, "Explicit_Problem", _ExplicitProblemStub)
-    return Crystallizers
+    failure_state = {"enabled": False}
+
+    def linear_model(params, time):
+        """Evaluate a fitted linear concentration model or its failure path.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Linear concentration rate [mol/L/s].
+        time : numpy.ndarray
+            Measurement times [s].
+
+        Returns
+        -------
+        numpy.ndarray
+            Predicted concentration [mol/L].
+
+        Raises
+        ------
+        BaseException
+            Requested model failure after the nominal fit is complete.
+        """
+        if failure_state["enabled"]:
+            raise error
+        return params[0] * time
+
+    time = np.array([0.0, 1.0, 2.0])  # [s]
+    # The deliberately imperfect fit gives residual bootstrapping a nonzero
+    # error distribution instead of a degenerate all-zero sample.
+    observed_concentration = np.array([0.1, 1.0, 2.1])  # [mol/L]
+    fit_evaluation_cap = 5  # [-], sufficient for this one-parameter linear fit
+    estimator = ParameterEstimation(
+        linear_model,
+        param_seed=np.array([1.0]),  # [mol/L/s]
+        x_data=time,
+        y_data=observed_concentration,
+        name_params=["rate_mol_l_s"],
+        name_states=["concentration_mol_l"],
+    )
+    estimator.optimize_fn(
+        method="LM",
+        verbose=False,
+        optim_options={"max_fun_eval": fit_evaluation_cap},
+    )
+    statistics = StatisticsClass(estimator)
+    failure_state["enabled"] = True
+    return statistics
 
 
 def test_parse_database_converts_numeric_fields_to_float_arrays(tmp_path):
@@ -210,25 +171,10 @@ def test_parse_database_propagates_malformed_nested_values(tmp_path):
 
 
 def test_bootstrap_params_records_nan_rows_for_linear_algebra_failures():
-    """Singular optimizer systems warn and produce NaN parameter rows."""
-
-    def failing_optimize(**kwargs):
-        """Raise the documented NumPy failure for a singular LM system.
-
-        Parameters
-        ----------
-        **kwargs
-            Optimizer options accepted but unused by this test double.
-
-        Raises
-        ------
-        numpy.linalg.LinAlgError
-            Always, to represent a singular approximate Hessian.
-        """
-        del kwargs
-        raise np.linalg.LinAlgError("singular bootstrap Hessian")
-
-    stats = _BootstrapStatistics(failing_optimize)
+    """User-model linear-algebra failures warn and produce NaN rows."""
+    stats = _statistics_with_failing_model(
+        np.linalg.LinAlgError("singular bootstrap Hessian")
+    )
 
     with pytest.warns(RuntimeWarning, match="singular bootstrap Hessian") as caught:
         boot_params = stats.bootstrap_params(num_samples=3)
@@ -236,30 +182,15 @@ def test_bootstrap_params_records_nan_rows_for_linear_algebra_failures():
     assert len(caught) == 3
     for index, warning in enumerate(caught):
         assert "sample {}".format(index) in str(warning.message)
-    assert boot_params.shape == (3, 2)
+    assert boot_params.shape == (3, 1)
     assert np.isnan(boot_params).all()
 
 
 def test_bootstrap_params_propagates_programming_errors():
-    """Unrelated optimizer programming errors are not converted to NaNs."""
-
-    def broken_optimize(**kwargs):
-        """Raise a programming error unrelated to numerical convergence.
-
-        Parameters
-        ----------
-        **kwargs
-            Optimizer options accepted but unused by this test double.
-
-        Raises
-        ------
-        AttributeError
-            Always, to represent an invalid optimizer implementation.
-        """
-        del kwargs
-        raise AttributeError("missing optimizer state")
-
-    stats = _BootstrapStatistics(broken_optimize)
+    """User-model programming errors are not converted to NaN rows."""
+    stats = _statistics_with_failing_model(
+        AttributeError("missing optimizer state")
+    )
 
     with pytest.raises(AttributeError, match="missing optimizer state"):
         stats.bootstrap_params(num_samples=3)
@@ -267,41 +198,21 @@ def test_bootstrap_params_propagates_programming_errors():
 
 def test_bootstrap_params_does_not_swallow_keyboard_interrupt():
     """User interrupts continue to abort a bootstrap run immediately."""
-
-    def interrupted_optimize(**kwargs):
-        """Raise a user interrupt from the optimizer boundary.
-
-        Parameters
-        ----------
-        **kwargs
-            Optimizer options accepted but unused by this test double.
-
-        Raises
-        ------
-        KeyboardInterrupt
-            Always, to emulate a user cancelling optimization.
-        """
-        del kwargs
-        raise KeyboardInterrupt
-
-    stats = _BootstrapStatistics(interrupted_optimize)
+    stats = _statistics_with_failing_model(KeyboardInterrupt())
 
     with pytest.raises(KeyboardInterrupt):
         stats.bootstrap_params(num_samples=3)
 
 
-def test_batch_cryst_ad_fallback_configures_finite_difference_problem(monkeypatch):
-    """Unsupported AD requests configure an operational NumPy fallback.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Cleanup fixture for the optional Assimulo problem boundary.
-    """
-    crystallizers = _import_crystallizers(monkeypatch)
+@pytest.mark.assimulo
+def test_batch_cryst_ad_fallback_configures_finite_difference_problem():
+    """Unsupported AD requests configure an operational NumPy fallback."""
+    assimulo_problem = pytest.importorskip("assimulo.problem")
 
     with pytest.warns(RuntimeWarning, match="finite-difference") as caught:
-        crystallizer = crystallizers.BatchCryst(target_comp="solute", jac_type="AD")
+        crystallizer = Crystallizers.BatchCryst(
+            target_comp="solute", jac_type="AD"
+        )
 
     assert Path(caught[0].filename).resolve() == Path(__file__).resolve()
     assert crystallizer.jac_type == "finite_diff"
@@ -315,6 +226,7 @@ def test_batch_cryst_ad_fallback_configures_finite_difference_problem(monkeypatc
         jacv_prod=False,
     )
 
+    assert isinstance(problem, assimulo_problem.Explicit_Problem)
     assert problem.jac == crystallizer.jac_states_numerical
     assert crystallizer.jac_params_fn == crystallizer.jac_params_numerical
     assert problem.rhs_sens == crystallizer.rhs_sensitivity
@@ -324,7 +236,7 @@ def test_batch_cryst_ad_fallback_configures_finite_difference_problem(monkeypatc
     "crystallizer_name",
     ("BatchCryst", "MSMPR", "SemibatchCryst"),
 )
-def test_ad_fallback_warning_points_at_caller(crystallizer_name, monkeypatch):
+def test_ad_fallback_warning_points_at_caller(crystallizer_name):
     """The AD fallback warning is attributed to the constructing caller.
 
     Covers all three public crystallizers because they sit at different depths:
@@ -337,11 +249,8 @@ def test_ad_fallback_warning_points_at_caller(crystallizer_name, monkeypatch):
     ----------
     crystallizer_name : str
         Attribute name of the public crystallizer class under test.
-    monkeypatch : pytest.MonkeyPatch
-        Cleanup fixture for the optional Assimulo problem boundary.
     """
-    crystallizers = _import_crystallizers(monkeypatch)
-    crystallizer_class = getattr(crystallizers, crystallizer_name)
+    crystallizer_class = getattr(Crystallizers, crystallizer_name)
 
     with pytest.warns(RuntimeWarning, match="finite-difference") as caught:
         construction_line = inspect.currentframe().f_lineno + 1
