@@ -1,94 +1,216 @@
-import os
+"""Regression tests for graph-defined flowsheet stream routing.
+
+The cases solve real batch mixers and transfer real liquid phases through real
+``Connection`` and ``SimulationResult`` collaborators.
+"""
 
 import numpy as np
 import pytest
 
-import PharmaPy.SimExec as se
+from PharmaPy.Containers import Mixer
+from PharmaPy.Phases import LiquidPhase
+from PharmaPy.SimExec import SimulationExec
 
 
 pytestmark = pytest.mark.unit
 
-PATH_PHYS = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(se.__file__))),
-    "tests",
-    "Flowsheet",
-    "data",
-    "compound_database.json",
-)
+FEED_A_MASS_FRACTION = np.array([0.70, 0.20, 0.05, 0.03, 0.02])  # [-]
+FEED_B_MASS_FRACTION = np.array([0.10, 0.20, 0.30, 0.20, 0.20])  # [-]
 
 
-class _Result:
-    time = np.array([0.0, 1.0])
+def _add_real_feed(mixer, database_path, temperature, mass_scale=1.0):
+    """Assign two real liquid phases to a source mixer.
+
+    Parameters
+    ----------
+    mixer : Mixer
+        Source unit that receives batch liquid phases.
+    database_path : str
+        Path to the repository thermophysical database.
+    temperature : float
+        Temperature of the first liquid phase [K]. The second phase is 1 K
+        warmer to exercise the real energy balance.
+    mass_scale : float, optional
+        Dimensionless source-specific mass multiplier [-].
+    """
+    mixer.Inlets = LiquidPhase(
+        database_path,
+        mass=1.0 * mass_scale,  # [kg]
+        mass_frac=FEED_A_MASS_FRACTION,
+        temp=temperature,
+    )
+    mixer.Inlets = LiquidPhase(
+        database_path,
+        mass=2.0 * mass_scale,  # [kg]
+        mass_frac=FEED_B_MASS_FRACTION,
+        temp=temperature + 1.0,  # [K]
+    )
 
 
-class _StubUO:
-    __module__ = "PharmaPy.Containers"
+def _configured_flowsheet(graph, database_path):
+    """Build a real mixer flowsheet and feed every graph source.
 
-    def __init__(self, name):
-        self._name = name
-        self.outputs = {}
-        self.result = _Result()
+    Parameters
+    ----------
+    graph : dict of str to list of str
+        Directed acyclic flowsheet adjacency mapping.
+    database_path : str
+        Path to the repository thermophysical database.
 
-    def solve_unit(self, **kwargs):
-        pass
+    Returns
+    -------
+    SimulationExec
+        Executor containing real ``Mixer`` units and source phases.
+    """
+    flowsheet = SimulationExec(database_path, flowsheet=graph)
+    destinations = {
+        destination
+        for successors in graph.values()
+        for destination in successors
+    }
+    for index, name in enumerate(graph):
+        mixer = Mixer()
+        setattr(flowsheet, name, mixer)
+        if name not in destinations:
+            source_temperature = 300.0 + 5.0 * index  # [K]
+            source_mass_scale = index + 1.0  # [-]
+            _add_real_feed(
+                mixer, database_path, source_temperature, source_mass_scale
+            )
 
-    def flatten_states(self):
-        pass
+    return flowsheet
 
 
-def _solve_and_record_connections(monkeypatch, graph, pick_units=None):
-    created = []
+def _connection_edges(flowsheet):
+    """Map real connection endpoints back to their graph unit names.
 
-    class ConnRecorder:
-        def __init__(self, source_uo, destination_uo):
-            created.append((source_uo._name, destination_uo._name))
+    Parameters
+    ----------
+    flowsheet : SimulationExec
+        Solved flowsheet containing real connection objects.
 
-        def transfer_data(self):
-            pass
-
-    monkeypatch.setattr(se, "check_modeling_objects", lambda *args, **kwargs: None)
-    monkeypatch.setattr(se, "SimulationResult", lambda *args, **kwargs: None)
-    monkeypatch.setattr(se, "Connection", ConnRecorder)
-
-    flst = se.SimulationExec(PATH_PHYS, flowsheet=graph)
-    for name in graph:
-        setattr(flst, name, _StubUO(name))
-
-    flst.SolveFlowsheet(pick_units=pick_units, verbose=False)
-
-    return created
+    Returns
+    -------
+    list of tuple of str
+        Source-destination names in connection creation order.
+    """
+    unit_names = {
+        id(getattr(flowsheet, name)): name
+        for name in flowsheet.graph
+    }
+    return [
+        (
+            unit_names[id(connection.source_uo)],
+            unit_names[id(connection.destination_uo)],
+        )
+        for connection in flowsheet.connections.values()
+    ]
 
 
 def _assert_connections_follow_graph(graph, created):
-    misrouted = [(source, dest) for source, dest in created
-                 if dest not in graph[source]]
+    """Assert every real handoff is an edge in the supplied graph.
 
+    Parameters
+    ----------
+    graph : dict of str to list of str
+        Directed acyclic flowsheet adjacency mapping.
+    created : sequence of tuple of str
+        Observed source-destination handoffs.
+    """
+    misrouted = [
+        (source, destination)
+        for source, destination in created
+        if destination not in graph[source]
+    ]
     assert not misrouted
 
 
-def test_stream_handoff_follows_graph_edges_not_execution_order(monkeypatch):
-    graph = {"A": ["C"], "B": ["C"], "C": ["D"], "D": []}
+def test_stream_handoff_follows_graph_edges_not_execution_order(data_path):
+    """Route real phase handoffs through graph edges, not adjacent units.
 
-    created = _solve_and_record_connections(monkeypatch, graph)
+    Parameters
+    ----------
+    data_path : dict of pathlib.Path
+        Repository test-data directories.
+    """
+    graph = {"A": ["C"], "B": ["C"], "C": ["D"], "D": []}
+    database_path = str(data_path["flowsheet"] / "compound_database.json")
+    flowsheet = _configured_flowsheet(graph, database_path)
+
+    flowsheet.SolveFlowsheet(verbose=False)
+    created = _connection_edges(flowsheet)
 
     _assert_connections_follow_graph(graph, created)
     assert set(created) == {("A", "C"), ("B", "C"), ("C", "D")}
+    assert len(flowsheet.C.Inlets) == 2
+    assert len(flowsheet.D.Inlets) == 1
+    source_masses = np.array([3.0, 6.0])  # [kg]
+    destination_inlets = sorted(
+        flowsheet.C.Inlets, key=lambda inlet: inlet.mass
+    )
+    expected_sources = [flowsheet.A.Outlet, flowsheet.B.Outlet]
+    np.testing.assert_allclose(
+        [inlet.mass for inlet in destination_inlets], source_masses
+    )
+    for inlet, source in zip(destination_inlets, expected_sources):
+        np.testing.assert_allclose(inlet.mass_frac, source.mass_frac)
+        assert inlet.temp == pytest.approx(source.temp)
+    assert flowsheet.D.Inlets[0].mass == pytest.approx(source_masses.sum())
+    np.testing.assert_allclose(
+        flowsheet.D.Inlets[0].mass_frac, flowsheet.C.Outlet.mass_frac
+    )
+    assert flowsheet.D.Inlets[0].temp == pytest.approx(
+        flowsheet.C.Outlet.temp
+    )
 
 
-def test_stream_handoff_supports_fanout_to_multiple_successors(monkeypatch):
+def test_stream_handoff_supports_fanout_to_multiple_successors(data_path):
+    """Copy a real source phase to every graph successor.
+
+    Parameters
+    ----------
+    data_path : dict of pathlib.Path
+        Repository test-data directories.
+    """
     graph = {"A": ["B", "C"], "B": ["D"], "C": ["D"], "D": []}
+    database_path = str(data_path["flowsheet"] / "compound_database.json")
+    flowsheet = _configured_flowsheet(graph, database_path)
 
-    created = _solve_and_record_connections(monkeypatch, graph)
+    flowsheet.SolveFlowsheet(verbose=False)
+    created = _connection_edges(flowsheet)
 
     _assert_connections_follow_graph(graph, created)
-    assert set(created) == {("A", "B"), ("A", "C"), ("B", "D"), ("C", "D")}
+    assert set(created) == {
+        ("A", "B"),
+        ("A", "C"),
+        ("B", "D"),
+        ("C", "D"),
+    }
+    assert len(flowsheet.B.Inlets) == 1
+    assert len(flowsheet.C.Inlets) == 1
+    assert len(flowsheet.D.Inlets) == 2
 
 
-def test_already_solved_branch_honors_pick_units(monkeypatch):
-    graph = {"A": ["B", "C"], "B": ["D"], "C": ["D"], "D": []}
+def test_already_solved_branch_honors_pick_units(data_path):
+    """Filter a real pre-solved unit's handoffs to selected destinations.
 
-    created = _solve_and_record_connections(
-        monkeypatch, graph, pick_units=["A", "C"])
+    Parameters
+    ----------
+    data_path : dict of pathlib.Path
+        Repository test-data directories.
+    """
+    graph = {"A": ["B", "C"], "B": ["C", "D"], "C": [], "D": []}
+    database_path = str(data_path["flowsheet"] / "compound_database.json")
+    flowsheet = _configured_flowsheet(graph, database_path)
+    _add_real_feed(
+        flowsheet.B, database_path, temperature=307.0, mass_scale=2.0
+    )
+    flowsheet.B.solve_unit()
+
+    flowsheet.SolveFlowsheet(pick_units=["A", "C"], verbose=False)
+    created = _connection_edges(flowsheet)
 
     _assert_connections_follow_graph(graph, created)
-    assert created == [("A", "C")]
+    assert created == [("A", "C"), ("B", "C")]
+    assert len(flowsheet.C.Inlets) == 2
+    assert flowsheet.D.Inlets == []
