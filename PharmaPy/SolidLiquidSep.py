@@ -16,7 +16,7 @@ from typing import Callable, Optional, Union
 import numpy as np
 from numpy.typing import ArrayLike
 from PharmaPy._assimulo import CVode, Explicit_Problem
-from PharmaPy.Commons import trapezoidal_rule, series_erfc
+from PharmaPy.Commons import high_resolution_fvm, trapezoidal_rule, series_erfc
 from PharmaPy.Phases import classify_phases
 from PharmaPy.MixedPhases import Slurry, Cake
 
@@ -41,26 +41,6 @@ grav = 9.8  # m/s**2
 # Retain the existing epsilon regularization of the capillary reciprocal power.
 # Shared by initialization and the RHS so a zero reduced saturation is avoided.
 DELIQUORING_SATURATION_FLOOR = eps  # [-], numerical floor, not residual pore filling
-
-
-def high_resolution_fvm(f, boundary_cond, limiter_type='Van Leer'):
-
-    # Ghost cells -1, 0 and N + 1 (see LeVeque 2002, Chapter 9)
-    f_extrap = 2*f[-1] - f[-2]
-    f_aug = np.concatenate(([boundary_cond]*2, f, [f_extrap]))
-
-    f_diff = np.diff(f_aug, axis=0)
-
-    theta = (f_diff[:-1]) / (f_diff[1:] + eps)
-
-    if limiter_type == 'Van Leer':
-        limiter = (np.abs(theta) + theta) / (1 + np.abs(theta))
-    else:  # TODO: include more limiters
-        pass
-
-    fluxes = f_aug[1:-1] + 0.5 * f_diff[1:] * limiter
-
-    return fluxes
 
 
 def upwind_fvm(f, boundary_cond):
