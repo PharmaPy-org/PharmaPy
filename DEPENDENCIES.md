@@ -16,6 +16,13 @@ without Assimulo. Attempting to construct an Assimulo-backed problem or solver
 without that optional dependency raises an installation error at the solver
 boundary.
 
+cyipopt is an optional optimizer binding used only by
+`ParameterEstimation.optimize_fn(method="IPOPT")`. It is deliberately absent
+from the core environment so the installation-error fallback remains covered.
+Contributors who need IPOPT parameter estimation may install `cyipopt` from
+conda-forge in a separate environment; PharmaPy does not currently provide a
+locked cyipopt feature or pip extra.
+
 pixi is the recommended developer/CI environment manager: its `[tool.pixi]`
 configuration in `pyproject.toml` provides a `default` (core, Assimulo-free)
 and an `assimulo` (full backend) environment backed by a committed `pixi.lock`,

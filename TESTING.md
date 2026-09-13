@@ -12,6 +12,12 @@ python -m pytest --collect-only
 python -m pytest tests/ -m "not assimulo"
 ```
 
+The CI core lane requires both Assimulo and cyipopt to be absent before it
+collects tests. This keeps their missing-dependency fallbacks observable. When
+the same command is run in a richer local environment, backend-absence tests
+may skip while the remaining core tests continue to run; use the explicit
+optional-backend environments for installed-backend coverage.
+
 Run both locked pixi test lanes:
 
 ```bash

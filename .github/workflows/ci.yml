@@ -36,6 +36,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[test]"
 
+      - name: Verify optional backends are absent from the core lane
+        run: |
+          python -c "import importlib.util; present = [name for name in ('assimulo', 'cyipopt') if importlib.util.find_spec(name) is not None]; assert not present, f'{present} belong only in explicit optional-backend lanes'"
+
       - name: Collect tests
         run: python -m pytest --collect-only
 

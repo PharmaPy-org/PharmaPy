@@ -675,6 +675,34 @@ class ParameterEstimation:
 
         return cond_number
 
+    def assemble_solver_info(self, opt_par):
+        """Assemble weighted residual and Jacobian data at a solved point.
+
+        Parameters
+        ----------
+        opt_par : numpy.ndarray
+            Solved parameter vector. Each entry uses the unit declared by its
+            corresponding model parameter.
+
+        Returns
+        -------
+        dict
+            ``fun`` contains dimensionless weighted residuals [-]. ``jac``
+            contains their Jacobian, with each row carrying the reciprocal
+            unit of its corresponding optimized parameter.
+
+        Notes
+        -----
+        Evaluating the objective with ``set_self=False`` preserves the raw
+        residuals stored by the final solver callback (issue #78).
+        """
+        residuals = self.get_objective(
+            opt_par, out_array=True, set_self=False
+        )  # [-]
+        jacobian = self.get_gradient(opt_par, out_array=True)
+        # Rows use reciprocal optimized-parameter units.
+        return {'jac': jacobian, 'fun': residuals}
+
     def optimize_fn(self, optim_options=None, simulate=False, verbose=True,
                     store_iter=True, method='LM', bounds=None):
         """Optimize variable parameters and assemble fit statistics.
@@ -747,12 +775,7 @@ class ParameterEstimation:
             # final_sens = np.vstack(self.sens_runs)
             # final_fun = np.concatenate(self.resid_runs)
 
-            # Assemble final weighted residuals without overwriting the
-            # solved-state residuals stored during the IPOPT callbacks.
-            resid_multidim = self.get_objective(opt_par, out_array=True,
-                                                set_self=False)
-            jac_multidim = self.get_gradient(opt_par, out_array=True)
-            info = {'jac': jac_multidim, 'fun': resid_multidim}
+            info = self.assemble_solver_info(opt_par)
 
         self.optim_options = optim_options
 
