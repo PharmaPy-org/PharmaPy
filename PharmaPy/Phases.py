@@ -180,7 +180,8 @@ class LiquidPhase(ThermoPhysicalManager):
             Print diagnostics for fractions summing below the legacy 0.99
             threshold [-]. Defaults to True.
         check_input : bool, optional
-            Warn if all amounts are zero. Defaults to True.
+            Warn if all amounts are zero, subject to the caller's warning
+            filters. Defaults to True.
 
         Raises
         ------
@@ -189,8 +190,15 @@ class LiquidPhase(ThermoPhysicalManager):
         RuntimeWarning
             If more than one composition measure is supplied.
 
+        Warnings
+        --------
+        RuntimeWarning
+            If all amounts are zero and check_input is True. The caller's
+            warning policy determines whether this is shown, ignored, or raised.
+
         Notes
         -----
+        Warning filters are left unchanged.
         Exactly one composition measure is required. Constructor composition
         inputs are copied before conversion. Derived concentrations retain
         the liquid volume basis. No physical basis changes during coercion.
@@ -296,12 +304,9 @@ class LiquidPhase(ThermoPhysicalManager):
 
         if (mass + vol + moles) == 0:
             if check_input:
-                warnings.simplefilter("always")
                 warnings.warn("'mass', 'moles' and 'vol' are all set to zero. "
                               "Model may not perform as intended.",
                               RuntimeWarning)
-
-                warnings.simplefilter("ignore")
 
         self.y_upstream = None
 
