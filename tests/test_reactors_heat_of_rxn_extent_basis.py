@@ -163,14 +163,13 @@ def _heat_generation_rate(reactor, mole_conc=MOLE_CONC):
 
     Notes
     -----
-    ``energy_balances(heat_prof=True)`` reports the reaction column with the
-    opposite sign of the ``source_term`` that drives ``dtemp_dt``; this helper
-    undoes that so a positive value means an exothermic release.
+    The reaction heat profile and temperature balance both use positive
+    heat generation for an exothermic release (#232/#234 sign convention).
     """
     heat_profile = reactor.energy_balances(
         0.0, mole_conc, VOL_EVAL, TEMP_EVAL, TEMP_EVAL, {}, heat_prof=True)
 
-    return -float(heat_profile[0, 0])  # [W]
+    return float(heat_profile[0, 0])  # [W]
 
 
 class _RateBasisLiquid:
@@ -476,7 +475,7 @@ def test_batch_uses_normalized_heat_with_raw_equilibrium_handoff(pharmapy):
     )  # [W]
 
     expected_source = _expected_stub_source_term() * reactor_volume  # [W]
-    assert -float(heat_profile[0, 0]) == pytest.approx(expected_source)
+    assert float(heat_profile[0, 0]) == pytest.approx(expected_source)
     np.testing.assert_allclose(
         kinetics.received_delta_hrxn, [STUB_HEATS_AS_WRITTEN]
     )

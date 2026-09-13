@@ -41,9 +41,8 @@ def _build_nonisothermal_reactor(data_path):
 
     Notes
     -----
-    The explicit floating-point stoichiometric matrix avoids the fractional-
-    order truncation tracked by issue #44. Once #44 is fixed, this fixture can
-    use integer stoichiometry while retaining the expected fractional order.
+    Integer stoichiometry exercises the fractional-order preservation fixed
+    for issue #44 in PR #263; the reaction orders remain floating point.
     """
     thermo_path = str(
         data_path["integration"] / "pfr_test_pure_comp.json")
@@ -62,7 +61,7 @@ def _build_nonisothermal_reactor(data_path):
     rate_constant = 40 / 60  # [1/s], converted exactly from 40 1/min
     activation_energy = 2.0e3  # [J/mol]
     reaction_enthalpy = -5.0e3  # [J/mol of reaction as written]
-    stoich_matrix = np.array([[-1.0, -1.0, 1.0]])  # [-]
+    stoich_matrix = np.array([[-1, -1, 1]])  # [-]
     reaction_orders = np.array(
         [[0.5, 1.0]])  # [-], fractional A order exercises the zero boundary
     kinetics = RxnKinetics(
@@ -354,14 +353,31 @@ def test_nonisothermal_sensitivity_rhs_couples_state_jacobian(data_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("custom_model", [False, True])
 def test_nonisothermal_state_jacobian_stays_in_concentration_domain(
-        data_path):
-    """Match the second-order one-sided derivative at zero concentration."""
+        data_path, custom_model):
+    """Match the one-sided derivative for production and custom kinetics.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository test-data paths.
+    custom_model : bool
+        Whether to use the supported unclipped power-law callback. False
+        retains the production ``elem_f_model`` and its concentration floor.
+
+    Notes
+    -----
+    At the depleted-reactant boundary the value assertion distinguishes the
+    second-order forward stencil from centered or first-order differences,
+    even though the production concentration floor keeps all three finite.
+    """
     reactor, states, params = _build_nonisothermal_reactor(data_path)
     fractional_order = 1.5  # [-]
     params[-2] = fractional_order
     reactor.Kinetics.set_params(params)
-    reactor.Kinetics.kinetic_model = _unclipped_power_law
+    if custom_model:
+        reactor.Kinetics.kinetic_model = _unclipped_power_law
     states[0] = 0.0  # [mol/L], depleted reactant boundary
     time = 0.0  # [s]
 
