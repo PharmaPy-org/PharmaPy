@@ -261,7 +261,30 @@ class SimulationResult:
 
         self.out_uos = out_uos
 
-    def GetStreamTable(self, basis='mass'):
+    def GetStreamTable(self, basis: str = 'mass') -> pd.DataFrame:
+        """Return raw-material and outlet records in flowsheet execution order.
+
+        Parameters
+        ----------
+        basis : {'mass', 'mole'}, optional
+            Amount and composition basis; defaults to mass.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Rows indexed by unit operation, source (inlet, initial holdup,
+            or outlet), and phase/stream identifier. Columns include
+            temperature [K], pressure [Pa], volume [m**3], volumetric flow
+            [m**3/s], and species fractions [-], where applicable. Mass
+            amounts and flows are [kg] and [kg/s]; molar amounts and flows
+            are [mol] and [mol/s]. Inapplicable fields are NaN.
+
+        Notes
+        -----
+        Continuous raw inlet amounts integrate over the receiving unit's
+        reported duration. Instantaneous static mixers have zero duration and
+        hence zero raw usage, while their flow-rate columns remain nonzero.
+        """
         uo_dict = self.sim.uos_instances
 
         base = ['temp', 'pres']
@@ -309,7 +332,7 @@ class SimulationResult:
         raw_materials = self.sim.GetRawMaterials(basis=basis, totals=False)
         stream_table = pd.concat((raw_materials, stream_table), axis=0)
 
-        grouped = stream_table.groupby(axis=0, level=0)
+        grouped = stream_table.groupby(level=0)
 
         dfs = []
 
