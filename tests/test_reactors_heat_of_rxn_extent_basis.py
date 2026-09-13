@@ -41,6 +41,12 @@ MULTI_REACTION_ORDERS = [[1.0], [1.0]]  # [-]
 MULTI_K_PARAMS = np.array([1.0e-3, 2.0e-3])  # [1/s]
 MULTI_EA_PARAMS = np.array([0.0, 0.0])  # [J/mol]
 
+# Reversible 2A <-> B and 3B <-> C use elementary mass action under #263's
+# equilibrium contract. These synthetic factors retain forward rates of
+# 1e-3 and 2e-3 mol/L/s at 1 mol/L, on their respective reaction-order bases.
+REVERSIBLE_REACTION_ORDERS = [[2.0], [3.0]]  # [-]
+REVERSIBLE_K_PARAMS = np.array([1.0e-3, 2.0e-3])  # [L/mol/s; L**2/mol**2/s]
+
 TREF_HRXN = 298.15  # [K]
 TEMP_EVAL = 320.0  # [K]
 VOL_EVAL = 2.0  # [m**3]
@@ -83,7 +89,7 @@ def _build_reactor(
     delta_hrxn : float or ndarray
         Reference reaction enthalpies [J/mol of reaction as written].
     k_params : ndarray, optional
-        Pre-exponential factors [1/s].
+        Pre-exponential factors [(mol/L)**(1 - total forward order)/s].
     ea_params : ndarray, optional
         Activation energies [J/mol].
     reaction_orders : list of list of float, optional
@@ -208,7 +214,7 @@ def _batch(
     isothermal : bool, optional
         Whether temperature is prescribed [-].
     k_params : ndarray, optional
-        Pre-exponential factors [1/s].
+        Pre-exponential factors [(mol/L)**(1 - total forward order)/s].
     ea_params : ndarray, optional
         Activation energies [J/mol].
     reaction_orders : list of list of float, optional
@@ -254,7 +260,8 @@ def _batch_heat_generation(reactor, mole_conc=MOLE_CONC):
     profile = reactor.energy_balances(
         0.0, mole_conc, VOL_EVAL, TEMP_EVAL, TEMP_EVAL, {}, heat_prof=True
     )  # [W]
-    return -float(profile[0, 0])  # [W]
+    # #263 aligns the stored reaction heat with the positive exothermic source.
+    return float(profile[0, 0])  # [W]
 
 
 def test_species_rates_are_invariant_to_stoichiometric_writing(data_path):
@@ -363,9 +370,9 @@ def test_batch_uses_normalized_heat_with_raw_equilibrium_handoff(data_path):
         data_path,
         MULTI_STOICH_AS_WRITTEN,
         MULTI_DELTA_HRXN_AS_WRITTEN,
-        k_params=MULTI_K_PARAMS,
+        k_params=REVERSIBLE_K_PARAMS,
         ea_params=MULTI_EA_PARAMS,
-        reaction_orders=MULTI_REACTION_ORDERS,
+        reaction_orders=REVERSIBLE_REACTION_ORDERS,
         mole_conc=MULTI_MOLE_CONC,
         reversible=True,
     )
@@ -391,9 +398,9 @@ def test_tank_reactors_use_normalized_heat_with_raw_equilibrium_handoff(
         reactor,
         MULTI_STOICH_AS_WRITTEN,
         MULTI_DELTA_HRXN_AS_WRITTEN,
-        k_params=MULTI_K_PARAMS,
+        k_params=REVERSIBLE_K_PARAMS,
         ea_params=MULTI_EA_PARAMS,
-        reaction_orders=MULTI_REACTION_ORDERS,
+        reaction_orders=REVERSIBLE_REACTION_ORDERS,
         mole_conc=MULTI_MOLE_CONC,
         reversible=True,
     )
@@ -430,9 +437,9 @@ def test_pfr_steady_energy_uses_normalized_heat_basis(data_path):
         ),
         MULTI_STOICH_AS_WRITTEN,
         MULTI_DELTA_HRXN_AS_WRITTEN,
-        k_params=MULTI_K_PARAMS,
+        k_params=REVERSIBLE_K_PARAMS,
         ea_params=MULTI_EA_PARAMS,
-        reaction_orders=MULTI_REACTION_ORDERS,
+        reaction_orders=REVERSIBLE_REACTION_ORDERS,
         mole_conc=MULTI_MOLE_CONC,
         reversible=True,
     )
@@ -464,9 +471,9 @@ def test_pfr_dynamic_energy_uses_normalized_heat_basis(data_path):
         ),
         MULTI_STOICH_AS_WRITTEN,
         MULTI_DELTA_HRXN_AS_WRITTEN,
-        k_params=MULTI_K_PARAMS,
+        k_params=REVERSIBLE_K_PARAMS,
         ea_params=MULTI_EA_PARAMS,
-        reaction_orders=MULTI_REACTION_ORDERS,
+        reaction_orders=REVERSIBLE_REACTION_ORDERS,
         mole_conc=MULTI_MOLE_CONC,
         reversible=True,
     )

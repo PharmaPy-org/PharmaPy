@@ -1,3 +1,5 @@
+"""Real-phase drum energy includes vapor outflow and condensate reflux."""
+
 import numpy as np
 import pytest
 
@@ -18,6 +20,21 @@ pytestmark = pytest.mark.unit
 )
 def test_adiabatic_energy_residual_includes_vapor_enthalpy(
         data_path, reflux_ratio):
+    """Balance feed, liquid, gross vapor, and returned condensate enthalpies.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic data paths.
+    reflux_ratio : float
+        Fraction of gross vapor returned as liquid condensate [-].
+
+    Notes
+    -----
+    PR #263 corrected the drum boundary: all gross vapor leaves with vapor
+    enthalpy and only the reflux fraction returns with condensate enthalpy.
+    Adiabatic excludes jacket heat, not the separate condenser's duty.
+    """
     # Enthalpies are J/mol; flows are mol/s, amounts are mol, pressure is Pa,
     # and volume is m^3. Thus the two residuals are J/s and J, respectively.
     thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
@@ -83,7 +100,7 @@ def test_adiabatic_energy_residual_includes_vapor_enthalpy(
 
     expected_energy_rate = (
         4.0 * h_in - 1.0 * h_liq
-        - (1.0 - reflux_ratio) * 2.0 * h_top
+        - 2.0 * h_vap + reflux_ratio * 2.0 * h_top
     )  # [J/s]
     expected_internal_energy = (
         3.0 * h_liq + 4.0 * h_vap - 101325.0 * 2.0 - 40.0

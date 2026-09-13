@@ -99,7 +99,21 @@ def test_get_kinetics_uses_secondary_parameters_from_vector_update():
 
 
 def test_msmpr_steady_state_accepts_scalar_seed(data_path):
-    """MSMPR steady-state solve accepts a scalar seed fraction."""
+    """A real, positive-volume crystal population accepts a scalar seed.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic data paths.
+
+    Notes
+    -----
+    The synthetic primary prefactor gives B/G = 1e15 #/m**3/um. With a
+    one-second residence time and growth near 0.4 um/s, the exponential
+    population has third moment about 6 * 1e15 * 0.4**4 * 1e-18 m**3/m**3.
+    This resolves nonzero crystal volume with the positive phase shape factor
+    required by #165/#263, instead of bypassing that boundary with kv=0.
+    """
     thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
     size_grid = np.array([0.0, 1.0])  # [um]
     distribution = np.zeros(2)  # [#/um]
@@ -119,7 +133,6 @@ def test_msmpr_steady_state_accepts_scalar_seed(data_path):
         x_distrib=size_grid,
         distrib=distribution,
         mass_frac=solid_mass_fraction,
-        kv=0.0,  # [-], isolates the scalar root contract
     )
     slurry = Slurry(vol=1.0, x_distrib=size_grid, distrib=distribution)
     slurry.Phases = [liquid, solid]
@@ -136,7 +149,6 @@ def test_msmpr_steady_state_accepts_scalar_seed(data_path):
         x_distrib=size_grid,
         distrib=distribution,
         mass_frac=solid_mass_fraction,
-        kv=0.0,  # [-]
     )
     inlet = SlurryStream(
         vol_flow=1.0,  # [m**3/s]
@@ -147,12 +159,18 @@ def test_msmpr_steady_state_accepts_scalar_seed(data_path):
 
     crystallizer = MSMPR(
         "A",
-        method="1D-FVM",
+        method="moments",
+        basis="mass_frac",
         vol_tank=1.0,  # [m**3]
         adiabatic=True,
     )
     crystallizer.Phases = slurry
-    crystallizer.Kinetics = _primary_growth_kinetics()
+    crystallizer.Kinetics = CrystKinetics(
+        coeff_solub=[0.1, 0.0, 0.0],  # [-], constant solubility mass fraction
+        nucl_prim=[1e15, 0.0, 1.0],  # [#/m**3/s], [J/mol], [-]
+        growth=[1.0, 0.0, 1.0],  # [um/s], [J/mol], [-]
+        sup_sat_type="absolute",
+    )
     crystallizer.Kinetics.target_idx = crystallizer.target_ind
     crystallizer.Inlet = inlet
 
@@ -160,7 +178,9 @@ def test_msmpr_steady_state_accepts_scalar_seed(data_path):
         0.3, 298.15)  # [um], [#/m**3/um], [-], [-], [-]
 
     np.testing.assert_allclose(x_vec, [0.0, 1.0])
-    np.testing.assert_allclose(f_convg, [1.0, np.exp(-2.5)])
-    assert w_convg == pytest.approx(0.5)
+    expected_population = 1e15 * np.exp(
+        -size_grid / (w_convg - 0.1))  # [#/m**3/um], B/G * exp(-x/(G*tau))
+    np.testing.assert_allclose(f_convg, expected_population)
+    assert 0.1 < w_convg < liquid_mass_fraction[0]
     assert info.converged
     assert final_fn == pytest.approx(0.0)
