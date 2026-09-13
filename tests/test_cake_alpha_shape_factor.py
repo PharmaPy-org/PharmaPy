@@ -2,9 +2,9 @@
 
 Issue #160 records that the scalar volumetric shape factor cancels from the
 normalized crystal-volume weights. The hydraulic resistance ``alpha`` should
-therefore be independent of any positive scalar ``kv`` at fixed porosity. Directly counting
-accesses to the phase attribute would test an implementation detail rather than
-this observable hydraulic-resistance contract.
+therefore be independent of any positive scalar ``kv`` at fixed porosity.
+Directly counting accesses to the phase attribute would test an implementation
+detail rather than this observable hydraulic-resistance contract.
 """
 
 import numpy as np
@@ -108,7 +108,9 @@ def test_cake_alpha_is_invariant_to_real_phase_shape_factor(thermo_path):
     # moments, times 180(1-e)/(e**3 rho_s); kv is absent from this expression.
     size = reference.Solid_1.x_distrib * 1e-6  # [m]
     centers = (size[1:] + size[:-1]) / 2  # [m]
-    counts = np.diff(size) * (reference.Solid_1.distrib[1:] + reference.Solid_1.distrib[:-1]) / 2  # [common number basis]
+    counts = np.diff(size) * (
+        reference.Solid_1.distrib[1:] + reference.Solid_1.distrib[:-1]
+    ) / 2  # [common number basis]
     porosity = reference.porosity  # [-], independently checked packing model
     expected = (180 * (1-porosity) / porosity**3 / reference.Solid_1.getDensity()
                 * np.dot(counts, centers) / np.dot(counts, centers**3))  # [m/kg]
