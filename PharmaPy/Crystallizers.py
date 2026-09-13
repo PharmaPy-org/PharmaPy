@@ -137,7 +137,9 @@ class _BaseCryst:
             volume (Batch) or working vol_tank / vol_offset (MSMPR/Semibatch).
             Design assumptions and provenance are in the advanced usage guide.
         basis : {'mass_conc', 'mass_frac'}
-            Composition basis, respectively [kg/m**3] or [kg/kg].
+            Kinetics-input composition basis, respectively [kg/m**3] or
+            [kg/kg]. The solver composition state remains liquid mass
+            concentration [kg/m**3] for both options.
         jac_type : {'finite_diff', 'analytical', 'AD', None}
             Sensitivity Jacobian mode. ``'AD'`` currently warns and selects
             ``'finite_diff'`` because AD callbacks are unavailable.
@@ -1830,8 +1832,9 @@ class BatchCryst(_BaseCryst):
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation
-    basis : str (optional, default = 'mass_conc')
-        Options : 'massfrac', 'massconc'
+    basis : {'mass_conc', 'mass_frac'}, optional
+        Kinetics-input composition basis, respectively [kg/m**3] or [kg/kg].
+        The solver composition state remains mass concentration [kg/m**3].
     state_events : lsit of dict(s)
         list of dictionaries, each one containing the specification of a
         state event
@@ -2116,7 +2119,7 @@ class BatchCryst(_BaseCryst):
         dmaterial_dt : numpy.ndarray
             stacked derivatives with mixed units, in this order:
             ``ddistr_dt`` ([#/um/s] for '1D-FVM', [um**n/s] for 'moments'),
-            ``dcomp_dt`` [kg/m**3/s] and ``dvol_liq`` [m**3/s].
+            ``dcomp_dt`` [kg/m**3/s], and ``dvol_liq`` [m**3/s].
         transf : numpy.ndarray
             crystallization mass rate [kg/s].
 
@@ -2128,9 +2131,11 @@ class BatchCryst(_BaseCryst):
         ``transf`` is a total rate [kg/s] rather than the volumetric
         [kg/m**3/s] rate returned by :meth:`MSMPR.material_balances`.
 
-        ``dcomp_dt`` is documented as [kg/m**3/s] because the
-        ``basis == 'mass_frac'`` rescaling below acts on a copy and never
-        reaches the returned array (tracked in issue #47).
+        ``basis`` controls only the composition passed to the kinetics:
+        ``mass_conc`` [kg/m**3] or ``mass_frac`` [kg/kg]. The ODE state is
+        declared and initialized as ``mass_conc`` [kg/m**3], so its residual
+        remains [kg/m**3/s] on both kinetics bases. ``dvol_liq`` remains
+        [m**3/s].
         """
 
         # 'vol' represents liquid volume
@@ -2152,12 +2157,10 @@ class BatchCryst(_BaseCryst):
         self.Liquid_1.updatePhase(mass_conc=mass_conc, vol=vol)
 
         dvol_liq = -transf/rho_liq  # TODO: results not consistent with mu_3
-        dcomp_dt = -transf/vol * (self.kron_jtg - mass_conc/rho_liq)
+        dcomp_dt = -transf/vol * (self.kron_jtg - mass_conc/rho_liq)  # [kg/m**3/s]
 
+        # Composition [kg/m**3/s], followed by volume [m**3/s].
         dliq_dt = np.append(dcomp_dt, dvol_liq)
-
-        if self.basis == 'mass_frac':
-            dcomp_dt *= 1 / rho_liq
 
         dmaterial_dt = np.concatenate((ddistr_dt, dliq_dt))
 
@@ -2433,8 +2436,9 @@ class MSMPR(_BaseCryst):
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation
-    basis : str (optional, default = 'mass_conc')
-        Options : 'massfrac', 'massconc'
+    basis : {'mass_conc', 'mass_frac'}, optional
+        Kinetics-input composition basis, respectively [kg/m**3] or [kg/kg].
+        The solver composition state remains mass concentration [kg/m**3].
     state_events : lsit of dict(s)
         list of dictionaries, each one containing the specification of a
         state event
@@ -2972,8 +2976,7 @@ class MSMPR(_BaseCryst):
         dmaterial_dt : numpy.ndarray
             stacked derivatives with mixed units, in this order:
             ``ddistr_dt`` ([#/m**3/um/s] for '1D-FVM', [um**n/m**3/s] for
-            'moments') and ``dcomp_dt`` ([kg/m**3/s], or [1/s] when
-            ``basis == 'mass_frac'``).
+            'moments') and ``dcomp_dt`` [kg/m**3/s].
         transf : numpy.ndarray
             crystallization mass rate per unit slurry volume [kg/m**3/s].
 
@@ -2991,7 +2994,10 @@ class MSMPR(_BaseCryst):
 
         The kinetic mass-transfer rate uses the crystal density [kg/m**3],
         while the liquid-volume correction normalizes ``mass_conc`` by the
-        tank liquid density [kg/m**3].
+        tank liquid density [kg/m**3]. ``basis`` controls only whether the
+        kinetics receive ``mass_conc`` [kg/m**3] or ``mass_frac`` [kg/kg];
+        the ODE composition state and residual remain [kg/m**3] and
+        [kg/m**3/s], respectively.
         """
 
         rho_liq, rho_sol = rhos[0]  # [kg/m**3], liquid and solid tank densities
@@ -3023,10 +3029,7 @@ class MSMPR(_BaseCryst):
         # [kg/m**3/s] both terms
         flow_term = tau_inv * (input_conc*phi_in[0] - mass_conc*phi)
         transf_term = transf * (self.kron_jtg - mass_conc / rho_liq)
-        dcomp_dt = 1 / phi * (flow_term - transf_term)
-
-        if self.basis == 'mass_frac':
-            dcomp_dt *= 1 / rho_liq
+        dcomp_dt = 1 / phi * (flow_term - transf_term)  # [kg/m**3/s]
 
         dmaterial_dt = np.concatenate((ddistr_dt, dcomp_dt))
 
@@ -3379,8 +3382,9 @@ class SemibatchCryst(MSMPR):
     reset_states : bool (optional, default = False)
         Boolean value indicating whether the states should be
         reset before simulation
-    basis : str (optional, default = 'mass_conc')
-        Options : 'massfrac', 'massconc'
+    basis : {'mass_conc', 'mass_frac'}, optional
+        Kinetics-input composition basis, respectively [kg/m**3] or [kg/kg].
+        The solver composition state remains mass concentration [kg/m**3].
     state_events : lsit of dict(s)
         list of dictionaries, each one containing the specification of a
         state event
@@ -3448,7 +3452,7 @@ class SemibatchCryst(MSMPR):
         dmaterial_dt : numpy.ndarray
             stacked derivatives with mixed units, in this order:
             ``ddistr_dt`` ([#/um/s] for '1D-FVM', [um**n/s] for 'moments'),
-            ``dcomp_dt`` [kg/m**3/s] and ``dvol_dt`` [m**3/s].
+            ``dcomp_dt`` [kg/m**3/s], and ``dvol_dt`` [m**3/s].
         transf : numpy.ndarray
             crystallization mass rate [kg/s].
 
@@ -3460,9 +3464,11 @@ class SemibatchCryst(MSMPR):
         [#/um]), and the kinetics are evaluated with ``vol=vol_slurry``, so
         ``transf`` is a total rate [kg/s].
 
-        ``dcomp_dt`` is documented as [kg/m**3/s] because the
-        ``basis == 'mass_frac'`` rescaling below acts on a copy and never
-        reaches the returned array (tracked in issue #47).
+        ``basis`` controls only the composition passed to the kinetics:
+        ``mass_conc`` [kg/m**3] or ``mass_frac`` [kg/kg]. The ODE state is
+        declared and initialized as ``mass_conc`` [kg/m**3], so its residual
+        remains [kg/m**3/s] on both kinetics bases. ``dvol_dt`` remains
+        [m**3/s].
         """
 
         rho_susp, rho_in = rhos
@@ -3510,10 +3516,8 @@ class SemibatchCryst(MSMPR):
         dvol_dt = (phi_in[0] * input_flow * rho_in_liq
                    - transf) / rho_liq  # [m**3/s]
 
+        # Composition [kg/m**3/s], followed by volume [m**3/s].
         dliq_dt = np.append(dcomp_dt, dvol_dt)
-
-        if self.basis == 'mass_frac':
-            dcomp_dt *= 1 / rho_liq
 
         dmaterial_dt = np.concatenate((ddistr_dt, dliq_dt))
 
