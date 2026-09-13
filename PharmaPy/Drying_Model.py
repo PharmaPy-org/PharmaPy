@@ -339,8 +339,9 @@ class Drying:
         ``k_perm`` [m**2] * ``k_ra`` [-] * ``dPg_dz`` [Pa/m] /
         ``visc_gas`` [Pa*s] = [m/s].
 
-        The ``x_liq`` supercritical slot reset preserves the existing state
-        layout.
+        The unresolved defect in issue #42 zeroes ``x_liq[:, -2]`` in the
+        volatile-liquid state. This is a provisional model limitation, not a
+        reset of a supercritical component.
 
         ``gas_velocity`` [m/s] and ``rho_gas`` [kg/m**3] are diagnostics from
         the most recent ``unit_model`` evaluation. They are not time profiles
