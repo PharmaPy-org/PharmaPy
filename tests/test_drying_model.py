@@ -104,7 +104,23 @@ def test_unit_model_hands_mass_rates_to_real_balance_path(
 
 def test_material_balance_uses_mass_drying_rate_for_gas_species(
         drying_unit_factory):
-    """Gas transfer uses one gas-holdup divisor on mass-basis rates."""
+    """Verify mass-basis transfer and normalized gas accumulation (#230).
+
+    Parameters
+    ----------
+    drying_unit_factory : callable
+        Construct a drying unit with real phases in water/ethanol/carrier order.
+
+    Notes
+    -----
+    The old saturation-only correction was an artifact of the defect: it
+    omitted total gas-inventory changes and made normalized fractions grow.
+    The constant-pressure pore gas is open, with a vent carrying the bulk
+    composition. That vent cancels between component and total balances,
+    giving H*dy_i/dt = r_i - y_i*sum(r_j) at zero convection, where H is gas
+    mass per bed volume. The explicit transfer values below retain the
+    molar-to-mass and single-holdup (#81) regressions.
+    """
     dryer = drying_unit_factory(number_nodes=2)
     dryer.idx_volatiles = np.array([0, 1])  # component indices [-]
     dryer.porosity = 0.5  # [-]
@@ -123,7 +139,7 @@ def test_material_balance_uses_mass_drying_rate_for_gas_species(
     ])  # [kg/m**3/s]
     dens_gas = np.array([1.2, 1.5])  # [kg/m**3]
 
-    dsat_dt, dygas_dt, _ = dryer.material_balance(
+    _, dygas_dt, _ = dryer.material_balance(
         time=0.0,
         satur=satur,
         temp_gas=np.full(2, 300.0),  # [K]
@@ -136,13 +152,13 @@ def test_material_balance_uses_mass_drying_rate_for_gas_species(
         inputs={"mass_frac": np.array([0.01, 0.01, 0.98])},  # [-]
     )
 
-    gas_holdup = dryer.porosity * (1.0 - satur)  # [-]
-    expected_transfer = dry_rate / gas_holdup[:, None] / dens_gas[:, None]
-    expected_saturation_correction = (
-        y_gas / (1.0 - satur[:, None]) * dsat_dt[:, None]
-    )  # [1/s]
-    expected_dygas_dt = (
-        expected_transfer + expected_saturation_correction
-    )  # [1/s]
-
+    expected_transfer = np.array([
+        [0.12, 0.6133333333333334, 0.0],
+        [0.144, 0.6133333333333333, 0.0],
+    ])  # [1/s]
+    expected_dygas_dt = expected_transfer - y_gas * np.array([
+        [0.22 / 0.3], [0.284 / 0.375],
+    ])  # [1/s], total mass sources divided by gas holdups [kg/m**3]
     np.testing.assert_allclose(dygas_dt, expected_dygas_dt)
+    # Roundoff from three component rates of order one per second.
+    np.testing.assert_allclose(dygas_dt.sum(axis=1), 0., atol=1e-15)

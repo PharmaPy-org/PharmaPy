@@ -253,9 +253,29 @@ def test_deliquoring_rejects_singular_micronized_irreducible_saturation(
 @pytest.mark.assimulo
 def test_drying_setup_converts_micrometer_grid_before_saturation(
         drying_unit_factory):
-    """Real drying setup passes meter diameters to the shared correlation."""
+    """Real drying setup passes meter diameters to the shared correlation.
+
+    Parameters
+    ----------
+    drying_unit_factory : callable
+        Construct a drying unit with real phases and the synthetic size grid.
+
+    Notes
+    -----
+    Recompute the correlation on an explicit metre grid using the initial
+    volatile-liquid composition. This preserves the conversion assertion
+    across the phase-composition normalization introduced by PR #263.
+    """
     pytest.importorskip("assimulo")
     dryer = drying_unit_factory(number_nodes=2)
+    liquid_fraction = dryer.CakePhase.Liquid_1.mass_frac.copy()  # [-]
+    liquid_fraction[dryer.idx_supercrit] = 0.0  # [-], liquid volatile subset
+    initial_temperature = dryer.Solid_1.temp  # [K]
+    liquid_density = dryer.Liquid_1.getDensity(
+        temp=initial_temperature, mass_frac=liquid_fraction,
+        basis='mass')  # [kg/m**3]
+    surface_tension = dryer.Liquid_1.getSurfTension(
+        temp=initial_temperature, mass_frac=liquid_fraction)  # [N/m]
 
     time, states = dryer.solve_unit(
         deltaP=5.0e4,
@@ -263,14 +283,21 @@ def test_drying_setup_converts_micrometer_grid_before_saturation(
         verbose=False,
     )
 
-    # [-], frozen synthetic setup value. Removing the meter conversion changes
-    # this value by 8.7%; rel=1e-10 keeps that unit-basis regression visible.
-    expected_irreducible_saturation = 0.16975758937005744
+    correlation_inputs = (
+        dryer.Solid_1.distrib, dryer.deltaP, dryer.CakePhase.porosity,
+        dryer.cake_height, dryer.Solid_1.moments[0],
+        (np.mean(surface_tension), liquid_density),
+    )  # [#/um], [Pa], [-], [m], [#], ([N/m], [kg/m**3])
+    expected_irreducible_saturation = solid_liquid_sep.get_sat_inf(
+        SIZE_GRID_UM * 1e-6, *correlation_inputs)  # [-], diameters [m]
+    micrometer_basis = solid_liquid_sep.get_sat_inf(
+        SIZE_GRID_UM, *correlation_inputs)  # [-], deliberately wrong size basis
     assert len(time) == np.shape(states)[0]
     np.testing.assert_allclose(dryer.Solid_1.x_distrib, SIZE_GRID_UM)
     assert dryer.s_inf == pytest.approx(
         expected_irreducible_saturation, rel=1e-10
     )
+    assert dryer.s_inf != pytest.approx(micrometer_basis, rel=1e-10)
 
 
 def test_drying_rejects_singular_micronized_irreducible_saturation(

@@ -248,23 +248,67 @@ def check_steady_state(time, states, sdot, tau, num_tau=1, time_stop=None,
 
 def eval_state_events(time, states, switches,
                       states_dim, name_states, state_event_list,
-                      sdot=None, discretized_model=False, state_map=None):
+                      sdot=None, discretized_model=False, state_map=None) -> np.ndarray:
+    """Evaluate state-event conditions in definition order.
+
+    Parameters
+    ----------
+    time : float
+        Absolute simulation time [s].
+    states : numpy.ndarray
+        Packed states in name_states order, with each state's physical units.
+        Distributed vectors are node-major: all components at node 0 first.
+    switches : sequence of bool
+        Event activation switches; all false disables root detection.
+    states_dim : sequence of int
+        Component count per named state (per node for distributed models).
+    name_states : sequence of str
+        Names in packed state order.
+    state_event_list : list of dict
+        Definitions with state_name and value (in the selected state's units),
+        or a callable(time, states_dict, derivatives_dict, **kwargs). state_idx
+        selects components. For distributed states it selects the component
+        axis at every node; node_idx optionally selects nodes independently.
+        Omitting either index retains that axis. Scalar distributed states
+        have one component. num_conditions defaults to one and must equal
+        the number of selected scalar conditions. Flattening is node-major
+        within each definition, followed by the next definition.
+    sdot : numpy.ndarray or None, optional
+        Packed derivatives [state units/s]; callables receive None if absent.
+    discretized_model : bool, optional
+        Whether states have a distributed node axis.
+    state_map : sequence of bool or None, optional
+        Derivative state selection passed to the unpacking helper.
+
+    Returns
+    -------
+    numpy.ndarray
+        Flat reference-minus-state conditions in the monitored state's units,
+        or callable results in their documented units. Disabled conditions
+        return positive dimensionless sentinels so they have no zero crossing.
+
+    Raises
+    ------
+    ValueError
+        If a definition's num_conditions does not match its returned size.
+    """
     events = []
 
     if discretized_model:
-        unpack_fn = globals()['unpack_discretized']
+        unpack_fn = unpack_discretized
     else:
-        unpack_fn = globals()['unpack_states']
+        unpack_fn = unpack_states
 
     dict_states = unpack_fn(states, states_dim, name_states)
 
+    dict_sdot = None
     if sdot is not None:
         dict_sdot = unpack_fn(sdot, states_dim, name_states,
                               state_map=state_map)
 
     if any(switches):
 
-        for di in state_event_list:
+        for event_index, di in enumerate(state_event_list):
             if 'callable' in di.keys():
                 kwargs_callable = di.get('kwargs', {})
                 event_flag = di['callable'](time, dict_states, dict_sdot,
@@ -275,22 +319,61 @@ def eval_state_events(time, states, switches,
 
                 state_idx = di.get('state_idx', None)
 
-                if state_idx is None:
-                    checked_value = dict_states[state_name]
-                else:
-                    checked_value = dict_states[state_name][state_idx]
+                checked_value = np.asarray(dict_states[state_name])  # [state units]
+                if discretized_model:
+                    num_components = states_dim[name_states.index(state_name)]
+                    checked_value = checked_value.reshape(-1, num_components)  # [state units]
+                    if state_idx is not None:
+                        checked_value = checked_value[:, state_idx]  # [state units]
+                    node_idx = di.get('node_idx')
+                    if node_idx is not None:
+                        checked_value = checked_value[node_idx]  # [state units]
+                elif state_idx is not None:
+                    checked_value = checked_value[state_idx]  # [state units]
 
                 event_flag = ref_value - checked_value
 
-            events.append(event_flag)
+            conditions = np.asarray(event_flag).ravel()  # [event units]
+            if conditions.size != di.get('num_conditions', 1):
+                event_id = di.get('event_name') or f"#{event_index} ({di.get('state_name', 'callable')})"
+                expected = di.get('num_conditions', 1)
+                raise ValueError(
+                    f"Event {event_id!r}: num_conditions expected {expected}, "
+                    f"got {conditions.size}")
+            events.append(conditions)
+    else:
+        events = [np.ones(di.get('num_conditions', 1)) for di in state_event_list]  # [-]
 
-    events = np.hstack(events)
+    events = np.concatenate(events) if events else np.empty(0)  # [event units]
 
     return events
 
 
-def handle_events(solver, event_info, state_event_list, any_event=True):
-    # if any_event:
+def handle_events(solver, event_info, state_event_list, any_event=True) -> None:
+    """Terminate on eligible roots, mapping conditions to their definitions.
+
+    Parameters
+    ----------
+    solver : object
+        Assimulo solver; unused because termination is signaled by exception.
+    event_info : tuple
+        First entry is the flat sequence of crossing directions [-]: -1 for
+        decreasing, +1 for increasing, zero for no crossing.
+    state_event_list : list of dict
+        Definitions in evaluator order. num_conditions gives each definition's
+        flat condition count (default one). direction optionally filters the
+        crossing, and event_name identifies the owning definition in messages.
+    any_event : bool, optional
+        Terminate if any eligible condition crosses; if False, require every
+        condition to cross in the current notification.
+
+    Raises
+    ------
+    TerminateSimulation
+        If the requested any/all condition is met.
+    ValueError
+        If the marker count differs from the declared condition count.
+    """
     event_markers = event_info[0]
 
     flags = []
@@ -298,7 +381,16 @@ def handle_events(solver, event_info, state_event_list, any_event=True):
     dim_events = [event.get('num_conditions', 1) for event in state_event_list]
 
     idx_state = [[ind] * num for ind, num in enumerate(dim_events)]
-    idx_state = np.hstack(idx_state)
+    idx_state = np.hstack(idx_state) if idx_state else np.empty(0, dtype=int)
+    if len(event_markers) != len(idx_state):
+        definitions = [
+            "{}: {}".format(event.get('event_name') or
+                            "#{} ({})".format(index, event.get('state_name', 'callable')),
+                            count)
+            for index, (event, count) in enumerate(zip(state_event_list, dim_events))]
+        raise ValueError(
+            f"Event num_conditions expected {len(idx_state)} markers "
+            f"({'; '.join(definitions)}), got {len(event_markers)}")
 
     for ind, val in enumerate(event_markers):
         direction = state_event_list[idx_state[ind]].get('direction')
@@ -317,17 +409,17 @@ def handle_events(solver, event_info, state_event_list, any_event=True):
             idx_true = [ind for (ind, flag) in enumerate(flags) if flag]
 
             for idx in idx_true:
-                id_event = state_event_list[idx].get('event_name')
+                id_event = state_event_list[idx_state[idx]].get('event_name')
                 if flags[idx]:
                     if id_event is None:
-                        print('State event %i was reached' % (idx + 1))
+                        print('State event %i was reached' % (idx_state[idx] + 1))
                     else:
                         print("State event '%s' was reached" % id_event)
 
                     raise TerminateSimulation
 
     else:
-        if all(flags):
+        if flags and all(flags):
             raise TerminateSimulation
 
 

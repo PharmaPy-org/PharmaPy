@@ -6,6 +6,8 @@ Created on Sun Aug  9 13:52:55 2020
 @author: dcasasor
 """
 
+from typing import Optional
+
 from PharmaPy.Connections import get_inputs_new
 
 
@@ -36,11 +38,21 @@ class CoolingWater:
         return self._DynamicInlet
 
     @DynamicInlet.setter
-    def DynamicInlet(self, dynamic_object):
+    def DynamicInlet(self, dynamic_object: Optional[object]) -> None:
+        """Attach a controller or restore static utility inputs.
+
+        Parameters
+        ----------
+        dynamic_object : object or None
+            Object exposing ``evaluate_inputs(time)`` with time [s].
+            None restores stored inlet
+            temperature [K] and utility flow [m**3/s or kg/s].
+        """
+        self._DynamicInlet = dynamic_object
+        if dynamic_object is None:
+            return
         dynamic_object.controllable = self.controllable
         dynamic_object.parent_instance = self
-
-        self._DynamicInlet = dynamic_object
 
     def updateObject(self, vol_flow=None, mass_flow=None, temp_in=None):
         if vol_flow is not None:
