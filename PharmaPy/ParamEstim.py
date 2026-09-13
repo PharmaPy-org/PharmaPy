@@ -6,9 +6,8 @@ Created on Mon Oct 28 15:35:48 2019
 @author: casas100
 """
 
-# from reactor_module import ReactorClass
 import numpy as np
-from scipy.linalg import svd, inv, ldl
+from scipy.linalg import inv, ldl
 from itertools import cycle
 
 import matplotlib.pyplot as plt
@@ -425,7 +424,10 @@ class ParameterEstimation:
         self.objfun_iter = []
         self.cond_number = []
 
+        self.optimize_flag = True  # [-]
         self.resid_runs = None
+        self.params_residuals = None  # parameter units
+        self.weighted_residuals = None  # [-]
         self.y_runs = None
         self.sens = None
         self.sens_runs = None
@@ -453,12 +455,62 @@ class ParameterEstimation:
         return params_reconstr
 
     def func_aux(self, params, x_vals, args, kwargs):
+        """Evaluate model states for finite-difference sensitivities.
+
+        Parameters
+        ----------
+        params : array_like
+            Full parameter vector, including fixed and optimized entries.
+            Units follow the model callback's parameter contract.
+        x_vals : array_like
+            Independent-variable samples passed to the model callback. Units
+            follow the callback, typically time [s].
+        args : tuple
+            Positional arguments forwarded to the model callback.
+        kwargs : dict
+            Keyword arguments forwarded to the model callback.
+
+        Returns
+        -------
+        states_flat : numpy.ndarray
+            Model states flattened in state-major order. Units follow the model
+            callback's state outputs.
+
+        """
         states = self.function(params, x_vals, *args, **kwargs)
 
         return states.T.ravel()
 
     def get_objective(self, params, out_array=False, set_self=True):
+        """Evaluate weighted residuals or their least-squares objective.
+
+        Parameters
+        ----------
+        params : array_like
+            Optimized parameter vector. Fixed parameters are reconstructed from
+            ``param_seed`` before evaluating the model. Units follow the model
+            callback's parameter contract.
+        out_array : bool, optional
+            If True, return weighted residuals flattened in state-major order.
+            If False, return ``1/2 * weighted_residuals.T @
+            weighted_residuals``. The default is False.
+        set_self : bool, optional
+            If True, store the latest model outputs, raw residuals in model
+            units as ``residuals`` with shape ``(sum_times, n_measured)`` in
+            data-major order, and ``sigma_inv``-weighted dimensionless
+            residuals [-] flattened state-major as ``weighted_residuals``. The
+            default is True.
+
+        Returns
+        -------
+        objective_or_residuals : float or numpy.ndarray
+            Dimensionless weighted scalar objective [-] when ``out_array`` is
+            False, or dimensionless weighted residual vector [-] when
+            ``out_array`` is True.
+
+        """
         # Store parameter values
+        params_in = np.asarray(params)  # parameter units
         if type(self.params_iter) is list:
             self.params_iter.append(params)
 
@@ -504,7 +556,7 @@ class ParameterEstimation:
             y_runs.append(y_run)
             resid_runs.append(resid_run)
 
-        weighted_residuals = [np.dot(resid, self.sigma_inv)
+        weighted_residuals = [np.dot(resid, self.sigma_inv)  # [-]
                               for resid in resid_runs]
 
         if len(sens_second) > 0:
@@ -516,15 +568,18 @@ class ParameterEstimation:
 
         residuals = self.optimize_flag * np.concatenate(resid_runs)
 
+        residual_out = np.concatenate([ar.T.ravel()
+                                       for ar in weighted_residuals])  # [-]
+
         if set_self:
             self.y_runs = y_runs
             self.resid_runs = resid_runs
 
             self.residuals = residuals
+            self.params_residuals = np.array(params_in, copy=True)
+            self.weighted_residuals = self.optimize_flag * residual_out
 
         # Return objective
-        residual_out = np.concatenate([ar.T.ravel()
-                                       for ar in weighted_residuals])
         if out_array:
             return residual_out
         else:
@@ -533,6 +588,36 @@ class ParameterEstimation:
         return residual_out
 
     def get_gradient(self, params, out_array=False, set_self=True):
+        """Assemble residual Jacobians or objective gradients.
+
+        Parameters
+        ----------
+        params : array_like
+            Optimized parameter vector. Fixed parameters are reconstructed from
+            ``param_seed`` before numerical finite differences are evaluated.
+            Units follow the parameter definitions supplied to the model.
+        out_array : bool, optional
+            If True, return the weighted residual Jacobian transposed as
+            ``(n_params, n_data)``. If False, return the scalar-objective
+            gradient used by IPOPT. The default is False.
+        set_self : bool, optional
+            Reserved for compatibility with optimizer callback signatures. The
+            current implementation stores the assembled weighted Jacobian on
+            ``self.sens`` regardless of this value.
+
+        Returns
+        -------
+        jacobian_or_gradient : numpy.ndarray
+            Weighted residual Jacobian with units reciprocal to each optimized
+            parameter when ``out_array`` is True, or objective gradient with
+            the same reciprocal-parameter units when ``out_array`` is False.
+
+        """
+
+        if not out_array and (
+                self.params_residuals is None or
+                not np.array_equal(params, self.params_residuals)):
+            self.get_objective(params)
 
         if self.sens_second is None:
             raw_sens = []
@@ -542,7 +627,8 @@ class ParameterEstimation:
                                    self.kwargs_fun[ind])
 
                     pick_p = np.where(self.map_variable)[0]
-                    sens = numerical_jac_data(self.func_aux, params,
+                    params_full = self.reconstruct_params(params)
+                    sens = numerical_jac_data(self.func_aux, params_full,
                                               pass_to_fun, dx=self.dx_fd,
                                               pick_x=pick_p)
                 else:
@@ -566,9 +652,6 @@ class ParameterEstimation:
 
             weighted_sens.append(weighted)
 
-        # if self.sens_runs is None:  # TODO: this is a hack to allow IPOPT
-        #     self.get_objective(params)
-
         concat_sens = np.vstack(weighted_sens)
         if not self.fit_spectra:
 
@@ -578,14 +661,10 @@ class ParameterEstimation:
         self.sens = concat_sens
         jacobian = concat_sens
 
-        # if set_self:
-        #     self.sens_runs = sens_runs
-
         if out_array:
             return jacobian.T  # LM doesn't require (y - y_e)^T J
         else:
-            res = np.concatenate([a.T.ravel() for a in self.residuals])
-            # gradient = jacobian.T.dot(self.residuals)  # 1D
+            res = self.weighted_residuals
             gradient = jacobian.T.dot(res)  # 1D
             return gradient
 
@@ -1362,53 +1441,3 @@ class MultipleCurveResolution(ParameterEstimation):
             residual = 1/2 * np.dot(weighted_resid, weighted_resid)
             penalty = self.mult_penalty*(np.maximum(-molar_abs, 0)**2).sum()
             return residual + penalty
-
-
-if __name__ == '__main__':
-    import englezos_example as englezos
-
-    # Data
-    data = np.genfromtxt('../data/englezos_example.csv', delimiter=',',
-                         skip_header=1)
-    t_exp, c3_exp = data.T
-
-    init_conc = [60, 60, 0]
-    param_seed = [1e-5, 1e-5]
-#    param_seed = [0.4577e-5, 0.2797e-3]
-
-    reaction_matrix = np.array([-2, -1, 2])
-    species = ('$NO$', '$O_2$', '$NO_2$')
-
-    param_object = ParameterEstimation(
-        reaction_matrix, param_seed,
-        t_exp, c3_exp,
-        y_init=init_conc,
-        measured_ind=(-1,),
-        kinetic_model=englezos.bodenstein_linder,
-        df_dstates=englezos.jac_conc,
-        df_dtheta=englezos.jac_par,
-        names_species=species)
-
-    simulate = True
-
-    if simulate:
-        param_object.solve_model(init_conc, x_eval=t_exp, eval_sens=True)
-        param_object.plot_states()
-        fig_sens, axes_sens = param_object.plot_sens(fig_size=(5, 2))
-
-        sens_total = param_object.reorder_sens()
-        U, sing_vals, V = svd(sens_total)
-        cond_number = max(sing_vals) / min(sing_vals)
-
-        labels = list('ab')
-        for ax, lab in zip(axes_sens, labels):
-            ax.text(0.05, 0.9, lab, transform=ax.transAxes)
-
-        fig_sens.savefig('../img/sens_englezos.pdf', bbox_inches='tight')
-
-    else:
-        optim_options = {'max_iter': 150, 'full_output': True, 'tau': 1e-2}
-
-        params_optim, covar, info = param_object.optimize_fn(
-            optim_options=optim_options)
-        param_object.plot_data_model()

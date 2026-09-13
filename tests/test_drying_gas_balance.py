@@ -178,8 +178,8 @@ def test_solve_unit_single_node_initial_state_includes_condensed_temperature(
     )
     solid = SimpleNamespace(
         temp=302.0,  # [K]
-        x_distrib=np.array([1.0, 2.0]),  # [m]
-        distrib=np.array([1.0, 1.0]),  # [-]
+        x_distrib=np.array([50.0, 100.0]),  # [um]
+        distrib=np.array([1.0, 1.0]),  # [#/m**3/um]
         # Synthetic distribution moments [m**0, m, m**2, m**3, m**4].
         moments=np.array([1.0, 1.0, 2.0, 4.0, 0.0]),
         getDensity=lambda: 1200.0,  # [kg/m**3]
@@ -201,9 +201,25 @@ def test_solve_unit_single_node_initial_state_includes_condensed_temperature(
     )
 
     class CapturedInitialState(Exception):
-        pass
+        """Stop the solve after checking the assembled initial state."""
 
     def assert_initial_state_width(time, states, sw=None):
+        """Assert that the single-node drying state contains both temperatures.
+
+        Parameters
+        ----------
+        time : float
+            Initial solve time [s].
+        states : ndarray
+            Flattened initial drying state [-] and [K].
+        sw : list, optional
+            Assimulo event switches [-].
+
+        Raises
+        ------
+        CapturedInitialState
+            Always raised after checking the assembled state.
+        """
         expected_width = 3 + dryer.Liquid_1.num_species + 2  # state columns [-]
         assert states.size == dryer.num_nodes * expected_width
         node = states.reshape(dryer.num_nodes, expected_width)

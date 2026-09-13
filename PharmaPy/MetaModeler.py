@@ -31,8 +31,23 @@ class MetaModelingClass:
             self.method_arguments['material_balances'] += name_states
             self.method_arguments['energy_balances'] += name_states
 
-    def __write_method(self, open_object, method_name, arg_names,
-                       internals=None):
+    def __write_method(self, open_object, method_name, arg_names):
+        """Write one method body into a generated PharmaPy template.
+
+        Parameters
+        ----------
+        open_object : file-like object
+            Writable Python source stream for the generated unit-operation
+            template.
+        method_name : str
+            Name of the template method to emit.
+        arg_names : sequence of str
+            Ordered method-argument names to place in the emitted signature.
+
+        Returns
+        -------
+        None
+        """
 
         arguments = ', '.join(arg_names)
         if method_name == 'Phases':
@@ -94,9 +109,9 @@ class MetaModelingClass:
                 ' '*8 + 'energy = self.energy_balances(time, **dict_states)\n\n')
 
             if self.model_type == 'ODE':
-                concat_snippet = ' '*8 + 'balances = np.concatenate(material, energy)\n'
+                concat_snippet = ' '*8 + 'balances = np.concatenate((material, energy)).ravel()\n'
             else:
-                concat_snippet = ' '*8 + 'balances = np.hstack(material, energy)\n'
+                concat_snippet = ' '*8 + 'balances = np.hstack((material, energy)).ravel()\n'
 
             open_object.writelines(concat_snippet)
 
@@ -154,19 +169,21 @@ class MetaModelingClass:
         elif method_name == 'retrieve_results' and self.name_states is not None:
             if self.model_type == 'ODE':
                 assign_outputs = [
-                    ' '*8 + 'outputs_split = np.split(states, np.acum_len, axis=1)\n',
+                    ' '*8 + 'outputs_split = np.split(states, self.acum_len, axis=1)\n',
                     ' '*8 + 'model_outputs = dict(zip(self.name_states, outputs_split))\n',
                     ]
             elif self.model_type == 'DAE':
                 assign_outputs = [
-                    ' '*8 + 'outputs_split = np.split(states, np.acum_len, axis=1)\n',
+                    ' '*8 + 'outputs_split = np.split(states, self.acum_len, axis=1)\n',
                     ' '*8 + 'model_outputs = dict(zip(self.name_states, outputs_split))\n',
                     ]
             elif self.model_type == 'PDE':
                 assign_outputs = [
-                    ' '*8 + 'model_outputs = reorder_pde_outputs(states, self.num_nodes, self.len_states)']
+                    ' '*8 + 'model_outputs = reorder_pde_outputs(states, self.num_nodes, self.len_states, self.name_states)\n']
 
             open_object.writelines(assign_outputs)
+            open_object.write(' '*8 + 'self.outputs = model_outputs\n')
+            open_object.write(' '*8 + 'return model_outputs\n\n')
 
         elif method_name != 'Phases':
             open_object.write(' '*8 + 'return\n\n')
@@ -252,22 +269,3 @@ class MetaModelingClass:
             self.__write_method(op, method, args)
 
         op.close()
-
-
-if __name__ == '__main__':
-    name_file = 'DynamicExtraction.py'
-    name_class = 'DynamicExtractor'
-    states = ['mol_i', 'x_liq', 'y_liq', 'holdup_R', 'holdup_E',
-              'R_flow', 'E_flow', 'u_int', 'temp']
-
-    meta_object = MetaModelingClass(name_file, name_class, name_states=states,
-                                    model_type='DAE')
-    meta_object.CreatePharmaPyTemplate()
-
-    # name_file = 'test_pde.py'
-    # name_class = 'DistillationColumn'
-    # states = ['x_liq', 'liq_holdup', 'temp', 'vap_flows']
-
-    # meta_object = MetaModelingClass(name_file, name_class, name_states=states,
-    #                                 model_type='PDE', oper_mode='continuous')
-    # meta_object.CreatePharmaPyTemplate()

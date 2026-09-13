@@ -3,6 +3,7 @@ import warnings
 import numpy as np
 from PharmaPy._assimulo import IDA, Implicit_Problem
 from PharmaPy.Phases import classify_phases
+from PharmaPy.ThermoModule import validate_activity_model
 from PharmaPy.Streams import VaporStream
 from PharmaPy.Connections import get_inputs_new
 from PharmaPy.Commons import (unpack_discretized, retrieve_pde_result,
@@ -56,7 +57,7 @@ class _BaseDistillation:
             Equilibrium-stage count [-]. If None, shortcut design estimates it.
             If negative, its absolute value multiplies the minimum stage count.
         gamma_model : str, optional
-            Activity-coefficient model name.
+            Activity-coefficient model: 'ideal', 'UNIFAC', or 'UNIQUAC'.
         num_feed : int, optional
             Feed tray number counted from the top [-].
         reflux_to_minimum_ratio : float, optional
@@ -66,6 +67,11 @@ class _BaseDistillation:
         -------
         None
             The constructor stores the shared configuration on the instance.
+
+        Raises
+        ------
+        ValueError
+            If gamma_model is not ideal, UNIFAC, or UNIQUAC.
         """
 
         self.num_plates = num_plates  # [-]
@@ -79,6 +85,7 @@ class _BaseDistillation:
         self.frac_HK = perc_HK/100  # [-]
         self.frac_LK = perc_LK/100  # [-]
 
+        validate_activity_model(gamma_model)
         self.gamma_model = gamma_model
 
         self.num_feed = num_feed  # [-], plate number from bottom.
@@ -898,6 +905,12 @@ class DistillationColumn(_BaseDistillation):
         -------
         None
             The method stores ``self.result`` and outlet stream objects.
+
+        Notes
+        -----
+        ``x_dist`` and ``x_bot`` are mole fractions [-]; the outlet streams
+        use that basis and derive ``mole_conc`` [mol/L] and ``mass_conc``
+        [kg/m**3].
         """
 
         if not(isinstance(x, np.ndarray)):
@@ -914,10 +927,10 @@ class DistillationColumn(_BaseDistillation):
 
         path = self.Inlet.path_data
         self.OutletDistillate = LiquidStream(path, temp=dist_result['T'][0],
-                                             mole_conc=dist_result['x_dist'],
+                                             mole_frac=dist_result['x_dist'],
                                              mole_flow=dist_result['dist_flowrate'])
         self.OutletBottom = LiquidStream(path, temp=dist_result['T'][-1],
-                                         mole_conc=dist_result['x_bot'],
+                                         mole_frac=dist_result['x_bot'],
                                          mole_flow=dist_result['bot_flowrate'])
         self.Outlet = self.OutletBottom
 

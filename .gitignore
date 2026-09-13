@@ -12,6 +12,10 @@ dist/
 .pytest_cache/
 .ruff_cache/
 
+# Editor project settings
+.vscode/
+.idea/
+
 # Jupyter Notebook
 .ipynb_checkpoints
 

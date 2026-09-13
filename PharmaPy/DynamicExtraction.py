@@ -70,6 +70,21 @@ def complete_molefrac(mole_frac, mapping):
 
 
 class DynamicExtractor:
+    """Model a staged dynamic liquid-liquid extractor.
+
+    Notes
+    -----
+    The current formulation keeps interstage light- and heavy-phase outlet
+    flows fixed at the inlet values. With unequal component distribution
+    coefficients, that constant-flow assumption cannot satisfy every component
+    material balance, every component equilibrium relation, and both phase
+    normalization equations simultaneously. The implemented closure therefore
+    preserves all component balances and phase normalization by replacing the
+    last-indexed component's phase-equilibrium relation. Results may depend on
+    the order of ``name_species`` until the variable-outlet-flow MESH
+    formulation tracked in #195 replaces this approximation.
+    """
+
     def __init__(self, num_stages, k_fun=None, eff=1, gamma_model='UNIQUAC'):
         """Create a staged dynamic extractor.
 
@@ -144,6 +159,48 @@ class DynamicExtractor:
 
         return gamma_light / gamma_heavy  # K_i [-]
 
+    def _evaluate_distribution_coefficients(self, x_light, x_heavy, temp):
+        """Evaluate and broadcast distribution coefficients.
+
+        Parameters
+        ----------
+        x_light : ndarray
+            Stage light-phase liquid mole fractions [-].
+        x_heavy : ndarray
+            Stage heavy-phase liquid mole fractions [-].
+        temp : ndarray
+            Stage liquid temperatures [K].
+
+        Returns
+        -------
+        ndarray
+            Distribution coefficients broadcast to the stage/component layout
+            of ``x_light`` [-].
+
+        Raises
+        ------
+        ValueError
+            If ``k_fun`` returns coefficients that cannot broadcast to the
+            stage/component layout of ``x_light``.
+
+        Notes
+        -----
+        Component-wise callbacks returning ``(num_comp,)`` remain compatible by
+        broadcasting across stages. A stricter stage-wise callback contract is
+        tracked in #123.
+        """
+        k_i = np.asarray(self.k_fun(x_light, x_heavy, temp))  # K_i [-]
+        expected_shape = np.shape(x_light)
+
+        try:
+            return np.broadcast_to(k_i, expected_shape)  # K_i [-]
+        except ValueError as err:
+            raise ValueError(
+                "k_fun must return distribution coefficients broadcastable "
+                f"to the stage/component shape {expected_shape}; got "
+                f"shape {k_i.shape}."
+            ) from err
+
     def nomenclature(self):
         """Create dynamic extractor state metadata.
 
@@ -158,9 +215,14 @@ class DynamicExtractor:
         -----
         The current dynamic-extractor state vector contains light and heavy
         liquid mole fractions [-], internal energy [J], and temperature [K].
+        The mole-fraction vectors retain all components for compatibility. The
+        final light- and heavy-phase entries are closed by phase
+        normalization; in this constant-flow approximation the final
+        heavy-phase entry is no longer constrained by its own component
+        equilibrium relation, so results may depend on component ordering.
         It keeps the existing dictionary-based metadata structure used by the
         result and plotting helpers; replacing that structure is outside this
-        #56 fix.
+        focused closure change.
         """
         num_comp = self.num_comp  # [-]
         name_species = self.name_species
@@ -389,15 +451,27 @@ class DynamicExtractor:
         Returns
         -------
         list of ndarray
-            Mole-fraction rates [1/s] and equilibrium residuals [-].
+            Mole-fraction residuals and equilibrium residuals. The first
+            ``num_comp - 1`` light-phase entries are mole-fraction rates
+            [1/s], the final light-phase entry is ``sum(x_i) - 1`` [-],
+            the first ``num_comp - 1`` heavy-phase entries are equilibrium
+            residuals [-], and the final heavy-phase entry is
+            ``sum(y_i) - 1`` [-].
+
+        Warnings
+        --------
+        Because light and heavy outlet flows are fixed at their inlet values,
+        the final-indexed component's equilibrium relation is omitted. This
+        closure keeps both phases normalized, but it is not permutation
+        invariant with respect to component order.
         """
 
         x_augm, y_augm, temp_augm, light_flows, heavy_flows = augm_arrays
         # Augmented mole fractions [-], temperatures [K], and flows [mol/s].
 
         # ---------- Equilibrium
-        # Stage-wise ``K_i`` callback support is tracked in #123.
-        k_ij = self.k_fun(x_i, y_i, temp)  # K_i [-]
+        k_ij = self._evaluate_distribution_coefficients(
+            x_i, y_i, temp)  # K_i [-]
         m_ij = k_ij / self.eff  # [-]
 
         # ---------- Differential block
@@ -418,15 +492,27 @@ class DynamicExtractor:
 
         # ---------- Modify outputs for stage two on
         if self.num_stages > 1:
-            deriv_term = holdup_heavy[0] * m_ij * (1 - self.eff) / div[1:] * \
-                dxij_dt[:-1]  # mole-fraction rate [1/s]
+            carry_coeff = holdup_heavy[1:, np.newaxis] * m_ij[1:] * \
+                (1 - self.eff) / div[1:]  # [-]
 
-            dxij_dt[1:] += deriv_term
+            # The stage closure couples dx_j/dt to dx_(j-1)/dt, so the staged
+            # system is lower bidiagonal and resolves by forward substitution.
+            for stage in range(1, self.num_stages):
+                dxij_dt[stage] += carry_coeff[stage - 1] * dxij_dt[stage - 1]
 
         if di_sdot is not None:
             dxij_dt = dxij_dt - di_sdot['x_i']  # [1/s]
 
-        out = [dxij_dt, equilibrium_alg]  # [1/s, -]
+        # The constant-flow approximation cannot satisfy all component
+        # equilibrium equations and both phase closures simultaneously. The
+        # final-indexed species is the dependent component until the
+        # variable-flow MESH formulation in #195 replaces this closure.
+        material_residuals = dxij_dt.copy()  # first num_comp - 1: [1/s]
+        equilibrium_residuals = equilibrium_alg.copy()  # [-]
+        material_residuals[:, -1] = x_i.sum(axis=1) - 1  # [-]
+        equilibrium_residuals[:, -1] = y_i.sum(axis=1) - 1  # [-]
+
+        out = [material_residuals, equilibrium_residuals]  # [mixed, -]
 
         return out
 
@@ -499,6 +585,13 @@ class DynamicExtractor:
         ``gamma_model``. The full staged solve still depends on broader
         stage-wise ``K_i`` support tracked in #123; the handoff itself is
         covered here without replacing the real thermodynamic callbacks.
+
+        The initial correction uses the same constant-flow approximation as
+        ``material_balances``: the final light- and heavy-phase components are
+        phase-normalization equations, and the final-indexed heavy component's
+        own equilibrium relation is omitted. Initial compositions can therefore
+        depend on component ordering until #195 introduces variable outlet
+        flows.
         """
         # ---------- Equilibrium calculations
         extr = BatchExtractor(k_fun=self.k_fun,
@@ -581,16 +674,20 @@ class DynamicExtractor:
 
             x_eqns = (HR * xi + HE * yi - mol_i) / HR  # [-]
 
-            k_ij = self.k_fun(xi, yi, temp)  # K_i [-]
-
-            # Stage-wise ``K_i`` callback support is tracked in #123.
+            k_ij = self._evaluate_distribution_coefficients(
+                xi, yi, temp)  # K_i [-]
             m_ij = k_ij / self.eff  # [-]
 
             y_eqns = np.zeros_like(yi)  # equilibrium residuals [-]
-            y_eqns[0] = m_ij * xi[0] - yi[0]
+            y_eqns[0] = m_ij[0] * xi[0] - yi[0]
 
             if self.num_stages > 1:
-                y_eqns[1:] = m_ij * (xi[1:] - xi[:-1] * (1 - self.eff)) - yi[1:]
+                y_eqns[1:] = m_ij[1:] * (
+                    xi[1:] - xi[:-1] * (1 - self.eff)
+                ) - yi[1:]
+
+            x_eqns[:, -1] = xi.sum(axis=1) - 1  # [-]
+            y_eqns[:, -1] = yi.sum(axis=1) - 1  # [-]
 
             eqns = np.column_stack((x_eqns, y_eqns)).ravel()  # [-]
 
