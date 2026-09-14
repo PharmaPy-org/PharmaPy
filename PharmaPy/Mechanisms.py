@@ -3,7 +3,7 @@ import copy
 from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   PhaseRef,PhaseStateCollection,PhaseStateVariable,
                                   StateKey,StateCollection,StreamConnection,IntraPhaseProcess,
-                                  TransferResult
+                                  TransferResult,StateEvent
 )
 from PharmaPy.Phases import BasePhase
 from time import perf_counter
@@ -84,13 +84,30 @@ class Mechanism:
         overwrite=False,
         phase_ref=None
     ):
+        keys = []
+
         for state in self.solver_states:
-            if phase_ref is None and state.phaseref is None:
-                raise ValueError(f"{type(self).__name__} defines solver states but has no owning phase reference")
+
+            # A caller-supplied owner wins, but a state that already names
+            # its own phase keeps it. Stamping phase_ref unconditionally
+            # overwrote that with None for mechanisms attached to an
+            # intraphase process, which registered the state under a key no
+            # lookup could ever match.
+            owner = phase_ref if phase_ref is not None else state.phaseref
+
+            if owner is None:
+                raise ValueError(
+                    f"{type(self).__name__} defines solver states but has no "
+                    "owning phase reference. Give the StateVariable a "
+                    "phaseref, or attach the mechanism to a phase."
+                )
+
             copiedState = copy.deepcopy(state)
-            copiedState.phaseref = phase_ref
+            copiedState.phaseref = owner
             collection.add(copiedState, overwrite)
-            self._solver_state_keys = tuple(StateKey(state.name, phase_ref) for state in self.solver_states)
+            keys.append(StateKey(state.name, owner))
+
+        self._solver_state_keys = tuple(keys)
 
     def compile_solver_state_keys(self):
         self._solver_state_keys = tuple(
@@ -120,16 +137,16 @@ class Mechanism:
         time
     ):
         return 0.0
-    def get_algebraic_residuals(
-        self,
-        **kwargs,
-    ):
+    def get_solver_state_residuals(self, **kwargs):
         """
-        Return algebraic residuals keyed by StateKey.
+        Residuals for any solver state this mechanism declared as algebraic.
 
-        Differential-only mechanisms simply return {}.
+        Mirrors get_solver_state_rates, but returns {StateKey: residual}: the
+        solver drives each residual to zero rather than integrating it. A
+        mechanism with no algebraic states returns {}, and the vessel then
+        skips the algebraic pass entirely.
         """
-        return TransferResult({},{},0)
+        return {}
     def get_overrides(self,name):
         return None
     def get_inlet_contributions(
@@ -418,7 +435,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         self.kv = kv
         self.output_states=[StateVariable(name="supersat",dim=len(self.target_ind),units="-",state_type="post", compute_value=self.compute_supersat_output),
                     StateVariable(name="solubility",dim=len(self.target_ind),units="kg/m3",state_type="post",compute_value=self.compute_solubility_output),
-                    StateVariable(name="mu_n",dim=4,index=[0, 1, 2, 3],units="various",state_type="post", compute_value=self.compute_moments_output)]
+                    StateVariable(name="mu_n",dim=4,index=[0, 1, 2, 3],units="m**n",state_type="post", compute_value=self.compute_moments_output)]
         if fraction is None:
             fraction = np.zeros(self.owning_phase.num_species)
             fraction[self.target_ind] = np.full(len(self.target_components),1/len(self.target_components))
@@ -461,10 +478,9 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     # Helpers
     # ------------------------------------------------------------------
 
-    # Liquid volume the distribution is referenced to. update_state keeps it
-    # current during a solve; the vessel seeds it when it wires the mechanism
-    # up so the solid mass is defined before the first evaluation.
-    reference_vol = None
+    # x_grid is in microns. Moments are reported in m**n, one factor of this
+    # per moment order, matching SolidPhase.getMoments.
+    MOMENT_UNIT_FACTOR = 1e-6
 
     def compute_moments(
         self,
@@ -472,7 +488,17 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         x_grid,
     ):
         """
-        Compute moments from a number density distribution.
+        Compute moments from a number density distribution, in m**n.
+
+        ``x_grid`` is in microns, so the raw integral is in micron**n. The
+        conversion to metres is what SolidPhase.getMoments applies, and the
+        original crystallizer relies on it: its kinetics and its
+        ``vol_solid = mu_n[3] * kv`` both expect m**n. Returning the raw
+        micron-based integral instead silently rescaled mu_1 by 1e6, mu_2 by
+        1e12 and mu_3 by 1e18.
+
+        Use compute_second_moment / compute_third_moment where a micron-based
+        integral is wanted instead.
         """
 
         moments = np.zeros(4)
@@ -483,7 +509,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
                 x_grid,
             )
 
-        return moments
+        return moments * self.MOMENT_UNIT_FACTOR ** np.arange(4)
 
     
     def compute_supersaturation(
@@ -532,8 +558,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         rates[mask] = -crystal_mass_rate/ len(mask)
 
         return rates
-    def get_solid_mass(self):
-        raise NotImplementedError
+
     # ------------------------------------------------------------------
     # API for child classes
     # ------------------------------------------------------------------
@@ -609,16 +634,39 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         """
 
         return 0.0
-    def update_state(self, completed_state, unit=None):
 
-        super().update_state(completed_state, unit=unit)
+    def get_events(self, unit):
+        """
+        Crystallization changes regime when supersaturation changes sign:
+        growth and primary nucleation above zero, dissolution below. The
+        kinetics branch there, so the right-hand side is only piecewise
+        smooth, and the integrator has to be told where the corner is instead
+        of hunting for it with short steps.
+        """
 
-        if unit is None:
-            return
+        if self._mechanism_kinetics is None:
+            return []
 
-        #we need the liquid volume since moments/csd are  per (m3_liquid)
-        self.reference_vol = unit.Phases.get_phase_from_ref(self.liquid_phase_ref).vol
-    
+        liquid_ref = getattr(self, "liquid_phase_ref", None)
+
+        if liquid_ref is None:
+            return []
+
+        def supersaturation_sign(time, completed_state, unit):
+            liquid = unit.Phases.get_phase_from_ref(liquid_ref)
+            supersat = np.atleast_1d(self.compute_supersaturation(liquid)[1])
+            return float(supersat[0])
+
+        return [
+            StateEvent(
+                name=f"supersaturation_sign[{type(self).__name__}]",
+                function=supersaturation_sign,
+                direction=0,
+                terminal=False,
+                source=self,
+            )
+        ]
+
     def compute_supersat_output(
         self,
         state_var,
@@ -752,24 +800,13 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         Compute third moment from a number density distribution.
         """
         return np.trapezoid(distrib * self.x_grid_cu, self.x_grid)
-    # x_grid is in microns, so the third moment is in micron**3 per m**3 of
-    # liquid. get_solid_mass and the population balance's mass_transfer both
-    # carry this factor; get_mass and set_mass did not, which made the solid
-    # inventory 1e18 times too large the moment it became nonzero.
+    # compute_third_moment integrates over x_grid in microns, so its result is
+    # in micron**3 and this converts it to m**3. The solid inventory is then
+    # density * kv * mu_3, with no volume factor: the original crystallizer
+    # scales nucleation by the slurry volume, which makes the distribution an
+    # absolute count rather than a per-volume density
+    # (Crystallizers.py: "mu_3 is total, not by volume").
     VOLUME_UNIT_FACTOR = 1e-18
-
-    def _require_reference_vol(self):
-
-        if self.reference_vol is None:
-            raise AttributeError(
-                f"{type(self).__name__} has no reference volume yet, so the "
-                "solid mass is undefined. The vessel sets it when the "
-                "mechanism is attached (via CrystKinetics or "
-                "phase_connections); set liquid_phase_ref and reference_vol "
-                "directly if you are wiring the mechanism by hand."
-            )
-
-        return self.reference_vol
 
     def get_mass(self):
         m3 = self.compute_third_moment(getattr(self,self.distribution_state_name))
@@ -777,7 +814,6 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             self.getDensity()
             * self.kv
             * m3
-            * self._require_reference_vol()
             * self.VOLUME_UNIT_FACTOR
         )
     def set_mass(self, mass):
@@ -788,7 +824,6 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         target_m3 = mass / (
             self.getDensity()
             * self.kv
-            * self._require_reference_vol()
             * self.VOLUME_UNIT_FACTOR
         )
 
@@ -829,6 +864,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         moms = self.compute_moments(csd,self.x_grid)
         self._timers['pop_balance_compute_moments'] = self._timers.get('pop_balance_compute_moments',0)+perf_counter()-t0
 
+        # mu_2 is in m**2, matching the original's getMoments basis. The
+        # size-dependent branch below needs the micron-based integral instead.
         mu2 = moms[2] #total surface area
         t0 = perf_counter()
         conc, supersat, solubility = self.compute_supersaturation(liquid)
@@ -844,7 +881,11 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             )
         )
         self._timers['pop_balance_compute_kinetics'] = self._timers.get('pop_balance_compute_kinetics',0)+perf_counter()-t0
-        nucl *= self.scale*liquid.vol
+        # The original scales nucleation by the slurry volume, not the liquid
+        # volume: vol_solid = mu_3 * kv with mu_3 in m**3
+        # (Crystallizers.py::material_balances).
+        vol_slurry = liquid.vol + moms[3] * self.kv
+        nucl *= self.scale * vol_slurry
         impurity_factor = self.mechanism_kinetics.alpha_fn(conc) #TODO check if con is the right units
         growth *= impurity_factor
         t0 = perf_counter()
@@ -891,7 +932,9 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             self._timers['pop_balance_compute_growth_dissol_term'] = self._timers.get('pop_balance_compute_growth_dissol_term',0)+perf_counter()-t0
             t0 = perf_counter()
             growth_int = np.trapezoid(growth_dep * csd * self.x_grid_sq,self.x_grid)
-            dissol_int = dissol *mu2
+            # Micron-based, to match growth_int and the original's
+            # trapezoid(dissol_dependent * csd * r_m**2, r_m).
+            dissol_int = dissol * self.compute_second_moment(csd)
             self._timers['pop_balance_compute_growth_dissol_int'] = self._timers.get('pop_balance_compute_growth_dissol_int',0)+perf_counter()-t0
             t0 = perf_counter()
             dens = self.density
@@ -927,29 +970,6 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer)
         self._timers['pop_balance_format'] = self._timers.get('pop_balance_format',0)+perf_counter()-t0
         return result
-    def get_solid_mass(self):
-
-        csd = getattr(
-            self,
-            self.distribution_state_name,
-            None
-        )
-
-        if csd is None:
-            return 0.0
-
-        mu3 = np.trapezoid(
-            csd * self.x_grid**3,
-            self.x_grid
-        )
-
-        return (
-            self.density
-            * self.kv
-            * mu3
-            * 1e-18
-        )
-   
 
 class MomentsPopulationBalance(PopulationBalanceMechanism):
     

@@ -4,8 +4,12 @@ from PharmaPy.DataClasses import *
 from PharmaPy.ProcessControl_Refactor import Controller, DefaultContinuousVesselVolume
 
 class _BaseReactor(MultiPhaseVessel):
-    def __init__(self, integrator=None, temp_ref=273.15, isothermal=False, reset_states=False, controller=Controller(), h_conv=0, state_events={}, adiabatic=False, jac_type="AD", Phases=None, basis='mass_j', ht_mode="jacket", diam=0, area_base=0):
-        super().__init__(integrator, temp_ref, isothermal, reset_states, controller, h_conv, state_events, adiabatic, jac_type, Phases, basis, ht_mode, diam, area_base)
+
+    # Forwarded wholesale rather than re-declared: repeating the base
+    # signature here and passing it on positionally meant every parameter
+    # added to MultiPhaseVessel silently failed to reach a reactor.
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         if self.isothermal:
                     assert self.adiabatic != 1, "Cannot be isothermal and adiabatic with a reaction present"
     @property
@@ -47,7 +51,7 @@ class _BaseReactor(MultiPhaseVessel):
         self.nomenclature(overwrite=True)
 class BatchReactor(_BaseReactor):
 
-    oper_mode = "batch"
+    oper_mode = "Batch"
 
     def __init__(self, **kwargs):
 
@@ -55,7 +59,7 @@ class BatchReactor(_BaseReactor):
 
 class SemiBatchReactor(_BaseReactor):
 
-    oper_mode = "semibatch"
+    oper_mode = "Semibatch"
 
     def __init__(self, **kwargs):
 
@@ -63,10 +67,14 @@ class SemiBatchReactor(_BaseReactor):
 
 class ContinuousReactor(_BaseReactor):
 
-    oper_mode = "continuous"
+    oper_mode = "Continuous"
 
-    def __init__(self, integrator=None, temp_ref=273.15, isothermal=False, reset_states=False, controller=DefaultContinuousVesselVolume(), h_conv=0, state_events={}, adiabatic=False, jac_type="AD", Phases=None, basis='mass_j', ht_mode="jacket", diam=0, area_base=0):
-        super().__init__(integrator, temp_ref, isothermal, reset_states, controller, h_conv, state_events, adiabatic, jac_type, Phases, basis, ht_mode, diam, area_base)
+    def __init__(self, *args, controller=None, **kwargs):
+        # Constructed per instance; a default argument would be shared by
+        # every ContinuousReactor in the session.
+        if controller is None:
+            controller = DefaultContinuousVesselVolume()
+        super().__init__(*args, controller=controller, **kwargs)
 
     def configure_default_connections(self):
 

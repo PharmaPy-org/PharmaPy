@@ -258,10 +258,7 @@ class DefaultContinuousVesselVolume(Controller):
         if resolved_inlets is None:
             return
 
-        inlet_flow = sum(
-            transfer.stream_phase.vol_flow
-            for transfer in resolved_inlets.streams[0].transfers
-        )
+        inlet_flow = self.total_inlet_flow(unit, resolved_inlets)
 
         volume_error = unit.Phases.vol - self.target_volume
 
@@ -277,6 +274,77 @@ class DefaultContinuousVesselVolume(Controller):
             outlet_flow,
             self.floor_width * max(inlet_flow, eps),
         )
+
+    @staticmethod
+    def total_inlet_flow(unit, resolved_inlets=None):
+        """
+        Volumetric feed into the vessel, summed over every inlet.
+
+        Summed across all connections rather than reading the first one: a
+        vessel may have several feeds, and a batch vessel has none at all, in
+        which case indexing the first would raise.
+        """
+
+        if resolved_inlets is None:
+            # Evaluated outside the resolve cycle (an event), so fall back to
+            # the connections' own streams.
+            return sum(
+                phase.vol_flow
+                for connection in unit.inlet_connections
+                for phase in connection.stream
+            )
+
+        return sum(
+            transfer.stream_phase.vol_flow
+            for connection in resolved_inlets
+            for transfer in connection
+        )
+
+    def requested_outlet_flow(self, unit, resolved_inlets=None):
+        """
+        The outlet the loop asks for before the no-backflow floor.
+
+        Shared by actuate and the switching event so both describe the same
+        surface.
+        """
+
+        inlet_flow = self.total_inlet_flow(unit, resolved_inlets)
+
+        target = self.target_volume
+
+        if target is None:
+            target = unit.Phases.vol
+
+        return inlet_flow + self.get_gain(inlet_flow) * (unit.Phases.vol - target)
+
+    def get_events(self, unit):
+        """
+        The outlet switches between flow and no flow when the requested flow
+        crosses zero, which is where soft_floor stops being the identity.
+        Locating that crossing by root-finding is cheaper than discovering it
+        through rejected steps.
+
+        Skipped when there is nothing to control. On a vessel with no outlet
+        the requested flow is identically zero, and a root function that is
+        always zero is degenerate - Sundials warns about it and gains
+        nothing.
+        """
+
+        if not unit.outlet_connections:
+            return []
+
+        def outlet_flow_sign(time, completed_state, unit):
+            return float(self.requested_outlet_flow(unit))
+
+        return [
+            StateEvent(
+                name="outlet_flow_sign",
+                function=outlet_flow_sign,
+                direction=0,
+                terminal=False,
+                source=self,
+            )
+        ]
 
 class ContinuousVesselController(
     TemperatureProfileMixin,
@@ -327,24 +395,41 @@ class ContinuousVesselController(
 
 
 class TankLevelController(Controller):
+    """
+    Hold a level by switching the outlet fully on or fully off.
 
-    def update_operating_conditions(
-            self,
-            time,
-            completed_state,
-            unit,
-        ):
+    A worked example of the minimal controller: override ``actuate`` and set
+    entries in ``self.operating_conditions``. Note the hard switch at the
+    target volume is a discontinuity in the right-hand side, so pair it with
+    the matching event (see DefaultContinuousVesselVolume.get_events) or
+    expect the integrator to hunt for it.
+    """
 
-        vessel_vol = unit.Phases.vol
+    def __init__(self, target_volume=2.0):
+        super().__init__()
+        self.target_volume = target_volume
+
+    def actuate(
+        self,
+        time,
+        completed_state,
+        unit,
+        resolved_inlets=None,
+        resolved_outlets=None,
+    ):
+
+        if resolved_inlets is None:
+            return
 
         inlet_flow = sum(
-            connection.stream.vol_flow
-            for connection in unit.inlet_connections
+            transfer.stream_phase.vol_flow
+            for connection in resolved_inlets
+            for transfer in connection
         )
 
         outlet_flow = (
             0.0
-            if vessel_vol < 2
+            if unit.Phases.vol < self.target_volume
             else inlet_flow
         )
 
@@ -352,33 +437,55 @@ class TankLevelController(Controller):
             OperatingKey(
                 "vol_flow",
                 connection=0,
+                port="outlet",
             )
         ] = outlet_flow
 
+    def get_events(self, unit):
+
+        def level_crossing(time, completed_state, unit):
+            return float(unit.Phases.vol) - self.target_volume
+
+        return [
+            StateEvent(
+                name="tank_level",
+                function=level_crossing,
+                direction=0,
+                terminal=False,
+                source=self,
+            )
+        ]
+
+
 class ComplexController(Controller):
+    """
+    Template for a controller that manipulates both ends of a vessel.
 
-    def update_operating_conditions(
-            self,
-            time,
-            completed_state,
-            unit,
-        ):
+    There is only ever one controller per vessel, so anything driving several
+    variables does all of it here. The inlet is set on the first pass, when
+    ``resolved_inlets`` is still None, and the outlet on the second, once the
+    actual inlet is known; ``MultiPhaseVessel.get_operating_conditions``
+    merges the two passes.
+    """
 
-        self.update_inlet_conditions(
-            time,
-            completed_state,
-            unit,
-        )
+    def actuate(
+        self,
+        time,
+        completed_state,
+        unit,
+        resolved_inlets=None,
+        resolved_outlets=None,
+    ):
 
-        self.update_outlet_conditions(
-            time,
-            completed_state,
-            unit,
-        )
+        if resolved_inlets is None:
+            self.actuate_inlets(time, completed_state, unit)
+        else:
+            self.actuate_outlets(
+                time, completed_state, unit, resolved_inlets,
+            )
 
-    def update_inlet_conditions(self,time,completed_state,unit):
-        ...
+    def actuate_inlets(self, time, completed_state, unit):
+        """Set OperatingKey(..., port='inlet') entries here."""
 
-    def update_outlet_conditions(self,time,completed_state,unit):
-        ...
-        
+    def actuate_outlets(self, time, completed_state, unit, resolved_inlets):
+        """Set OperatingKey(..., port='outlet') entries here."""

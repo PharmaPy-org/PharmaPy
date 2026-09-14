@@ -1,8 +1,45 @@
 import numpy as np
 from abc import ABC, abstractmethod
-from PharmaPy._assimulo import CVode, Explicit_Problem
-from PharmaPy.Commons import eval_state_events
+from PharmaPy._assimulo import (CVode, Explicit_Problem, IDA,
+                                Implicit_Problem)
+from PharmaPy.Commons import TerminateSimulation
 from PharmaPy.DataClasses import *
+
+
+def attach_assimulo_events(problem, unit, implicit=False):
+    """
+    Give an Assimulo problem the vessel's switching surfaces.
+
+    Assimulo locates each sign change by root-finding, stops there and
+    restarts, which is what lets the integrator take long steps between
+    regime changes instead of shortening them to stumble across one.
+
+    The explicit and implicit problem classes disagree on the signature:
+    Explicit_Problem asks for ``(t, y, sw)`` while Implicit_Problem asks for
+    ``(t, y, yd, sw)``.
+    """
+
+    if implicit:
+        def state_events(time, states, derivatives, sw):
+            return unit.evaluate_events(time, states)
+    else:
+        def state_events(time, states, sw):
+            return unit.evaluate_events(time, states)
+
+    def handle_event(solver, event_info):
+        # event_info is (state_event_flags, time_event_flag)
+        flags = event_info[0]
+
+        triggered = [
+            index for index, flag in enumerate(flags) if flag
+        ]
+
+        if unit.handle_event(solver.t, triggered):
+            raise TerminateSimulation
+
+    problem.state_events = state_events
+    problem.handle_event = handle_event
+
 
 class IntegratorBackend(ABC):
 
@@ -11,6 +48,37 @@ class IntegratorBackend(ABC):
 
         # Neutral linear-solver request, set by the unit operation.
         self.linear_solver = None
+
+    # Backends that cannot integrate a differential-algebraic system set
+    # this False, and refuse at compile time rather than silently treating a
+    # residual row as a derivative.
+    supports_algebraic = False
+
+    def check_algebraic_support(self, unit):
+        """
+        Every backend accepts a residual-carrying state vector; only some can
+        solve one.
+
+        A unit with no algebraic states costs nothing here, which is the
+        common case. A unit that has them and lands on an ODE-only backend is
+        refused outright: CVode would integrate the residual rows as if they
+        were derivatives and return numbers that look plausible and are
+        wrong.
+        """
+
+        if not unit.has_algebraic_balance or self.supports_algebraic:
+            return
+
+        keys = [
+            str(key)
+            for key in unit.solver_state_collection.algebraic_keys
+        ]
+
+        raise NotImplementedError(
+            f"{type(self).__name__} solves ODEs only, but this unit declares "
+            f"algebraic state(s) {keys}. Use AssimuloDAEBackend, or "
+            "DiffeqpyBackend, which handles them through a mass matrix."
+        )
 
     def set_linear_solver(self, kind):
         """
@@ -119,20 +187,9 @@ class AssimuloBackend(IntegratorBackend):
         states_init = unit.create_solver_init_states()
         unit.save_initial_solver_state(states_init,unit.elapsed_time)
         
+        self.check_algebraic_support(unit)
+
         self.set_ode_problem(unit,states_init)
-
-        if unit.state_event_list:
-
-            def new_handle(solver, info):
-                return handle_events(
-                    solver,
-                    info,
-                    unit.state_event_list,
-                    any_event=any_event
-                )
-
-            self._problem.state_events = unit._eval_state_events
-            self._problem.handle_event = new_handle
 
         solver = CVode(self._problem)
 
@@ -251,47 +308,30 @@ class AssimuloBackend(IntegratorBackend):
             states_init,
     ):
 
-        if unit.state_event_list:
+        def model(time, states, sw=None):
+            rhs = unit.unit_model(time=time, states=states)
 
-            sw0 = [True] * len(unit.state_event_list)
-
-            def model(time, states, sw=None):
-                return unit.unit_model(
-                    time=time,
-                    states=states,
-                    sw=sw
+            if len(rhs) != len(states):
+                raise RuntimeError(
+                    f"Model returned {len(rhs)} values for {len(states)} "
+                    "states."
                 )
 
+            return rhs
+
+        events = unit.compiled_events
+
+        if events:
             problem = Explicit_Problem(
                 model,
                 states_init,
                 t0=unit.elapsed_time,
-                sw0=sw0
+                sw0=[True] * len(events),
             )
 
-            def new_handle(solver, info):
-                return handle_events(
-                    solver,
-                    info,
-                    unit.state_event_list,
-                    any_event=True
-                )
-
-            problem.state_events = unit._eval_state_events
-            problem.handle_event = new_handle
+            attach_assimulo_events(problem, unit)
 
         else:
-
-            def model(time, states):
-                rhs = unit.unit_model(time=time, states=states)
-
-                if len(rhs) != len(states):
-                    print("RHS mismatch!")
-                    print(len(states), len(rhs))
-                    raise RuntimeError
-
-                return rhs
-
             problem = Explicit_Problem(
                 model,
                 states_init,
@@ -299,15 +339,6 @@ class AssimuloBackend(IntegratorBackend):
             )
 
         self._problem = problem
-
-    def _eval_state_events(self, time, states, sw):
-        # TODO reactor version changes discretized_model to True if PFR (cobc in our case)
-        events = eval_state_events(
-            time, states, sw, self.len_states,
-            self._solver_states, self.state_event_list, sdot=self.derivatives,
-            discretized_model=False)
-
-        return events
 
     def unit_jacobian(self, t, y):
         return self.jac_states_fun(t, y)
@@ -356,6 +387,229 @@ class AssimuloBackend(IntegratorBackend):
 
         return rhs_sens
     
+
+class AssimuloDAEBackend(IntegratorBackend):
+    """
+    Assimulo IDA backend for differential-algebraic units.
+
+    CVode integrates explicit ODEs only, so a unit that declares algebraic
+    states needs the implicit solver. The vessel's contract is unchanged:
+    ``unit_model`` returns one vector holding derivatives in the
+    differential slots and residuals in the algebraic ones. This backend
+    turns that into IDA's residual form
+
+        res = yd - f(y)   on differential rows
+        res =      f(y)   on algebraic rows
+
+    so no mechanism has to know which solver it ended up under.
+    """
+
+    supports_algebraic = True
+
+    LINEAR_SOLVERS = {
+        "krylov": "SPGMR",
+        "dense": "DENSE",
+        "sparse": "SPARSE",
+    }
+
+    def __init__(self, options={'maxh': 1}):
+
+        super().__init__()
+
+        self._problem = None
+        self._solver = None
+        self.options = options
+
+        self.eval_sens = False
+        self.jac_v_prod = False
+
+    def set_linear_solver(self, kind):
+
+        super().set_linear_solver(kind)
+
+        name = self.LINEAR_SOLVERS.get(kind)
+
+        if name is not None and self._solver is not None:
+            self._solver.linear_solver = name
+
+    def make_residual(self, unit):
+        """
+        Wrap unit_model as an IDA residual.
+
+        ``differential`` is precomputed because this runs on every residual
+        evaluation; ``np.where`` on a cached mask is cheaper than branching
+        per state.
+        """
+
+        algebraic = unit.solver_state_collection.algebraic_mask
+        differential = ~algebraic
+
+        def residual(time, states, derivatives, sw=None):
+            values = np.asarray(
+                unit.unit_model(time=time, states=states),
+                dtype=float,
+            )
+
+            return np.where(
+                differential,
+                derivatives - values,
+                values,
+            )
+
+        return residual
+
+    def initial_derivatives(self, unit, states_init):
+        """
+        Consistent yd0: f(y0) on differential rows, zero on algebraic ones.
+
+        IDA only needs the differential entries to be right; the algebraic
+        entries of yd never enter the residual.
+        """
+
+        algebraic = unit.solver_state_collection.algebraic_mask
+
+        values = np.asarray(
+            unit.unit_model(time=unit.elapsed_time, states=states_init),
+            dtype=float,
+        )
+
+        return np.where(algebraic, 0.0, values)
+
+    def compile_integrator(
+            self,
+            unit,
+            eval_sens=False,
+            jac_v_prod=False,
+            options=None,
+            verbose=True,
+            any_event=True,
+    ):
+
+        if eval_sens:
+            raise NotImplementedError(
+                "AssimuloDAEBackend does not compute sensitivities."
+            )
+
+        self.eval_sens = eval_sens
+        self.jac_v_prod = jac_v_prod
+
+        unit.reset()
+
+        states_init = unit.create_solver_init_states()
+        unit.save_initial_solver_state(states_init, unit.elapsed_time)
+
+        derivatives_init = self.initial_derivatives(unit, states_init)
+
+        events = unit.compiled_events
+
+        problem = Implicit_Problem(
+            self.make_residual(unit),
+            states_init,
+            derivatives_init,
+            t0=unit.elapsed_time,
+            sw0=[True] * len(events) if events else None,
+        )
+
+        # 1 marks a differential state, 0 an algebraic one. suppress_alg
+        # keeps the algebraic residuals out of the error test, which is the
+        # usual choice for a semi-explicit index-1 system.
+        problem.algvar = np.where(
+            unit.solver_state_collection.algebraic_mask, 0.0, 1.0
+        )
+
+        if events:
+            attach_assimulo_events(problem, unit, implicit=True)
+
+        self._problem = problem
+
+        solver = IDA(problem)
+        solver.suppress_alg = True
+
+        for source in (options, self.options):
+            if not source:
+                continue
+            for name, value in source.items():
+                setattr(solver, name, value)
+                if name == "time_limit":
+                    solver.report_continuously = True
+
+        if not verbose:
+            solver.verbosity = 50
+
+        self._solver = solver
+        unit.configure_solver()
+
+        self._compiled = True
+
+        return states_init
+
+    def solve(
+            self,
+            unit,
+            runtime=None,
+            time_grid=None,
+            eval_sens=False,
+            jac_v_prod=False,
+            verbose=True,
+            options=None,
+            any_event=True,
+    ):
+
+        if (
+            not self._compiled
+            or eval_sens != self.eval_sens
+            or jac_v_prod != self.jac_v_prod
+        ):
+            self.compile_integrator(
+                unit, eval_sens, jac_v_prod, options, verbose, any_event,
+            )
+
+        time, states = self.fast_solve(
+            unit,
+            runtime=runtime,
+            time_grid=time_grid,
+            verbose=verbose,
+        )
+
+        unit.retrieve_results(time, states)
+
+        return time, states
+
+    def fast_solve(
+            self,
+            unit,
+            runtime=None,
+            time_grid=None,
+            verbose=True,
+    ):
+
+        if not self._compiled:
+            raise RuntimeError("Integrator has not been compiled.")
+
+        states_init = unit.create_solver_init_states()
+
+        if runtime is not None:
+            final_time = unit.elapsed_time + runtime
+        elif time_grid is not None:
+            final_time = time_grid[-1]
+        else:
+            raise ValueError(
+                "Either runtime or time_grid must be supplied."
+            )
+
+        self._solver.t = unit.elapsed_time
+        self._solver.y = states_init
+        self._solver.yd = self.initial_derivatives(unit, states_init)
+
+        self._solver.make_consistent('IDA_YA_YDP_INIT')
+
+        # IDA returns derivatives as well; the vessel only consumes (t, y).
+        time, states, _ = self._solver.simulate(
+            final_time,
+            ncp_list=time_grid,
+        )
+
+        return time, states
 
 class DiffeqpyBackend(IntegratorBackend):
     """
@@ -420,6 +674,12 @@ class DiffeqpyBackend(IntegratorBackend):
         "tsit5": "Tsit5()",
     }
 
+    # Mass-matrix problems need an algorithm that accepts one; CVODE_BDF
+    # does not, so a DAE falls back to a pure-Julia stiff solver.
+    supports_algebraic = True
+
+    ALGEBRAIC_ALGORITHM = "rodas5p"
+
     # Neutral linear-solver request -> algorithm key
     LINEAR_SOLVER_ALGORITHMS = {
         "krylov": "bdf_krylov",
@@ -438,6 +698,9 @@ class DiffeqpyBackend(IntegratorBackend):
         self._rhs = None
         self._solution = None
         self._vector_type = None
+        self._mass_matrix = None
+        self._callbacks = None
+        self._diagonal_type = None
 
         self.eval_sens = False
         self.jac_v_prod = False
@@ -527,10 +790,16 @@ class DiffeqpyBackend(IntegratorBackend):
         algorithm = self.algorithm
 
         if algorithm is None:
-            algorithm = self.LINEAR_SOLVER_ALGORITHMS.get(
-                self.linear_solver,
-                "bdf",
-            )
+
+            if self._mass_matrix is not None:
+                # CVODE_BDF cannot take a mass matrix, so the linear-solver
+                # hint does not apply here.
+                algorithm = self.ALGEBRAIC_ALGORITHM
+            else:
+                algorithm = self.LINEAR_SOLVER_ALGORITHMS.get(
+                    self.linear_solver,
+                    "bdf",
+                )
 
         # Anything that is not one of our keys is taken to be an
         # already-constructed Julia algorithm and passed straight through.
@@ -606,6 +875,68 @@ class DiffeqpyBackend(IntegratorBackend):
 
         return self._vector_type(np.asarray(values, dtype=float))
 
+    def make_mass_matrix(self, unit):
+        """
+        Diagonal mass matrix marking which rows are constraints.
+
+        ``M y' = f(y)`` with a 1 on every differential row and a 0 on every
+        algebraic one turns the vector unit_model already returns into an
+        index-1 DAE: the zero rows say "this entry of f is a residual to
+        drive to zero", which is exactly the packing convention the vessel
+        uses. Returns None for an ordinary ODE so nothing is allocated.
+        """
+
+        if not unit.has_algebraic_balance:
+            return None
+
+        mask = unit.solver_state_collection.algebraic_mask
+        diagonal = np.where(mask, 0.0, 1.0)
+
+        if self._diagonal_type is None:
+            # Diagonal lives in LinearAlgebra, which is not in scope inside
+            # diffeqpy's module, so it has to be imported explicitly. A
+            # Diagonal rather than a dense matrix matters here: a
+            # discretized phase can make this a few hundred rows square.
+            self._diagonal_type = self.julia_eval(
+                "import LinearAlgebra; LinearAlgebra.Diagonal"
+            )
+
+        return self._diagonal_type(self.to_julia_vector(diagonal))
+
+    def make_callbacks(self, unit):
+        """
+        One ContinuousCallback per event, combined into a CallbackSet.
+
+        VectorContinuousCallback would be the natural fit, but its event
+        index arrives through PythonCall as raw bytes that cannot be
+        converted to an int, so each event gets its own scalar callback
+        instead and closes over its own index.
+        """
+
+        events = unit.compiled_events
+
+        if not events:
+            return None
+
+        de = self.de
+        callbacks = []
+
+        for index, event in enumerate(events):
+
+            def condition(u, t, integrator, index=index):
+                return float(unit.evaluate_events(float(t), np.asarray(u))[index])
+
+            def affect(integrator, index=index):
+                if unit.handle_event(float(integrator.t), [index]):
+                    de.seval("terminate!")(integrator)
+
+            callbacks.append(de.ContinuousCallback(condition, affect))
+
+        if len(callbacks) == 1:
+            return callbacks[0]
+
+        return de.CallbackSet(*callbacks)
+
     # ------------------------------------------------------------------
     # IntegratorBackend interface
     # ------------------------------------------------------------------
@@ -626,14 +957,6 @@ class DiffeqpyBackend(IntegratorBackend):
                 "AssimuloBackend for parameter estimation."
             )
 
-        if unit.state_event_list:
-            raise NotImplementedError(
-                "DiffeqpyBackend does not handle state events yet. They "
-                "would map onto SciML callbacks, but the switch-handling "
-                "protocol has no equivalent here, so the events would be "
-                "quietly ignored rather than honoured."
-            )
-
         self.eval_sens = eval_sens
         self.jac_v_prod = jac_v_prod
 
@@ -646,6 +969,8 @@ class DiffeqpyBackend(IntegratorBackend):
             self.options.update(options)
 
         self._rhs = self.make_rhs(unit)
+        self._mass_matrix = self.make_mass_matrix(unit)
+        self._callbacks = self.make_callbacks(unit)
 
         # Gives the unit its chance to request a linear solver before the
         # algorithm is built, which happens per solve.
@@ -726,8 +1051,16 @@ class DiffeqpyBackend(IntegratorBackend):
                 "Either runtime or time_grid must be supplied."
             )
 
+        if self._mass_matrix is None:
+            function = self._rhs
+        else:
+            function = de.seval("ODEFunction")(
+                self._rhs,
+                mass_matrix=self._mass_matrix,
+            )
+
         problem = de.ODEProblem(
-            self._rhs,
+            function,
             states_init,
             (start_time, float(final_time)),
         )
@@ -736,6 +1069,9 @@ class DiffeqpyBackend(IntegratorBackend):
 
         if time_grid is not None:
             kwargs["saveat"] = np.asarray(time_grid, dtype=float)
+
+        if self._callbacks is not None:
+            kwargs["callback"] = self._callbacks
 
         solution = de.solve(
             problem,

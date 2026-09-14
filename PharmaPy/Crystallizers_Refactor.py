@@ -51,14 +51,6 @@ class _BaseCrystallizer(MultiPhaseVessel):
             pbm = solidphase.get_mechanism(OneDFVMMechanism)
             pbm.liquid_phase_ref = PhaseRef("liquid",0)
             pbm.owning_phase_ref = solidphase_ref
-
-            # The solid's mass is derived from the distribution's third
-            # moment scaled by the liquid volume. update_state refreshes that
-            # volume every evaluation, but anything that reads the solid mass
-            # before the first one (Outlet, Phases.vol) needs it set now.
-            pbm.reference_vol = self.Phases.get_phase_from_ref(
-                pbm.liquid_phase_ref
-            ).vol
             weights = pbm.fraction
             if pbm._mechanism_kinetics is None:
                 try:
@@ -126,7 +118,7 @@ class _BaseCrystallizer(MultiPhaseVessel):
 
 class BatchCrystallizer(_BaseCrystallizer):
 
-    oper_mode = "batch"
+    oper_mode = "Batch"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -135,7 +127,7 @@ class BatchCrystallizer(_BaseCrystallizer):
 
 class SemiBatchCrystallizer(_BaseCrystallizer):
 
-    oper_mode = "semibatch"
+    oper_mode = "Semibatch"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -144,13 +136,18 @@ class SemiBatchCrystallizer(_BaseCrystallizer):
 
 class ContinuousCrystallizer(_BaseCrystallizer):
 
-    oper_mode = "continuous"
+    oper_mode = "Continuous"
 
     def __init__(
         self,
-        controller=DefaultContinuousVesselVolume(),
+        controller=None,
         **kwargs
     ):
+
+        # Constructed per instance; a default argument would be shared by
+        # every ContinuousCrystallizer in the session.
+        if controller is None:
+            controller = DefaultContinuousVesselVolume()
 
         super().__init__(
             controller=controller,

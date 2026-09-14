@@ -4,7 +4,7 @@ import string
 import numpy as np
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Any
+from typing import Optional, Sequence, Any, ClassVar
 from types import MethodType
 from collections import OrderedDict
 from collections.abc import Callable
@@ -238,12 +238,18 @@ class TransferResult:
 class StateCollection:
     states: dict[StateKey, StateVariable] = field(default_factory=dict)
 
+    # StateVariable.state_type marking a state the solver must satisfy as a
+    # residual g(y) = 0 rather than advance as a derivative.
+    ALGEBRAIC_STATE_TYPE: ClassVar[str] = "alg"
+
     # Compiled numerical layout
     _keys: tuple = field(default_factory=tuple, init=False, repr=False)
     _material_keys: tuple = field(default_factory=tuple, init=False, repr=False)
     _state_values: tuple = field(default_factory=tuple, init=False, repr=False)
     _slices: dict = field(default_factory=dict, init=False, repr=False)
     _material_slices: dict = field(default_factory=dict, init=False, repr=False)
+    _algebraic_keys: tuple = field(default_factory=tuple, init=False, repr=False)
+    _algebraic_mask: Any = field(default=None, init=False, repr=False)
     _dim: int = field(default=0, init=False, repr=False)
     _compiled: bool = field(default=False, init=False, repr=False)
     _material_dim: int = field(default=0, init=False, repr=False)
@@ -284,6 +290,7 @@ class StateCollection:
         state_values = []
         slices = {}
         material_slices = {}
+        algebraic_keys = []
 
         start = 0
         material_start = 0
@@ -296,6 +303,9 @@ class StateCollection:
             state_values.append(state)
             slices[key] = state_slice
 
+            # Material slices stay differential-only: they address the
+            # inventory the positivity limiter throttles, and an algebraic
+            # state has no inventory to run out of.
             if state.state_type == "diff" and key.phaseref is not None:
                 material_slices[key] = slice(
                     material_start,
@@ -303,16 +313,48 @@ class StateCollection:
                 )
                 material_start += state.dim
 
+            if state.state_type == self.ALGEBRAIC_STATE_TYPE:
+                algebraic_keys.append(key)
+
             start = end
+
+        # True where the packed vector carries a residual rather than a
+        # derivative. Backends read this to build a mass matrix or an
+        # implicit residual; it is all zeros for an ordinary ODE.
+        algebraic_mask = np.zeros(start, dtype=bool)
+
+        for key in algebraic_keys:
+            algebraic_mask[slices[key]] = True
 
         self._keys = tuple(keys)
         self._material_keys = tuple(key for key in keys if key in material_slices)
         self._state_values = tuple(state_values)
         self._slices = slices
         self._material_slices = material_slices
+        self._algebraic_keys = tuple(algebraic_keys)
+        self._algebraic_mask = algebraic_mask
         self._dim = start
         self._material_dim = material_start
         self._compiled = True
+
+    @property
+    def algebraic_keys(self):
+        """Solver states defined by a residual instead of a derivative."""
+        if not self._compiled:
+            self.compile()
+        return self._algebraic_keys
+
+    @property
+    def algebraic_mask(self):
+        if not self._compiled:
+            self.compile()
+        return self._algebraic_mask
+
+    @property
+    def has_algebraic(self):
+        if not self._compiled:
+            self.compile()
+        return len(self._algebraic_keys) > 0
 
     @property
     def material_dim(self):

@@ -25,12 +25,27 @@ from time import perf_counter
 eps = np.finfo(float).eps
 
 class MultiPhaseVessel():
+
+    # Declared on the class so a subclass can override it. Assigning it in
+    # __init__ would shadow the subclass value with None on every instance,
+    # and Connections and SimExec branch on it, so a shadowed value silently
+    # takes a flowsheet down the wrong path. Spellings match the rest of
+    # PharmaPy: 'Batch', 'Semibatch', 'Continuous'.
+    oper_mode = None
+
     def __init__(self,integrator=None,temp_ref=273.15,
-     isothermal=False, reset_states=False, controller=Controller(), h_conv=0, 
+     isothermal=False, reset_states=False, controller=None, h_conv=0, 
       state_events={},
-      adiabatic=False,jac_type="AD",Phases=None,
-      basis='mass_j',ht_mode="jacket",diam=0,area_base=0):
-      
+      adiabatic=False,Phases=None,
+      basis='mass_j',ht_mode="jacket",diam=0,area_base=0,
+      emit_events=True):
+
+        # Built here rather than as a default argument: a default is
+        # evaluated once at class-definition time, so every vessel in the
+        # session would share one controller object, and a level controller's
+        # target_volume would leak between unrelated vessels.
+        if controller is None:
+            controller = Controller()
 
         if isothermal and controller is not None:
             assert 'global_temp' not in controller.states and 'temp' not in controller.states, "Cannot change the temperature of an isothermal unit"
@@ -39,12 +54,8 @@ class MultiPhaseVessel():
         self.adiabatic = adiabatic
         self.isothermal = isothermal
 
-        self.jac_type = jac_type
-        
-
         self.controller = controller #TODO ZZ refactor analyze_controls to give a Controls dataclass, an empty one if controls None
-        self.oper_mode = None #This is not called within the class, but is used by pharmapy to handle connections (either 'batch' or 'continuous', etc.)
-        
+
         
         # Phase init
         self._phase_connections = []
@@ -65,6 +76,15 @@ class MultiPhaseVessel():
         if state_events is None:
             state_events = []
         self.state_event_list = state_events
+
+        # Whether mechanisms and the controller hand their switching
+        # surfaces to the integrator. Root-finding pays off when a surface
+        # is actually crossed and the step size is limited by that crossing;
+        # it is pure overhead when the step size is limited by something
+        # else, and the cost is per-step (and heavier under diffeqpy, where
+        # every condition evaluation crosses into Python). Measure before
+        # assuming it helps.
+        self.emit_events = emit_events
 
         #state initialization, all types
         self._initialize_states(reset_states)
@@ -413,10 +433,33 @@ class MultiPhaseVessel():
 
             phase = self.phase_states.get_phase(statekey.phaseref)
 
-            return getattr(phase, statekey.name, None)
+            value = getattr(phase, statekey.name, None)
+
+            if value is not None:
+                return value
+
+            # A phase delegates to the mechanisms in its own `mechanisms`
+            # list, but a mechanism attached to an intraphase process is not
+            # in that list, so its states have to be found directly.
+            return self.get_mechanism_state_value(statekey)
 
         # unit operation state
-        return getattr(self, statekey.name, None)
+        value = getattr(self, statekey.name, None)
+
+        if value is not None:
+            return value
+
+        return self.get_mechanism_state_value(statekey)
+
+    def get_mechanism_state_value(self, statekey):
+        """Initial value for a solver state owned by a mechanism."""
+
+        for mechanism in self.iter_mechanisms():
+
+            if mechanism.owns_state(statekey):
+                return getattr(mechanism, statekey.name, None)
+
+        return None
             
     def __getattr__(self, name):
         # For Backward compatability 
@@ -471,6 +514,10 @@ class MultiPhaseVessel():
         # Resolved outlet streams, available once the unit has been solved.
         self.outlet_conditions = None
 
+        # Memo for evaluate_events, keyed on the exact (time, states).
+        self._event_cache_key = None
+        self._event_cache_values = None
+
         self._initialize_state_collections()
 
         
@@ -499,6 +546,17 @@ class MultiPhaseVessel():
             not self.isothermal
             and StateKey("global_temp") not in self.controller.states and not anytemp
         )
+    @property
+    def has_algebraic_balance(self):
+        """
+        True when some mechanism contributes a residual rather than a rate.
+
+        Checked the way has_energy_balance is: when it is False the whole
+        algebraic pass is skipped, so an ordinary ODE never pays for the
+        machinery or allocates a vector of zeros to carry nothing.
+        """
+        return self.solver_state_collection.has_algebraic
+
     @property
     def has_utility_balance(self):
         return (
@@ -546,8 +604,12 @@ class MultiPhaseVessel():
                 )
 
         for process in self.intraphase_processes:
+            # An intraphase mechanism belongs to the phase its process runs
+            # in, so that is the owner of any solver state it declares.
             process.mechanism.add_solver_state_variables(
-                self.solver_state_collection,overwrite
+                self.solver_state_collection,
+                overwrite=overwrite,
+                phase_ref=process.phaseref,
             )
     def define_output_states(self,overwrite=False):
         self.recorded_output_history ={}
@@ -720,7 +782,17 @@ class MultiPhaseVessel():
         for mechanism in getattr(self, "_workspace_mechanisms", ()):
             mechanism.update_state(completed_state, unit=self)
 
-    def pack_state_rates(self, material_rates, global_rates=None):
+    def pack_state_rates(self, material_rates, global_rates=None,
+                         algebraic_residuals=None):
+        """
+        Pack one vector the solver can consume.
+
+        Differential slots carry the derivative; algebraic slots carry the
+        residual g(y), which must be zero at a consistent solution. Keeping
+        both in one vector of the same length means the backends differ only
+        in how they interpret it (mass matrix, or an implicit residual), and
+        unit_model's return shape never changes.
+        """
 
         buffer = self._solver_rate_buffer
         buffer.fill(0.0)
@@ -729,6 +801,13 @@ class MultiPhaseVessel():
         solver_slices = self.solver_state_collection.slices
 
         for key in self.solver_state_collection.keys:
+
+            if algebraic_residuals is not None and key in algebraic_residuals:
+                buffer[solver_slices[key]] = np.asarray(
+                    algebraic_residuals[key]
+                ).reshape(-1)
+                continue
+
             try:
                 buffer[solver_slices[key]] = material_rates[material_slices[key]]
             except KeyError:
@@ -801,9 +880,24 @@ class MultiPhaseVessel():
 
         if enrgy_bce:
             return self.pack_state_rates(global_rates=global_rates)
+
+        # Skipped entirely, like the energy balance, when no mechanism
+        # declares an algebraic state: an ordinary ODE never builds or
+        # carries a residual vector.
+        algebraic_residuals = None
+
+        if self.has_algebraic_balance:
+            t0 = perf_counter()
+            algebraic_residuals = self.algebraic_balances(time, completed_state)
+            self._timers['algebraic_balances_total'] = self._timers.get('algebraic_balances_total',0)+perf_counter()-t0
+
+            if alg_bce:
+                return algebraic_residuals
+
         t0 = perf_counter()
         balances = self.pack_state_rates(material_rates=material_rates,
-                                        global_rates=global_rates)
+                                        global_rates=global_rates,
+                                        algebraic_residuals=algebraic_residuals)
         self._timers['pack_state_rates'] = self._timers.get('pack_state_rates',0)+perf_counter()-t0
         assert len(balances) == len(states), (
             f"Returned {len(balances)} derivatives "
@@ -812,20 +906,6 @@ class MultiPhaseVessel():
 
         self.derivatives = balances
         return balances
-        # algebraic_residuals = self.algebraic_balances(
-        #     time,
-        #     completed_state,
-        #     operating_conditions,
-        # )
-
-        # if alg_bce:
-        #     return algebraic_residuals
-        # if not algebraic_residuals:
-        #     # legacy behavior
-        #     return balances
-        # else:
-        #     return balances, algebraic_residuals
-
 
     def compile_structure(self):
 
@@ -865,6 +945,7 @@ class MultiPhaseVessel():
 
         self._compile_stream_workspaces()
         self._compile_positivity_layout()
+        self.compile_events()
 
     def _compile_stream_workspaces(self):
         """
@@ -1018,18 +1099,6 @@ class MultiPhaseVessel():
         )
 
     
-    def initialize_rate_dictionary(self)->dict[StateKey,Any]:
-
-        rates = {}
-
-        for key, state in self.solver_state_collection.states.items():
-
-            if state.state_type != 'diff':
-                continue
-
-            rates[key] = np.zeros(state.dim)
-
-        return rates
     def get_operating_conditions(self,time:float,completed_state:dict[StateKey])->tuple[StreamConditions,StreamConditions,dict[OperatingKey]]:
         # --------------------------------------------
         # Controller sees current vessel state
@@ -1062,24 +1131,187 @@ class MultiPhaseVessel():
 
         return resolved_inlets,operating_conditions
 
-    def get_events(self):
-        events = []
+    def iter_mechanisms(self):
+        """
+        Every mechanism attached to this vessel, each yielded once.
 
-        events.extend(self.controller.get_events(self))
+        A phase mechanism is commonly also reachable through a phase
+        connection wrapped in a MechanismView, so identity is tracked through
+        the wrapper to avoid registering the same events or residuals twice.
+        """
+
+        seen = set()
+
+        for phase in self.Phases:
+
+            for mechanism in getattr(phase, "mechanisms", ()) or ():
+
+                if id(mechanism) not in seen:
+                    seen.add(id(mechanism))
+                    yield mechanism
 
         for connection in self.phase_connections:
-            if connection.mechanism is not None:
-                events.extend(
-                    connection.mechanism.get_events(self)
-                )
+
+            mechanism = connection.mechanism
+
+            if mechanism is None:
+                continue
+
+            # MechanismView delegates attribute access, so unwrap before
+            # testing identity against the phase's own mechanism list.
+            underlying = getattr(mechanism, "mechanism", mechanism)
+
+            if id(underlying) not in seen:
+                seen.add(id(underlying))
+                yield mechanism
 
         for process in self.intraphase_processes:
-            events.extend(
-                process.mechanism.get_events(self)
-            )
+
+            if id(process.mechanism) not in seen:
+                seen.add(id(process.mechanism))
+                yield process.mechanism
+
+    def get_events(self):
+        """
+        Switching surfaces declared by the controller and the mechanisms.
+
+        Handing these to the integrator lets it locate a regime change by
+        root-finding and restart cleanly there, instead of discovering it by
+        failing steps. That is what makes a small maxh unnecessary.
+        """
+
+        if not self.emit_events:
+            return []
+
+        events = list(self.controller.get_events(self))
+
+        for mechanism in self.iter_mechanisms():
+            events.extend(mechanism.get_events(self))
+
+        # Events supplied directly to the constructor, when they use the
+        # StateEvent contract rather than the legacy dictionary format that
+        # Commons.eval_state_events consumes.
+        for event in self.state_event_list or ():
+            if isinstance(event, StateEvent):
+                events.append(event)
 
         return events
+
+    def compile_events(self):
+        self._compiled_events = tuple(self.get_events())
+        self._event_cache_key = None
+        self._event_cache_values = None
+        return self._compiled_events
+
+    @property
+    def compiled_events(self):
+        events = getattr(self, "_compiled_events", None)
+
+        if events is None:
+            events = self.compile_events()
+
+        return events
+
+    @property
+    def has_events(self):
+        return len(self.compiled_events) > 0
+
+    def evaluate_events(self, time, states):
+        """
+        Evaluate every event function at (time, states).
+
+        The phases are brought up to date first, because event functions are
+        written against the vessel (unit.Phases.vol, a mechanism's
+        supersaturation) rather than against the raw solver vector. This runs
+        once per solver step, not once per right-hand side evaluation.
+        """
+
+        events = self.compiled_events
+
+        if not events:
+            return np.zeros(0)
+
+        states = np.asarray(states, dtype=float)
+
+        # Every event is evaluated together and the result memoized against
+        # the exact (time, state) it came from. SciML asks one callback at a
+        # time, so without this a vessel with N events would rebuild the
+        # phases N times per step to answer N questions about the same point.
+        # Hashing the raw bytes is exact, and cheap next to complete_state.
+        cache_key = (time, states.tobytes())
+
+        if self._event_cache_key == cache_key:
+            return self._event_cache_values
+
+        unpacked = self.solver_state_collection.unpack(states)
+        completed_state = self.complete_state(unpacked, time)
+        self.update_phases_from_state(completed_state)
+
+        values = np.empty(len(events))
+
+        for index, event in enumerate(events):
+            values[index] = event.function(time, completed_state, self)
+
+        self._event_cache_key = cache_key
+        self._event_cache_values = values
+
+        return values
+
+    def handle_event(self, time, event_indices):
+        """
+        Respond to located events.
+
+        Non-terminal events need no action: the integrator has already
+        stopped at the root and will restart there, which is the whole point.
+        Returns True when the run should stop.
+        """
+
+        events = self.compiled_events
+
+        return any(
+            events[index].terminal
+            for index in event_indices
+            if 0 <= index < len(events)
+        )
+
     
+    def algebraic_balances(self, time, completed_state):
+        """
+        Residuals for solver states defined by a constraint, not a rate.
+
+        Each mechanism returns {StateKey: residual}; a consistent solution is
+        one where every residual is zero. Only called when
+        has_algebraic_balance is True.
+        """
+
+        residuals = {}
+
+        for mechanism in self.iter_mechanisms():
+
+            contribution = mechanism.get_solver_state_residuals(
+                time=time,
+                completed_state=completed_state,
+                unit=self,
+            )
+
+            if contribution:
+                residuals.update(contribution)
+
+        missing = [
+            key for key in self.solver_state_collection.algebraic_keys
+            if key not in residuals
+        ]
+
+        if missing:
+            raise KeyError(
+                "No mechanism supplied a residual for algebraic state(s) "
+                f"{[str(key) for key in missing]}. Every state registered "
+                "with state_type='alg' must be returned by some mechanism's "
+                "get_solver_state_residuals."
+            )
+
+        return residuals
+
     def material_balances(
         self,
         time:float,
@@ -1328,9 +1560,6 @@ class MultiPhaseVessel():
 
     def sum_material_contributions(self,contributions):
         return contributions.sum(axis=0)
-    def material_key(self, phase_ref:PhaseRef):
-        return StateKey(self.basis, phase_ref)
-    
     def resolve_outlet_flows(
         self,
         operating_conditions:dict[OperatingKey,Any],
@@ -1532,11 +1761,15 @@ class MultiPhaseVessel():
                 vessel_phase = self.phase_states.get_phase(mapping.sink_phaseref)
 
 
+                # As on the outlet side, a connection-level vol_flow
+                # describes the whole stream. Handing it to each phase would
+                # multiply a multi-phase feed by the number of phases.
                 ops = self.get_phase_operating_conditions(
                     operating_conditions,
                     connection_num,
                     mapping.source_phaseref,
                     "inlet",
+                    skip_connection_level=True,
                 )
 
                 self._apply_inlet_overrides(
