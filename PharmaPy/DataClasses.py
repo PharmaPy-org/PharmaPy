@@ -221,6 +221,11 @@ class ResolvedStreamConnection:
     connection: StreamConnection
     transfers: list[ResolvedPhaseTransfer]
 
+    # The stream actually carrying the resolved flows. This is the vessel's
+    # working copy, not connection.stream, which stays at the template values
+    # the user configured.
+    stream: "MixedStream | None" = None
+
     def __iter__(self):
         return iter(self.transfers)
 

@@ -461,6 +461,11 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     # Helpers
     # ------------------------------------------------------------------
 
+    # Liquid volume the distribution is referenced to. update_state keeps it
+    # current during a solve; the vessel seeds it when it wires the mechanism
+    # up so the solid mass is defined before the first evaluation.
+    reference_vol = None
+
     def compute_moments(
         self,
         distrib,
@@ -753,13 +758,26 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
     # inventory 1e18 times too large the moment it became nonzero.
     VOLUME_UNIT_FACTOR = 1e-18
 
+    def _require_reference_vol(self):
+
+        if self.reference_vol is None:
+            raise AttributeError(
+                f"{type(self).__name__} has no reference volume yet, so the "
+                "solid mass is undefined. The vessel sets it when the "
+                "mechanism is attached (via CrystKinetics or "
+                "phase_connections); set liquid_phase_ref and reference_vol "
+                "directly if you are wiring the mechanism by hand."
+            )
+
+        return self.reference_vol
+
     def get_mass(self):
         m3 = self.compute_third_moment(getattr(self,self.distribution_state_name))
         return (
             self.getDensity()
             * self.kv
             * m3
-            * self.reference_vol
+            * self._require_reference_vol()
             * self.VOLUME_UNIT_FACTOR
         )
     def set_mass(self, mass):
@@ -770,7 +788,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         target_m3 = mass / (
             self.getDensity()
             * self.kv
-            * self.reference_vol
+            * self._require_reference_vol()
             * self.VOLUME_UNIT_FACTOR
         )
 

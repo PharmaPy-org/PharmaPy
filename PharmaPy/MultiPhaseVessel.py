@@ -219,19 +219,41 @@ class MultiPhaseVessel():
 
     @property
     def Outlet(self):
+        """
+        The unit's single outlet stream.
 
-        if self.outlet_conditions is not None:
+        After a solve this is the resolved stream, carrying the flows and
+        composition the vessel actually discharged. Before one it is the
+        connection's stream, which still holds the configured template.
 
-            if len(self.outlet_conditions.streams) == 1:
-                return self.outlet_conditions.streams[0].stream
+        AttributeError raised in a property is indistinguishable from a
+        missing attribute, so Python falls through to __getattr__ and the
+        caller sees a bare "Outlet" instead of the reason. Every message
+        here therefore says what is actually wrong.
+        """
+
+        conditions = self.outlet_conditions
+
+        if conditions is not None and conditions.streams:
+
+            if len(conditions.streams) == 1:
+                return conditions.streams[0].stream
 
             raise AttributeError(
-                "Multiple outlet streams exist."
+                f"This unit resolved {len(conditions.streams)} outlet "
+                "streams. Use outlet_conditions to pick one."
             )
 
         # Backward compatibility before solve
         if len(self.outlet_connections) == 1:
             return self.outlet_connections[0].stream
+
+        if not self.outlet_connections:
+            raise AttributeError(
+                f"{type(self).__name__} has no outlet connections. "
+                "Continuous units define one in "
+                "configure_default_connections; batch units have none."
+            )
 
         raise AttributeError(
             "Multiple outlet connections exist. "
@@ -414,7 +436,18 @@ class MultiPhaseVessel():
             idx = int(name.split("_")[1]) - 1
             return self.Phases.Vapors[idx]
 
-        raise AttributeError(name) #TODO Check if this raises unwanted errors
+        # A property whose getter raises AttributeError looks to Python
+        # exactly like a missing attribute, so __getattr__ runs and the
+        # explanation the getter raised is replaced by a bare name. Re-run
+        # the getter so its own message reaches the caller.
+        descriptor = getattr(type(self), name, None)
+
+        if isinstance(descriptor, property) and descriptor.fget is not None:
+            return descriptor.fget(self)
+
+        raise AttributeError(
+            f"{type(self).__name__!s} has no attribute {name!r}"
+        )
        
     def _initialize_states(self,reset=False):
 
@@ -434,6 +467,10 @@ class MultiPhaseVessel():
 
         self.result = None
         self._initial_solver_state = None
+
+        # Resolved outlet streams, available once the unit has been solved.
+        self.outlet_conditions = None
+
         self._initialize_state_collections()
 
         
@@ -1475,7 +1512,9 @@ class MultiPhaseVessel():
                     )
                 )
 
-            resolved.append(ResolvedStreamConnection(connection=connection,transfers=transfers))
+            resolved.append(ResolvedStreamConnection(connection=connection,
+                                                     transfers=transfers,
+                                                     stream=outlet_stream))
 
         return StreamConditions(resolved)
         
@@ -1525,7 +1564,8 @@ class MultiPhaseVessel():
                     )
                 )
             resolved.append(ResolvedStreamConnection(connection=connection,
-                                                     transfers=transfers))
+                                                     transfers=transfers,
+                                                     stream=inlet_stream))
 
 
         return StreamConditions(resolved)

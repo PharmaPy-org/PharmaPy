@@ -5,7 +5,9 @@ from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.Kinetics import RxnKinetics,CrystKinetics
 from PharmaPy.Crystallizers_Refactor import BatchCrystallizer, ContinuousCrystallizer
 from PharmaPy.Utilities import CoolingWater
-from PharmaPy.ProcessControl_Refactor import Controller,DefaultContinuousVesselVolume, SimpleTemperatureController
+from PharmaPy.ProcessControl_Refactor import (Controller, DefaultContinuousVesselVolume,
+                                              SimpleTemperatureController,
+                                              ContinuousVesselController)
 from PharmaPy.Mechanisms import OneDFVMMechanism
 
 
@@ -37,18 +39,22 @@ def new_temp_profile(x):
         return np.interp(x, [0, t], [313, 273.15])
     return 273.15
 
-temp_control = SimpleTemperatureController(temp_func=new_temp_profile)
+# Holds the vessel volume with the outlet and follows the cooling profile.
+# The profile replaces the energy balance, so the jacket is assumed able to
+# track it; swap in DefaultContinuousVesselVolume to let the utility duty
+# set the temperature instead.
+control = ContinuousVesselController(temp_func=new_temp_profile)
 # -----------------------------
 # Reactor Setup
 # -----------------------------
 
 integrator = AssimuloBackend(options={'maxh':0.1})
 
-vessel = BatchCrystallizer(
+vessel = ContinuousCrystallizer(
     integrator=integrator,
     h_conv=10000,
     diam=.01,
-    controller=temp_control
+    controller=control,
 
 )
 
@@ -60,7 +66,7 @@ m = 1
 liquid1 = LiquidPhase(
     dpath,
     mass=m,
-    mass_frac=[0,0,0.2,0,0.8],
+    mass_frac=[0,0,0.4,0,0.6],
 
 )
 print("starting vol:", liquid1.vol)
@@ -124,8 +130,8 @@ print("done")
 #     "Outlet composition:",
 #     vessel.Outlet.mass_frac
 # )
-# print("outlet temp:",
-#       vessel.Outlet.temp)
+print("outlet temp:",
+      vessel.Outlet.temp)
 
 # print(
 #     "Vessel Final composition:",
@@ -145,7 +151,7 @@ print("done")
 # )
 import matplotlib.pyplot as plt
 
-if False:
+if True:
     for mj,spec in zip(vessel.result.mass_j_liquid0.T,['A','B','C','D','Solvent']):
         if spec=='Solvent':continue
         plt.plot(vessel.result.time,mj,label=spec)

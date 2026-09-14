@@ -51,6 +51,14 @@ class _BaseCrystallizer(MultiPhaseVessel):
             pbm = solidphase.get_mechanism(OneDFVMMechanism)
             pbm.liquid_phase_ref = PhaseRef("liquid",0)
             pbm.owning_phase_ref = solidphase_ref
+
+            # The solid's mass is derived from the distribution's third
+            # moment scaled by the liquid volume. update_state refreshes that
+            # volume every evaluation, but anything that reads the solid mass
+            # before the first one (Outlet, Phases.vol) needs it set now.
+            pbm.reference_vol = self.Phases.get_phase_from_ref(
+                pbm.liquid_phase_ref
+            ).vol
             weights = pbm.fraction
             if pbm._mechanism_kinetics is None:
                 try:
@@ -104,8 +112,11 @@ class _BaseCrystallizer(MultiPhaseVessel):
         "Place holder in case future children need special behavior"
         pass
     def configure_solver(self):
-        #Assimulo option, does nothing if not using assimulo backend
-        self.integrator._solver.linear_solver = "SPGMR"
+        # The distribution block makes the system large and sparse, so an
+        # iterative linear solve beats forming the dense Jacobian. Asking the
+        # backend rather than poking at its solver keeps this working for any
+        # backend; one that has no such choice ignores the request.
+        self.integrator.set_linear_solver("krylov")
     def _post_set_phases(self):
         super()._post_set_phases()
         

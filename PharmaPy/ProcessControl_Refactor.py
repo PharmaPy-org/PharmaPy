@@ -98,24 +98,57 @@ class Controller:
         pass
     def get_events(self,unit):
             return []
-class SimpleTemperatureController(Controller):
-    def __init__(self,temp_func,temp_0 =273.15):
-        super().__init__()
+class TemperatureProfileMixin:
+    """
+    Drive the vessel temperature from a time profile.
+
+    Owning ``global_temp`` replaces the vessel's energy balance: the vessel
+    checks whether the key is present in ``states`` (see
+    ``MultiPhaseVessel.has_energy_balance``) while it lays out its solver
+    states, so the key has to be registered at construction, long before any
+    ``update_state`` call.
+
+    Mix this in ahead of the controller it extends so that its ``reset`` and
+    ``update_state`` run first and still defer to the base controller.
+    """
+
+    temp_func = None
+    temp_0 = None
+
+    def set_temperature_profile(self, temp_func, temp_0=None):
+
         self.temp_func = temp_func
-        self.temp_0 = temp_0
-        self.states[StateKey('global_temp')]=temp_0
+
+        # The seed value is only what the key holds until the first
+        # update_state overwrites it; evaluating the profile keeps a reset
+        # vessel consistent with the run that follows.
+        self.temp_0 = temp_func(0.0) if temp_0 is None else temp_0
+
+        self.states[StateKey("global_temp")] = self.temp_0
+
     def reset(self):
 
         super().reset()
 
-        self.states[
-            StateKey("global_temp")
-        ] = self.temp_0
+        if self.temp_func is not None:
+            self.states[StateKey("global_temp")] = self.temp_0
+
     def update_state(self, time, completed_state, unit):
-        statekey = StateKey('global_temp')
-        self.states[statekey] = self.temp_func(time)
-        
-    
+
+        super().update_state(time, completed_state, unit)
+
+        if self.temp_func is not None:
+            self.states[StateKey("global_temp")] = self.temp_func(time)
+
+
+class SimpleTemperatureController(TemperatureProfileMixin, Controller):
+    """Follow a temperature profile; leave all flows alone."""
+
+    def __init__(self, temp_func, temp_0=None):
+        super().__init__()
+        self.set_temperature_profile(temp_func, temp_0)
+
+
 class DefaultContinuousVesselVolume(Controller):
     """
     Hold vessel volume by trimming the outlet around the inlet flow.
@@ -244,6 +277,54 @@ class DefaultContinuousVesselVolume(Controller):
             outlet_flow,
             self.floor_width * max(inlet_flow, eps),
         )
+
+class ContinuousVesselController(
+    TemperatureProfileMixin,
+    DefaultContinuousVesselVolume,
+):
+    """
+    Hold vessel volume with the outlet while driving temperature on a profile.
+
+    This is the pairing a continuous crystallizer normally wants: the outlet
+    trims the level around the feed, and the jacket is assumed capable of
+    tracking whatever temperature trajectory is asked for, so the energy
+    balance is replaced by the profile rather than solved.
+
+    Because ``global_temp`` becomes a controlled state, ``Utility`` is not
+    consulted and the vessel carries one fewer differential state. Use
+    DefaultContinuousVesselVolume on its own if you want the jacket duty to
+    determine the temperature instead.
+
+    Parameters
+    ----------
+    temp_func : callable
+        ``temp_func(time) -> K``.
+    temp_0 : float, optional
+        Seed temperature. Defaults to ``temp_func(0)``.
+    target_volume : float, optional
+        Volume to hold. Defaults to the vessel's volume at the first
+        evaluation.
+    tau, K : float, optional
+        Level-loop tuning, as in DefaultContinuousVesselVolume.
+    """
+
+    def __init__(
+        self,
+        temp_func,
+        temp_0=None,
+        target_volume=None,
+        tau=None,
+        K=None,
+    ):
+
+        super().__init__(
+            target_volume=target_volume,
+            tau=tau,
+            K=K,
+        )
+
+        self.set_temperature_profile(temp_func, temp_0)
+
 
 class TankLevelController(Controller):
 
