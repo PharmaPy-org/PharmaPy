@@ -5,7 +5,7 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   StateKey,StateCollection,StreamConnection,IntraPhaseProcess,
                                   TransferResult,StateEvent
 )
-from PharmaPy.Phases import BasePhase
+from PharmaPy.Phases_Refactored import BasePhase
 from time import perf_counter
 
 eps = np.finfo(float).eps
@@ -512,12 +512,53 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         return moments * self.MOMENT_UNIT_FACTOR ** np.arange(4)
 
     
+    def liquid_in_solubility_basis(self, liquid):
+        """Liquid composition converted into the kinetics' declared basis.
+
+        A solubility correlation is just numbers; which composition basis it
+        was fitted in lives only in the person who fitted it. CrystKinetics
+        now states it, and this converts the liquid to match, so the
+        supersaturation and the solubility are always compared like for like.
+
+        Previously this was hard-coded to mass per volume of *pure solvent*
+        while original PharmaPy feeds solubility_temp a mass concentration on
+        a *solution* basis -- a silent ~5% offset on concentration that the
+        exponents amplified to ~13% on growth and ~31% on nucleation.
+        """
+        basis = getattr(self.mechanism_kinetics, 'solubility_basis',
+                        'mass_per_volume_solution')
+
+        if basis == 'mass_per_volume_solution':
+            return liquid.mass_conc
+
+        if basis == 'mole_per_volume_solution':
+            return liquid.mole_conc
+
+        if basis == 'mass_per_mass_solution':
+            return liquid.mass_frac
+
+        if basis == 'mole_frac':
+            return liquid.mole_frac
+
+        mass_solvent = liquid.mass_j[self.solvent_ind]
+
+        if basis == 'mass_per_mass_solvent':
+            return liquid.mass_j / mass_solvent
+
+        if basis == 'mass_per_volume_solvent':
+            return (liquid.mass_j / mass_solvent
+                    * liquid.getDensityPure()[0][self.solvent_ind])
+
+        raise ValueError(
+            f"Unknown solubility basis {basis!r}. Valid bases are "
+            f"{list(getattr(self.mechanism_kinetics, 'SOLUBILITY_BASES', ()))}"
+        )
     def compute_supersaturation(
         self,
         liquid,
     ):
-        "Make sure that conc matches the units of supersat"
-        conc = liquid.mass_j/liquid.mass_j[-1]*liquid.getDensityPure()[0][self.solvent_ind] #TODO check if these are the units expected by CrystKin
+        "Express the liquid in whatever basis the solubility is stated in."
+        conc = self.liquid_in_solubility_basis(liquid)
         
         conc_target = conc.T[self.target_ind]
         
@@ -597,25 +638,48 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         """
         Called by the vessel.
 
-        The liquid phase is the source.
-
-        The solid phase is the sink.
+        Crystallization runs liquid -> solid, but dissolution is wired as a
+        second connection running solid -> liquid, so source and sink swap
+        roles between the two. The population balance is written in terms of
+        liquid and solid, not source and sink, so identify them by phase
+        family rather than by connection direction. Reading them positionally
+        bound the solid to the liquid slot on the dissolution connection,
+        where its all-zero mass_j produced 0/0 and poisoned the whole
+        right-hand side with NaN.
         """
+        liquid_phase, solid_phase = self._orient_phases(source_phase,
+                                                        sink_phase)
+
         t0 = perf_counter()
-        result= self.solve_population_balance(source_phase,sink_phase,completed_state,time,connection)
+        result= self.solve_population_balance(liquid_phase,solid_phase,completed_state,time,connection)
         self._timers['pop_balance_solve_total'] = self._timers.get('pop_balance_solve_total',0)+perf_counter()-t0
         if not hasattr(self,"liquid_phase_ref"):
-            self.liquid_phase_ref = connection.source_phaseref
+            self.liquid_phase_ref = self._liquid_phaseref(connection)
 
         result.aux.update(
             {
                 "connection": connection,
                 "state_rates": result.state_rates,
-                "liquid_phase": source_phase,
-                "solid_phase": sink_phase,
+                "liquid_phase": liquid_phase,
+                "solid_phase": solid_phase,
             }
         )
         return result
+
+    @staticmethod
+    def _orient_phases(source_phase, sink_phase):
+        """Return (liquid, solid) regardless of connection direction."""
+        if getattr(source_phase, 'phase_family', None) == 'solid':
+            return sink_phase, source_phase
+
+        return source_phase, sink_phase
+
+    def _liquid_phaseref(self, connection):
+        """The PhaseRef naming the liquid side of this connection."""
+        if connection.source_phaseref.phase_type == 'solid':
+            return connection.sink_phaseref
+
+        return connection.source_phaseref
 
     # ------------------------------------------------------------------
     # Heat generation
@@ -857,7 +921,12 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         connection:PhaseConnection
     ) -> TransferResult:
         t0=perf_counter()
-        statekey =  StateKey(self.distribution_state_name,connection.sink_phaseref)
+        # The distribution lives on the phase that owns this mechanism (the
+        # solid), not on the connection's sink. For crystallization the two
+        # coincide, but the dissolution connection runs solid -> liquid, so
+        # keying off the sink looked for 'distrib' on the liquid and raised
+        # KeyError. Any crystallizer given dissolution kinetics hit this.
+        statekey =  StateKey(self.distribution_state_name,self.owning_phase_ref)
         csd = completed_state[statekey]
         self._timers['statekey_construct'] = self._timers.get('statekey_construct',0)+perf_counter()-t0
         t0 = perf_counter()
@@ -966,7 +1035,10 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self._timers['pop_balance_compute_species_transfer'] = self._timers.get('pop_balance_compute_species_transfer',0)+perf_counter()-t0
         t0 = perf_counter()
         state_rates = {StateKey(self.solver_states[0].name,self.owning_phase): dcsd_dt} #if phaseref is a phase instead of a PhaseRef, the vessel will determine the phaseref
-        state_rates.update({StateKey('mass_j',connection.source_phaseref):species_rates_out})
+        # Species leave or enter the LIQUID, which is the connection's source
+        # for crystallization but its sink for dissolution. Keying off the
+        # source unconditionally would return dissolved mass to the solid.
+        state_rates.update({StateKey('mass_j',self._liquid_phaseref(connection)):species_rates_out})
         result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer)
         self._timers['pop_balance_format'] = self._timers.get('pop_balance_format',0)+perf_counter()-t0
         return result

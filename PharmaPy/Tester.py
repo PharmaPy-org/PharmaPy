@@ -1,11 +1,11 @@
-from PharmaPy.Phases import LiquidPhase, SolidPhase
-from PharmaPy.Streams import LiquidStream
-from PharmaPy.Reactors_refactor import ContinuousReactor,BatchReactor
+from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.Streams_Refactored import LiquidStream
+from PharmaPy.Reactors_Refactored import ContinuousReactor,BatchReactor
 from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.Kinetics import RxnKinetics,CrystKinetics
-from PharmaPy.Crystallizers_Refactor import BatchCrystallizer, ContinuousCrystallizer
+from PharmaPy.Crystallizers_Refactored import BatchCrystallizer, ContinuousCrystallizer
 from PharmaPy.Utilities import CoolingWater
-from PharmaPy.ProcessControl_Refactor import Controller,DefaultContinuousVesselVolume, SimpleTemperatureController
+from PharmaPy.ProcessControl_Refactored import Controller,DefaultContinuousVesselVolume, SimpleTemperatureController
 from PharmaPy.Mechanisms import OneDFVMMechanism
 
 

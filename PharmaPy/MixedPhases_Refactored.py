@@ -1,0 +1,257 @@
+# -*- coding: utf-8 -*-
+"""
+Multi-phase containers for the MultiPhaseVessel refactor.
+
+Carved out of MixedPhases.py when the phase stack was split. The legacy
+Slurry / SlurryStream / Cake classes stay in PharmaPy.MixedPhases, which the
+old unit operations still import; nothing here depends on them.
+"""
+
+from PharmaPy.Phases_Refactored import BasePhase
+from collections import defaultdict
+import numpy as np
+import copy
+
+class MixedPhase:
+    # -----------------------------------------------------------------
+    # Legacy connection protocol.
+    #
+    # PharmaPy.Connections reads these off whatever matter it is moving
+    # between units, and sets them when it wires a connection. They are
+    # declared on the class so __getattr__ -- which aggregates across
+    # phases -- never sees them; none of them is a per-phase quantity.
+    # Remove once the remaining unit operations are ported.
+    # -----------------------------------------------------------------
+    DynamicInlet = None
+    y_upstream = None
+    y_inlet = None
+    time_upstream = None
+    transferred_from_uo = False
+
+    # Not a per-phase quantity either: without this, MixedPhase.ind_solv would
+    # fall through to __getattr__ and come back as a mass-weighted *average of
+    # species indices*, which is meaningless and would not look wrong.
+    ind_solv = None
+    name_solv = None
+
+    def __init__(self,phases=None):
+        self._Phases = []
+        if phases is not None:
+            self.Phases = phases
+        self.EXTENSIVE_PROPERTIES = {"mass", "vol", "moles"}
+    
+    @property
+    def Phases(self):
+        return self._Phases
+    
+    @Phases.setter
+    def Phases(self,phases):
+
+        phases = phases if isinstance(phases,(list,tuple)) else [phases]
+        phases = self._normalize_phases(phases)
+        self._Phases = phases
+
+    def _normalize_phases(self,phases):
+        adjusted_phases = []
+
+        for phase in phases:
+
+            if isinstance(phase, MixedPhase):
+                adjusted_phases.extend(self._normalize_phases(phase.Phases))
+
+            elif isinstance(phase, BasePhase) and not phase.is_stream:
+                adjusted_phases.append(phase)
+
+            else:
+                raise TypeError("All phases must be PharmaPy Phase objects")
+        return adjusted_phases
+
+    @property
+    def phases_by_type(self):
+        groups = defaultdict(list)
+        for phase in self.Phases:
+            key=phase.phase_family
+            groups[key].append(phase)
+        return groups
+    def get_phase_from_ref(self,
+            phase_ref
+        )->BasePhase:
+
+        candidates = []
+
+        for phase in self.Phases:
+
+            phase_type = (
+                phase.phase_family
+                .lower()
+            )
+
+            if phase_type == phase_ref.phase_type:
+                candidates.append(phase)
+
+        return candidates[phase_ref.index]
+    def __iter__(self):
+        return iter(self._Phases)
+    
+    def __len__(self):
+        return len(self._Phases)
+
+    def __getitem__(self, idx):
+        return self._Phases[idx]
+    
+    def __getattr__(self, name:str):
+        """
+        Default bulk-property implementation.
+
+        If a property or method is explicitly implemented on MixedPhase,
+        Python will find it before calling __getattr__. This method therefore
+        only handles attributes that are not otherwise defined.
+        """
+
+        # Prevent interfering with Python internals
+        if (name.startswith("__") and name.endswith("__")) or name.startswith("_"):
+            raise AttributeError(name)
+
+        key =name.removesuffix("s").lower()
+        if key in self.phases_by_type:
+            out = MixedPhase(self.phases_by_type[key])
+            return out
+        phases = object.__getattribute__(self,"_Phases")
+        masses = np.array([phase.mass for phase in phases], dtype=float) 
+
+        total_mass = masses.sum()
+        if total_mass > 0:
+            weights = masses / total_mass
+        else:
+            weights = np.ones(len(phases), dtype=float) / len(phases)
+
+        attrs = [getattr(phase, name, None) for phase in phases]
+
+        # Methods
+        if any(callable(attr) for attr in attrs):
+
+            def wrapper(*args, **kwargs):
+                values = []
+
+                for attr in attrs:
+                    if attr is None:
+                        values.append(0)
+                    else:
+                        values.append(attr(*args, **kwargs))
+
+                values = np.asarray(values)
+
+                # np.dot contracts the last axis of weights with the
+                # SECOND-to-last of values, so it only works when each
+                # phase contributes a scalar or a 1-D vector. A phase can
+                # return a whole trajectory -- mole_conc over (time,
+                # species) when a flowsheet connection converts an outlet --
+                # and np.dot then fails on the shape. Contract the phase
+                # axis explicitly so any trailing shape works.
+                return np.tensordot(weights, values, axes=(0, 0))
+
+            return wrapper
+
+        # Attributes
+        if all(v is None for v in attrs):
+            raise AttributeError(f"No phases have attribute {name}")
+
+        values = np.array([0 if v is None else v for v in attrs])
+
+        # Extensive properties
+        if name in self.EXTENSIVE_PROPERTIES:
+            return values.sum()
+        if not np.issubdtype(values.dtype, np.number):
+            # Some attributes are shared metadata rather than a per-phase
+            # quantity -- path_data and name_species are the same object on
+            # every phase of a mixture. Averaging them is meaningless, but
+            # passing them through is exactly right, and old unit operations
+            # read them straight off the matter they are handed.
+            present = [v for v in attrs if v is not None]
+
+            if present and all(np.array_equal(v, present[0]) for v in present):
+                return present[0]
+
+            raise AttributeError(
+                f"Cannot automatically aggregate attribute '{name}'. "
+                "Implement it explicitly on MixedPhase."
+            )
+        # Everything else defaults to mass-weighted average, contracting the
+        # phase axis so per-phase arrays of any shape aggregate correctly.
+        return np.tensordot(weights, values, axes=(0, 0))
+    
+    def getCp(self, basis='mass'):
+
+        total_cp = 0.0
+
+        for phase in self:
+
+            total_cp += (
+                phase.mass
+                * phase.getCp(basis='mass')
+            )
+
+        return total_cp
+    @property
+    def name_species(self):
+        return self.Phases[0].name_species
+    @property
+    def num_species(self):
+        return len(self.name_species)
+    def to_stream(self):
+        mixedstream = copy.copy(self)
+        phases = mixedstream._Phases
+        mixedstream.__class__ = MixedStream
+        mixedstream.Streams = [phase.to_stream() for phase in phases]
+        return mixedstream
+class MixedStream(MixedPhase):
+
+    EXTENSIVE_PROPERTIES = {
+        "mass_flow",
+        "vol_flow",
+        "mole_flow",
+    }
+    
+    def __init__(self,Streams=None):
+        super().__init__()
+        if Streams is not None:
+            self.Streams=Streams
+
+    @property
+    def Streams(self):
+        # Alias for Phases but with the knowledge that they are stream objects
+        return self.Phases
+    @Streams.setter
+    def Streams(self,value):
+        self.Phases = value
+
+    def _normalize_phases(self, streams):
+        """
+        Recursively flatten nested MixedStreams while preserving
+        individual stream objects.
+        """
+        normalized = []
+        for stream in streams:
+
+            if isinstance(stream, MixedStream):
+                normalized.extend(self._normalize_streams(stream.Streams))
+
+            elif isinstance(stream,BasePhase) and stream.is_stream:
+                normalized.append(stream)
+
+            else:
+                raise TypeError("All objects assigned to MixedStream must be Stream objects.")
+
+        return normalized
+
+    def evaluate_inputs(self, time):
+        """
+        Evaluate every constituent stream and return the results.
+        """
+        return [stream.evaluate_inputs(time) for stream in self.Streams]
+    def to_phase(self):
+        mixedphase = copy.copy(self)
+        streams = mixedphase._Phases
+        mixedphase.__class__ = MixedPhase
+        mixedphase.Phases = [stream.to_phase() for stream in streams]
+        return mixedphase  # the return was missing, so this yielded None

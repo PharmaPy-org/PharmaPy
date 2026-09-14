@@ -30,16 +30,17 @@ AFFECTED_MODULES = (
     "PharmaPy.Reactors",
     "PharmaPy.SolidLiquidSep",
     "PharmaPy.ThreePhaseSettler",
-    # MultiPhaseVessel refactor modules. PharmaPy.Reactors_refactor is
-    # deliberately absent: its module-level imports are not package qualified,
-    # so it cannot be imported as part of the package yet. Add it here once
-    # those imports are fixed.
-    "PharmaPy.Crystallizers_Refactor",
+    # MultiPhaseVessel refactor modules.
+    "PharmaPy.Crystallizers_Refactored",
     "PharmaPy.DataClasses",
     "PharmaPy.IntegratorBackends",
     "PharmaPy.Mechanisms",
+    "PharmaPy.MixedPhases_Refactored",
     "PharmaPy.MultiPhaseVessel",
-    "PharmaPy.ProcessControl_Refactor",
+    "PharmaPy.Phases_Refactored",
+    "PharmaPy.ProcessControl_Refactored",
+    "PharmaPy.Reactors_Refactored",
+    "PharmaPy.Streams_Refactored",
 )
 # Modules that raise TerminateSimulation from solver event handlers and must
 # therefore share one exception class with PharmaPy.Commons.

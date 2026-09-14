@@ -1,7 +1,7 @@
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Mechanisms import ReactionMechanism
 from PharmaPy.DataClasses import *
-from PharmaPy.ProcessControl_Refactor import Controller, DefaultContinuousVesselVolume
+from PharmaPy.ProcessControl_Refactored import Controller, DefaultContinuousVesselVolume
 
 class _BaseReactor(MultiPhaseVessel):
 

@@ -1,11 +1,11 @@
-from PharmaPy.Phases import LiquidPhase, SolidPhase
-from PharmaPy.Streams import LiquidStream
-from PharmaPy.Reactors_refactor import ContinuousReactor,BatchReactor
+from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.Streams_Refactored import LiquidStream
+from PharmaPy.Reactors_Refactored import ContinuousReactor,BatchReactor
 from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.Kinetics import RxnKinetics,CrystKinetics
-from PharmaPy.Crystallizers_Refactor import BatchCrystallizer, ContinuousCrystallizer
+from PharmaPy.Crystallizers_Refactored import BatchCrystallizer, ContinuousCrystallizer
 from PharmaPy.Utilities import CoolingWater
-from PharmaPy.ProcessControl_Refactor import (Controller, DefaultContinuousVesselVolume,
+from PharmaPy.ProcessControl_Refactored import (Controller, DefaultContinuousVesselVolume,
                                               SimpleTemperatureController,
                                               ContinuousVesselController)
 from PharmaPy.Mechanisms import OneDFVMMechanism
@@ -50,7 +50,7 @@ control = ContinuousVesselController(temp_func=new_temp_profile)
 
 integrator = AssimuloBackend(options={'maxh':0.1})
 
-vessel = ContinuousCrystallizer(
+vessel = BatchCrystallizer(
     integrator=integrator,
     h_conv=10000,
     diam=.01,
@@ -130,8 +130,8 @@ print("done")
 #     "Outlet composition:",
 #     vessel.Outlet.mass_frac
 # )
-print("outlet temp:",
-      vessel.Outlet.temp)
+# print("outlet temp:",
+#       vessel.Outlet.temp)
 
 # print(
 #     "Vessel Final composition:",
@@ -141,10 +141,10 @@ print("outlet temp:",
 #     "Vessel Final mass:",
 #     vessel.Phases.mass
 # )
-# print(
-#     "Vessel Final vol:",
-#     vessel.Phases.vol
-# )
+print(
+    "Vessel Final vol:",
+    vessel.Phases.vol
+)
 # print(
 #     "Vessel Final temp:",
 #     vessel.Phases.temp

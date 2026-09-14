@@ -1,7 +1,7 @@
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Mechanisms import *
 from PharmaPy.DataClasses import *
-from PharmaPy.ProcessControl_Refactor import DefaultContinuousVesselVolume
+from PharmaPy.ProcessControl_Refactored import DefaultContinuousVesselVolume
 
 class _BaseCrystallizer(MultiPhaseVessel):
     def __init__(self,*args,**kwargs):

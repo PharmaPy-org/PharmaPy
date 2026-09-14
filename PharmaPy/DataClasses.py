@@ -14,8 +14,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from PharmaPy.Mechanisms import Mechanism,CrossPhaseTransferMechanism,DirectTransfer
-    from PharmaPy.Phases import BasePhase
-    from PharmaPy.MixedPhases import MixedPhase,MixedStream
+    from PharmaPy.Phases_Refactored import BasePhase
+    from PharmaPy.MixedPhases_Refactored import MixedPhase,MixedStream
 ## Dataclasses
 @dataclass(frozen=True)
 class PhaseRef:

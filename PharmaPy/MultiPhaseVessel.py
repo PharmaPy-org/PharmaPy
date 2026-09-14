@@ -5,12 +5,12 @@ Created on Fri July 10 2026
 @author: zhillma
 Refactored the code by dcasasor
 """
-from PharmaPy.Phases import classify_phases, SolidPhase, LiquidPhase, VaporPhase, BasePhase
-from PharmaPy.Streams import LiquidStream, SolidStream, VaporStream
-from PharmaPy.MixedPhases import Slurry, SlurryStream, MixedPhase, MixedStream
+from PharmaPy.Phases_Refactored import BasePhase
+from PharmaPy.MixedPhases_Refactored import MixedPhase, MixedStream
 
-from PharmaPy.ProcessControl_Refactor import Controller
+from PharmaPy.ProcessControl_Refactored import Controller
 from PharmaPy.Results import DynamicResult
+from PharmaPy.Connections import interpolate_inputs
 
 
 
@@ -105,8 +105,74 @@ class MultiPhaseVessel():
     
     @Phases.setter
     def Phases(self, phases):
-        self._Phases = MixedPhase(phases)
+        incoming = MixedPhase(self._as_phases(phases))
+
+        # Connections stamps transferred_from_uo on material handed over by
+        # an upstream unit. The old units merged that material into whatever
+        # had already been configured -- a crystallizer is given its seed
+        # solid and receives its liquid from upstream (Crystallizers.py
+        # appends rather than replaces). Replacing outright would discard
+        # the solid phase along with its population-balance mechanism, so
+        # merge by phase family: an arriving phase supersedes the configured
+        # one of the same family, and any family not present is added.
+        if getattr(phases, 'transferred_from_uo', False) \
+                and self._Phases is not None:
+
+            incoming = MixedPhase(self._merge_by_family(incoming.Phases))
+
+        self._Phases = incoming
         self._post_set_phases()
+
+    def _as_phases(self, matter):
+        """Accept held-up phases, or a stream to be converted into them.
+
+        Connections hands a continuous unit's outlet -- a MixedStream --
+        straight to the destination's Phases. A semibatch vessel accepts an
+        incoming flow by definition, so converting the stream to its phase
+        form is exactly right. A batch vessel does not: a continuous unit
+        feeding a batch one needs a holding vessel between them to turn a
+        flow into a charge, so say that rather than failing obscurely deep
+        inside MixedPhase with "All phases must be PharmaPy Phase objects".
+        """
+        is_stream = getattr(matter, 'is_stream', False) or isinstance(
+            matter, MixedStream)
+
+        if not is_stream:
+            return matter
+
+        if self.oper_mode == 'Batch':
+            raise TypeError(
+                f"{type(self).__name__} is a batch unit and cannot be fed "
+                "directly from a continuous one: a flow has to be "
+                "accumulated into a charge first. Put a holding vessel "
+                "(PharmaPy.Containers.DynamicCollector) between them."
+            )
+
+        return matter.to_phase()
+
+    def _merge_by_family(self, arrivals):
+        """Substitute arriving phases into the configured ones by family.
+
+        Matching is positional within a family: the first arriving liquid
+        replaces the first configured liquid, the second the second, and so
+        on. Breaking on the first match of a family instead would let two
+        arriving liquids overwrite the same slot and silently drop one.
+        """
+        merged = list(self._Phases.Phases)
+        used = set()
+
+        for arriving in arrivals:
+            for idx, existing in enumerate(merged):
+                if idx in used:
+                    continue
+                if existing.phase_family == arriving.phase_family:
+                    merged[idx] = arriving
+                    used.add(idx)
+                    break
+            else:
+                merged.append(arriving)
+
+        return merged
         
     
 
@@ -269,6 +335,14 @@ class MultiPhaseVessel():
             return self.outlet_connections[0].stream
 
         if not self.outlet_connections:
+            # A batch or semibatch vessel discharges its contents rather
+            # than a stream, so it legitimately has no outlet connection.
+            # The old units modelled this by setting Outlet to the final
+            # phase (Reactors.py: 'self.Outlet = self.Liquid_1'), which is
+            # what a downstream unit in a flowsheet expects to receive.
+            if self.oper_mode != 'Continuous' and self._Phases is not None:
+                return self.Phases
+
             raise AttributeError(
                 f"{type(self).__name__} has no outlet connections. "
                 "Continuous units define one in "
@@ -283,6 +357,121 @@ class MultiPhaseVessel():
     def Outlet(self,outlet):
         outlet = outlet if isinstance(outlet,(list,tuple)) else [outlet]
         self._create_default_connections('outlet_connections',outlet)
+
+    # =================================================================
+    # Legacy flowsheet protocol
+    #
+    # SimExec and Connections were written against the pre-refactor unit
+    # operations and read a handful of attributes off every unit they
+    # execute. They are supplied here so a MultiPhaseVessel can sit in a
+    # flowsheet next to old units. None of this is used by the vessel
+    # itself; it is a translation layer and should be deleted once the
+    # remaining unit operations are ported.
+    # =================================================================
+
+    # Connections.PassPhases sets this on a Semibatch destination.
+    material_from_upstream = False
+
+    # Only meaningful for units with several named outlets (none yet).
+    default_output = None
+
+    # Populated by SimExec when it walks the graph.
+    bipartite = None
+    names_upstream = None
+
+    @property
+    def is_continuous(self):
+        """Connections uses this to decide whether the downstream unit
+        receives the whole outlet trajectory or only its final point."""
+        return self.oper_mode == 'Continuous'
+
+    @property
+    def states_di(self):
+        """Solver state description, in the shape the old units publish.
+
+        Results.SimulationResult skips any unit whose states_di is None, so
+        with every unit refactored the summary table came out empty and
+        Results.pprint called max() on it -- raising at the very end of
+        SolveFlowsheet, after all the physics had already run, and leaving
+        flst.result and flst.connections unassigned.
+
+        StateVariable.as_dict already emits dim/units/type/index, which is
+        exactly what that summary reads.
+        """
+        if self.solver_state_collection is None:
+            return None
+
+        return {
+            self.solver_state_collection.format_key(key): state.as_dict()
+            for key, state in self.solver_state_collection.states.items()
+        }
+
+    def flatten_states(self):
+        """No-op kept for SimExec, which calls this after every solve.
+
+        Old units accumulate a list of per-run state arrays in
+        profiles_runs and stack them here. The refactored vessel already
+        stores one flat array per state in self.result, so there is
+        nothing to stack."""
+        return self.result
+
+    @property
+    def names_states_out(self):
+        """State names carried by the outlet, in the vocabulary the old
+        NameAnalyzer expects. Mirrors the old CSTR/BatchReactor lists."""
+        names = ['mole_conc']
+
+        if any(p.phase_family == 'solid' for p in self.Phases.Phases):
+            names.append('distrib')
+
+        names.append('temp')
+        names.append('vol_flow' if self.is_continuous else 'vol')
+
+        return names
+
+    @property
+    def names_states_in(self):
+        """Old units declare inlet names separately from outlet names; for
+        this vessel the two coincide."""
+        return self.names_states_out
+
+    @property
+    def outputs(self):
+        """Outlet trajectory as {state name: array}, which Connections
+        attaches to the transferred matter as y_upstream.
+
+        Returns None before a solve, which is what the old units do and
+        what SimExec tests for."""
+        if self.result is None:
+            return None
+
+        out = {}
+
+        conc = getattr(self.result, 'mole_conc_liquid0', None)
+        if conc is not None:
+            out['mole_conc'] = np.asarray(conc)
+
+        distrib = getattr(self.result, 'distrib_solid0', None)
+        if distrib is not None:
+            out['distrib'] = np.asarray(distrib)
+
+        temp = getattr(self.result, 'global_temp', None)
+        if temp is not None:
+            out['temp'] = np.asarray(temp)
+
+        num_t = len(np.asarray(self.result.time))
+
+        if self.is_continuous:
+            flow = getattr(self.result, 'outlet_vol_flow', None)
+            out['vol_flow'] = (np.full(num_t, getattr(self.Outlet, 'vol_flow', 0.0))
+                               if flow is None else np.ravel(np.asarray(flow)))
+        else:
+            vol = getattr(self.result, 'vessel_vol', None)
+            out['vol'] = (np.full(num_t, self.Phases.vol) if vol is None
+                          else np.ravel(np.asarray(vol)))
+
+        return out
+
     
 
     def define_material_states(self):
@@ -623,6 +812,31 @@ class MultiPhaseVessel():
             ),overwrite
         )
 
+        # Reported so that a downstream unit reading this unit's outputs
+        # gets the real trajectory. These used to be fabricated as flat
+        # arrays from the final value, which made a level-controlled outlet
+        # look like a constant flow.
+        self.output_state_collection.add(
+            StateVariable(
+                name="vessel_vol",
+                dim=1,
+                units="m3",
+                state_type="post",
+                compute_value=self.compute_vessel_volume,
+            ),overwrite
+        )
+
+        if self.outlet_connections:
+            self.output_state_collection.add(
+                StateVariable(
+                    name="outlet_vol_flow",
+                    dim=1,
+                    units="m3/s",
+                    state_type="post",
+                    compute_value=self.compute_outlet_volflow_value,
+                ),overwrite
+            )
+
         if not self.has_energy_balance:
             self.output_state_collection.add(
                 StateVariable(
@@ -686,6 +900,49 @@ class MultiPhaseVessel():
             total_mass+= phase.mass
         return total_mass
         
+    @staticmethod
+    def compute_vessel_volume(
+            state_var,
+            time,
+            completed_state,
+            context,
+            resolved_inlets=None,
+            resolved_outlets=None,
+            operating_conditions=None,
+        ):
+        """Holdup volume at this time point.
+
+        The replay updates the phases from the solver state before the
+        output sweep runs, so reading phase.vol here gives the value at this
+        time rather than at the end of the run.
+        """
+        return sum(phase.vol for phase in context.Phases)
+
+    @staticmethod
+    def compute_outlet_volflow_value(
+            state_var,
+            time,
+            completed_state,
+            context,
+            resolved_inlets=None,
+            resolved_outlets=None,
+            operating_conditions=None,
+        ):
+        """Volumetric flow actually discharged at this time point.
+
+        Taken from the resolved transfers rather than from the controller's
+        request, so it reflects any rescaling the positivity limiter applied.
+        """
+        if resolved_outlets is None:
+            return 0.0
+
+        v_flow = 0.0
+
+        for connection in resolved_outlets.streams:
+            for transfer in connection:
+                v_flow += transfer.vol_flow
+
+        return v_flow
     @staticmethod
     def compute_outlet_massflow_value(
             state_var,
@@ -973,6 +1230,11 @@ class MultiPhaseVessel():
         # phase, so they can be put back when it stops overriding them.
         self._inlet_overrides_applied = {}
 
+        # Upstream trajectory evaluated at one time, reused across the
+        # several inlet resolutions that share it. Cleared here so a new
+        # solve cannot read a value cached at the same time from the last.
+        self._inlet_traj_cache = None
+
         # A stream phase shares its vessel phase's mechanisms by reference
         # (to_stream is a shallow copy), so the workspaces hold their own
         # copies and those copies have to be advanced alongside the vessel's.
@@ -986,21 +1248,109 @@ class MultiPhaseVessel():
             for mechanism in phase.mechanisms
         ]
 
+    def _evaluate_inlet_trajectories(self, time):
+        """Upstream inlet values at this time, or None if every feed is static.
+
+        Connections faithfully records an upstream unit's outlet trajectory
+        on the stream it hands over, but nothing here ever read it, so a
+        downstream continuous unit ran on the upstream's *final* composition
+        from t=0 onwards -- dimensionally sane, quietly wrong.
+
+        Two traps. The trajectory lives on the inner phase: Inlet wraps the
+        stream in a MixedStream, which declares y_upstream/y_inlet/
+        time_upstream as class attributes, so reading them off the wrapper
+        always yields None. And this runs twice per right-hand side
+        evaluation, so the result is cached per time -- interpolate_inputs
+        builds a fresh interpolant per key per call.
+        """
+        cached = self._inlet_traj_cache
+
+        if cached is not None and cached[0] == time:
+            return cached[1]
+
+        out = None
+
+        for connection_num, connection in enumerate(self.inlet_connections):
+
+            for mapping in connection.phase_mappings:
+
+                # Connections writes the trajectory onto whatever object it
+                # was handed. When the upstream outlet is a MixedStream that
+                # is the wrapper; when it is a bare stream it is the phase
+                # itself. Check both rather than assuming which.
+                inner = connection.stream.get_phase_from_ref(
+                    mapping.source_phaseref)
+
+                values = self._inlet_values_at(inner, time)
+
+                if values is None:
+                    values = self._inlet_values_at(connection.stream, time)
+
+                if values is None:
+                    continue
+
+                out = {} if out is None else out
+                out[(connection_num, mapping.source_phaseref)] = values
+
+        self._inlet_traj_cache = (time, out)
+
+        return out
+
+    def _inlet_values_at(self, source, time):
+        """Inlet field values at one time, or None when the feed is static."""
+        dynamic = getattr(source, "DynamicInlet", None)
+
+        if dynamic is not None:
+            return dict(source.evaluate_inputs(time))
+
+        if getattr(source, "y_upstream", None) is None:
+            return None
+
+        y_inlet = getattr(source, "y_inlet", None)
+
+        if not y_inlet:
+            return None
+
+        if "distrib" in y_inlet:
+            raise NotImplementedError(
+                "This inlet carries a crystal size distribution from "
+                "upstream, but a distribution lives on a mechanism rather "
+                "than on the phase, so updatePhase cannot apply it. Only "
+                "liquid inlet states are supported so far."
+            )
+
+        times = getattr(source, "time_upstream", None)
+
+        # A batch source reports a single time rather than a trajectory
+        # (Connections.FeedConnection), so there is nothing to interpolate.
+        if np.ndim(times) == 0:
+            return dict(y_inlet)
+
+        return {
+            name: interpolate_inputs(time, times, values)
+            for name, values in y_inlet.items()
+        }
+
     def _apply_inlet_overrides(
         self,
         stream_phase,
         template_phase,
         ops,
         workspace_key,
+        baseline=None,
     ):
         """
-        Apply controller overrides to a reused inlet stream.
+        Apply the upstream trajectory and controller overrides to a reused
+        inlet stream.
 
         The workspace persists between calls, so a field the controller
         overrode on one evaluation and left alone on the next has to be
-        restored from the connection's own stream. A fresh copy used to do
-        that implicitly.
+        restored. Restoring it from the connection's static template would
+        overwrite the trajectory, so the trajectory is the baseline where one
+        exists and the template supplies the rest. Controller overrides are
+        applied last and still win.
         """
+        baseline = baseline or {}
 
         previous = self._inlet_overrides_applied.get(workspace_key)
 
@@ -1011,10 +1361,20 @@ class MultiPhaseVessel():
             if stale:
                 stream_phase.updatePhase(
                     **{
-                        name: getattr(template_phase, name)
+                        name: (baseline[name] if name in baseline
+                               else getattr(template_phase, name))
                         for name in stale
                     }
                 )
+
+        # One call, not one per field: updatePhase sets composition before
+        # amount, and volume is converted to mass using the density implied
+        # by that composition. Split across calls it would use a stale one.
+        arriving = {name: value for name, value in baseline.items()
+                    if name not in ops}
+
+        if arriving:
+            stream_phase.updatePhase(**arriving)
 
         if ops:
             stream_phase.updatePhase(**ops)
@@ -1114,7 +1474,9 @@ class MultiPhaseVessel():
         # --------------------------------------------
         # Resolve inlet after possible inlet control
         # --------------------------------------------
-        resolved_inlets = self.resolve_inlets(completed_state,operating_conditions)
+        inlet_inputs = self._evaluate_inlet_trajectories(time)
+
+        resolved_inlets = self.resolve_inlets(completed_state,operating_conditions,inlet_inputs)
         # --------------------------------------------
         # Controller observes actual inlet
         # --------------------------------------------
@@ -1127,7 +1489,7 @@ class MultiPhaseVessel():
 
 
         # Re-resolve inlet in case controller changed it
-        resolved_inlets = self.resolve_inlets(completed_state,operating_conditions)
+        resolved_inlets = self.resolve_inlets(completed_state,operating_conditions,inlet_inputs)
 
         return resolved_inlets,operating_conditions
 
@@ -1747,7 +2109,7 @@ class MultiPhaseVessel():
 
         return StreamConditions(resolved)
         
-    def resolve_inlets(self,completed_state,operating_conditions)->StreamConditions:
+    def resolve_inlets(self,completed_state,operating_conditions,inlet_inputs=None)->StreamConditions:
 
         resolved = []
 
@@ -1772,13 +2134,16 @@ class MultiPhaseVessel():
                     skip_connection_level=True,
                 )
 
+                workspace_key = (connection_num, mapping.source_phaseref)
+
                 self._apply_inlet_overrides(
                     stream_phase,
                     connection.stream.get_phase_from_ref(
                         mapping.source_phaseref
                     ),
                     ops,
-                    (connection_num, mapping.source_phaseref),
+                    workspace_key,
+                    baseline=(inlet_inputs or {}).get(workspace_key),
                 )
 
 
@@ -2283,7 +2648,10 @@ class MultiPhaseVessel():
     
     def update_final_conditions(self,completed_state,time,solver_history,output_history):
         completed_state = self.complete_state(completed_state,time[-1])
-        resolved_inlets,operating_conditions = self.get_operating_conditions(time,completed_state)
+        # The final condition is one point in time, as the line above
+        # already assumes. Passing the whole array made the controller and
+        # the inlet trajectory return arrays where scalars belong.
+        resolved_inlets,operating_conditions = self.get_operating_conditions(time[-1],completed_state)
         resolved_outlets = self._resolve_outlets(completed_state,operating_conditions)
 
         # The resolved streams live in a workspace that later evaluations

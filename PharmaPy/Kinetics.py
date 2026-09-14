@@ -8,7 +8,7 @@ import json
 import re
 
 from PharmaPy.Commons import get_permutation_indexes
-from PharmaPy.Errors import PharmaPyTypeError
+from PharmaPy.Errors import PharmaPyTypeError, PharmaPyValueError
 
 # from autograd import numpy as np
 
@@ -609,27 +609,37 @@ class RxnKinetics:
 
             rxn_rates = temp_terms * f_terms
 
-            count=0
             rrates = rxn_rates.copy()
-            while count <max_iter:
-                total_rates = np.dot(rrates, self.normalized_stoich.T)
-                problem_species = total_rates + conc < -eps*10
-                if not any(problem_species):
-                    break # no <0 species
-                for spec_indx in np.where(problem_species)[0]:
-                    rxns_with_consumption = self.normalized_stoich[spec_indx,:] <0
-                    if not np.any(rxns_with_consumption):continue # it could have been fixed on a previous iteration since problem_species was defined
-                    total_consumed = np.dot(rrates[rxns_with_consumption], self.normalized_stoich[spec_indx,rxns_with_consumption])
-                    scale = min(1.0, -conc[spec_indx]/(total_consumed+eps)) # conc +scale*consumed >=0
-                    rrates[rxns_with_consumption]*=scale
-                count+=1
+
+            # The clamp is irreducibly 1-D: np.where(problem_species)[0] yields
+            # row indices on a 2-D input and conc[spec_indx] then selects a row,
+            # so `any(problem_species)` raises on a trajectory. Pre-refactor this
+            # loop lived inside `if overall_rates:`, which is why the 2-D
+            # post-processing calls (Reactors.py:686, 1037, 1555, 1722, 1732, all
+            # overall_rates=False) never reached it. Restore that guard, extended
+            # to return_both -- the refactored stack's only caller.
+            if (overall_rates or return_both) and np.asarray(conc).ndim == 1:
+                count=0
+                while count <max_iter:
+                    total_rates = np.dot(rrates, self.normalized_stoich.T)
+                    problem_species = total_rates + conc < -eps*10
+                    if not any(problem_species):
+                        break # no <0 species
+                    for spec_indx in np.where(problem_species)[0]:
+                        rxns_with_consumption = self.normalized_stoich[spec_indx,:] <0
+                        if not np.any(rxns_with_consumption):continue # it could have been fixed on a previous iteration since problem_species was defined
+                        total_consumed = np.dot(rrates[rxns_with_consumption], self.normalized_stoich[spec_indx,rxns_with_consumption])
+                        scale = min(1.0, -conc[spec_indx]/(total_consumed+eps)) # conc +scale*consumed >=0
+                        rrates[rxns_with_consumption]*=scale
+                    count+=1
+
             total_rates = np.dot(rrates, self.normalized_stoich.T)
             if return_both:
                 return rrates,total_rates
             if overall_rates:  # per species
                 return total_rates
             else:  # per rxn
-                return rrates
+                return rxn_rates  # raw, unclamped, as pre-refactor
 
 
 class CrystKinetics:
@@ -663,12 +673,27 @@ class CrystKinetics:
 
     """
 
+    # Composition bases a solubility correlation can be expressed in. The
+    # correlation itself carries no units, so which one is meant has to be
+    # stated -- "mass_conc" is ambiguous because it does not say per what.
+    # Whichever is named here is the basis the liquid composition is converted
+    # into before being compared against the solubility.
+    SOLUBILITY_BASES = (
+        'mass_per_volume_solution',   # kg solute / m3 solution
+        'mass_per_volume_solvent',    # kg solute / m3 solvent
+        'mass_per_mass_solvent',      # kg solute / kg solvent
+        'mass_per_mass_solution',     # kg solute / kg solution (= mass_frac)
+        'mole_per_volume_solution',   # kmol solute / m3 solution (= mol/L)
+        'mole_frac',                  # mole fraction
+    )
+
     def __init__(self, coeff_solub=None, solub_fn=None,
                  nucl_prim=None, nucl_sec=None, growth=None, dissolution=None,
                  solubility_type='polynomial', sup_sat_type='relative',
                  reformulate_kin=False, alpha_fn=None,
                  temp_ref=298.15, custom_mechanisms=None,
-                 mu_sec_nucl='volume'):
+                 mu_sec_nucl='volume',
+                 solubility_basis='mass_per_volume_solution'):
         """
         Parameters
         ----------
@@ -697,6 +722,17 @@ class CrystKinetics:
         self.temp_ref = temp_ref
         self.sup_sat_type = sup_sat_type
         self.reformulate_kin = reformulate_kin
+
+        if solubility_basis not in self.SOLUBILITY_BASES:
+            raise PharmaPyValueError(
+                f"solubility_basis={solubility_basis!r} is not one of "
+                f"{list(self.SOLUBILITY_BASES)}"
+            )
+
+        # Default matches original PharmaPy, which feeds solubility_temp a
+        # mass concentration on a solution-volume basis (Crystallizers.py
+        # material_balances, basis='mass_conc').
+        self.solubility_basis = solubility_basis
 
         if solub_fn is None:
             self.get_solubility = self.solubility_temp
