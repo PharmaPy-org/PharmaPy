@@ -9,6 +9,7 @@ Created on Mon Oct 28 15:35:48 2019
 import numpy as np
 from scipy.linalg import inv, ldl
 from itertools import cycle
+from typing import Callable, Optional
 
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
@@ -90,6 +91,102 @@ def convert_types(data, two_d=False):
         out.append(val)
 
     return out
+
+
+def _ordered_experiment_values(data: dict, names: list, label: str) -> list:
+    """Read an experiment mapping in the declared independent-data order.
+
+    Parameters
+    ----------
+    data : dict
+        Experiment-keyed values; array shapes and physical units are retained.
+    names : list
+        Experiment keys in the insertion order of ``x_data``.
+    label : str
+        Input name used in validation errors.
+
+    Returns
+    -------
+    list
+        Original values selected by key, without modifying caller data.
+
+    Raises
+    ------
+    ValueError
+        If experiment keys differ from those declared by ``x_data``.
+    """
+    missing = [name for name in names if name not in data]
+    unexpected = [name for name in data if name not in names]
+    if missing or unexpected:
+        raise ValueError(
+            f"{label} experiment keys must match x_data; "
+            f"missing={missing!r}, unexpected={unexpected!r}")
+    return [data[name] for name in names]
+
+
+def _experiment_arguments(data, count: int, names: Optional[list],
+                          label: str, keyword: bool) -> list:
+    """Normalize callback arguments once at the estimator boundary.
+
+    Parameters
+    ----------
+    data : tuple, list, dict or None
+        Callback arguments, preserving their model-defined units and shapes.
+    count : int
+        Number of experiments.
+    names : list or None
+        Explicit experiment keys, or None for positional datasets.
+    label : str
+        Input name used in validation errors.
+    keyword : bool
+        Whether values contain keyword dictionaries instead of argument tuples.
+
+    Returns
+    -------
+    list
+        One argument container per experiment in ``x_data`` order.
+
+    Raises
+    ------
+    ValueError
+        If keys or the number of argument containers do not match the data.
+    TypeError
+        If an experiment's keyword arguments are not a dictionary.
+
+    Notes
+    -----
+    For one experiment, a tuple contains positional callback arguments and a
+    dictionary contains callback keywords. A dictionary keyed by the sole
+    experiment name with a dictionary value instead denotes keyed keywords;
+    use a one-element list to pass that same structure as callback keywords.
+    Unnamed multiple datasets retain legacy dictionary insertion order.
+    """
+    if data is None:
+        return [{} if keyword else () for _ in range(count)]
+
+    single_keywords = keyword and count == 1 and isinstance(data, dict)
+    keyed_keywords = (single_keywords and names is not None
+                      and set(data) == set(names)
+                      and isinstance(data[names[0]], dict))
+    if single_keywords and not keyed_keywords:
+        values = [data]
+    elif isinstance(data, dict):
+        values = (list(data.values()) if names is None else
+                  _ordered_experiment_values(data, names, label))
+    elif (count == 1 and not keyword
+          and not (isinstance(data, list) and data
+                   and all(isinstance(value, tuple) for value in data))):
+        values = [data]
+    else:
+        values = list(data)
+
+    if len(values) != count:
+        raise ValueError(
+            f"{label} must contain one entry per experiment; "
+            f"expected {count}, got {len(values)}")
+    if keyword and any(not isinstance(value, dict) for value in values):
+        raise TypeError(f"Each {label} entry must be a dictionary")
+    return values
 
 
 def get_masked_ydata(y_list, masks, assign_missing=None, merge=True):
@@ -206,35 +303,44 @@ def flatten_spectral_sens(sens):
 
 
 class ParameterEstimation:
+    """Fit model parameters to weighted observations from one or more experiments.
 
-    def __init__(self, func, param_seed, x_data, y_data=None,
+    Experiment identity follows ``x_data`` keys when provided; state columns,
+    physical bases and callback units remain those declared by the model.
+    """
+
+    def __init__(self, func: Callable, param_seed, x_data, y_data=None,
                  measured_ind=None,
                  args_fun=None, kwargs_fun=None,
                  optimize_flags=None,
                  jac_fun=None, dx_finitediff=None,
                  weight_matrix=None,
-                 name_params=None, name_states=None):
+                 name_params=None, name_states=None) -> None:
         """ Create a ParameterEstimation object
 
         Parameters
         ----------
         func : callable
-            model function with signaure func(params, x_data, *args, **kwargs).
+            Model function with signature func(params, x_data, *args, **kwargs).
             It must return either an array of size len(x_i) in the one-state
             case, and an array of size len(x_i) x num_states for models
-            describing multiple states. See 'x_data' for details on x_i
+            describing multiple states. State units/bases must match ``y_data``;
+            parameter units must match ``param_seed``. See ``x_data`` for x_i.
         param_seed : array-like
-            parameter seed values.
+            Parameter seed values in the units required by ``func``.
         x_data : numpy array, list of arrays or dict
             array with experimental values for the independent variable x. If
             several datasets Ne are passed, either a list of arrays
                 x_data = [x_1, ..., x_i, ..., x_Ne]
             or a dictionary of arrays:
-                x_data = {'name_exp_1': x_1,, ..., 'name_exp_i': x_i, ...,
+                x_data = {'name_exp_1': x_1, ..., 'name_exp_i': x_i, ...,
                           'name_exp_N': x_Ne}
-            can be specified.
+            can be specified. Units follow the model independent variable
+            (typically time [s]). Dictionary insertion order declares experiment
+            order; other experiment mappings are aligned by those keys.
         y_data : numpy array or list of arrays, optional
-            experimental values for the dependent variable(s) y.
+            Experimental values for the dependent variable(s) y, in the model's
+            state units and physical bases.
             Array y is of dimension len(x_i) x N_meas, where N_meas is less
             than or equal to the number of states returned by func (Ny).
             It supports same data structures as 'x_data'. If 'ydata' is a
@@ -245,12 +351,18 @@ class ParameterEstimation:
             passed in each dataset contained in 'y_data'.
             If None, it is assumed that all the states are measured.
             The default is None.
-        args_fun : tuple or list of tuples, optional
-            positional arguments to be passed to func. For multiple datasets,
-            pass a list of tuples. The default is None.
-        kwargs_fun : dict, list of dicts, optional
-            keyword arguments to be passed to func. For multiple datasets,
-            pass a list of dicts. The default is None.
+        args_fun : tuple, list of tuples or dict of tuples, optional
+            Positional callback arguments in model-defined units. A tuple is
+            passed directly for one experiment. A list contains one tuple per
+            experiment in ``x_data`` order. With named experiments, a mapping
+            must have exactly the ``x_data`` keys. The default is None.
+        kwargs_fun : dict or list of dicts, optional
+            Callback keywords in model-defined units. For multiple experiments,
+            use a list in ``x_data`` order or a mapping with exactly its keys.
+            For one experiment, a dictionary contains callback keywords, except
+            that ``{experiment_name: keyword_dict}`` denotes keyed keywords.
+            To pass that reserved structure to the callback itself, wrap it in
+            a one-element list. The default is None.
         optimize_flags : list of bools, optional
             list with dimension len(param_seed). If a given parameter is to
             be optimized, its corresponding flag is True. Otherwise, the flag
@@ -264,11 +376,12 @@ class ParameterEstimation:
 
             The resulting array must be of size [sum_i len(x_i)] x num_params,
             which is formed by stacking jacobian matrices for each state
-            vertically. If None, the jacobian is computed using finite
-            differences. The default is None.
+            vertically, with units of state / parameter. If None, it is
+            computed using finite differences. The default is None.
         dx_finitediff : float, optional
             perturbation in the parameter space used to estimate the
-            parametric jacobian. The default is None.
+            parametric jacobian, in the corresponding parameter units.
+            The default is None.
         weight_matrix : numpy array, optional
             array with dimension N_meas x N_meas, indicating weighting
             factors for the measured states. A typical choice is a
@@ -281,7 +394,24 @@ class ParameterEstimation:
 
         Returns
         -------
-        ParameterEstimation object
+        ParameterEstimation
+            Estimator with one aligned input and callback entry per experiment.
+
+        Raises
+        ------
+        ValueError
+            If experiment mappings disagree, experiment counts differ, or no
+            experiments are supplied.
+        TypeError
+            If an experiment's keyword arguments are not a dictionary.
+
+        Notes
+        -----
+        Lists and arrays retain positional ordering. Nested state observation
+        dictionaries are passed through without treating state names as
+        experiment names. Callback mappings used with unnamed multiple datasets
+        retain their legacy insertion order; use lists to make that explicit.
+        No physical-unit or state-column conversion is performed.
 
         """
 
@@ -313,8 +443,22 @@ class ParameterEstimation:
         if isinstance(x_data, dict):
             self.experim_names = list(x_data.keys())
 
+        if isinstance(y_data, dict) and self.experim_names is not None:
+            y_data = _ordered_experiment_values(
+                y_data, self.experim_names, 'y_data')
+
         x_data = convert_types(x_data)
         y_data = convert_types(y_data, two_d=True)
+        if not x_data or len(x_data) != len(y_data):
+            raise ValueError(
+                "x_data and y_data must contain the same nonzero number of "
+                f"experiments; got {len(x_data)} and {len(y_data)}")
+
+        args_fun = _experiment_arguments(
+            args_fun, len(x_data), self.experim_names, 'args_fun', keyword=False)
+        kwargs_fun = _experiment_arguments(
+            kwargs_fun, len(x_data), self.experim_names, 'kwargs_fun',
+            keyword=True)
 
         x_model, x_masks, y_data = analyze_data(x_data, y_data)
 
@@ -337,21 +481,6 @@ class ParameterEstimation:
         self.sens_second = None  # sensitivities returned along with obj fun
 
         # ---------- Arguments
-        if args_fun is None:
-            args_fun = [()] * self.num_datasets
-        elif self.num_datasets == 1:
-            args_fun = [args_fun]
-        else:
-            args_fun = list(args_fun.values())
-
-        if kwargs_fun is None:
-            kwargs_fun = [{}] * self.num_datasets
-        elif self.num_datasets == 1:
-            # if not isinstance(kwargs_fun, list):
-            kwargs_fun = [kwargs_fun]
-        else:
-            kwargs_fun = list(kwargs_fun.values())
-
         self.args_fun = args_fun
         self.kwargs_fun = kwargs_fun
 
