@@ -265,3 +265,74 @@ def test_keyword_entries_must_be_dictionaries(experiments):
     experiments['kwargs_fun']['dilute'] = ()
     with pytest.raises(TypeError, match='Each kwargs_fun entry must be a dictionary'):
         ParameterEstimation(accumulating_concentration, [2.], **experiments)
+
+
+@pytest.mark.parametrize('named', [False, True])
+@pytest.mark.parametrize('invalid', [1., np.array(1.)], ids=['scalar', 'zero-d-array'])
+def test_positional_entries_reject_noniterables_at_construction(
+        experiments, named, invalid):
+    # Both malformed values represent the dilute initial concentration [mol/L].
+    experiments['args_fun']['dilute'] = invalid
+    if not named:
+        experiments = {key: list(value.values())
+                       for key, value in experiments.items()}
+    with pytest.raises(TypeError, match='args_fun.*iterable') as error:
+        ParameterEstimation(accumulating_concentration, [2.], **experiments)
+    identity = "['dilute']" if named else '[0]'
+    assert 'offending experiments: ' + identity in str(error.value)
+
+
+@pytest.mark.parametrize('representation', ['direct', 'unnamed-mapping'])
+def test_single_positional_scalar_is_rejected_at_construction(representation):
+    times = np.array([0., 1., 3.])  # [s], constant-rate verification schedule
+    observations = np.array([1., 3., 7.])  # [mol/L], C0=1, rate=2
+    args = 1. if representation == 'direct' else {'initial': 1.}  # [mol/L]
+    with pytest.raises(TypeError, match=r'args_fun.*offending experiments: \[0\]'):
+        ParameterEstimation(accumulating_concentration, [2.], times,
+                            observations, args_fun=args)
+
+
+@pytest.mark.parametrize('container', [list, np.array], ids=['list', 'array'])
+def test_iterable_positional_entries_preserve_callback_values(experiments, container):
+    experiments['args_fun'] = {
+        name: container(values) for name, values in experiments['args_fun'].items()
+    }  # [mol/L], retain valid iterable containers rather than requiring tuples
+    estimator = ParameterEstimation(accumulating_concentration, [2.], **experiments)
+    expected = np.array([-.1, 0., 0., -.2, 0., 0.])  # [mol/L], unit weights
+    np.testing.assert_allclose(estimator.get_objective([2.], out_array=True),
+                               expected, rtol=0., atol=ROUNDING_ATOL)
+
+
+def tuple_initial_concentration(parameters, time_s, initial):
+    """Evaluate accumulation with a tuple-valued callback argument.
+
+    Parameters
+    ----------
+    parameters : ndarray
+        Concentration-production rate [mol/L/s], shape (1,).
+    time_s : ndarray
+        Measurement times [s], shape (n_times,).
+    initial : tuple
+        One initial concentration [mol/L], shape (1,).
+
+    Returns
+    -------
+    ndarray
+        Concentrations [mol/L], shape (n_times,).
+    """
+    initial_mol_l, = initial  # [mol/L], scalar input must not replace this tuple
+    return accumulating_concentration(parameters, time_s, initial_mol_l)
+
+
+@pytest.mark.parametrize('wrapped', [False, True])
+def test_single_tuple_valued_callback_argument_has_an_explicit_escape(wrapped):
+    times = np.array([0., 1., 3.])  # [s], constant-rate verification schedule
+    observations = np.array([1., 3., 7.])  # [mol/L], C0=1, rate=2
+    args = ((1.,),)  # [mol/L], one callback argument that is itself a tuple
+    if wrapped:
+        args = [args]  # One experiment's argument container.
+    estimator = ParameterEstimation(tuple_initial_concentration, [2.], times,
+                                    observations, args_fun=args)
+    assert isinstance(estimator.args_fun[0][0], tuple)
+    np.testing.assert_allclose(estimator.get_objective([2.], out_array=True),
+                               np.zeros(3), rtol=0., atol=ROUNDING_ATOL)

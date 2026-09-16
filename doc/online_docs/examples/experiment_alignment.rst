@@ -38,6 +38,16 @@ Compatibility and ordering
   ``kwargs_fun={"gain": multiplier}`` remain direct callback arguments.
   A named experiment also accepts ``args_fun={name: (initial,)}`` and
   ``kwargs_fun={name: {"gain": multiplier}}``.
+* A single experiment's positional list of tuples is now unwrapped:
+  ``args_fun=[(initial,)]`` passes ``initial`` to the callback, whereas older
+  versions passed the tuple ``(initial,)``. To preserve a tuple-valued callback
+  argument, use ``args_fun=((initial,),)`` or ``args_fun=[((initial,),)]``.
+  A direct list such as ``args_fun=[initial]`` keeps its existing meaning.
+* Each positional argument container must be iterable. Scalar entries, including
+  zero-dimensional arrays, raise ``TypeError`` at construction with ``args_fun``
+  and the offending experiment keys (or zero-based positions for unnamed data).
+  Use ``(value,)`` to pass one scalar argument; list and array containers remain
+  supported.
 * A single experiment's keyword dictionary is interpreted as experiment-keyed
   only when its sole key is the experiment name and its value is a dictionary.
   Other dictionaries retain their direct callback meaning. To pass the reserved

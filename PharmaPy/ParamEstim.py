@@ -151,7 +151,9 @@ def _experiment_arguments(data, count: int, names: Optional[list],
     ValueError
         If keys or the number of argument containers do not match the data.
     TypeError
-        If an experiment's keyword arguments are not a dictionary.
+        If positional arguments are not iterable or keyword arguments are not
+        a dictionary. Positional errors identify experiment keys or, for
+        unnamed experiments, zero-based positions.
 
     Notes
     -----
@@ -186,6 +188,19 @@ def _experiment_arguments(data, count: int, names: Optional[list],
             f"expected {count}, got {len(values)}")
     if keyword and any(not isinstance(value, dict) for value in values):
         raise TypeError(f"Each {label} entry must be a dictionary")
+    if not keyword:
+        invalid = []
+        for name, value in zip(names if names is not None else range(count),
+                               values):
+            try:
+                iter(value)
+            except TypeError:
+                invalid.append(name)
+        if invalid:
+            raise TypeError(
+                f"Each {label} entry must be an iterable of positional "
+                f"arguments; offending experiments: {invalid!r}. "
+                "Use (value,) for a single positional argument.")
     return values
 
 
@@ -354,8 +369,13 @@ class ParameterEstimation:
         args_fun : tuple, list of tuples or dict of tuples, optional
             Positional callback arguments in model-defined units. A tuple is
             passed directly for one experiment. A list contains one tuple per
-            experiment in ``x_data`` order. With named experiments, a mapping
-            must have exactly the ``x_data`` keys. The default is None.
+            experiment in ``x_data`` order, including for one experiment:
+            ``[(initial,)]`` passes ``initial``, not ``(initial,)``. Use
+            ``((initial,),)`` when the callback argument is itself a tuple.
+            With named experiments, a mapping must have exactly the
+            ``x_data`` keys. Other iterable argument containers, such as
+            lists and one-dimensional arrays, retain their callback meaning.
+            The default is None.
         kwargs_fun : dict or list of dicts, optional
             Callback keywords in model-defined units. For multiple experiments,
             use a list in ``x_data`` order or a mapping with exactly its keys.
@@ -403,7 +423,9 @@ class ParameterEstimation:
             If experiment mappings disagree, experiment counts differ, or no
             experiments are supplied.
         TypeError
-            If an experiment's keyword arguments are not a dictionary.
+            If positional arguments are not iterable or keyword arguments are
+            not a dictionary. Positional errors identify experiment keys or,
+            for unnamed experiments, zero-based positions.
 
         Notes
         -----
