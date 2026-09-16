@@ -711,7 +711,9 @@ class ParameterEstimation:
             Solver information at the accepted parameters. ``info['fun']`` is
             the weighted residual vector [-], ordered by experiment then state
             then sample. ``info['jac']`` has shape
-            ``(num_params, num_data_total)`` and reciprocal parameter units.
+            ``(num_params, len(info['fun']))`` and reciprocal parameter units.
+            With staggered measurement grids, columns include unobserved
+            model-grid entries, so their count can exceed ``num_data_total``.
             LM additionally supplies its accepted ``x`` and solver diagnostics.
 
         Raises
