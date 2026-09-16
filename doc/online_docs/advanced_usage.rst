@@ -2,6 +2,28 @@
 Advanced features
 ====================
 
+Parameter-estimation outputs
+============================
+
+After :code:`ParameterEstimation.optimize_fn(method='LM')` or
+:code:`SimulationExec.EstimateParams(method='LM')`, reported predictions and
+residuals describe the accepted parameters in :code:`params_convg`, including
+when the solver stops after rejecting its last trial. The estimator evaluates
+the model once more per experiment to refresh its stored outputs. This also
+restores a stateful unit-operation callback to those parameters; the unit retains
+the last experiment's trajectory when several experiments share one unit.
+This reporting step does not establish convergence. Inspect the solver's
+termination diagnostics before interpreting the fit.
+
+:code:`y_model`, :code:`y_runs`, and :code:`resid_runs` retain experiment order,
+measured-state order, and the model's state units (for example [mol/L]).
+:code:`weighted_residuals` applies the observation weighting once and follows
+experiment, state, then sample order. Repeated fits replace :code:`y_model`
+instead of appending earlier fits. The accepted LM :code:`info['x']`,
+:code:`info['fun']`, :code:`info['jac']`, and solver counters are unchanged by
+the extra reporting evaluation. Objective-history recording follows the usual
+callback behavior, including duplicate removal with :code:`store_iter=True`.
+
 Liquid heat capacity
 ====================
 
