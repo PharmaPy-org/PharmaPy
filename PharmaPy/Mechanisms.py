@@ -832,6 +832,129 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             self.x_grid,
         )
     
+    # ---------------- flow terms ----------------
+    #
+    # MultiPhaseVessel calls these for every resolved transfer whose
+    # vessel-side phase owns this mechanism. Neither was implemented, so
+    # both fell through to Mechanism's empty dict and crystals never
+    # entered through a feed nor left with the product: a continuous
+    # crystallizer was a batch crystallizer with liquid flowing past it.
+    #
+    # Reference is old MSMPR.material_balances (Crystallizers.py), which
+    # writes the same expression for both discretisations:
+    #
+    #     tau_inv    = input_flow / vol
+    #     flow_state = tau_inv * (input_state - state)
+    #
+    # written there for a per-slurry-volume population n. These
+    # mechanisms carry an ABSOLUTE population N = n * vol (see the
+    # comment on VOLUME_UNIT_FACTOR), so multiplying through by vol:
+    #
+    #     dN/dt = Q * n_in  -  (Q / vol) * N
+    #
+    # the first term being the inlet half and the second the outlet half.
+    #
+    # SIGN CONVENTION: both hooks return a positive magnitude. The vessel
+    # adds inlet contributions and SUBTRACTS outlet ones
+    # (MultiPhaseVessel.add_outlet_terms does '-= value', matching how it
+    # treats species_flow), so returning a negative rate here would feed
+    # crystals back in rather than withdrawing them.
+    #
+    # Both terms are exactly zero for a vessel with no connections, which
+    # keeps a batch crystallizer untouched. They live on the base class so
+    # a resolved distribution and a set of moments behave identically --
+    # the moments path having silently had no flow terms at all.
+
+    # Populations are carried in micron-based units, so a third moment
+    # needs this to become m3.
+    VOLUME_UNIT_FACTOR = 1e-18
+
+    @property
+    def flow_state_name(self):
+        """The population state that travels with the stream."""
+        for attr in ('distribution_state_name', 'moments_state_name'):
+
+            name = getattr(self, attr, None)
+
+            if name:
+                return name
+
+        return None
+
+    def _flow_state_key(self):
+        return StateKey(self.flow_state_name, self.owning_phase_ref)
+
+    def _validate_inlet_state(self, value):
+        """Hook for a subclass to reject a feed it cannot accept."""
+        return value
+
+    def solid_volume_fraction(self, value):
+        """Solid volume per m3 of slurry, from a per-slurry-volume state.
+
+        Used to split a slurry feed's volumetric flow between its phases.
+        """
+        raise NotImplementedError
+
+    def _inlet_population_density(self, stream_phase):
+        """Feed population per m3 of slurry.
+
+        Published in that basis by MultiPhaseVessel.outputs, which is what
+        old PharmaPy moved between units -- the old crystallizer
+        multiplied by vol_slurry again on the way back into a phase.
+        """
+        name = self.flow_state_name
+
+        for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
+
+            if getattr(mechanism, 'flow_state_name', None) != name:
+                continue
+
+            value = getattr(mechanism, name, None)
+
+            if value is None:
+                continue
+
+            return self._validate_inlet_state(
+                np.asarray(value, dtype=float))
+
+        return None
+
+    def get_inlet_contributions(self, stream_phase, vessel_phase, amount,
+                                completed_state):
+
+        if not amount:
+            return {}
+
+        density = self._inlet_population_density(stream_phase)
+
+        if density is None:
+            return {}
+
+        return {self._flow_state_key(): amount * density}
+
+    def get_outlet_contributions(self, stream_phase, vessel_phase, amount,
+                                 completed_state):
+
+        if not amount:
+            return {}
+
+        vol = getattr(vessel_phase, 'vol', 0.0) or 0.0
+
+        if vol <= 0:
+            # Nothing held, so nothing to withdraw. The population is zero
+            # here in any case, so the term would vanish anyway; the guard
+            # is only to keep amount/vol finite.
+            return {}
+
+        key = self._flow_state_key()
+        state = completed_state.get(key)
+
+        if state is None:
+            state = getattr(self, self.flow_state_name)
+
+        return {key: (amount / vol) * np.asarray(state, dtype=float)}
+
+
 class OneDFVMMechanism(PopulationBalanceMechanism):
 
     def __init__(
@@ -985,106 +1108,27 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
 
     # ---------------- flow terms ----------------
     #
-    # MultiPhaseVessel calls these for every resolved transfer whose
-    # vessel-side phase owns this mechanism. Neither was implemented, so
-    # both fell through to Mechanism's empty dict and crystals never
-    # entered through a feed nor left with the product: a
-    # ContinuousCrystallizer was a batch crystallizer with liquid flowing
-    # past it.
-    #
-    # Reference is old MSMPR.material_balances (Crystallizers.py):
-    #
-    #     tau_inv      = input_flow / vol
-    #     flow_distrib = tau_inv * (input_distrib - distrib)
-    #
-    # written there for a per-slurry-volume number density n. This
-    # mechanism carries an ABSOLUTE count N = n * vol (see the comment on
-    # VOLUME_UNIT_FACTOR), so multiplying the original through by vol:
-    #
-    #     dN/dt = Q * n_in  -  (Q / vol) * N
-    #
-    # the first term being the inlet half and the second the outlet half.
-    #
-    # SIGN CONVENTION: both hooks return a positive magnitude. The vessel
-    # adds inlet contributions and SUBTRACTS outlet ones
-    # (MultiPhaseVessel.add_outlet_terms does '-= value', matching how it
-    # treats species_flow), so returning a negative rate here would feed
-    # crystals back in rather than withdrawing them.
-    #
-    # Both terms are exactly zero for a vessel with no connections, which
-    # keeps a BatchCrystallizer untouched.
+    # The inlet and outlet halves live on PopulationBalanceMechanism so
+    # this and the moments form behave identically. Only the two pieces
+    # that genuinely differ are here.
 
-    def _distribution_key(self):
-        return StateKey(self.distribution_state_name, self.owning_phase_ref)
+    def _validate_inlet_state(self, value):
+        """A feed distribution must be on this vessel's own size grid."""
+        if value.shape != self.x_grid.shape:
+            raise ValueError(
+                'An inlet crystal size distribution has %d bins but this '
+                'vessel discretises size into %d. Feeding a distribution '
+                'between different grids would need interpolation, which '
+                'is not implemented -- give both units the same x_grid.'
+                % (value.size, self.x_grid.size))
 
-    def _inlet_number_density(self, stream_phase):
-        """Feed crystal number density, counts per micron bin per m3.
+        return value
 
-        Published in that basis by MultiPhaseVessel.outputs, which is what
-        old PharmaPy transferred between units -- the old crystallizer
-        multiplied by vol_slurry again on the way back into a phase.
-        """
-        for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
-
-            name = getattr(mechanism, 'distribution_state_name', None)
-
-            if name is None:
-                continue
-
-            value = getattr(mechanism, name, None)
-
-            if value is None:
-                continue
-
-            value = np.asarray(value, dtype=float)
-
-            if value.shape != self.x_grid.shape:
-                raise ValueError(
-                    'An inlet crystal size distribution has %d bins but '
-                    'this vessel discretises size into %d. Feeding a distribution '
-                    'between different grids would need interpolation, which is '
-                    'not implemented -- give both units the same x_grid.'
-                    % (value.size, self.x_grid.size))
-
-            return value
-
-        return None
-
-    def get_inlet_contributions(self, stream_phase, vessel_phase, amount,
-                                completed_state):
-
-        if not amount:
-            return {}
-
-        density = self._inlet_number_density(stream_phase)
-
-        if density is None:
-            return {}
-
-        return {self._distribution_key(): amount * density}
-
-    def get_outlet_contributions(self, stream_phase, vessel_phase, amount,
-                                 completed_state):
-
-        if not amount:
-            return {}
-
-        vol = getattr(vessel_phase, 'vol', 0.0) or 0.0
-
-        if vol <= 0:
-            # Nothing held, so nothing to withdraw. The distribution is
-            # zero here in any case, so the term would vanish anyway; the
-            # guard is only to keep amount/vol finite.
-            return {}
-
-        key = self._distribution_key()
-        distrib = completed_state.get(key)
-
-        if distrib is None:
-            distrib = getattr(self, self.distribution_state_name)
-
-        return {key: (amount / vol) * np.asarray(distrib, dtype=float)}
-
+    def solid_volume_fraction(self, value):
+        """Solid volume per m3 of slurry, from a number density."""
+        return float(self.kv
+                     * self.compute_third_moment(value)
+                     * self.VOLUME_UNIT_FACTOR)
     def solve_population_balance(
         self,
         liquid:BasePhase,
@@ -1264,6 +1308,14 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
 
         setattr(self, moments_state_name, moments_init)
 
+        # PopulationBalanceMechanism registers a derived 'mu_n' output,
+        # computed by integrating a resolved distribution. Here the
+        # moments ARE the solver state, so that output both duplicates it
+        # and collides with it by name -- the vessel then has one name
+        # meaning two different things.
+        self.output_states = [state for state in self.output_states
+                              if state.name != moments_state_name]
+
         self.solver_states = (
             StateVariable(
                 name=moments_state_name,
@@ -1336,6 +1388,27 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         setattr(self, self.moments_state_name,
                 moments * (target_mu3 / current))
 
+    # ---------------- flow terms ----------------
+    #
+    # Inherited from PopulationBalanceMechanism. Old
+    # MSMPR.material_balances applies the identical expression to the
+    # moment set that it applies to a resolved distribution:
+    #
+    #     input_distrib = u_inputs['Inlet']['mu_n'] * (1e6)**arange(n)
+    #     flow_distrib  = tau_inv * (input_distrib - distrib)
+    #
+    # so only the volume fraction differs, mu_3 being available directly
+    # rather than needing to be integrated.
+
+    def solid_volume_fraction(self, value):
+        """Solid volume per m3 of slurry, from the third moment."""
+        moments = np.atleast_1d(np.asarray(value, dtype=float))
+
+        if len(moments) < 4:
+            return 0.0
+
+        return float(self.kv * moments[3] * self.VOLUME_UNIT_FACTOR)
+
     def solve_population_balance(
         self,
         liquid,
@@ -1398,17 +1471,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         return TransferResult(state_rates=state_rates, aux=aux,
                               net_mass_rate=mass_transfer)
 
-    def add_output_state_variables(self, outputs):
-        super().add_output_state_variables(outputs)
-        outputs.add(
-            StateVariable(
-                name="mu_n",
-                dim=4,
-                index=list(range(4)),
-                units="m**n",
-                state_type="post"
-            )
-        )
+
 
 
 

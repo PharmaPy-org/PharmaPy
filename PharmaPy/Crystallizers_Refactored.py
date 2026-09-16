@@ -48,7 +48,18 @@ class _BaseCrystallizer(MultiPhaseVessel):
                 solidphase=self.Phases.get_phase_from_ref(solidphase_ref)
             except IndexError:
                 raise IndexError("The solid phase cannot be found, did you initialize the vessel with a solid phase?")
-            pbm = solidphase.get_mechanism(OneDFVMMechanism)
+            # Matched on the base class, not OneDFVMMechanism: a
+            # crystallizer discretised by moments carries a
+            # MomentsPopulationBalance, and hardcoding the FVM class
+            # silently returned None, so the moments form could not be
+            # constructed at all.
+            pbm = solidphase.get_mechanism(PopulationBalanceMechanism)
+
+            if pbm is None:
+                raise AttributeError(
+                    'The solid phase carries no population balance mechanism. '
+                    'Attach a OneDFVMMechanism or a MomentsPopulationBalance '
+                    'to it before setting CrystKinetics.')
             pbm.liquid_phase_ref = PhaseRef("liquid",0)
             pbm.owning_phase_ref = solidphase_ref
             weights = pbm.fraction

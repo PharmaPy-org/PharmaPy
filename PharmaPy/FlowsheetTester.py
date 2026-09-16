@@ -44,7 +44,8 @@ from PharmaPy.Crystallizers_Refactored import (
     BatchCrystallizer as NewBatchCryst,
     SemiBatchCrystallizer as NewSemiBatchCryst,
     ContinuousCrystallizer as NewContCryst)
-from PharmaPy.Mechanisms import OneDFVMMechanism
+from PharmaPy.Mechanisms import (OneDFVMMechanism,
+                                 MomentsPopulationBalance)
 from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.ProcessControl_Refactored import (SimpleTemperatureController,
                                                 ContinuousVesselController)
@@ -550,7 +551,16 @@ def _cryst_solid():
     return solid
 
 
-def _continuous_cryst():
+def _moments_solid():
+    """A solid discretised by moments rather than a resolved distribution."""
+    solid = NewSolidPhase(PATH, mass=0.0, mass_frac=MASSFRAC_SOLID)
+    solid.mechanisms = MomentsPopulationBalance(
+        owning_phase=solid, target_components='C', solvent_name='solvent',
+        moments_init=np.zeros(4), scale=1e-9)
+    return solid
+
+
+def _continuous_cryst(solid_fn=_cryst_solid):
     conc = np.array([0., 0., CONC_CRYST, 0., 0.])
     unit = NewContCryst(
         integrator=AssimuloBackend(options={'maxh': 60}),
@@ -559,7 +569,7 @@ def _continuous_cryst():
             temp_func=lambda t: TEMP_CRYST))
     unit.Phases = [NewLiquidPhase(PATH, temp=TEMP_CRYST, mass_conc=conc,
                                   vol=VOL_INIT, name_solv='solvent'),
-                   _cryst_solid()]
+                   solid_fn()]
     unit.CrystKinetics = cryst_kinetics()
     unit.Inlet = NewLiquidStream(PATH, temp=TEMP_CRYST, mass_conc=conc,
                                  vol_flow=FEED_VOLFLOW,
@@ -568,13 +578,13 @@ def _continuous_cryst():
     return unit
 
 
-def _semibatch_cryst():
+def _semibatch_cryst(solid_fn=_cryst_solid):
     unit = NewSemiBatchCryst(
         integrator=AssimuloBackend(options={'maxh': 60}),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=SimpleTemperatureController(
             temp_func=cooling_profile(TIME_R01)))
-    unit.Phases = [_new_liquid(), _cryst_solid()]
+    unit.Phases = [_new_liquid(), solid_fn()]
     unit.CrystKinetics = cryst_kinetics()
     unit.Inlet = _new_feed()
     unit.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
@@ -585,15 +595,22 @@ def stage8_continuous_to_semibatch_matrix():
     """Each continuous source feeding each semibatch destination."""
     cases = (
         ('reactor -> reactor', _continuous_reactor,
-         lambda: _new_reactor(NewSemiReactor, inlet=_new_feed()), False),
+         lambda: _new_reactor(NewSemiReactor, inlet=_new_feed()), None),
         ('reactor -> crystallizer', _continuous_reactor,
-         _semibatch_cryst, False),
+         _semibatch_cryst, None),
         ('crystallizer -> crystallizer', _continuous_cryst,
-         _semibatch_cryst, True),
+         _semibatch_cryst, 'distrib'),
+        # The moments form had no flow terms at all, so crystals neither
+        # entered nor left and nothing said so.
+        ('moments cryst -> moments cryst',
+         lambda: _continuous_cryst(_moments_solid),
+         lambda: _semibatch_cryst(_moments_solid), 'mu_n'),
     )
 
     results = []
 
+    # expect_distrib names the population state a crystallizer source must
+    # hand over ('distrib' or 'mu_n'), or False for a reactor source.
     for label, make_up, make_down, expect_distrib in cases:
         flst = SimulationExec(PATH, flowsheet='U01 --> U02')
         flst.U01 = make_up()
@@ -624,10 +641,41 @@ def stage8_continuous_to_semibatch_matrix():
         # A crystallizer source must hand over its size distribution; that
         # used to be refused outright, and before that the connection
         # could not even be built.
-        if expect_distrib and 'distrib' not in arrived:
+        if expect_distrib and expect_distrib not in arrived:
             raise AssertionError(
-                '%s: crystallizer source passed no distribution (%s)'
-                % (label, sorted(arrived)))
+                '%s: crystallizer source passed no %s (%s)'
+                % (label, expect_distrib, sorted(arrived)))
+
+        # A trajectory that arrives is not the same as the right amount
+        # arriving. An upstream unit publishes vol_flow for the WHOLE
+        # stream; handing that to every phase delivered liquid + solid =
+        # 1.55x the upstream outlet and overstated the crystal feed by the
+        # same factor, while this stage still passed. Each phase must get
+        # its share, and the shares must add back up to the stream flow.
+        if expect_distrib:
+            upstream_flow = float(
+                np.asarray(flst.U01.result.outlet_vol_flow)[-1])
+            probe = {
+                'vol_flow': upstream_flow,
+                expect_distrib: np.asarray(
+                    flst.U01.outputs[expect_distrib])[-1],
+            }
+            shares = flst.U02._inlet_phase_shares(
+                flst.U02.inlet_connections[0], probe)
+
+            if shares is None:
+                raise AssertionError(
+                    '%s: a slurry feed was not split across its phases, so '
+                    'every phase receives the whole stream flow' % label)
+
+            total = sum(shares.values())
+            drift = abs(total - upstream_flow) / upstream_flow
+
+            if drift > 1e-10:
+                raise AssertionError(
+                    '%s: inlet phase flows sum to %.6e but the upstream '
+                    'outlet is %.6e (rel %.3e)'
+                    % (label, total, upstream_flow, drift))
 
         results.append(label)
 
@@ -651,7 +699,8 @@ def stage8_continuous_to_semibatch_matrix():
         raise AssertionError(
             'a reactor accepted a solid phase it cannot hold')
 
-    return '%d pairings connected; cryst -> reactor refused' % len(results)
+    return ('%d pairings connected, slurry flow conserved; '
+            'cryst -> reactor refused' % len(results))
 
 
 STAGES = (

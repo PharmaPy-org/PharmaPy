@@ -334,7 +334,15 @@ class Connection:
             #     num_distr = len(self.Matter.distrib)
             
             if 'mu_n' in states_up:
-                num_distr = len(self.Matter.moments)
+                # Old units expose the moment set as 'moments'; a
+                # refactored one carries it under the mechanism's own
+                # state name, so accept either.
+                moments = getattr(self.Matter, 'moments', None)
+
+                if moments is None:
+                    moments = getattr(self.Matter, 'mu_n')
+
+                num_distr = len(moments)
             elif 'distrib' in states_up:
                 num_distr = len(self.Matter.distrib)
             else:

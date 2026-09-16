@@ -415,14 +415,38 @@ class MultiPhaseVessel():
         nothing to stack."""
         return self.result
 
+    def _population_state_names(self):
+        """Population states the solid phases publish, e.g. distrib or mu_n.
+
+        Named by the mechanism rather than hardcoded, so a crystallizer
+        using moments publishes its moment set the way an FVM one
+        publishes its distribution. Hardcoding 'distrib' meant a moments
+        crystallizer advertised a state it never emitted, and a downstream
+        unit received no population at all.
+        """
+        names = []
+
+        for phase in self.Phases.Phases:
+
+            if phase.phase_family != 'solid':
+                continue
+
+            for mechanism in getattr(phase, 'mechanisms', None) or ():
+
+                name = getattr(mechanism, 'flow_state_name', None)
+
+                if name and name not in names:
+                    names.append(name)
+
+        return names
+
     @property
     def names_states_out(self):
         """State names carried by the outlet, in the vocabulary the old
         NameAnalyzer expects. Mirrors the old CSTR/BatchReactor lists."""
         names = ['mole_conc']
 
-        if any(p.phase_family == 'solid' for p in self.Phases.Phases):
-            names.append('distrib')
+        names.extend(self._population_state_names())
 
         names.append('temp')
         names.append('vol_flow' if self.is_continuous else 'vol')
@@ -468,8 +492,11 @@ class MultiPhaseVessel():
         if conc is not None:
             out['mole_conc'] = np.asarray(conc)
 
-        distrib = getattr(self.result, 'distrib_solid0', None)
-        if distrib is not None:
+        for population_name in self._population_state_names():
+            distrib = getattr(self.result,
+                              population_name + '_solid0', None)
+            if distrib is None:
+                continue
             # Published as a number DENSITY (counts per micron bin per m3
             # of slurry), which is the basis old PharmaPy moved between
             # units: MSMPR.material_balances feeds the received
@@ -486,7 +513,7 @@ class MultiPhaseVessel():
                 safe = np.where(vol > 0, vol, 1.0)
                 distrib = distrib / safe.reshape(-1, 1)
 
-            out['distrib'] = distrib
+            out[population_name] = distrib
 
         temp = getattr(self.result, 'global_temp', None)
         if temp is not None:
@@ -1505,6 +1532,75 @@ class MultiPhaseVessel():
         return {name: value for name, value in values.items()
                 if name not in owned and name not in foreign}
 
+    def _inlet_phase_shares(self, connection, trajectory):
+        """Volumetric flow carried by each phase of a feed.
+
+        An upstream unit publishes vol_flow for the WHOLE stream, so
+        handing that value to every phase counts it once per phase. For a
+        slurry feed that delivered liquid + solid = 1.55x the upstream
+        outlet flow, and overstated the crystal feed by the same factor.
+        Splitting it restores the invariant the rest of resolve_inlets
+        assumes: each phase vol_flow is that phase share, and their sum is
+        the stream flow.
+
+        The solid share is its volume fraction, which the distribution
+        gives directly: it is published per m3 of slurry, so
+        kv * mu_3 * VOLUME_UNIT_FACTOR is already a fraction.
+
+        Returns None when there is nothing to split -- a static feed, or a
+        single-phase one whose share is the whole flow either way.
+        """
+        if not trajectory or 'vol_flow' not in trajectory:
+            return None
+
+        refs = [m.source_phaseref for m in connection.phase_mappings]
+
+        if len(refs) < 2:
+            return None
+
+        total_flow = float(trajectory['vol_flow'])
+        shares = {}
+        solid_fraction = 0.0
+
+        for ref in refs:
+
+            if ref.phase_type == 'liquid':
+                continue
+
+            fraction = 0.0
+
+            try:
+                phase = self.phase_states.get_phase(ref)
+            except KeyError:
+                phase = None
+
+            for mechanism in getattr(phase, 'mechanisms', None) or ():
+
+                name = getattr(mechanism, 'flow_state_name', None)
+
+                if name is None or name not in trajectory:
+                    continue
+
+                # The mechanism knows how to read its own population: an
+                # integral over a resolved distribution, or mu_3 directly.
+                fraction = mechanism.solid_volume_fraction(
+                    np.asarray(trajectory[name], dtype=float))
+
+            shares[ref] = max(fraction, 0.0)
+            solid_fraction += shares[ref]
+
+        solid_fraction = min(solid_fraction, 1.0)
+
+        remaining = [ref for ref in refs if ref not in shares]
+
+        if remaining:
+            each = (1.0 - solid_fraction) / len(remaining)
+
+            for ref in remaining:
+                shares[ref] = each
+
+        return {ref: share * total_flow for ref, share in shares.items()}
+
     def _get_inlet_workspace(self, connection_num, connection):
 
         workspaces = getattr(self, "_inlet_workspaces", None)
@@ -2240,6 +2336,20 @@ class MultiPhaseVessel():
         for connection_num, connection in enumerate(self.inlet_connections):
 
             inlet_stream = self._get_inlet_workspace(connection_num, connection)
+
+            # The trajectory is recorded once per connection, so any
+            # mapping entry carries the same connection-level states.
+            trajectory = None
+
+            for mapping in connection.phase_mappings:
+                trajectory = (inlet_inputs or {}).get(
+                    (connection_num, mapping.source_phaseref))
+
+                if trajectory:
+                    break
+
+            phase_flows = self._inlet_phase_shares(connection, trajectory)
+
             transfers= []
             for mapping in connection.phase_mappings:
                 stream_phase = inlet_stream.get_phase_from_ref(mapping.source_phaseref)
@@ -2273,6 +2383,20 @@ class MultiPhaseVessel():
 
                 workspace_key = (connection_num, mapping.source_phaseref)
 
+                baseline = (inlet_inputs or {}).get(workspace_key)
+
+                # Give this phase its share of the stream flow rather than
+                # the whole of it, so the species_flow below is this phase
+                # share too. The solid is deliberately left out: a vol_flow
+                # on it drives set_mass, which would rescale the very
+                # distribution just applied.
+                if (phase_flows is not None and baseline
+                        and 'vol_flow' in baseline
+                        and mapping.source_phaseref.phase_type == 'liquid'):
+                    baseline = dict(baseline)
+                    baseline['vol_flow'] = phase_flows[
+                        mapping.source_phaseref]
+
                 self._apply_inlet_overrides(
                     stream_phase,
                     connection.stream.get_phase_from_ref(
@@ -2280,11 +2404,16 @@ class MultiPhaseVessel():
                     ),
                     ops,
                     workspace_key,
-                    baseline=(inlet_inputs or {}).get(workspace_key),
+                    baseline=baseline,
                 )
 
 
                 species_flow = getattr(stream_phase,self.basis+"_flow")
+
+                phase_vol_flow = stream_phase.vol_flow
+
+                if phase_flows is not None:
+                    phase_vol_flow = phase_flows[mapping.source_phaseref]
 
 
                 transfers.append(
@@ -2293,7 +2422,7 @@ class MultiPhaseVessel():
                         mapping=mapping,
                         vessel_phase=vessel_phase,
                         stream_phase=stream_phase,
-                        vol_flow=stream_phase.vol_flow,
+                        vol_flow=phase_vol_flow,
                         species_flow=species_flow,
                         direction="inlet",
                     )
