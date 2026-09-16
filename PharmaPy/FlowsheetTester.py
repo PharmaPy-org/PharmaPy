@@ -64,8 +64,28 @@ RXNS = ['A + B --> C', 'C + A --> D']
 K_VALS = np.array([2.654e4, 5.3e2])
 EA_VALS = np.array([4.0e4, 3.0e4])
 
+# The old units and the refactored ones now want nucleation in DIFFERENT
+# units, so they no longer share one constant.
+#
+# Old PharmaPy's BatchCryst multiplies nucleation by the slurry volume inside
+# fvm_method (it passes vol=vol_slurry), so its prefactors are per unit of
+# whatever basis that implies. The refactored mechanisms take nucleation as
+# #/(s m3 slurry) and never multiply, so their prefactor absorbs that factor
+# once: kP_intensive = kP_old * vol_slurry.
+#
+# This is the unit conversion implied by the basis change, NOT a refit. With
+# the unconverted values the refactored chemistry is about 1/VOL_INIT = 17x
+# hotter and no longer integrates at all (CVode corrector failures near
+# t = 1270 s). A genuine refit against experimental data is still outstanding.
 PRIM = (3e8, 0, 3)
 SEC = (4.46e10, 0, 2, 1e-5)
+
+# Literal rather than VOL_INIT, which is defined further down; they are the
+# same nominal vessel volume and the assert below keeps them that way.
+_NUCL_BASIS_VOL = 0.06
+
+PRIM_INTENSIVE = (PRIM[0] * _NUCL_BASIS_VOL, PRIM[1], PRIM[2])
+SEC_INTENSIVE = (SEC[0] * _NUCL_BASIS_VOL, SEC[1], SEC[2], SEC[3])
 GROWTH = (5, 0, 1.32)
 DISSOL = (1, 0, 1)
 SOLUB = np.array([2.269e2, -1.88e0, 3.89e-3])
@@ -76,6 +96,8 @@ MASSFRAC_SOLID = [0, 0, 1, 0, 0]
 TEMP_INIT = 313.15
 CONC_INIT = np.array([0.33, 0.33, 0, 0, 0])
 VOL_INIT = 0.06
+assert VOL_INIT == _NUCL_BASIS_VOL, (
+    'the nucleation basis conversion above assumes the nominal vessel volume')
 
 FEED_VOLFLOW = 1e-5      # m3/s
 
@@ -104,8 +126,16 @@ def rxn_kinetics():
                        ea_params=EA_VALS)
 
 
-def cryst_kinetics():
+def old_cryst_kinetics():
+    """For the pre-refactor crystallizers, which scale nucleation themselves."""
     return CrystKinetics(SOLUB, nucl_prim=PRIM, nucl_sec=SEC, growth=GROWTH,
+                         dissolution=DISSOL)
+
+
+def cryst_kinetics():
+    """For the refactored mechanisms: nucleation in #/(s m3 slurry)."""
+    return CrystKinetics(SOLUB, nucl_prim=PRIM_INTENSIVE,
+                         nucl_sec=SEC_INTENSIVE, growth=GROWTH,
                          dissolution=DISSOL)
 
 
@@ -165,7 +195,7 @@ def stage1_all_old():
                            mass_frac=MASSFRAC_SOLID)
     flst.CR01 = OldBatchCryst(target_comp='C', method='1D-FVM', scale=1e-9,
                               controls={'temp': cooling_profile()})
-    flst.CR01.Kinetics = cryst_kinetics()
+    flst.CR01.Kinetics = old_cryst_kinetics()
     flst.CR01.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
     flst.CR01.Phases = solid_cry
 
@@ -206,7 +236,7 @@ def stage2_new_new_old():
     cryst_solid = NewSolidPhase(PATH, mass=0.0, mass_frac=MASSFRAC_SOLID)
     cryst_solid.mechanisms = OneDFVMMechanism(
         cryst_solid, target_components='C', solvent_name='solvent',
-        x_grid=X_GR, distrib_init=np.zeros_like(X_GR), scale=1e-9)
+        x_grid=X_GR, distrib_init=np.zeros_like(X_GR))
 
     flst.CR01 = NewBatchCryst(
         integrator=AssimuloBackend(options={'maxh': 60}),
@@ -260,7 +290,7 @@ def stage3_new_old_new_old():
     cryst_solid = NewSolidPhase(PATH, mass=0.0, mass_frac=MASSFRAC_SOLID)
     cryst_solid.mechanisms = OneDFVMMechanism(
         cryst_solid, target_components='C', solvent_name='solvent',
-        x_grid=X_GR, distrib_init=np.zeros_like(X_GR), scale=1e-9)
+        x_grid=X_GR, distrib_init=np.zeros_like(X_GR))
 
     flst.CR01 = NewSemiBatchCryst(
         integrator=AssimuloBackend(options={'maxh': 60}),
@@ -547,7 +577,7 @@ def _cryst_solid():
     solid = NewSolidPhase(PATH, mass=0.0, mass_frac=MASSFRAC_SOLID)
     solid.mechanisms = OneDFVMMechanism(
         solid, target_components='C', solvent_name='solvent',
-        x_grid=X_GR, distrib_init=np.zeros_like(X_GR), scale=1e-9)
+        x_grid=X_GR, distrib_init=np.zeros_like(X_GR))
     return solid
 
 
@@ -556,7 +586,7 @@ def _moments_solid():
     solid = NewSolidPhase(PATH, mass=0.0, mass_frac=MASSFRAC_SOLID)
     solid.mechanisms = MomentsPopulationBalance(
         owning_phase=solid, target_components='C', solvent_name='solvent',
-        moments_init=np.zeros(4), scale=1e-9)
+        moments_init=np.zeros(4))
     return solid
 
 
@@ -703,6 +733,121 @@ def stage8_continuous_to_semibatch_matrix():
             'cryst -> reactor refused' % len(results))
 
 
+# =====================================================================
+# Stage 9 -- the 1D-FVM and the method of moments are two discretisations
+# of the same population balance. With SIZE-INDEPENDENT growth the moment
+# equations are an exact closure of it,
+#
+#     dmu_0/dt = B,   dmu_k/dt = k*G*mu_(k-1) + B*rad**k
+#
+# with no discretisation in size at all, so the moments run is the
+# analytical reference and the FVM must converge to it. The moments form
+# carries no distribution, which is why MASS is the quantity to compare.
+# =====================================================================
+CROSS_TEMP = 278.15
+CROSS_CONC = 40.0
+CROSS_RUN = 1800.0
+
+
+def _cross_crystallizer(mechanism_factory):
+    solid = NewSolidPhase(PATH, mass=0.0, mass_frac=MASSFRAC_SOLID)
+    solid.mechanisms = mechanism_factory(solid)
+
+    unit = NewBatchCryst(
+        integrator=AssimuloBackend(options={'maxh': 60}),
+        h_conv=H_CONV, diam=VESSEL_DIAM,
+        controller=SimpleTemperatureController(
+            temp_func=lambda t: CROSS_TEMP))
+    unit.Phases = [NewLiquidPhase(PATH, temp=CROSS_TEMP,
+                                  mass_conc=np.array([0., 0., CROSS_CONC,
+                                                      0., 0.]),
+                                  vol=VOL_INIT, name_solv='solvent'),
+                   solid]
+    unit.CrystKinetics = cryst_kinetics()   # 3-parameter: size independent
+    unit.Utility = CoolingWater(mass_flow=1, temp_in=CROSS_TEMP)
+    unit.solve_unit(runtime=CROSS_RUN)
+
+    mech = solid.mechanisms
+    mech = mech[0] if isinstance(mech, (list, tuple)) else mech
+
+    return unit, mech
+
+
+def _crystal_mass(mech, mu3):
+    return (mech.getDensity() * mech.kv * mu3
+            * mech.VOLUME_UNIT_FACTOR * mech.slurry_volume)
+
+
+def stage9_fvm_versus_moments():
+    """Two discretisations, one physics, compared on mass."""
+    moments_unit, moments_mech = _cross_crystallizer(
+        lambda solid: MomentsPopulationBalance(
+            owning_phase=solid, target_components='C',
+            solvent_name='solvent', moments_init=np.zeros(4), rad=1.0))
+
+    reference = _crystal_mass(
+        moments_mech, np.asarray(moments_unit.result.mu_n_solid0)[-1, 3])
+
+    liquid = np.asarray(moments_unit.result.mass_j_liquid0)
+    lost = liquid[0, 2] - liquid[-1, 2]
+
+    # The moment closure is exact, so it must conserve mass outright. This is
+    # the tightest mass-balance check in the suite -- the FVM can only manage
+    # it in the limit.
+    drift = abs(reference - lost) / lost
+
+    if drift > 1e-6:
+        raise AssertionError(
+            'the moment closure should conserve mass exactly, but crystal '
+            '%.9f kg vs liquid lost %.9f kg (rel %.2e)'
+            % (reference, lost, drift))
+
+    gaps = []
+
+    for cells in (400, 800):
+        grid = np.linspace(1.0, 2000.0, cells)
+        unit, mech = _cross_crystallizer(
+            lambda solid, g=grid: OneDFVMMechanism(
+                solid, target_components='C', solvent_name='solvent',
+                x_grid=g, distrib_init=np.zeros_like(g)))
+
+        # The FVM injects nuclei at x_grid[0], which is why the moments run
+        # above is given rad=1.0 to match. A mismatch here shows up as a
+        # constant offset that refinement never removes.
+        if float(mech.rad) != 1.0:
+            raise AssertionError(
+                'nucleus size mismatch: FVM injects at %.4f, moments used 1.0'
+                % mech.rad)
+
+        distrib = np.asarray(unit.result.distrib_solid0)[-1]
+        mass = _crystal_mass(mech, mech.integrate_over_size(distrib * grid**3))
+        gaps.append(abs(mass - reference) / reference)
+
+        # the liquid side is not a discretisation question: both remove the
+        # same solute, so they must agree closely at any resolution
+        fvm_liquid = np.asarray(unit.result.mass_j_liquid0)[-1, 2]
+        rel_liquid = abs(fvm_liquid - liquid[-1, 2]) / liquid[-1, 2]
+
+        if rel_liquid > 1e-4:
+            raise AssertionError(
+                'liquid composition disagrees between the two schemes at %d '
+                'cells: FVM %.9f vs moments %.9f (rel %.2e)'
+                % (cells, fvm_liquid, liquid[-1, 2], rel_liquid))
+
+    if gaps[-1] > 0.02:
+        raise AssertionError(
+            'FVM crystal mass is %.3f%% from the moment closure at 800 cells'
+            % (100 * gaps[-1]))
+
+    if gaps[-1] > 0.6 * gaps[0]:
+        raise AssertionError(
+            'the FVM is not converging to the moment closure: %.3f%% at 400 '
+            'cells, %.3f%% at 800' % (100 * gaps[0], 100 * gaps[1]))
+
+    return ('moments closes exactly; FVM within %.2f%% and converging'
+            % (100 * gaps[-1]))
+
+
 STAGES = (
     ('0  old Filter alone                                 ', stage0_filter_alone),
     ('1  all-old   R01 -> CR01 -> F01                     ', stage1_all_old),
@@ -713,6 +858,7 @@ STAGES = (
     ('6  new -> new   Continuous -> Semibatch             ', stage6_new_continuous_to_semibatch),
     ('7  new -> new   Continuous -> Batch (must refuse)   ', stage7_new_continuous_to_batch_refused),
     ('8  continuous -> semibatch, all pairings            ', stage8_continuous_to_semibatch_matrix),
+    ('9  1D-FVM vs moments, compared on mass              ', stage9_fvm_versus_moments),
 )
 
 

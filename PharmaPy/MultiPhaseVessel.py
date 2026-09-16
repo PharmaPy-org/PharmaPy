@@ -497,21 +497,14 @@ class MultiPhaseVessel():
                               population_name + '_solid0', None)
             if distrib is None:
                 continue
-            # Published as a number DENSITY (counts per micron bin per m3
-            # of slurry), which is the basis old PharmaPy moved between
-            # units: MSMPR.material_balances feeds the received
+            # The solver state is already a number DENSITY per m3 of
+            # slurry, which is the basis old PharmaPy moved between units:
+            # MSMPR.material_balances feeds the received
             # u_inputs['Inlet']['distrib'] straight into
-            # tau_inv * (input_distrib - distrib), and the old
-            # crystallizer multiplied by vol_slurry again on the way back
-            # into a phase. The solver state here is an absolute count, so
-            # divide by the vessel volume before handing it downstream.
+            # tau_inv * (input_distrib - distrib). It used to be an absolute
+            # count and was divided by the vessel volume here; that division
+            # is now wrong twice over.
             distrib = np.asarray(distrib, dtype=float)
-            vol = getattr(self.result, 'vessel_vol', None)
-
-            if vol is not None:
-                vol = np.asarray(vol, dtype=float)
-                safe = np.where(vol > 0, vol, 1.0)
-                distrib = distrib / safe.reshape(-1, 1)
 
             out[population_name] = distrib
 

@@ -44,6 +44,7 @@ def new_temp_profile(x):
 # track it; swap in DefaultContinuousVesselVolume to let the utility duty
 # set the temperature instead.
 control = ContinuousVesselController(temp_func=new_temp_profile)
+control = SimpleTemperatureController(temp_func=new_temp_profile)
 # -----------------------------
 # Reactor Setup
 # -----------------------------
@@ -101,11 +102,11 @@ cryst_kinetics =build_crysts(fitted_kinetics)
 Ckinetics = CrystKinetics(np.array([-28.13909202,	0.001,	5.900800253]),**cryst_kinetics, solubility_type='apelblat',
                           solubility_basis='mass_per_volume_solvent')
 Utility = CoolingWater(mass_flow=100, temp_in=273.55)
-vessel.Utility = Utility
+# vessel.Utility = Utility
 # vessel.RxnKinetics = Rkinetics
 vessel.CrystKinetics = Ckinetics
 # vessel.controller.target_volume=1e-2
-vessel.Inlet = inlet
+# vessel.Inlet = inlet
 
 
 # -----------------------------

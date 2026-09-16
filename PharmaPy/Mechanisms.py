@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import copy
 from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
@@ -476,6 +477,14 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             fraction[self.target_ind] = np.full(len(self.target_components),1/len(self.target_components))
         self.fraction = fraction
 
+        # Set on every right-hand side evaluation; see _slurry_volume.
+        self.slurry_volume = None
+
+        # The liquid this population is suspended in, set when the vessel
+        # wires its phase connections. Needed to turn an intensive population
+        # into an inventory at any point, not just after a solve.
+        self.liquid_phase = None
+
         self._timers = {}
 
     @property
@@ -539,12 +548,20 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         moments = np.zeros(4)
 
         for n in range(4):
-            moments[n] = np.trapezoid(
-                distrib * x_grid**n,
-                x_grid,
-            )
+            moments[n] = self.integrate_over_size(distrib * x_grid**n,
+                                                  x_grid)
 
         return moments * self.MOMENT_UNIT_FACTOR ** np.arange(4)
+
+    def integrate_over_size(self, integrand, x_grid=None):
+        """Quadrature for a moment integral.
+
+        A scheme that carries cell averages must integrate them the same way
+        it advances them, or its moments do not obey its own conservation
+        law. Subclasses override this; the generic rule is the trapezoid.
+        """
+        return np.trapezoid(integrand, self.x_grid if x_grid is None
+                            else x_grid)
 
     
     def liquid_in_solubility_basis(self, liquid):
@@ -832,6 +849,82 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             self.x_grid,
         )
     
+    # ---------------- basis helpers ----------------
+    #
+    # The population state is a number DENSITY per m3 of slurry. The slurry
+    # volume therefore appears at exactly two boundaries, where an intensive
+    # quantity becomes an extensive one: the mass transfer leaving the
+    # population balance, and the solid inventory. Nowhere else -- in
+    # particular NOT on the nucleation rate, which is already #/(s m3 slurry).
+    #
+    # The old `scale` argument was meant as numerical conditioning, but it
+    # multiplied the state without being divided back out of the moments, so
+    # it acted as a nucleation multiplier and moved a batch answer by 1e8
+    # between scale=1 and scale=1e-9. It is accepted and ignored now; solver
+    # tolerances do this job.
+
+    @staticmethod
+    def _reject_scale(scale):
+        if scale is None or scale == 1:
+            return
+
+        warnings.warn(
+            'scale= is deprecated and ignored. It was meant as numerical '
+            'conditioning but leaked into the physics, acting as a '
+            'nucleation multiplier. The population balance is now written so '
+            'that no conditioning factor is needed.',
+            DeprecationWarning,
+            stacklevel=3,
+        )
+
+    def true_state(self, state):
+        """Kept so callers written against the scaled state still work."""
+        return np.asarray(state, dtype=float)
+
+    def slurry_volume_from(self, liquid, true_state):
+        """Slurry volume implied by the liquid volume and the solid fraction.
+
+        Under the intensive basis kv * mu_3 is a volume FRACTION (m3 of
+        crystal per m3 of slurry), not a volume, so the old
+        ``vol_liquid + kv*mu_3`` no longer makes sense dimensionally:
+        vol_slurry = vol_liquid / (1 - phi).
+
+        Takes the TRUE (unscaled) population state and asks
+        solid_volume_fraction for phi, so there is one convention for the
+        fraction rather than one helper wanting micron-based moments and
+        another metre-based ones.
+        """
+        phi = min(max(self.solid_volume_fraction(true_state), 0.0),
+                  1.0 - 1e-12)
+
+        vol_slurry = float(liquid.vol) / (1.0 - phi)
+        self.slurry_volume = vol_slurry
+
+        return vol_slurry
+
+    def _slurry_volume(self, true_state=None):
+        """Slurry volume for the inventory accessors.
+
+        The inventory is read DURING a right-hand side evaluation -- the
+        solid's vol setter calls set_mass -- and that can happen before
+        solve_population_balance has run and cached a volume. So compute it
+        from the liquid phase when one is known, and only fall back to the
+        cache. Raising here instead surfaced as an opaque
+        'repeated recoverable right-hand side errors' from CVode.
+        """
+        liquid = getattr(self, 'liquid_phase', None)
+
+        if liquid is not None and true_state is not None:
+            try:
+                return self.slurry_volume_from(liquid, true_state)
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+        if self.slurry_volume is not None:
+            return self.slurry_volume
+
+        return 0.0
+
     # ---------------- flow terms ----------------
     #
     # MultiPhaseVessel calls these for every resolved transfer whose
@@ -846,11 +939,10 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     #     tau_inv    = input_flow / vol
     #     flow_state = tau_inv * (input_state - state)
     #
-    # written there for a per-slurry-volume population n. These
-    # mechanisms carry an ABSOLUTE population N = n * vol (see the
-    # comment on VOLUME_UNIT_FACTOR), so multiplying through by vol:
+    # for a per-slurry-volume population n, which is exactly the basis
+    # these mechanisms carry, so it applies unchanged:
     #
-    #     dN/dt = Q * n_in  -  (Q / vol) * N
+    #     dn/dt = (Q / vol) * n_in  -  (Q / vol) * n
     #
     # the first term being the inlet half and the second the outlet half.
     #
@@ -925,12 +1017,19 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         if not amount:
             return {}
 
+        vol = getattr(vessel_phase, 'vol', 0.0) or 0.0
+
+        if vol <= 0:
+            return {}
+
         density = self._inlet_population_density(stream_phase)
 
         if density is None:
             return {}
 
-        return {self._flow_state_key(): amount * density}
+        # Intensive state, so this is the MSMPR form directly:
+        #     dn/dt = (Q/vol) * (n_in - n)
+        return {self._flow_state_key(): (amount / vol) * density}
 
     def get_outlet_contributions(self, stream_phase, vessel_phase, amount,
                                  completed_state):
@@ -968,7 +1067,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         density=None,
         kv=1,
         distribution_state_name="distrib",
-        scale=1
+        scale=None,
+        rad=None,
     ):
         """
         Assumes an x_grid of constant dx
@@ -982,10 +1082,30 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             kv=kv)
 
         self.x_grid = np.asarray(x_grid)
+
+        if len(self.x_grid) < 2:
+            raise ValueError(
+                'A size grid needs at least two nodes to have a cell width.')
+
+        if np.any(np.diff(self.x_grid) <= 0):
+            raise ValueError(
+                'The size grid must be strictly increasing.')
+
         self.x_grid_sq = self.x_grid**2
         self.x_grid_cu = self.x_grid**3
-        self.dx = self.x_grid[1] - self.x_grid[0]
-        self.rad = self.x_grid[0]
+        self.dx = self._cell_widths(self.x_grid)
+        # Nucleus size for the nucleation MASS term. This must equal the size
+        # at which the boundary condition injects nuclei, which for this
+        # discretisation is the first grid node: the flux at the left face is
+        # G*n(0) = B, so the population gains B*x_grid[0]**3 of volume per
+        # second. Accounting for it as B*rad_zero**3 with rad_zero = 0 -- as
+        # the original does -- means the crystals gain mass the liquid never
+        # gave up. Measured on an empty vessel, the population balance grew
+        # mu_3 at 8.5e-5 kg/s while the mass transfer reported 6e-18 kg/s.
+        #
+        # Overridable for a genuinely different nucleus size, but it should
+        # track the grid unless you know why it should not.
+        self.rad = self.x_grid[0] if rad is None else rad
         self.distribution_state_name = distribution_state_name
         assert len(distrib_init)==len(x_grid), "x_grid and distrib must be the same length"
         setattr(self,distribution_state_name,distrib_init)
@@ -995,13 +1115,14 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
                 name=distribution_state_name,
                 phaseref=None,
                 dim=len(self.x_grid),
-                units="#/(micron m3)",
+                units="#/(micron m3 slurry)",
                 state_type="diff",
                 limit_negative_inventory=False
             ),
         )
 
-        self.scale =scale
+        self._reject_scale(scale)
+        self.scale = 1
         self._update_exposed_attributes()
         self.expose('x_grid')
 
@@ -1041,6 +1162,24 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             **kwargs,
         )
 
+    def integrate_over_size(self, integrand, x_grid=None):
+        """Rectangle rule, because this scheme stores CELL AVERAGES.
+
+        ``dcsd_dt = -diff(flux)/dx`` advances cell averages, so the moment
+        consistent with that conservation law is ``sum(n * x**k * dx)``, with
+        dx the per-cell width -- a scalar on a uniform grid, an array on a
+        geometric one, broadcasting either way. The
+        trapezoid rule gives the first and last nodes half weight -- and the
+        nucleation boundary condition injects every nucleus into exactly the
+        first cell, so the population balance gained mu_3 at twice the rate
+        the mass transfer removed solute from the liquid. Measured as a clean
+        0.5000 ratio over 400 samples before this changed.
+
+        The original carries the same mismatch: SolidPhase.getMoments is a
+        trapezoid over the same cell averages.
+        """
+        return np.sum(integrand * self.dx)
+
     def compute_second_moment(
             self,
             distrib,
@@ -1049,7 +1188,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             Compute second moment from a number density distribution.
             """
     
-            return np.trapezoid(distrib * self.x_grid_sq, self.x_grid)
+            return self.integrate_over_size(distrib * self.x_grid_sq)
     def compute_third_moment(
             self,
             distrib,
@@ -1057,7 +1196,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         """
         Compute third moment from a number density distribution.
         """
-        return np.trapezoid(distrib * self.x_grid_cu, self.x_grid)
+        return self.integrate_over_size(distrib * self.x_grid_cu)
     # compute_third_moment integrates over x_grid in microns, so its result is
     # in micron**3 and this converts it to m**3. The solid inventory is then
     # density * kv * mu_3, with no volume factor: the original crystallizer
@@ -1067,22 +1206,38 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
     VOLUME_UNIT_FACTOR = 1e-18
 
     def get_mass(self):
-        m3 = self.compute_third_moment(getattr(self,self.distribution_state_name))
+        # mu_3 is now m3 of crystal per m3 of slurry, so the inventory needs
+        # the slurry volume to become a mass.
+        distribution = self.true_state(
+            getattr(self,self.distribution_state_name))
+        m3 = self.compute_third_moment(distribution)
         return (
             self.getDensity()
             * self.kv
             * m3
             * self.VOLUME_UNIT_FACTOR
+            * self._slurry_volume(distribution)
         )
     def set_mass(self, mass):
 
         if mass is None:
             return
 
+        vol_slurry = self._slurry_volume(
+            self.true_state(getattr(self,self.distribution_state_name)))
+
+        if vol_slurry <= 0:
+            if mass == 0:
+                return
+            raise ValueError(
+                'Cannot set a crystal mass without knowing the slurry volume; '
+                'the distribution is a number density per m3 of slurry.')
+
         target_m3 = mass / (
             self.getDensity()
             * self.kv
             * self.VOLUME_UNIT_FACTOR
+            * vol_slurry
         )
 
         self.set_third_moment(target_m3)
@@ -1096,15 +1251,51 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
 
         distribution = getattr(self,self.distribution_state_name)
 
-        current_m3 = self.compute_third_moment(distribution)
+        # target_m3 is a TRUE moment, so compare against the true state; the
+        # ratio is then applied to the conditioned state, which is what is
+        # actually stored.
+        current_m3 = self.compute_third_moment(self.true_state(distribution))
         if target_m3==0 and current_m3 == 0:
             return
         if current_m3 <= 0:
             raise ValueError("Cannot scale a distribution with zero third moment.")
 
-        scale = target_m3 / current_m3
+        factor = target_m3 / current_m3
 
-        setattr(self,self.distribution_state_name,distribution * scale)
+        setattr(self,self.distribution_state_name,distribution * factor)
+
+    @staticmethod
+    def _cell_widths(x_grid):
+        """Width of the finite volume cell around each grid node.
+
+        A uniform grid gives one scalar. A geometric grid -- which is the
+        natural choice here, because it resolves the small sizes where
+        nucleation happens -- gives an array, with cell faces at the
+        geometric mean of adjacent nodes and the outer two extrapolated by
+        the grid ratio.
+
+        This mirrors Phases.getDistribution and the Slurry setup in
+        MixedPhases, which is where the original computes exactly the same
+        thing; the refactor had reduced it to ``x_grid[1] - x_grid[0]``, a
+        single scalar applied to every cell. On geomspace(1, 1500, 35) that
+        is 0.24 micron standing in for cells up to 323 micron wide -- a 1347x
+        misweighting of the largest cells, in both the flux divergence and
+        the moment integrals.
+        """
+        widths = np.diff(x_grid)
+
+        if np.allclose(widths, widths[0], rtol=1e-8):
+            return widths[0]
+
+        ratio = x_grid[1] / x_grid[0]
+        faces = np.zeros(len(x_grid) + 1)
+        interior = np.sqrt(x_grid[1:] * x_grid[:-1])
+
+        faces[0] = interior[0] / ratio
+        faces[-1] = interior[-1] * ratio
+        faces[1:-1] = interior
+
+        return np.diff(faces)
 
     # ---------------- flow terms ----------------
     #
@@ -1147,7 +1338,9 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         csd = completed_state[statekey]
         self._timers['statekey_construct'] = self._timers.get('statekey_construct',0)+perf_counter()-t0
         t0 = perf_counter()
-        moms = self.compute_moments(csd,self.x_grid)
+        # Physics reads the true population, never the conditioned state.
+        csd_true = self.true_state(csd)
+        moms = self.compute_moments(csd_true,self.x_grid)
         self._timers['pop_balance_compute_moments'] = self._timers.get('pop_balance_compute_moments',0)+perf_counter()-t0
 
         # mu_2 is in m**2, matching the original's getMoments basis. The
@@ -1167,11 +1360,15 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             )
         )
         self._timers['pop_balance_compute_kinetics'] = self._timers.get('pop_balance_compute_kinetics',0)+perf_counter()-t0
-        # The original scales nucleation by the slurry volume, not the liquid
-        # volume: vol_solid = mu_3 * kv with mu_3 in m**3
-        # (Crystallizers.py::material_balances).
-        vol_slurry = liquid.vol + moms[3] * self.kv
-        nucl *= self.scale * vol_slurry
+        # nucl is #/(s m3 slurry) and the distribution is a number density on
+        # that same basis, so there is NO volume factor here. Multiplying by
+        # vol_slurry made the distribution an absolute count, which in turn
+        # made the moments fed back into get_kinetics extensive -- so
+        # secondary nucleation, which depends on magma density, scaled with
+        # vessel size. The volume returns once, on the mass transfer below.
+        vol_slurry = self.slurry_volume_from(liquid, csd_true)
+        nucl_intensive = nucl
+        nucl = nucl_intensive
         impurity_factor = self.mechanism_kinetics.alpha_fn(conc) #TODO check if con is the right units
         growth *= impurity_factor
         t0 = perf_counter()
@@ -1199,13 +1396,11 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
 
             growth_term = growth* (f_aug[1:-1]+ 0.5 * f_diff[1:] * limiter[:-1])
             dissol_term = dissol* (f_aug[2:]- 0.5 * f_diff[1:] * limiter[1:])
-            mass_transfer = self.density* self.kv* (3 * (growth + dissol) * mu2+ nucl * self.rad**3)* 1e-6
+            growth_int = growth * self.compute_second_moment(csd_true)
 
         # Size-dependent growth
         else:
 
-            alpha = gparams[3]
-            beta = gparams[4]
             t0 = perf_counter()
             growth_dep = (growth* self._growth_size_factor)
             self._timers['pop_balance_compute_growth_dep'] = self._timers.get('pop_balance_compute_growth_dep',0)+perf_counter()-t0
@@ -1217,18 +1412,28 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             dissol_term = dissol* (f_aug[2:]- 0.5 * f_diff[1:] * limiter[1:])
             self._timers['pop_balance_compute_growth_dissol_term'] = self._timers.get('pop_balance_compute_growth_dissol_term',0)+perf_counter()-t0
             t0 = perf_counter()
-            growth_int = np.trapezoid(growth_dep * csd * self.x_grid_sq,self.x_grid)
-            # Micron-based, to match growth_int and the original's
-            # trapezoid(dissol_dependent * csd * r_m**2, r_m).
-            dissol_int = dissol * self.compute_second_moment(csd)
+            growth_int = self.integrate_over_size(
+                growth_dep * csd_true * self.x_grid_sq)
             self._timers['pop_balance_compute_growth_dissol_int'] = self._timers.get('pop_balance_compute_growth_dissol_int',0)+perf_counter()-t0
-            t0 = perf_counter()
-            dens = self.density
-            self._timers['pop_balance_get_density'] = self._timers.get('pop_balance_get_density',0)+perf_counter()-t0
-            t0 = perf_counter()
-            mass_transfer = (dens* self.kv* 3* 
-                             (growth_int+ dissol_int+ nucl * self.rad**3)* 1e-18)
-            self._timers['pop_balance_compute_mass_transfer'] = self._timers.get('pop_balance_compute_mass_transfer',0)+perf_counter()-t0
+
+        t0 = perf_counter()
+        # d(mu_3)/dt = 3*G*mu_2 + B*rad**3, so the 3 belongs to the growth
+        # and dissolution terms ONLY -- it used to distribute over the
+        # nucleation term as well. Every term is micron-based here, so one
+        # VOLUME_UNIT_FACTOR converts the lot (the original applied 1e-6 to a
+        # metre-based mu_2 and to a micron-based rad**3 together, leaving the
+        # nucleation term wrong by 1e12).
+        #
+        # This is a rate per m3 of slurry; vol_slurry makes it extensive.
+        dissol_int = dissol * self.compute_second_moment(csd_true)
+
+        mass_transfer = (
+            self.density * self.kv
+            * (3 * (growth_int + dissol_int) + nucl_intensive * self.rad**3)
+            * self.VOLUME_UNIT_FACTOR
+            * vol_slurry
+        )
+        self._timers['pop_balance_compute_mass_transfer'] = self._timers.get('pop_balance_compute_mass_transfer',0)+perf_counter()-t0
         # self._timers['pop_balance_handle_growth'] = self._timers.get('pop_balance_handle_growth',0)+perf_counter()-t0
         t0 = perf_counter()
         flux = growth_term + dissol_term
@@ -1284,7 +1489,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         density=None,
         kv=1,
         rad=0.0,
-        scale=1,
+        scale=None,
         moments_state_name='mu_n',
     ):
         super().__init__(
@@ -1304,7 +1509,8 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         # rad is the nucleus size. It lived on the old unit operation as
         # rad_zero (default 0), never on the phase, so it must be supplied.
         self.rad = rad
-        self.scale = scale
+        self._reject_scale(scale)
+        self.scale = 1
 
         setattr(self, moments_state_name, moments_init)
 
@@ -1365,7 +1571,8 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         if len(moments) < 4:
             return 0.0
 
-        return self.density * self.kv * moments[3] * 1e-18
+        return (self.density * self.kv * self.true_state(moments)[3] * 1e-18
+                * self._slurry_volume(self.true_state(moments)))
 
     def set_mass(self, value):
         moments = np.asarray(getattr(self, self.moments_state_name),
@@ -1375,8 +1582,17 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
             raise ValueError(
                 'Setting mass needs at least four moments (mu_0..mu_3)')
 
-        target_mu3 = value / (self.density * self.kv * 1e-18)
-        current = moments[3]
+        vol_slurry = self._slurry_volume(self.true_state(moments))
+
+        if vol_slurry <= 0:
+            if value == 0:
+                return
+            raise ValueError(
+                'Cannot set a crystal mass without knowing the slurry '
+                'volume; the moments are per m3 of slurry.')
+
+        target_mu3 = value / (self.density * self.kv * 1e-18 * vol_slurry)
+        current = self.true_state(moments)[3]
 
         if target_mu3 == 0 and current == 0:
             return
@@ -1386,7 +1602,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
                 'Cannot scale moments with a zero third moment.')
 
         setattr(self, self.moments_state_name,
-                moments * (target_mu3 / current))
+                moments * (target_mu3 / current))  # ratio is scale-invariant
 
     # ---------------- flow terms ----------------
     #
@@ -1423,18 +1639,18 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
 
         conc, supersat, solubility = self.compute_supersaturation(liquid)
 
-        # The original scales nucleation by the slurry volume, with the
-        # solid contribution taken from mu_3 (Crystallizers.py).
-        vol_solid = mu[3] * self.kv * 1e-18 if len(mu) > 3 else 0.0
-        vol_slurry = liquid.vol + vol_solid
-
-        # Kinetics want moments per m**3 of suspension, in m**n.
-        mu_susp = mu * (1e-6) ** np.arange(len(mu)) / max(vol_slurry, eps)
+        # Intensive basis: mu is already per m3 of slurry, so the kinetics
+        # need only the micron -> metre conversion, with no volume division.
+        # The volume returns on the mass transfer below.
+        mu_true = self.true_state(mu)
+        mu_susp = mu_true * (1e-6) ** np.arange(len(mu_true))
+        vol_slurry = self.slurry_volume_from(liquid, mu_true)
 
         nucl, growth, dissol = self.mechanism_kinetics.get_kinetics(
             conc, liquid.temp, self.kv, mu_susp)
 
-        nucl = nucl * self.scale * vol_slurry
+        nucl_intensive = nucl
+        nucl = nucl_intensive
         growth = growth * self.mechanism_kinetics.alpha_fn(conc)
 
         ind_mom = np.arange(1, len(mu))
@@ -1445,11 +1661,14 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
 
         dmu_dt = np.concatenate((dmu_zero_dt, dmu_1on_dt))
 
-        # kg/s. mu_2 is micron**2 here, hence the (1e-6)**3.
+        # Per m3 of slurry, then made extensive. mu_2 is micron**2 and
+        # growth micron/s, so (1e-6)**3 converts to m3/s. The true moments
+        # and the unscaled nucleation rate, not the conditioned state.
         mass_transfer = float(np.atleast_1d(
             self.density * self.kv
-            * (3 * (growth + dissol) * mu[2] + nucl * self.rad ** 3)
-        )[0]) * (1e-6) ** 3
+            * (3 * (growth + dissol) * mu_true[2]
+               + nucl_intensive * self.rad ** 3)
+        )[0]) * (1e-6) ** 3 * vol_slurry
 
         species_rates_out = self.compute_species_transfer(mass_transfer,
                                                           liquid)

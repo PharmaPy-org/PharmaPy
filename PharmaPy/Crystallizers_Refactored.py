@@ -61,6 +61,10 @@ class _BaseCrystallizer(MultiPhaseVessel):
                     'Attach a OneDFVMMechanism or a MomentsPopulationBalance '
                     'to it before setting CrystKinetics.')
             pbm.liquid_phase_ref = PhaseRef("liquid",0)
+            # The population is a number density per m3 of SLURRY, so the
+            # mechanism needs the liquid to convert it into an inventory.
+            pbm.liquid_phase = self.Phases.get_phase_from_ref(
+                PhaseRef("liquid", 0))
             pbm.owning_phase_ref = solidphase_ref
             weights = pbm.fraction
             if pbm._mechanism_kinetics is None:
