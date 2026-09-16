@@ -431,9 +431,26 @@ class MultiPhaseVessel():
 
     @property
     def names_states_in(self):
-        """Old units declare inlet names separately from outlet names; for
-        this vessel the two coincide."""
-        return self.names_states_out
+        """Inlet state names, in the vocabulary the old NameAnalyzer wants.
+
+        Not simply names_states_out. A vessel's OUTLET carries an amount
+        but its INLET carries a flow, whatever the vessel's own operating
+        mode. A semibatch vessel used to advertise 'vol' here, so
+        NameAnalyzer had nothing to map an upstream 'vol_flow' onto and
+        quietly dropped it from y_inlet -- the trajectory then arrived
+        without the one state that says how fast material is entering.
+
+        Continuous vessels already say 'vol_flow', and a batch vessel is
+        never fed (Connections only builds y_inlet when the destination is
+        not Batch), so in practice this only changes semibatch inlets.
+        """
+        names = self.names_states_out
+
+        if self.oper_mode != 'Batch':
+            names = ['vol_flow' if name == 'vol' else name
+                     for name in names]
+
+        return names
 
     @property
     def outputs(self):
@@ -453,7 +470,23 @@ class MultiPhaseVessel():
 
         distrib = getattr(self.result, 'distrib_solid0', None)
         if distrib is not None:
-            out['distrib'] = np.asarray(distrib)
+            # Published as a number DENSITY (counts per micron bin per m3
+            # of slurry), which is the basis old PharmaPy moved between
+            # units: MSMPR.material_balances feeds the received
+            # u_inputs['Inlet']['distrib'] straight into
+            # tau_inv * (input_distrib - distrib), and the old
+            # crystallizer multiplied by vol_slurry again on the way back
+            # into a phase. The solver state here is an absolute count, so
+            # divide by the vessel volume before handing it downstream.
+            distrib = np.asarray(distrib, dtype=float)
+            vol = getattr(self.result, 'vessel_vol', None)
+
+            if vol is not None:
+                vol = np.asarray(vol, dtype=float)
+                safe = np.where(vol > 0, vol, 1.0)
+                distrib = distrib / safe.reshape(-1, 1)
+
+            out['distrib'] = distrib
 
         temp = getattr(self.result, 'global_temp', None)
         if temp is not None:
@@ -847,14 +880,23 @@ class MultiPhaseVessel():
                             ),overwrite
                         )
         
-        for process in self.intraphase_processes:
+        # Every liquid phase reports its composition, whether or not it
+        # happens to carry a reaction. This used to sit inside the
+        # intraphase_processes loop below, so a crystallizer -- which has
+        # no reaction -- registered no mole_conc output at all, even though
+        # names_states_out advertises one. A downstream unit was then handed
+        # an outlet trajectory with no liquid composition in it.
+        counts = {}
 
-            phase = self.Phases.get_phase_from_ref(process.phaseref)
-            process.mechanism.add_output_state_variables(
-                self.output_state_collection,
-                overwrite=overwrite,
-                process=process
-            )
+        for phase in self.Phases.Phases:
+
+            phase_type = phase.phase_family.lower()
+            idx = counts.get(phase_type, 0)
+            counts[phase_type] = idx + 1
+
+            if phase_type != 'liquid':
+                continue
+
             self.output_state_collection.add(
                 StateVariable(
                     name="mole_conc",
@@ -862,10 +904,18 @@ class MultiPhaseVessel():
                     units="kmol/m3",
                     state_type="post",
                     index=phase.name_species,
-                    phaseref=process.phaseref,
+                    phaseref=PhaseRef(phase_type, idx),
                     compute_value=self.compute_mole_conc_value
                 ),
                 overwrite
+            )
+
+        for process in self.intraphase_processes:
+
+            process.mechanism.add_output_state_variables(
+                self.output_state_collection,
+                overwrite=overwrite,
+                process=process
             )
 
         
@@ -1311,14 +1361,11 @@ class MultiPhaseVessel():
         if not y_inlet:
             return None
 
-        if "distrib" in y_inlet:
-            raise NotImplementedError(
-                "This inlet carries a crystal size distribution from "
-                "upstream, but a distribution lives on a mechanism rather "
-                "than on the phase, so updatePhase cannot apply it. Only "
-                "liquid inlet states are supported so far."
-            )
-
+        # A crystal size distribution used to be refused here, because it
+        # belongs to a mechanism rather than to the phase and so cannot go
+        # through updatePhase. _apply_mechanism_inlet_states now routes it
+        # to the owning mechanism instead, so it is interpolated with
+        # everything else.
         times = getattr(source, "time_upstream", None)
 
         # A batch source reports a single time rather than a trajectory
@@ -1352,6 +1399,11 @@ class MultiPhaseVessel():
         """
         baseline = baseline or {}
 
+        # States owned by a mechanism cannot go through updatePhase, so
+        # peel them off first and let the mechanism take them.
+        baseline = self._apply_mechanism_inlet_states(stream_phase, baseline)
+        ops = self._apply_mechanism_inlet_states(stream_phase, ops)
+
         previous = self._inlet_overrides_applied.get(workspace_key)
 
         if previous:
@@ -1380,6 +1432,78 @@ class MultiPhaseVessel():
             stream_phase.updatePhase(**ops)
 
         self._inlet_overrides_applied[workspace_key] = set(ops)
+
+    def _mechanism_state_names(self):
+        """Names of solver states owned by a mechanism rather than a phase."""
+        names = set()
+
+        for phase in self.Phases.Phases:
+
+            for mechanism in getattr(phase, 'mechanisms', None) or ():
+
+                for attr in ('distribution_state_name',
+                             'moments_state_name'):
+
+                    name = getattr(mechanism, attr, None)
+
+                    if name:
+                        names.add(name)
+
+        return names
+
+    def _apply_mechanism_inlet_states(self, stream_phase, values):
+        """Hand mechanism-owned inlet states to the mechanism.
+
+        Returns the remaining states for the normal updatePhase path. Two
+        things happen here: a state this phase's mechanism owns (a crystal
+        size distribution) is applied to that mechanism, and a
+        mechanism-owned state belonging to a DIFFERENT phase is dropped.
+        The second matters because a trajectory is recorded per connection
+        rather than per phase, so the liquid mapping is handed the solid's
+        distribution as well, and updatePhase would reject it.
+        """
+        if not values:
+            return values
+
+        owned = {}
+
+        for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
+
+            for attr in ('distribution_state_name', 'moments_state_name'):
+
+                name = getattr(mechanism, attr, None)
+
+                if name and name in values:
+                    owned[name] = mechanism
+
+        foreign = {name for name in values
+                   if name in self._mechanism_state_names()
+                   and name not in owned}
+
+        # Same reason, the other way round: the solid mapping is handed
+        # the liquid's concentration. A solid has no solvent, so its
+        # mole_conc setter raises asking which species that is -- the
+        # state simply is not the solid's to take.
+        if getattr(stream_phase, 'phase_family', '').lower() != 'liquid':
+            # vol_flow is a connection-level quantity describing the whole
+            # stream -- resolve_inlets already skips it per phase for the
+            # controller ops, for the same reason. Applied to a solid it
+            # sets a volume the distribution does not support, and the
+            # mechanism's set_mass override raises 'cannot scale a
+            # distribution with zero third moment'. The solid's content
+            # comes from its distribution, not from a volume.
+            foreign |= {name for name in values
+                        if name in ('mole_conc', 'mass_conc', 'vol_flow',
+                                    'vol', 'mass_flow', 'mass')}
+
+        if not owned and not foreign:
+            return values
+
+        for name, mechanism in owned.items():
+            mechanism.apply_inlet_state(name, values[name])
+
+        return {name: value for name, value in values.items()
+                if name not in owned and name not in foreign}
 
     def _get_inlet_workspace(self, connection_num, connection):
 
@@ -2120,7 +2244,20 @@ class MultiPhaseVessel():
             for mapping in connection.phase_mappings:
                 stream_phase = inlet_stream.get_phase_from_ref(mapping.source_phaseref)
 
-                vessel_phase = self.phase_states.get_phase(mapping.sink_phaseref)
+                try:
+                    vessel_phase = self.phase_states.get_phase(
+                        mapping.sink_phaseref)
+                except KeyError:
+                    # A slurry feed into a vessel with no matching phase.
+                    # Without this it surfaced as a bare KeyError naming a
+                    # PhaseRef, which says nothing about the flowsheet.
+                    raise ValueError(
+                        f'{type(self).__name__} is fed a '
+                        f'{mapping.sink_phaseref.phase_type} phase but has '
+                        'none to receive it. Give this vessel a '
+                        f'{mapping.sink_phaseref.phase_type} phase, or put '
+                        'a separation step upstream so it is not sent one.'
+                    ) from None
 
 
                 # As on the outlet side, a connection-level vol_flow
@@ -2222,21 +2359,38 @@ class MultiPhaseVessel():
             for resolved_connection in resolved_inlets:
                 for transfer in resolved_connection:
 
-                    material_slice = self._material_slice_by_phase[
+                    # Guarded the way add_outlet_terms already does it. A
+                    # phase whose inventory is a mechanism state rather
+                    # than species masses -- a solid tracked by its size
+                    # distribution -- has no material slice, and indexing
+                    # directly raised KeyError on the PhaseRef the moment
+                    # a slurry was fed in. Its contribution arrives
+                    # through the mechanism hook below instead.
+                    material_slice = self._material_slice_by_phase.get(
                         transfer.mapping.sink_phaseref
-                    ]
+                    )
 
-                    buffer.contributions[
-                        buffer.INLET,
-                        material_slice,
-                    ] += transfer.species_flow
+                    if material_slice is not None:
+                        buffer.contributions[
+                            buffer.INLET,
+                            material_slice,
+                        ] += transfer.species_flow
+
+                    # A distribution is carried per m3 of SLURRY (that is
+                    # how MultiPhaseVessel.outputs publishes it, matching
+                    # old PharmaPy), so the mechanism needs the whole
+                    # stream's volumetric flow, not this phase's share of
+                    # it. Using the solid's own vol_flow would understate
+                    # the crystal feed by the solid volume fraction.
+                    slurry_vol_flow = sum(
+                        t.vol_flow or 0.0 for t in resolved_connection)
 
                     for mechanism in transfer.vessel_phase.mechanisms:
 
                         state_rates = mechanism.get_inlet_contributions(
                             transfer.stream_phase,
                             transfer.vessel_phase,
-                            transfer.vol_flow,
+                            slurry_vol_flow,
                             completed_state,
                         )
 

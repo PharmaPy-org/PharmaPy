@@ -6,7 +6,7 @@ Created on Tue Jun 16 15:43:14 2020
 """
 
 from PharmaPy.Phases import classify_phases
-from PharmaPy.Interpolation import NewtonInterpolation
+from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Commons import trapezoidal_rule
 
 import numpy as np
@@ -16,20 +16,14 @@ from scipy.interpolate import CubicSpline
 eps = np.finfo(float).eps
 
 
-def Interpolation(t_data, y_data, time):
-    idx_time = np.argmin(abs(time - t_data))
-
-    idx_lower = max(0, idx_time - 1)
-    idx_upper = idx_lower + 3
-
-    t_interp = t_data[idx_lower:idx_upper]
-    y_interp = y_data[idx_lower:idx_upper]
-
-    interp = NewtonInterpolation(t_interp, y_interp)
-
-    y_target = interp.evalPolynomial(time)
-
-    return y_target
+def Interpolation(t_data, y_data, time, num_points=3):
+    """Kept as a module-level name; the implementation now lives in
+    PharmaPy.Interpolation so the local-stencil logic exists once.
+    This copy had no upper clamp at all and leaned on Python slice
+    truncation, so it reached the right value at the last node but
+    quietly fell to a two-point stencil there."""
+    return local_newton_interpolation(time, t_data, y_data,
+                                      num_points=num_points)
 
 
 def energy_balance(inst, mass_str):

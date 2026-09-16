@@ -149,6 +149,15 @@ class Mechanism:
         return {}
     def get_overrides(self,name):
         return None
+    def apply_inlet_state(self, name, value):
+        """Set an inlet state this mechanism owns, from a trajectory.
+
+        A crystal size distribution belongs to the mechanism rather than
+        to the phase, so a feed carrying one cannot be applied through
+        BasePhase.updatePhase. The vessel routes those states here.
+        """
+        setattr(self, name, np.asarray(value, dtype=float))
+
     def get_inlet_contributions(
         self,
         stream_phase,
@@ -168,6 +177,32 @@ class Mechanism:
         return {}
     def get_events(self,unit):
         return []
+
+    # -----------------------------------------------------------------
+    # Conversion to and from the pre-refactor phase representation.
+    #
+    # Old PharmaPy kept this state on the phase itself; here it lives on
+    # the mechanism. A mechanism that predates the split therefore has to
+    # say how to spell its state the old way, and how to read it back.
+    # The base returns None for "I do not know how", which the phase turns
+    # into an explicit error rather than a silently incomplete conversion --
+    # a mechanism written after the split has no obligation to be
+    # backwards compatible, but it must not pretend to be.
+    # -----------------------------------------------------------------
+
+    def to_legacy_state(self):
+        """Constructor kwargs for the equivalent old-stack phase, or None."""
+        return None
+
+    @classmethod
+    def from_legacy_phase(cls, legacy_phase, owning_phase):
+        """Build this mechanism from an old phase, or return None."""
+        return None
+
+    @classmethod
+    def claims_legacy_phase(cls, legacy_phase):
+        """Whether this mechanism is the one that owns that phase's state."""
+        return False
 class CrossPhaseTransferMechanism(Mechanism):
     """
     Computes material exchanged between two phases.
@@ -847,6 +882,42 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self._update_exposed_attributes()
         self.expose('x_grid')
 
+    # ---------------- legacy conversion ----------------
+
+    @classmethod
+    def claims_legacy_phase(cls, legacy_phase):
+        """An old SolidPhase built from a distribution belongs here."""
+        return getattr(legacy_phase, 'distrib', None) is not None \
+            and getattr(legacy_phase, 'x_distrib', None) is not None
+
+    def to_legacy_state(self):
+        """The distribution, spelled the way an old SolidPhase holds it.
+
+        x_grid and x_distrib are both in microns and distrib is a number
+        density in both stacks, so the arrays transfer unchanged. Passing
+        distrib_type='num' stops the old constructor from reinterpreting
+        them as a volume-percent distribution and rescaling.
+        """
+        return {
+            'x_distrib': np.asarray(self.x_grid),
+            'distrib': np.asarray(getattr(self, self.distribution_state_name)),
+            'kv': self.kv,
+        }
+
+    @classmethod
+    def from_legacy_phase(cls, legacy_phase, owning_phase, **kwargs):
+        """Rebuild the mechanism from an old SolidPhase's own attributes."""
+        if not cls.claims_legacy_phase(legacy_phase):
+            return None
+
+        return cls(
+            owning_phase=owning_phase,
+            x_grid=np.asarray(legacy_phase.x_distrib),
+            distrib_init=np.asarray(legacy_phase.distrib),
+            kv=getattr(legacy_phase, 'kv', 1),
+            **kwargs,
+        )
+
     def compute_second_moment(
             self,
             distrib,
@@ -911,6 +982,108 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         scale = target_m3 / current_m3
 
         setattr(self,self.distribution_state_name,distribution * scale)
+
+    # ---------------- flow terms ----------------
+    #
+    # MultiPhaseVessel calls these for every resolved transfer whose
+    # vessel-side phase owns this mechanism. Neither was implemented, so
+    # both fell through to Mechanism's empty dict and crystals never
+    # entered through a feed nor left with the product: a
+    # ContinuousCrystallizer was a batch crystallizer with liquid flowing
+    # past it.
+    #
+    # Reference is old MSMPR.material_balances (Crystallizers.py):
+    #
+    #     tau_inv      = input_flow / vol
+    #     flow_distrib = tau_inv * (input_distrib - distrib)
+    #
+    # written there for a per-slurry-volume number density n. This
+    # mechanism carries an ABSOLUTE count N = n * vol (see the comment on
+    # VOLUME_UNIT_FACTOR), so multiplying the original through by vol:
+    #
+    #     dN/dt = Q * n_in  -  (Q / vol) * N
+    #
+    # the first term being the inlet half and the second the outlet half.
+    #
+    # SIGN CONVENTION: both hooks return a positive magnitude. The vessel
+    # adds inlet contributions and SUBTRACTS outlet ones
+    # (MultiPhaseVessel.add_outlet_terms does '-= value', matching how it
+    # treats species_flow), so returning a negative rate here would feed
+    # crystals back in rather than withdrawing them.
+    #
+    # Both terms are exactly zero for a vessel with no connections, which
+    # keeps a BatchCrystallizer untouched.
+
+    def _distribution_key(self):
+        return StateKey(self.distribution_state_name, self.owning_phase_ref)
+
+    def _inlet_number_density(self, stream_phase):
+        """Feed crystal number density, counts per micron bin per m3.
+
+        Published in that basis by MultiPhaseVessel.outputs, which is what
+        old PharmaPy transferred between units -- the old crystallizer
+        multiplied by vol_slurry again on the way back into a phase.
+        """
+        for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
+
+            name = getattr(mechanism, 'distribution_state_name', None)
+
+            if name is None:
+                continue
+
+            value = getattr(mechanism, name, None)
+
+            if value is None:
+                continue
+
+            value = np.asarray(value, dtype=float)
+
+            if value.shape != self.x_grid.shape:
+                raise ValueError(
+                    'An inlet crystal size distribution has %d bins but '
+                    'this vessel discretises size into %d. Feeding a distribution '
+                    'between different grids would need interpolation, which is '
+                    'not implemented -- give both units the same x_grid.'
+                    % (value.size, self.x_grid.size))
+
+            return value
+
+        return None
+
+    def get_inlet_contributions(self, stream_phase, vessel_phase, amount,
+                                completed_state):
+
+        if not amount:
+            return {}
+
+        density = self._inlet_number_density(stream_phase)
+
+        if density is None:
+            return {}
+
+        return {self._distribution_key(): amount * density}
+
+    def get_outlet_contributions(self, stream_phase, vessel_phase, amount,
+                                 completed_state):
+
+        if not amount:
+            return {}
+
+        vol = getattr(vessel_phase, 'vol', 0.0) or 0.0
+
+        if vol <= 0:
+            # Nothing held, so nothing to withdraw. The distribution is
+            # zero here in any case, so the term would vanish anyway; the
+            # guard is only to keep amount/vol finite.
+            return {}
+
+        key = self._distribution_key()
+        distrib = completed_state.get(key)
+
+        if distrib is None:
+            distrib = getattr(self, self.distribution_state_name)
+
+        return {key: (amount / vol) * np.asarray(distrib, dtype=float)}
 
     def solve_population_balance(
         self,
@@ -1044,7 +1217,187 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         return result
 
 class MomentsPopulationBalance(PopulationBalanceMechanism):
-    
+    """Method of moments, ported from Crystallizers.py::method_of_moments.
+
+    Tracks mu_0..mu_{n-1} rather than a resolved distribution. Moments are
+    carried in micron**n as the original does; kinetics are handed them in
+    m**n per m**3 of suspension, and the mass transfer carries the
+    (1e-6)**3 conversion.
+
+    Caveat inherited from the original: the moment form was only ever
+    exercised on the volume basis in the batch crystallizer. It was still
+    part-built for the reactive crystallizer, which was the first move to a
+    mass basis, so the mass-basis path here is unproven.
+    """
+
+    def __init__(
+        self,
+        owning_phase,
+        target_components,
+        solvent_name,
+        moments_init,
+        kinetics=None,
+        density=None,
+        kv=1,
+        rad=0.0,
+        scale=1,
+        moments_state_name='mu_n',
+    ):
+        super().__init__(
+            owning_phase=owning_phase,
+            target_components=target_components,
+            solvent_name=solvent_name,
+            kinetics=kinetics,
+            density=density,
+            kv=kv,
+        )
+
+        moments_init = np.atleast_1d(np.asarray(moments_init, dtype=float))
+
+        self.moments_state_name = moments_state_name
+        self.num_mom = len(moments_init)
+
+        # rad is the nucleus size. It lived on the old unit operation as
+        # rad_zero (default 0), never on the phase, so it must be supplied.
+        self.rad = rad
+        self.scale = scale
+
+        setattr(self, moments_state_name, moments_init)
+
+        self.solver_states = (
+            StateVariable(
+                name=moments_state_name,
+                dim=self.num_mom,
+                index=list(range(self.num_mom)),
+                units='micron**n',
+                state_type='diff',
+                limit_negative_inventory=False,
+            ),
+        )
+
+        self._update_exposed_attributes()
+
+    # ---------------- legacy conversion ----------------
+
+    @classmethod
+    def claims_legacy_phase(cls, legacy_phase):
+        """An old SolidPhase built from moments rather than a distribution."""
+        return (getattr(legacy_phase, 'moments', None) is not None
+                and getattr(legacy_phase, 'distrib', None) is None)
+
+    def to_legacy_state(self):
+        return {
+            'moments': np.asarray(getattr(self, self.moments_state_name)),
+            'num_mom': self.num_mom,
+            'kv': self.kv,
+        }
+
+    @classmethod
+    def from_legacy_phase(cls, legacy_phase, owning_phase, **kwargs):
+        if not cls.claims_legacy_phase(legacy_phase):
+            return None
+
+        return cls(
+            owning_phase=owning_phase,
+            moments_init=np.asarray(legacy_phase.moments),
+            kv=getattr(legacy_phase, 'kv', 1),
+            **kwargs,
+        )
+
+    # ---------------- population balance ----------------
+
+    def get_mass(self):
+        """Solid mass implied by the third moment."""
+        moments = np.asarray(getattr(self, self.moments_state_name))
+
+        if len(moments) < 4:
+            return 0.0
+
+        return self.density * self.kv * moments[3] * 1e-18
+
+    def set_mass(self, value):
+        moments = np.asarray(getattr(self, self.moments_state_name),
+                             dtype=float)
+
+        if len(moments) < 4:
+            raise ValueError(
+                'Setting mass needs at least four moments (mu_0..mu_3)')
+
+        target_mu3 = value / (self.density * self.kv * 1e-18)
+        current = moments[3]
+
+        if target_mu3 == 0 and current == 0:
+            return
+
+        if current <= 0:
+            raise ValueError(
+                'Cannot scale moments with a zero third moment.')
+
+        setattr(self, self.moments_state_name,
+                moments * (target_mu3 / current))
+
+    def solve_population_balance(
+        self,
+        liquid,
+        solid,
+        completed_state,
+        time,
+        connection,
+    ):
+
+        statekey = StateKey(self.moments_state_name, self.owning_phase_ref)
+        mu = np.asarray(completed_state[statekey], dtype=float)
+
+        conc, supersat, solubility = self.compute_supersaturation(liquid)
+
+        # The original scales nucleation by the slurry volume, with the
+        # solid contribution taken from mu_3 (Crystallizers.py).
+        vol_solid = mu[3] * self.kv * 1e-18 if len(mu) > 3 else 0.0
+        vol_slurry = liquid.vol + vol_solid
+
+        # Kinetics want moments per m**3 of suspension, in m**n.
+        mu_susp = mu * (1e-6) ** np.arange(len(mu)) / max(vol_slurry, eps)
+
+        nucl, growth, dissol = self.mechanism_kinetics.get_kinetics(
+            conc, liquid.temp, self.kv, mu_susp)
+
+        nucl = nucl * self.scale * vol_slurry
+        growth = growth * self.mechanism_kinetics.alpha_fn(conc)
+
+        ind_mom = np.arange(1, len(mu))
+
+        dmu_zero_dt = np.atleast_1d(nucl)
+        dmu_1on_dt = (ind_mom * (growth + dissol) * mu[:-1]
+                      + nucl * self.rad ** ind_mom)
+
+        dmu_dt = np.concatenate((dmu_zero_dt, dmu_1on_dt))
+
+        # kg/s. mu_2 is micron**2 here, hence the (1e-6)**3.
+        mass_transfer = float(np.atleast_1d(
+            self.density * self.kv
+            * (3 * (growth + dissol) * mu[2] + nucl * self.rad ** 3)
+        )[0]) * (1e-6) ** 3
+
+        species_rates_out = self.compute_species_transfer(mass_transfer,
+                                                          liquid)
+
+        aux = {
+            'supersat': supersat,
+            'solubility': solubility,
+            'growth': growth,
+            'dissolution': dissol,
+            'nucleation': nucl,
+        }
+
+        state_rates = {
+            StateKey(self.moments_state_name, self.owning_phase): dmu_dt,
+            StateKey('mass_j', self._liquid_phaseref(connection)):
+                species_rates_out,
+        }
+
+        return TransferResult(state_rates=state_rates, aux=aux,
+                              net_mass_rate=mass_transfer)
+
     def add_output_state_variables(self, outputs):
         super().add_output_state_variables(outputs)
         outputs.add(

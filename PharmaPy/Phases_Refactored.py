@@ -772,6 +772,155 @@ class BasePhase(ThermoPhysicalManager):
 
         return stream
 
+    # =================================================================
+    # Conversion to the pre-refactor stack.
+    #
+    # The old unit operations import PharmaPy.Phases and type-check
+    # against it by module string and by isinstance, so handing them a
+    # refactored phase does not work no matter how closely it duck-types.
+    # These build a genuine old-stack object instead.
+    #
+    # State that used to live on the phase now lives on a mechanism, so
+    # each attached mechanism is asked to spell its own state the old way.
+    # A mechanism that cannot is named in the error rather than dropped.
+    # =================================================================
+
+    LEGACY_CLASS_NAME = None
+
+    # Only the old LiquidPhase takes name_solv; SolidPhase and VaporPhase
+    # have no such argument and would reject it.
+    LEGACY_ACCEPTS_NAME_SOLV = False
+
+    def _legacy_class(self):
+        import PharmaPy.Phases as legacy
+
+        if self.LEGACY_CLASS_NAME is None:
+            raise TypeError(
+                f"{type(self).__name__} has no pre-refactor equivalent")
+
+        return getattr(legacy, self.LEGACY_CLASS_NAME)
+
+    def _legacy_mechanism_state(self):
+        """Merge what every attached mechanism contributes, or explain."""
+        state = {}
+
+        for mechanism in self.mechanisms:
+            contribution = mechanism.to_legacy_state()
+
+            if contribution is None:
+                raise NotImplementedError(
+                    f"{type(mechanism).__name__} holds state for this "
+                    f"{type(self).__name__} but does not define "
+                    "to_legacy_state(), so it cannot be expressed in the "
+                    "pre-refactor representation. Implement that method on "
+                    "the mechanism, or keep this phase on the refactored "
+                    "side of the flowsheet."
+                )
+
+            state.update(contribution)
+
+        return state
+
+    def to_legacy(self):
+        """An equivalent phase from the pre-refactor PharmaPy.Phases."""
+        legacy_cls = self._legacy_class()
+
+        kwargs = dict(
+            path_thermo=self.path_thermo,
+            temp=self.temp,
+            mass=float(self.mass) if self.mass is not None else 0,
+            mass_frac=np.asarray(self.mass_frac).copy(),
+        )
+
+        if self.LEGACY_ACCEPTS_NAME_SOLV and self.name_solv is not None:
+            kwargs['name_solv'] = self.name_solv
+
+        mechanism_state = self._legacy_mechanism_state()
+        kwargs.update(mechanism_state)
+
+        if 'distrib' in mechanism_state:
+            # The old SolidPhase reinterprets a supplied distribution
+            # against a supplied mass (getDistribution treats it as a
+            # volume-percent curve and rescales). Given mass=0 it takes the
+            # array verbatim as a number density and derives the mass from
+            # the third moment instead, which is what we want: the
+            # distribution is the source of truth on both sides.
+            kwargs['mass'] = 0
+
+        return legacy_cls(**kwargs)
+
+    @staticmethod
+    def from_legacy(legacy_phase, **mechanism_kwargs):
+        """Build a refactored phase from a pre-refactor one.
+
+        The inverse of to_legacy, and not symmetric with it: the old stack
+        kept particle state on the phase, so that state has to be moved into
+        a mechanism here. Which mechanism is decided by asking each
+        candidate whether it claims the phase -- a distribution goes to the
+        finite-volume mechanism, bare moments to the method-of-moments one.
+
+        A mechanism also needs things the old phase never carried, such as
+        which species crystallizes; those come in as mechanism_kwargs from
+        whoever is driving the conversion, and their absence is an error
+        rather than a silently mechanism-less phase.
+        """
+        import PharmaPy.Mechanisms as mech
+
+        name = type(legacy_phase).__name__
+        target_cls = {
+            'LiquidPhase': LiquidPhase,
+            'SolidPhase': SolidPhase,
+            'VaporPhase': VaporPhase,
+            'LiquidStream': LiquidPhase,
+            'SolidStream': SolidPhase,
+            'VaporStream': VaporPhase,
+        }.get(name)
+
+        if target_cls is None:
+            raise NotImplementedError(
+                f"No refactored equivalent of {name} is known")
+
+        kwargs = dict(
+            path_thermo=getattr(legacy_phase, 'path_data', None),
+            temp=legacy_phase.temp,
+            mass_frac=np.asarray(legacy_phase.mass_frac).copy(),
+        )
+
+        ind_solv = getattr(legacy_phase, 'ind_solv', None)
+
+        if ind_solv is not None and target_cls is LiquidPhase:
+            kwargs['name_solv'] = legacy_phase.name_species[ind_solv]
+
+        phase = target_cls(**kwargs)
+
+        # Composition first, then amount: mass cannot be set before
+        # mass_frac exists, which the constructor has just taken care of.
+        mass = getattr(legacy_phase, 'mass', None)
+
+        if mass:
+            phase.mass = float(mass)
+
+        candidates = (mech.OneDFVMMechanism, mech.MomentsPopulationBalance)
+
+        for candidate in candidates:
+
+            if not candidate.claims_legacy_phase(legacy_phase):
+                continue
+
+            built = candidate.from_legacy_phase(legacy_phase, phase,
+                                                **mechanism_kwargs)
+
+            if built is None:
+                raise NotImplementedError(
+                    f"{candidate.__name__} claims this {name} but could not "
+                    "rebuild itself from it"
+                )
+
+            phase.mechanisms = built
+            break
+
+        return phase
+
     ######## Mechanism logic
     @property
     def mechanisms(self)->list["Mechanism"]:
@@ -857,6 +1006,8 @@ class BasePhase(ThermoPhysicalManager):
         unit._timers['updatePhaseMech'] = unit._timers.get('updatePhaseMech',0)+perf_counter()-t0
 
 class LiquidPhase(BasePhase):
+    LEGACY_CLASS_NAME = 'LiquidPhase'
+    LEGACY_ACCEPTS_NAME_SOLV = True
     def __init__(
             self,
             path_thermo=None,
@@ -902,6 +1053,7 @@ class LiquidPhase(BasePhase):
 
 
 class VaporPhase(BasePhase):
+    LEGACY_CLASS_NAME = 'VaporPhase'
     def __init__(
         self,
         path_thermo=None,
@@ -942,6 +1094,7 @@ class VaporPhase(BasePhase):
         )
 
 class SolidPhase(BasePhase):
+    LEGACY_CLASS_NAME = 'SolidPhase'
     def __init__(
         self,
         path_thermo=None,

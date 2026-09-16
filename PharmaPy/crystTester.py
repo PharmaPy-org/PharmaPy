@@ -95,7 +95,11 @@ rxns = ['A + B --> C', 'C + A --> D']
 # Rkinetics = RxnKinetics(path=dpath,rxn_list=rxns, k_params=kvals_rxns,ea_params=ea_vals)
 fitted_kinetics = np.array([6.26855218e+18, 8.30671806e+00, 1.45782420e+06, 4.52241037e+00, 3.93676056e+00]) 
 cryst_kinetics =build_crysts(fitted_kinetics)
-Ckinetics = CrystKinetics(np.array([-28.13909202,	0.001,	5.900800253]),**cryst_kinetics, solubility_type='apelblat')
+# solubility_basis says which composition basis this Apelblat correlation was
+# fitted in. Without it the default (solution volume, matching old PharmaPy)
+# drives the run undersaturated; per-solvent-volume reproduces the fit.
+Ckinetics = CrystKinetics(np.array([-28.13909202,	0.001,	5.900800253]),**cryst_kinetics, solubility_type='apelblat',
+                          solubility_basis='mass_per_volume_solvent')
 Utility = CoolingWater(mass_flow=100, temp_in=273.55)
 vessel.Utility = Utility
 # vessel.RxnKinetics = Rkinetics

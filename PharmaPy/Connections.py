@@ -370,11 +370,130 @@ class Connection:
             converted_states = name_analyzer.convertUnits(self.Matter)
             self.Matter.y_inlet = converted_states
 
+    @staticmethod
+    def _is_refactored_unit(uo):
+        """Whether a unit operation is built on MultiPhaseVessel.
+
+        Checked through the class hierarchy rather than by importing
+        MultiPhaseVessel, which imports this module.
+        """
+        return any(cls.__module__ == 'PharmaPy.MultiPhaseVessel'
+                   for cls in type(uo).__mro__)
+
+    @staticmethod
+    def _is_refactored_matter(matter):
+        """Whether material belongs to the refactored phase stack."""
+        return any(cls.__module__.endswith('_Refactored')
+                   for cls in type(matter).__mro__)
+
+    def _match_stacks(self, matter):
+        """Convert material between the old and refactored phase stacks.
+
+        The two stacks are separate class hierarchies, and the old unit
+        operations type-check by module string and isinstance, so material
+        cannot simply be handed across. Convert it to whichever stack the
+        destination belongs to.
+
+        Anything that cannot be converted raises here, naming what could
+        not be handled: a mechanism written after the split has no duty to
+        be backwards compatible, but the failure has to be visible rather
+        than a silently incomplete transfer.
+        """
+        destination_is_new = self._is_refactored_unit(self.destination_uo)
+        matter_is_new = self._is_refactored_matter(matter)
+
+        if destination_is_new == matter_is_new:
+            return matter
+
+        if matter_is_new:
+            # A bound method, so it takes no further argument.
+            bound = getattr(matter, 'to_legacy', None)
+            converter = None if bound is None else (lambda _m: bound())
+            direction = 'to the pre-refactor stack'
+        else:
+            converter = self._legacy_to_refactored
+            direction = 'to the refactored stack'
+
+        if converter is None:
+            raise TypeError(
+                f'{type(matter).__name__} cannot be converted {direction} '
+                f'for {type(self.destination_uo).__name__}: it defines no '
+                'conversion. Keep both units on the same stack, or give '
+                'it one.'
+            )
+
+        converted = converter(matter)
+
+        self._carry_connection_fields(matter, converted)
+
+        return converted
+
+    # FeedConnection and ConvertUnits stamp these onto the matter before
+    # PassPhases runs. A stack conversion builds a brand new object, so
+    # they have to be carried over explicitly -- otherwise the downstream
+    # unit loses the upstream trajectory and silently runs on a constant
+    # inlet, which is exactly what a new -> old handover used to do.
+    CONNECTION_FIELDS = ('y_upstream', 'y_inlet', 'time_upstream',
+                         'num_interpolation_points', 'DynamicInlet')
+
+    def _carry_connection_fields(self, source, target):
+        """Move the connection protocol across a stack conversion.
+
+        Done here rather than inside each to_legacy/from_legacy so a new
+        conversion cannot forget it. Every name is declared as a class
+        attribute on both stacks, so getattr never falls through to
+        MixedPhase.__getattr__ and comes back as a mass-weighted average.
+        """
+        for name in self.CONNECTION_FIELDS:
+            value = getattr(source, name, None)
+
+            if value is not None:
+                setattr(target, name, value)
+
+    def _legacy_to_refactored(self, matter):
+        """Old material into the refactored stack.
+
+        A mechanism needs things the old phase never carried -- which
+        species crystallizes, which is the solvent. Those are taken from
+        the destination's own configured phases, which is the only place
+        that knows them.
+        """
+        from PharmaPy.MixedPhases_Refactored import MixedPhase
+
+        kwargs = self._destination_mechanism_kwargs()
+
+        phases = getattr(matter, 'Phases', None)
+        members = phases if isinstance(phases, (list, tuple)) else [matter]
+
+        converted = [MixedPhase.phase_from_legacy(member, **kwargs)
+                     for member in members]
+
+        return converted[0] if len(converted) == 1 else MixedPhase(converted)
+
+    def _destination_mechanism_kwargs(self):
+        """Mechanism configuration to reuse from the destination vessel."""
+        destination_phases = getattr(self.destination_uo, 'Phases', None)
+
+        for phase in getattr(destination_phases, 'Phases', ()) or ():
+
+            for mechanism in getattr(phase, 'mechanisms', ()) or ():
+
+                target = getattr(mechanism, 'target_components', None)
+                solvent = getattr(mechanism, 'solvent_name', None)
+
+                if target is not None and solvent is not None:
+                    return {'target_components': target,
+                            'solvent_name': solvent}
+
+        return {}
+
     def PassPhases(self):
 
         class_destination = self.destination_uo.__class__.__name__
         mode_dest = self.destination_uo.oper_mode
         transfered_matter = copy.deepcopy(self.Matter)
+
+        transfered_matter = self._match_stacks(transfered_matter)
 
         transfered_matter.transferred_from_uo = True
 
@@ -397,6 +516,34 @@ class Connection:
                         'target_ind': self.source_uo.target_ind,
                         'target_comp': self.source_uo.target_comp,
                         'scale': self.source_uo.scale}
+
+            elif self._is_refactored_unit(self.destination_uo):
+                # The branch below only assigns Phases when the
+                # destination has none. A refactored vessel always has
+                # Phases, so a semibatch destination silently discarded
+                # everything handed to it: HOLD01 -> CR01 passed 32.6 kg
+                # and the crystallizer's holdup did not move, so it ran
+                # on its own initial charge and the flowsheet was really
+                # a set of disconnected units.
+                #
+                # What the material means depends on the source. A
+                # continuous source produces a flow, which is a feed; a
+                # discontinuous one discharges a quantity, which is a
+                # charge and merges into the holdup exactly as it does
+                # for a Batch destination.
+                #
+                # Scoped to refactored destinations on purpose: changing
+                # how an old semibatch unit is fed would move every
+                # existing old-unit flowsheet.
+                if self.source_uo.oper_mode == 'Continuous':
+                    self.destination_uo.Inlet = transfered_matter
+
+                    if self.destination_uo.Phases is None:
+                        self.destination_uo.Phases = transfered_matter
+                else:
+                    self.destination_uo.Phases = transfered_matter
+
+                self.destination_uo.material_from_upstream = True
 
             elif self.destination_uo.Phases is None:
                 self.destination_uo.Phases = transfered_matter

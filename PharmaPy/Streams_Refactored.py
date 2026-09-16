@@ -1,5 +1,5 @@
 from PharmaPy.Phases_Refactored import BasePhase
-from PharmaPy.Interpolation import NewtonInterpolation
+from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
 from PharmaPy.DataClasses import StateVariable,StateKey
 import copy
@@ -13,19 +13,13 @@ import numpy as np
 
 
 def Interpolation(t_data, y_data, time, newton=True, num_points=3):
-    idx_time = np.argmin(abs(time - t_data))
-
-    idx_lower = max(0, idx_time - 1)
-    idx_upper = min(len(t_data) - 1, idx_lower + num_points)
-
-    t_interp = t_data[idx_lower:idx_upper]
-    y_interp = y_data[idx_lower:idx_upper]
-
-    # Newton interpolation (quadratic, three points)
-    interp = NewtonInterpolation(t_interp, y_interp)
-    y_target = interp.evalPolynomial(time)
-
-    return y_target
+    """Kept as a module-level name; the implementation now lives in
+    PharmaPy.Interpolation so the local-stencil logic exists once.
+    This file used to carry its own copy, complete with the
+    off-by-one that collapsed the stencil to a single node at the end
+    of the data."""
+    return local_newton_interpolation(time, t_data, y_data,
+                                      num_points=num_points)
 
 
 class BatchToFlowConnector:
@@ -333,6 +327,37 @@ class BaseStream(BasePhase):
                 stream="inlet"
             )
         )
+    # A stream's pre-refactor counterpart takes flows rather than
+    # amounts, so the conversion differs from a phase's only in which
+    # keyword the quantity arrives under.
+    LEGACY_QUANTITY_NAME = 'mass_flow'
+
+    def to_legacy(self):
+        """An equivalent stream from the pre-refactor PharmaPy.Streams."""
+        import PharmaPy.Streams as legacy
+
+        if self.LEGACY_CLASS_NAME is None:
+            raise TypeError(
+                f'{type(self).__name__} has no pre-refactor equivalent')
+
+        legacy_cls = getattr(legacy, self.LEGACY_CLASS_NAME)
+
+        kwargs = {
+            'path_thermo': self.path_thermo,
+            'temp': self.temp,
+            'mass_frac': np.asarray(self.mass_frac).copy(),
+            self.LEGACY_QUANTITY_NAME: float(self.mass_flow)
+            if self.mass_flow is not None else 0,
+        }
+
+        if self.LEGACY_ACCEPTS_NAME_SOLV and self.name_solv is not None:
+            kwargs['name_solv'] = self.name_solv
+
+        mechanism_state = self._legacy_mechanism_state()
+        kwargs.update(mechanism_state)
+
+        return legacy_cls(**kwargs)
+
     def to_phase(self):
         phase = copy.copy(self)
         phase.__class__ = self.phase_class
@@ -349,6 +374,8 @@ class BaseStream(BasePhase):
 
 
 class LiquidStream(BaseStream):
+    LEGACY_CLASS_NAME = 'LiquidStream'
+    LEGACY_ACCEPTS_NAME_SOLV = True
     def __init__(
         self,
         path_thermo=None,
@@ -394,11 +421,13 @@ class LiquidStream(BaseStream):
         self.cp_liq = np.atleast_2d(self.cp_liq)
         self.p_vap = np.atleast_2d(self.p_vap)
 class VaporStream(BaseStream):
+    LEGACY_CLASS_NAME = 'VaporStream'
     phase_family = 'vapor'
     from PharmaPy.Phases_Refactored import VaporPhase
     phase_class = VaporPhase
 
 class SolidStream(BaseStream):
+    LEGACY_CLASS_NAME = 'SolidStream'
     phase_family='solid'
     from PharmaPy.Phases_Refactored import SolidPhase
     phase_class = SolidPhase

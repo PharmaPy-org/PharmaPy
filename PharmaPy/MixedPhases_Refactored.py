@@ -153,8 +153,23 @@ class MixedPhase:
             return wrapper
 
         # Attributes
-        if all(v is None for v in attrs):
+        present = [v for v in attrs if v is not None]
+
+        if not present:
             raise AttributeError(f"No phases have attribute {name}")
+
+        # An attribute that only one phase carries belongs to that phase.
+        # 'distrib' is the solid's in a liquid/solid slurry, and the
+        # pre-refactor Slurry exposed it directly. Standing a zero in for
+        # the phases that lack it is meaningless for an average and
+        # outright broken for an array: np.array([0, <35 floats>]) raises
+        # 'setting an array element with a sequence ... inhomogeneous
+        # shape', which is how Connections.ConvertUnits crashed reading
+        # len(Matter.distrib) for a crystallizer outlet. Summing or
+        # averaging a single contributor returns that contributor anyway,
+        # so this is only a widening of what works.
+        if len(present) == 1:
+            return present[0]
 
         values = np.array([0 if v is None else v for v in attrs])
 
@@ -198,6 +213,51 @@ class MixedPhase:
     @property
     def num_species(self):
         return len(self.name_species)
+    @staticmethod
+    def phase_from_legacy(legacy_phase, **mechanism_kwargs):
+        """One old phase into its refactored equivalent."""
+        from PharmaPy.Phases_Refactored import BasePhase
+
+        return BasePhase.from_legacy(legacy_phase, **mechanism_kwargs)
+
+    @staticmethod
+    def from_legacy(legacy_matter, **mechanism_kwargs):
+        """An old Slurry, or a bare old phase, into this stack."""
+        phases = getattr(legacy_matter, 'Phases', None)
+        members = phases if isinstance(phases, (list, tuple)) \
+            else [legacy_matter]
+
+        return MixedPhase([MixedPhase.phase_from_legacy(m, **mechanism_kwargs)
+                           for m in members])
+
+    def to_legacy(self):
+        """An equivalent container from the pre-refactor stack.
+
+        A liquid/solid pair becomes a Slurry, which is what the old solid
+        handling units accept. A single phase converts to that phase alone,
+        because the old units take a bare phase there and wrapping it in a
+        Slurry would make them look for a solid that does not exist.
+        """
+        import PharmaPy.MixedPhases as legacy
+
+        converted = [phase.to_legacy() for phase in self.Phases]
+
+        if len(converted) == 1:
+            return converted[0]
+
+        families = {phase.phase_family for phase in self.Phases}
+
+        if families != {"liquid", "solid"}:
+            raise NotImplementedError(
+                "The pre-refactor stack has no container for phases "
+                f"{sorted(families)}; only a liquid/solid Slurry exists."
+            )
+
+        slurry = legacy.Slurry()
+        slurry.Phases = converted
+
+        return slurry
+
     def to_stream(self):
         mixedstream = copy.copy(self)
         phases = mixedstream._Phases
@@ -249,6 +309,29 @@ class MixedStream(MixedPhase):
         Evaluate every constituent stream and return the results.
         """
         return [stream.evaluate_inputs(time) for stream in self.Streams]
+    def to_legacy(self):
+        """A pre-refactor SlurryStream, or the single stream alone."""
+        import PharmaPy.MixedPhases as legacy
+
+        converted = [phase.to_legacy() for phase in self.Phases]
+
+        if len(converted) == 1:
+            return converted[0]
+
+        families = {phase.phase_family for phase in self.Phases}
+
+        if families != {'liquid', 'solid'}:
+            raise NotImplementedError(
+                'The pre-refactor stack has no container for streams '
+                f'{sorted(families)}; only a liquid/solid SlurryStream '
+                'exists.'
+            )
+
+        slurry = legacy.SlurryStream()
+        slurry.Phases = converted
+
+        return slurry
+
     def to_phase(self):
         mixedphase = copy.copy(self)
         streams = mixedphase._Phases

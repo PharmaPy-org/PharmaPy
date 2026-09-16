@@ -6,7 +6,7 @@ Created on Wed May 27 10:12:13 2020
 """
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
-from PharmaPy.Interpolation import NewtonInterpolation
+from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
 
 from scipy.interpolate import CubicSpline
@@ -14,19 +14,13 @@ import numpy as np
 
 
 def Interpolation(t_data, y_data, time, newton=True, num_points=3):
-    idx_time = np.argmin(abs(time - t_data))
-
-    idx_lower = max(0, idx_time - 1)
-    idx_upper = min(len(t_data) - 1, idx_lower + num_points)
-
-    t_interp = t_data[idx_lower:idx_upper]
-    y_interp = y_data[idx_lower:idx_upper]
-
-    # Newton interpolation (quadratic, three points)
-    interp = NewtonInterpolation(t_interp, y_interp)
-    y_target = interp.evalPolynomial(time)
-
-    return y_target
+    """Kept as a module-level name; the implementation now lives in
+    PharmaPy.Interpolation so the local-stencil logic exists once.
+    This file used to carry its own copy, complete with the
+    off-by-one that collapsed the stencil to a single node at the end
+    of the data."""
+    return local_newton_interpolation(time, t_data, y_data,
+                                      num_points=num_points)
 
 
 class BatchToFlowConnector:

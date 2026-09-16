@@ -42,7 +42,8 @@ from PharmaPy.Reactors_Refactored import (BatchReactor as NewBatchReactor,
                                           ContinuousReactor as NewContReactor)
 from PharmaPy.Crystallizers_Refactored import (
     BatchCrystallizer as NewBatchCryst,
-    SemiBatchCrystallizer as NewSemiBatchCryst)
+    SemiBatchCrystallizer as NewSemiBatchCryst,
+    ContinuousCrystallizer as NewContCryst)
 from PharmaPy.Mechanisms import OneDFVMMechanism
 from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.ProcessControl_Refactored import (SimpleTemperatureController,
@@ -278,7 +279,48 @@ def stage3_new_old_new_old():
     })
     flst.SolveFlowsheet(kwargs_run=run_kwargs, verbose=False)
 
-    return 'filtration time = %.1f s' % flst.F01.timeProf[-1]
+    # The crystallizer must actually process what the holding vessel
+    # collected. This stage used to report only a filtration time, and the
+    # whole HOLD01 -> CR01 link was a no-op: Connections handed CR01
+    # 32.6 kg, the semibatch branch dropped it because CR01 already had
+    # Phases, and CR01 ran on its own initial charge instead.
+    # The stack conversion used to build a fresh legacy object and leave
+    # y_upstream / time_upstream / y_inlet behind, so HOLD01 ran on R01's
+    # constant final snapshot. Checked structurally because the effect on
+    # the collected mass is only a fraction of a percent -- far too small
+    # for an end-to-end number to catch reliably.
+    hold_inlet = flst.HOLD01.Inlet
+
+    if getattr(hold_inlet, 'y_upstream', None) is None:
+        raise AssertionError(
+            'HOLD01 lost R01 trajectory (y_upstream) crossing the stacks')
+
+    if np.ndim(getattr(hold_inlet, 'time_upstream', None)) == 0:
+        raise AssertionError(
+            'HOLD01 got a scalar time from a continuous source, so the '
+            'trajectory was dropped crossing the stacks')
+
+    if not getattr(hold_inlet, 'y_inlet', None):
+        raise AssertionError(
+            'HOLD01 lost the converted inlet states (y_inlet) crossing '
+            'the stacks')
+
+    collected = float(flst.HOLD01.Outlet.mass)
+
+    if collected <= 0:
+        raise AssertionError('HOLD01 collected nothing from R01')
+
+    charged = float(np.asarray(flst.CR01.result.mass_j_liquid0)[0].sum())
+    drift = abs(charged - collected) / collected
+
+    if drift > 1e-6:
+        raise AssertionError(
+            'CR01 did not start from the HOLD01 contents: HOLD01 collected '
+            '%.6f kg but CR01 began with %.6f kg (rel %.3e)'
+            % (collected, charged, drift))
+
+    return ('filtration time = %.1f s, CR01 charged with HOLD01 %.3f kg'
+            % (flst.F01.timeProf[-1], collected))
 
 
 
@@ -401,7 +443,74 @@ def stage6_new_continuous_to_semibatch():
                                           'R02': {'runtime': TIME_R01}}),
                         verbose=False)
 
-    return 'R02 final mass %.6f kg' % flst.R02.Phases.mass
+    # Reporting only the final mass let a completely ignored connection
+    # pass: R02 kept its own static feed because the semibatch branch in
+    # Connections dropped the transferred matter. Assert that R02 follows
+    # the upstream trajectory the way stage 5 does -- a standalone run fed
+    # R01's constant final outlet must give a different answer.
+    downstream = np.asarray(flst.R02.result.mole_conc_liquid0)[-1]
+    upstream_end = np.asarray(flst.R01.result.mole_conc_liquid0)[-1]
+
+    # Two failure modes need two controls, because 'differs from a
+    # snapshot' alone is satisfied by a connection that was ignored
+    # outright -- which is how this stage passed while R02 ran entirely on
+    # its own feed.
+    #
+    # A fed vessel must be told how fast it is being fed. names_states_in
+    # used to mirror names_states_out, which says 'vol' for a semibatch
+    # vessel, so NameAnalyzer had nothing to map the upstream 'vol_flow'
+    # onto and the feed rate vanished from the trajectory -- leaving R02
+    # following the upstream composition at its own configured flow.
+    stream = flst.R02.inlet_connections[0].stream
+    arrived = getattr(stream, 'y_inlet', None)
+
+    if not arrived:
+        # Connections writes onto the wrapper or the inner phase
+        # depending on what it was handed; check both.
+        for phase in stream:
+            arrived = getattr(phase, 'y_inlet', None)
+            if arrived:
+                break
+
+    if not arrived or 'vol_flow' not in arrived:
+        raise AssertionError(
+            'R02 inlet trajectory has no feed rate: got %s. A semibatch '
+            'vessel must declare vol_flow as an inlet state.'
+            % (sorted(arrived) if arrived else None))
+
+    # (a) connection dropped: R02 would match a standalone run on the feed
+    #     it was configured with.
+    ignored = _new_reactor(NewSemiReactor, inlet=_new_feed())
+    ignored.solve_unit(runtime=TIME_R01)
+    ignored_end = np.asarray(ignored.result.mole_conc_liquid0)[-1]
+
+    iscale = max(np.abs(ignored_end).max(), 1e-30)
+    gap = np.abs(downstream - ignored_end).max() / iscale
+
+    if gap < 1e-6:
+        raise AssertionError(
+            'R02 matches a standalone run on its own configured feed '
+            '(rel %.3e), so the connection from R01 is being ignored' % gap)
+
+    # (b) connected but frozen: R02 would match a run fed R01's constant
+    #     final outlet.
+    control = _new_reactor(
+        NewSemiReactor,
+        inlet=_new_feed(mole_conc=upstream_end,
+                        vol_flow=float(flst.R01.Outlet.vol_flow)))
+    control.solve_unit(runtime=TIME_R01)
+    snapshot = np.asarray(control.result.mole_conc_liquid0)[-1]
+
+    scale = max(np.abs(snapshot).max(), 1e-30)
+    divergence = np.abs(downstream - snapshot).max() / scale
+
+    if divergence < 1e-6:
+        raise AssertionError(
+            'downstream still matches a constant snapshot (rel %.3e), so '
+            'the upstream trajectory is being ignored' % divergence)
+
+    return ('R02 final mass %.6f kg, differs from constant-snapshot '
+            'control by %.3e' % (flst.R02.Phases.mass, divergence))
 
 
 def stage7_new_continuous_to_batch_refused():
@@ -423,6 +532,128 @@ def stage7_new_continuous_to_batch_refused():
     raise AssertionError('accepted a continuous feed into a batch unit')
 
 
+# =====================================================================
+# Stage 8 -- every continuous -> semibatch pairing of the two vessel
+# kinds. A crystallizer source is the hard case: its outlet carries a
+# crystal size distribution, which is owned by a mechanism rather than
+# by the phase.
+# =====================================================================
+TEMP_CRYST = 278.15      # below the 4.94 kg/m3 solubility of C
+CONC_CRYST = 40.0        # kg/m3 of C, comfortably supersaturated
+
+
+def _cryst_solid():
+    solid = NewSolidPhase(PATH, mass=0.0, mass_frac=MASSFRAC_SOLID)
+    solid.mechanisms = OneDFVMMechanism(
+        solid, target_components='C', solvent_name='solvent',
+        x_grid=X_GR, distrib_init=np.zeros_like(X_GR), scale=1e-9)
+    return solid
+
+
+def _continuous_cryst():
+    conc = np.array([0., 0., CONC_CRYST, 0., 0.])
+    unit = NewContCryst(
+        integrator=AssimuloBackend(options={'maxh': 60}),
+        h_conv=H_CONV, diam=VESSEL_DIAM,
+        controller=ContinuousVesselController(
+            temp_func=lambda t: TEMP_CRYST))
+    unit.Phases = [NewLiquidPhase(PATH, temp=TEMP_CRYST, mass_conc=conc,
+                                  vol=VOL_INIT, name_solv='solvent'),
+                   _cryst_solid()]
+    unit.CrystKinetics = cryst_kinetics()
+    unit.Inlet = NewLiquidStream(PATH, temp=TEMP_CRYST, mass_conc=conc,
+                                 vol_flow=FEED_VOLFLOW,
+                                 name_solv='solvent')
+    unit.Utility = CoolingWater(mass_flow=1, temp_in=TEMP_CRYST)
+    return unit
+
+
+def _semibatch_cryst():
+    unit = NewSemiBatchCryst(
+        integrator=AssimuloBackend(options={'maxh': 60}),
+        h_conv=H_CONV, diam=VESSEL_DIAM,
+        controller=SimpleTemperatureController(
+            temp_func=cooling_profile(TIME_R01)))
+    unit.Phases = [_new_liquid(), _cryst_solid()]
+    unit.CrystKinetics = cryst_kinetics()
+    unit.Inlet = _new_feed()
+    unit.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
+    return unit
+
+
+def stage8_continuous_to_semibatch_matrix():
+    """Each continuous source feeding each semibatch destination."""
+    cases = (
+        ('reactor -> reactor', _continuous_reactor,
+         lambda: _new_reactor(NewSemiReactor, inlet=_new_feed()), False),
+        ('reactor -> crystallizer', _continuous_reactor,
+         _semibatch_cryst, False),
+        ('crystallizer -> crystallizer', _continuous_cryst,
+         _semibatch_cryst, True),
+    )
+
+    results = []
+
+    for label, make_up, make_down, expect_distrib in cases:
+        flst = SimulationExec(PATH, flowsheet='U01 --> U02')
+        flst.U01 = make_up()
+        flst.U02 = make_down()
+        flst.SolveFlowsheet(
+            kwargs_run=quiet({'U01': {'runtime': TIME_R01},
+                              'U02': {'runtime': TIME_R01}}),
+            verbose=False)
+
+        stream = flst.U02.inlet_connections[0].stream
+        arrived = getattr(stream, 'y_inlet', None)
+
+        if not arrived:
+            for phase in stream:
+                arrived = getattr(phase, 'y_inlet', None)
+                if arrived:
+                    break
+
+        if not arrived:
+            raise AssertionError(
+                '%s: downstream received no trajectory at all' % label)
+
+        if 'vol_flow' not in arrived:
+            raise AssertionError(
+                '%s: trajectory carries no feed rate (%s)'
+                % (label, sorted(arrived)))
+
+        # A crystallizer source must hand over its size distribution; that
+        # used to be refused outright, and before that the connection
+        # could not even be built.
+        if expect_distrib and 'distrib' not in arrived:
+            raise AssertionError(
+                '%s: crystallizer source passed no distribution (%s)'
+                % (label, sorted(arrived)))
+
+        results.append(label)
+
+    # A reactor has no solid phase, so a slurry feed must be refused with
+    # an error that says so rather than a bare KeyError on a PhaseRef.
+    flst = SimulationExec(PATH, flowsheet='U01 --> U02')
+    flst.U01 = _continuous_cryst()
+    flst.U02 = _new_reactor(NewSemiReactor, inlet=_new_feed())
+
+    try:
+        flst.SolveFlowsheet(
+            kwargs_run=quiet({'U01': {'runtime': TIME_R01},
+                              'U02': {'runtime': TIME_R01}}),
+            verbose=False)
+    except ValueError as exc:
+        if 'none to receive it' not in str(exc):
+            raise AssertionError(
+                'crystallizer -> reactor raised the wrong error: %s' % exc
+            ) from None
+    else:
+        raise AssertionError(
+            'a reactor accepted a solid phase it cannot hold')
+
+    return '%d pairings connected; cryst -> reactor refused' % len(results)
+
+
 STAGES = (
     ('0  old Filter alone                                 ', stage0_filter_alone),
     ('1  all-old   R01 -> CR01 -> F01                     ', stage1_all_old),
@@ -432,6 +663,7 @@ STAGES = (
     ('5  new -> new   Continuous -> Continuous            ', stage5_new_continuous_to_continuous),
     ('6  new -> new   Continuous -> Semibatch             ', stage6_new_continuous_to_semibatch),
     ('7  new -> new   Continuous -> Batch (must refuse)   ', stage7_new_continuous_to_batch_refused),
+    ('8  continuous -> semibatch, all pairings            ', stage8_continuous_to_semibatch_matrix),
 )
 
 

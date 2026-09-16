@@ -294,7 +294,11 @@ class LiquidPhase(ThermoPhysicalManager):
         if mole_conc is not None:
             frac_out = self.conc_to_frac(mole_conc,
                                          solvent_ind=self.ind_solv)
-            if self.ind_solv:
+            # Was 'if self.ind_solv:'. conc_to_frac only returns the extra
+            # concentration when a solvent index was supplied, and index 0
+            # is a valid solvent that the truthiness test read as 'none
+            # supplied' -- unpacking two values from a three-tuple.
+            if self.ind_solv is not None:
                 mass_frac, mole_frac, mole_conc = frac_out
             else:
                 mass_frac, mole_frac = frac_out
@@ -309,7 +313,9 @@ class LiquidPhase(ThermoPhysicalManager):
                 frac_out = self.mass_conc_to_frac(mass_conc,
                                                 solvent_ind=None)
 
-            if self.ind_solv and not solvent_pass:
+            # Was 'if self.ind_solv and not solvent_pass:' -- same falsy
+            # index-0 problem as above.
+            if self.ind_solv is not None and not solvent_pass:
                 mass_frac, mole_frac, mass_conc = frac_out
             else:
                 mass_frac, mole_frac = frac_out
