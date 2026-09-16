@@ -9,7 +9,7 @@ Created on Mon Oct 28 15:35:48 2019
 import numpy as np
 from scipy.linalg import inv, ldl
 from itertools import cycle
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
@@ -853,8 +853,11 @@ class ParameterEstimation:
 
         return cond_number
 
-    def optimize_fn(self, optim_options=None, simulate=False, verbose=True,
-                    store_iter=True, method='LM', bounds=None):
+    def optimize_fn(self, optim_options: Optional[dict] = None,
+                    simulate: bool = False, verbose: bool = True,
+                    store_iter: bool = True, method: str = 'LM',
+                    bounds: Optional[Sequence] = None
+                    ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Optimize variable parameters and assemble fit statistics.
 
         Parameters
@@ -871,25 +874,52 @@ class ParameterEstimation:
         method : {'LM', 'IPOPT'}, optional
             Optimization method used for fitting.
         bounds : sequence, optional
-            Parameter bounds passed to IPOPT.
+            Parameter bounds passed to IPOPT, in the model parameter units.
 
         Returns
         -------
         opt_par : numpy.ndarray
-            Optimized variable parameters.
+            Accepted variable parameters, shape ``(num_params,)``, in the
+            model callback's parameter units.
         covar_params : numpy.ndarray
-            Estimated covariance matrix for the variable parameters.
+            Estimated covariance, shape ``(num_params, num_params)``. Entry
+            ``(i, j)`` has the product of parameter i and parameter j units.
         info : dict
-            Solver Jacobian and residual information. For IPOPT,
-            ``info['fun']`` stores weighted residuals, dimensionless [-] after
-            applying ``sigma_inv``.
+            Solver information at the accepted parameters. ``info['fun']`` is
+            the weighted residual vector [-], ordered by experiment then state
+            then sample. ``info['jac']`` has shape
+            ``(num_params, num_data_total)`` and reciprocal parameter units.
+            LM additionally supplies its accepted ``x`` and solver diagnostics.
+
+        Raises
+        ------
+        ImportError
+            If IPOPT is selected without the optional cyipopt dependency.
+        numpy.linalg.LinAlgError
+            If the accepted Jacobian yields a singular covariance matrix.
+
+        Notes
+        -----
+        After LM finishes, the model is evaluated once per experiment at the
+        accepted parameters to refresh ``y_runs``, ``resid_runs``,
+        ``residuals``, and ``weighted_residuals`` before assembling
+        ``y_model``. This includes termination after a rejected trial; it does
+        not imply convergence. Predictions and raw residuals retain the model
+        state units and measured-state order. Repeated calls replace the
+        previous ``y_model`` list.
+
+        The reporting evaluation does not change LM's returned ``x``, ``fun``,
+        ``jac``, or solver counters. It uses the usual objective callback and
+        its history recording; with ``store_iter=True`` duplicate parameter
+        entries are removed as usual. Stateful callbacks must support another
+        evaluation at the same parameters, as during optimization.
 
         """
 
         self.optimize_flag = not simulate
         self.opt_method = method
 
-        params_var = self.param_seed[self.map_variable]
+        params_var = self.param_seed[self.map_variable]  # [model parameter units]
 
         if method == 'LM':
             if optim_options is None:
@@ -904,6 +934,10 @@ class ParameterEstimation:
                 self.get_gradient,
                 args=(True,),
                 **optim_options)
+
+            # Rejected trial callbacks overwrite model buffers. Refresh them
+            # at the accepted point while retaining native LM result metadata.
+            self.get_objective(opt_par, out_array=True)
 
         elif method == 'IPOPT':
             if not have_cyipopt:
@@ -921,10 +955,6 @@ class ParameterEstimation:
 
             opt_par = result['x']
 
-            # final_sens = np.vstack(self.sens_runs)[:, self.map_variable].T
-            # final_sens = np.vstack(self.sens_runs)
-            # final_fun = np.concatenate(self.resid_runs)
-
             # Assemble final weighted residuals without overwriting the
             # solved-state residuals stored during the IPOPT callbacks.
             resid_multidim = self.get_objective(opt_par, out_array=True,
@@ -935,8 +965,7 @@ class ParameterEstimation:
         self.optim_options = optim_options
 
         # Store
-        self.params_convg = opt_par
-        # self.covar_params = inv_hessian
+        self.params_convg = opt_par  # [model parameter units]
         self.info_opt = info
 
         self.cond_number = np.array(self.cond_number)
@@ -953,12 +982,13 @@ class ParameterEstimation:
                 columns=col_names)
 
         # Model prediction with final parameters
+        self.y_model = []  # [model state units], one array per experiment
         for ind in range(self.num_datasets):
             y_data = self.y_data[ind]
             if isinstance(y_data, dict):
                 y_data = np.hstack(list(y_data.values()))
 
-            y_model = self.resid_runs[ind] + y_data
+            y_model = self.resid_runs[ind] + y_data  # [model state units]
             self.y_model.append(y_model)
 
         covar_params = self.get_covariance()
