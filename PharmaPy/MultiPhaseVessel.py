@@ -1138,10 +1138,12 @@ class MultiPhaseVessel():
             try:
                 buffer[solver_slices[key]] = material_rates[material_slices[key]]
             except KeyError:
-                try:
-                    buffer[solver_slices[key]] = np.asarray(global_rates[key]).reshape(-1)
-                except KeyError:
-                    raise KeyError(f"StateKey {key} not found in material_rates or global_rates")
+                raise KeyError(
+                    f"StateKey {key} is a solver state but was not produced "
+                    "by the global balances"
+                ) from None
+
+            buffer[solver_slices[key]] = np.asarray(value).reshape(-1)
 
         return buffer
 
