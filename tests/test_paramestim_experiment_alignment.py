@@ -162,6 +162,46 @@ def test_positional_multiple_experiments_keep_order(experiments, named, represen
                                expected, rtol=0., atol=ROUNDING_ATOL)
 
 
+@pytest.mark.parametrize('observation_order', ['declared', 'reversed'])
+@pytest.mark.parametrize('container', [list, tuple])
+def test_keyed_observations_require_named_experiments(
+        experiments, container, observation_order):
+    """Reject observation keys that unnamed ``x_data`` cannot align.
+
+    Both orders were previously accepted: the declared order happened to pair
+    correctly, while the reversed order silently paired each experiment's
+    times with the other experiment's observations.
+    """
+    observations = experiments.pop('y_data')  # [mol/L]
+    if observation_order == 'reversed':
+        observations = dict(reversed(list(observations.items())))
+    # Positional times [s], initial values [mol/L] and gains [-].
+    inputs = {key: container(value.values())
+              for key, value in experiments.items()}
+    with pytest.raises(ValueError, match='y_data experiment keys') as error:
+        ParameterEstimation(accumulating_concentration, [2.],
+                            y_data=observations, **inputs)
+    message = str(error.value)
+    assert repr(list(observations)) in message
+    assert 'unnamed x_data' in message
+
+
+@pytest.mark.parametrize('times_container',
+                         [np.asarray, lambda times: [times]],
+                         ids=['array', 'list'])
+def test_single_keyed_observation_mapping_accepts_unnamed_times(
+        times_container):
+    """Accept one keyed observation; one experiment has no pairing order."""
+    rate = [2.]  # [mol/L/s], exact synthetic rate
+    times = np.array([0., 1., 3.])  # [s], constant-rate verification schedule
+    observations = {'batch': np.array([1., 3., 7.])}  # [mol/L], C0=1, rate=2
+    estimator = ParameterEstimation(accumulating_concentration, rate,
+                                    times_container(times), observations,
+                                    args_fun=(1.,))  # [mol/L]
+    np.testing.assert_allclose(estimator.get_objective(rate, out_array=True),
+                               np.zeros(3), rtol=0., atol=ROUNDING_ATOL)
+
+
 @pytest.mark.parametrize('named, representation', [
     (False, 'direct'), (True, 'direct'), (False, 'list'), (True, 'list'),
     (True, 'keyed')])
@@ -222,6 +262,25 @@ def test_nested_spectral_observations_keep_fields_masks_and_caller_data():
     assert list(observations) == ['second', 'first']
     np.testing.assert_array_equal(observations['first']['spectra'],
                                   [[10., 11.], [12., 13.]])
+
+
+def test_keyed_nested_observations_require_named_experiments():
+    """Apply the key rule to nested spectral observations and the subclass."""
+    times = [{'spectra': np.array([0., 2.]), 'non_spectra': np.array([1.])},
+             {'spectra': np.array([0., 3.]),
+              'non_spectra': np.array([2.])}]  # [s], positional experiments
+    observations = {
+        'second': {'spectra': np.array([[20., 21.], [22., 23.]]),
+                   'non_spectra': np.array([24.])},
+        'first': {'spectra': np.array([[10., 11.], [12., 13.]]),
+                  'non_spectra': np.array([14.])},
+    }  # spectra [-]; non-spectral concentration [mol/L]; synthetic data
+    with pytest.raises(ValueError,
+                       match=r"y_data experiment keys \['second', 'first'\]"):
+        MultipleCurveResolution(
+            accumulating_concentration, [2.], times, observations,
+            measured_ind={'spectra': [0], 'non_spectra': [0]},
+            name_states=['concentration'])
 
 
 def test_empty_experiments_are_rejected():

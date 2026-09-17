@@ -353,13 +353,15 @@ class ParameterEstimation:
             can be specified. Units follow the model independent variable
             (typically time [s]). Dictionary insertion order declares experiment
             order; other experiment mappings are aligned by those keys.
-        y_data : numpy array or list of arrays, optional
+        y_data : numpy array, list of arrays or dict, optional
             Experimental values for the dependent variable(s) y, in the model's
             state units and physical bases.
             Array y is of dimension len(x_i) x N_meas, where N_meas is less
             than or equal to the number of states returned by func (Ny).
-            It supports same data structures as 'x_data'. If 'ydata' is a
-            dictionary, its keys must match those of 'x_data'.
+            It supports same data structures as ``x_data``. If ``y_data`` is a
+            dictionary, its keys must match those of ``x_data``. A dictionary
+            with more than one experiment requires named ``x_data``; with
+            unnamed ``x_data``, pass a list in ``x_data`` order instead.
             The default is None.
         measured_ind : list of int, optional
             Indexes of the states returned by func that are measured and
@@ -420,8 +422,9 @@ class ParameterEstimation:
         Raises
         ------
         ValueError
-            If experiment mappings disagree, experiment counts differ, or no
-            experiments are supplied.
+            If experiment mappings disagree, experiment counts differ, no
+            experiments are supplied, or ``y_data`` maps more than one
+            experiment while ``x_data`` is unnamed.
         TypeError
             If positional arguments are not iterable or keyword arguments are
             not a dictionary. Positional errors identify experiment keys or,
@@ -431,8 +434,10 @@ class ParameterEstimation:
         -----
         Lists and arrays retain positional ordering. Nested state observation
         dictionaries are passed through without treating state names as
-        experiment names. Callback mappings used with unnamed multiple datasets
-        retain their legacy insertion order; use lists to make that explicit.
+        experiment names. Observation mappings with more than one experiment
+        cannot be aligned with unnamed ``x_data`` and are rejected. Callback
+        mappings used with unnamed multiple datasets retain their legacy
+        insertion order; use lists to make that explicit.
         No physical-unit or state-column conversion is performed.
 
         """
@@ -468,6 +473,11 @@ class ParameterEstimation:
         if isinstance(y_data, dict) and self.experim_names is not None:
             y_data = _ordered_experiment_values(
                 y_data, self.experim_names, 'y_data')
+        elif isinstance(y_data, dict) and len(y_data) > 1:
+            raise ValueError(
+                f"y_data experiment keys {list(y_data)!r} cannot be aligned "
+                "with unnamed x_data; pass x_data as a dictionary with the "
+                "same keys, or y_data as a list in x_data order")
 
         x_data = convert_types(x_data)
         y_data = convert_types(y_data, two_d=True)

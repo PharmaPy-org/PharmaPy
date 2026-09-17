@@ -52,6 +52,12 @@ Compatibility and ordering
   only when its sole key is the experiment name and its value is a dictionary.
   Other dictionaries retain their direct callback meaning. To pass the reserved
   structure itself as callback keywords, use ``kwargs_fun=[{name: {...}}]``.
+* Observation dictionaries for more than one experiment require named
+  ``x_data``. Unnamed ``x_data`` provides no keys to check them against, so
+  construction raises ``ValueError`` instead of pairing observations by
+  insertion order as older versions did. Pass ``y_data`` as a list in
+  ``x_data`` order, or name the experiments in ``x_data``. A one-entry
+  observation dictionary remains valid for a single unnamed experiment.
 * Legacy callback dictionaries with unnamed multiple datasets retain insertion
   order. Prefer positional lists, or name the experiments in ``x_data`` so keys
   can be checked.
