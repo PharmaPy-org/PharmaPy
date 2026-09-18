@@ -772,7 +772,7 @@ class CrystKinetics:
         self.solub_type = solubility_type
 
         if reformulate_kin:
-            if len(param_dict['growth']) == 3:
+            if len(param_dict.get('growth') or ()) <= 3:
                 self.name_params = (r'\log(k_{bp})', r'\log(E_{bp}/R)', 'b',
                                     r'\log(k_{bs})', r'\log(E_{bs}/R)', 's_1', 's_2',
                                     r'\log(k_{g})', r'\log(E_{g}/R)', 'g',
@@ -780,10 +780,10 @@ class CrystKinetics:
             else:
                 self.name_params = (r'\log(k_{bp})', r'\log(E_{bp}/R)', 'b',
                                 r'\log(k_{bs})', r'\log(E_{bs}/R)', 's_1', 's_2',
-                                r'\log(k_{g})', r'\log(E_{g}/R)', 'g','alpha','beta'
+                                r'\log(k_{g})', r'\log(E_{g}/R)', 'g','alpha','beta',
                                 r'\log(k_{d})', r'\log(E_{d}/R)', 'd')
         else:
-            if len(param_dict['growth']) == 3:
+            if len(param_dict.get('growth') or ()) <= 3:
                 self.name_params = ('k_{bp}', 'E_{bp}', 'b',
                                     'k_{bs}', 'E_{bs}', 's_1', 's_2',
                                     'k_{g}', 'E_{g}', 'g',
