@@ -611,14 +611,15 @@ class RxnKinetics:
 
             rrates = rxn_rates.copy()
 
-            # The clamp is irreducibly 1-D: np.where(problem_species)[0] yields
-            # row indices on a 2-D input and conc[spec_indx] then selects a row,
-            # so `any(problem_species)` raises on a trajectory. Pre-refactor this
-            # loop lived inside `if overall_rates:`, which is why the 2-D
-            # post-processing calls (Reactors.py:686, 1037, 1555, 1722, 1732, all
-            # overall_rates=False) never reached it. Restore that guard, extended
-            # to return_both -- the refactored stack's only caller.
-            if (overall_rates or return_both) and np.asarray(conc).ndim == 1:
+            # Rescale the extent so no species is driven negative. This is
+            # scoped to return_both, the refactored mechanisms' call, and is
+            # deliberately not applied to the reported rates: derivatives()
+            # differentiates the unclamped rate law, so clamping here would
+            # hand a solver a rate and a Jacobian that disagree. Limiting
+            # consumption belongs to the balance that integrates the rates.
+            # The loop is also irreducibly 1-D, because np.where on a 2-D
+            # input yields row indices that conc[spec_indx] then misreads.
+            if return_both and np.asarray(conc).ndim == 1:
                 count=0
                 while count <max_iter:
                     total_rates = np.dot(rrates, self.normalized_stoich.T)
