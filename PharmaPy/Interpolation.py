@@ -13,10 +13,23 @@ from scipy.special import comb
 
 
 def local_newton_interpolation(time, t_data, y_data, num_points=3):
+    """Newton interpolation over the num_points nodes nearest to `time`."""
+    num_points = max(1, min(num_points, len(t_data)))
+
     idx_time = np.argmin(abs(time - t_data))
 
-    idx_lower = max(0, idx_time - 1)
-    idx_upper = min(len(t_data) - 1, idx_lower + num_points)
+    # The slice bound below is EXCLUSIVE. It used to read
+    #     idx_upper = min(len(t_data) - 1, idx_lower + num_points)
+    # which is an inclusive-style clamp, so it dropped the final node from
+    # every window that reached the end of the data: at the last node the
+    # stencil collapsed to a single point and the 'interpolation' silently
+    # returned y_data[-2]. Since callers clamp time to t_data[-1] before
+    # calling (Connections.interpolate_inputs), that made every evaluation
+    # at or past the upstream horizon hold the second-to-last value rather
+    # than the last. Clamp idx_lower instead, so the window slides back off
+    # the end of the data rather than shrinking.
+    idx_lower = min(max(0, idx_time - 1), len(t_data) - num_points)
+    idx_upper = idx_lower + num_points
 
     t_interp = t_data[idx_lower:idx_upper]
     y_interp = y_data[idx_lower:idx_upper]

@@ -1,7 +1,8 @@
+from __future__ import annotations
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Mechanisms import *
 from PharmaPy.DataClasses import *
-from PharmaPy.ProcessControl_Refactor import DefaultContinuousVesselVolume
+from PharmaPy.ProcessControl_Refactored import DefaultContinuousVesselVolume
 
 class _BaseCrystallizer(MultiPhaseVessel):
     def __init__(self,*args,**kwargs):
@@ -48,8 +49,23 @@ class _BaseCrystallizer(MultiPhaseVessel):
                 solidphase=self.Phases.get_phase_from_ref(solidphase_ref)
             except IndexError:
                 raise IndexError("The solid phase cannot be found, did you initialize the vessel with a solid phase?")
-            pbm = solidphase.get_mechanism(OneDFVMMechanism)
+            # Matched on the base class, not OneDFVMMechanism: a
+            # crystallizer discretised by moments carries a
+            # MomentsPopulationBalance, and hardcoding the FVM class
+            # silently returned None, so the moments form could not be
+            # constructed at all.
+            pbm = solidphase.get_mechanism(PopulationBalanceMechanism)
+
+            if pbm is None:
+                raise AttributeError(
+                    'The solid phase carries no population balance mechanism. '
+                    'Attach a OneDFVMMechanism or a MomentsPopulationBalance '
+                    'to it before setting CrystKinetics.')
             pbm.liquid_phase_ref = PhaseRef("liquid",0)
+            # The population is a number density per m3 of SLURRY, so the
+            # mechanism needs the liquid to convert it into an inventory.
+            pbm.liquid_phase = self.Phases.get_phase_from_ref(
+                PhaseRef("liquid", 0))
             pbm.owning_phase_ref = solidphase_ref
             weights = pbm.fraction
             if pbm._mechanism_kinetics is None:
@@ -104,8 +120,11 @@ class _BaseCrystallizer(MultiPhaseVessel):
         "Place holder in case future children need special behavior"
         pass
     def configure_solver(self):
-        #Assimulo option, does nothing if not using assimulo backend
-        self.integrator._solver.linear_solver = "SPGMR"
+        # The distribution block makes the system large and sparse, so an
+        # iterative linear solve beats forming the dense Jacobian. Asking the
+        # backend rather than poking at its solver keeps this working for any
+        # backend; one that has no such choice ignores the request.
+        self.integrator.set_linear_solver("krylov")
     def _post_set_phases(self):
         super()._post_set_phases()
         
@@ -115,7 +134,7 @@ class _BaseCrystallizer(MultiPhaseVessel):
 
 class BatchCrystallizer(_BaseCrystallizer):
 
-    oper_mode = "batch"
+    oper_mode = "Batch"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -124,7 +143,7 @@ class BatchCrystallizer(_BaseCrystallizer):
 
 class SemiBatchCrystallizer(_BaseCrystallizer):
 
-    oper_mode = "semibatch"
+    oper_mode = "Semibatch"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -133,13 +152,18 @@ class SemiBatchCrystallizer(_BaseCrystallizer):
 
 class ContinuousCrystallizer(_BaseCrystallizer):
 
-    oper_mode = "continuous"
+    oper_mode = "Continuous"
 
     def __init__(
         self,
-        controller=DefaultContinuousVesselVolume(),
+        controller=None,
         **kwargs
     ):
+
+        # Constructed per instance; a default argument would be shared by
+        # every ContinuousCrystallizer in the session.
+        if controller is None:
+            controller = DefaultContinuousVesselVolume()
 
         super().__init__(
             controller=controller,

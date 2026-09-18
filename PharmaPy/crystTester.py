@@ -1,11 +1,13 @@
-from PharmaPy.Phases import LiquidPhase, SolidPhase
-from PharmaPy.Streams import LiquidStream
-from PharmaPy.Reactors_refactor import ContinuousReactor,BatchReactor
+from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.Streams_Refactored import LiquidStream
+from PharmaPy.Reactors_Refactored import ContinuousReactor,BatchReactor
 from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.Kinetics import RxnKinetics,CrystKinetics
-from PharmaPy.Crystallizers_Refactor import BatchCrystallizer, ContinuousCrystallizer
+from PharmaPy.Crystallizers_Refactored import BatchCrystallizer, ContinuousCrystallizer
 from PharmaPy.Utilities import CoolingWater
-from PharmaPy.ProcessControl_Refactor import Controller,DefaultContinuousVesselVolume, SimpleTemperatureController
+from PharmaPy.ProcessControl_Refactored import (Controller, DefaultContinuousVesselVolume,
+                                              SimpleTemperatureController,
+                                              ContinuousVesselController)
 from PharmaPy.Mechanisms import OneDFVMMechanism
 
 
@@ -37,7 +39,12 @@ def new_temp_profile(x):
         return np.interp(x, [0, t], [313, 273.15])
     return 273.15
 
-temp_control = SimpleTemperatureController(temp_func=new_temp_profile)
+# Holds the vessel volume with the outlet and follows the cooling profile.
+# The profile replaces the energy balance, so the jacket is assumed able to
+# track it; swap in DefaultContinuousVesselVolume to let the utility duty
+# set the temperature instead.
+control = ContinuousVesselController(temp_func=new_temp_profile)
+control = SimpleTemperatureController(temp_func=new_temp_profile)
 # -----------------------------
 # Reactor Setup
 # -----------------------------
@@ -48,7 +55,7 @@ vessel = BatchCrystallizer(
     integrator=integrator,
     h_conv=10000,
     diam=.01,
-    controller=temp_control
+    controller=control,
 
 )
 
@@ -60,7 +67,7 @@ m = 1
 liquid1 = LiquidPhase(
     dpath,
     mass=m,
-    mass_frac=[0,0,0.2,0,0.8],
+    mass_frac=[0,0,0.4,0,0.6],
 
 )
 print("starting vol:", liquid1.vol)
@@ -89,8 +96,12 @@ rxns = ['A + B --> C', 'C + A --> D']
 # Rkinetics = RxnKinetics(path=dpath,rxn_list=rxns, k_params=kvals_rxns,ea_params=ea_vals)
 fitted_kinetics = np.array([6.26855218e+18, 8.30671806e+00, 1.45782420e+06, 4.52241037e+00, 3.93676056e+00]) 
 cryst_kinetics =build_crysts(fitted_kinetics)
-Ckinetics = CrystKinetics(np.array([-28.13909202,	0.001,	5.900800253]),**cryst_kinetics, solubility_type='apelblat')
-# Utility = CoolingWater(mass_flow=100, temp_in=273.55)
+# solubility_basis says which composition basis this Apelblat correlation was
+# fitted in. Without it the default (solution volume, matching old PharmaPy)
+# drives the run undersaturated; per-solvent-volume reproduces the fit.
+Ckinetics = CrystKinetics(np.array([-28.13909202,	0.001,	5.900800253]),**cryst_kinetics, solubility_type='apelblat',
+                          solubility_basis='mass_per_volume_solvent')
+Utility = CoolingWater(mass_flow=100, temp_in=273.55)
 # vessel.Utility = Utility
 # vessel.RxnKinetics = Rkinetics
 vessel.CrystKinetics = Ckinetics
@@ -111,8 +122,8 @@ vessel.solve_unit(runtime=150)
 
 print(vessel.result.Total_m_in_vessel[-5:])
 print('model_calls', vessel.model_call_count)
-# print(vessel._timers)
-print(vessel.Phases[1].mechanisms[0]._timers)
+print(vessel._timers)
+# print(vessel.Phases[1].mechanisms[0]._timers)
 print("done")
 
 # print(
@@ -135,17 +146,17 @@ print("done")
 #     "Vessel Final mass:",
 #     vessel.Phases.mass
 # )
-# print(
-#     "Vessel Final vol:",
-#     vessel.Phases.vol
-# )
+print(
+    "Vessel Final vol:",
+    vessel.Phases.vol
+)
 # print(
 #     "Vessel Final temp:",
 #     vessel.Phases.temp
 # )
 import matplotlib.pyplot as plt
 
-if False:
+if True:
     for mj,spec in zip(vessel.result.mass_j_liquid0.T,['A','B','C','D','Solvent']):
         if spec=='Solvent':continue
         plt.plot(vessel.result.time,mj,label=spec)

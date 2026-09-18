@@ -436,20 +436,32 @@ class ThermoPhysicalManager:
             mole_frac = (conc.T / conc.sum(axis=1)).T
 
         if basis == 'mole':
-            if solvent_ind:
+            # Was 'if solvent_ind:'. Species 0 is a perfectly valid solvent,
+            # but 0 is falsy, so that test reported 'no solvent' and returned
+            # one fewer value than the branch above had promised -- leaving
+            # callers unpacking the wrong arity. Compare against None.
+            if solvent_ind is not None:
                 return mole_frac, conc
             else:
                 return mole_frac
 
         elif basis == 'mass':
             mass_frac = self.frac_to_frac(mole_frac=mole_frac)
-            if solvent_ind:
+            # Was 'if solvent_ind:'. Species 0 is a perfectly valid solvent,
+            # but 0 is falsy, so that test reported 'no solvent' and returned
+            # one fewer value than the branch above had promised -- leaving
+            # callers unpacking the wrong arity. Compare against None.
+            if solvent_ind is not None:
                 return mass_frac, conc
             else:
                 return mass_frac
         else:
             mass_frac = self.frac_to_frac(mole_frac=mole_frac)
-            if solvent_ind:
+            # Was 'if solvent_ind:'. Species 0 is a perfectly valid solvent,
+            # but 0 is falsy, so that test reported 'no solvent' and returned
+            # one fewer value than the branch above had promised -- leaving
+            # callers unpacking the wrong arity. Compare against None.
+            if solvent_ind is not None:
                 return mass_frac, mole_frac, conc
             else:
                 return mass_frac, mole_frac
@@ -474,14 +486,22 @@ class ThermoPhysicalManager:
             mass_frac = (conc.T / conc.sum(axis=1)).T
 
         if basis == 'mass':
-            if solvent_ind:
+            # Was 'if solvent_ind:'. Species 0 is a perfectly valid solvent,
+            # but 0 is falsy, so that test reported 'no solvent' and returned
+            # one fewer value than the branch above had promised -- leaving
+            # callers unpacking the wrong arity. Compare against None.
+            if solvent_ind is not None:
                 return mass_frac, conc
             else:
                 return mass_frac
 
         elif basis == 'mole':
             mole_frac = self.frac_to_frac(mass_frac=mass_frac)
-            if solvent_ind:
+            # Was 'if solvent_ind:'. Species 0 is a perfectly valid solvent,
+            # but 0 is falsy, so that test reported 'no solvent' and returned
+            # one fewer value than the branch above had promised -- leaving
+            # callers unpacking the wrong arity. Compare against None.
+            if solvent_ind is not None:
                 return mole_frac, conc
             else:
                 return mole_frac

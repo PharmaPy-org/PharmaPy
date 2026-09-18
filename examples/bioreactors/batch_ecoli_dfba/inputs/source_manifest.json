@@ -1,0 +1,17 @@
+{
+  "doi": "10.1016/S0006-3495(02)73903-9",
+  "title": "Dynamic Flux Balance Analysis of Diauxic Growth in Escherichia coli",
+  "authors": ["Radhakrishnan Mahadevan", "Jeremy S. Edwards", "Francis J. Doyle III"],
+  "year": 2002,
+  "source_url": "https://doi.org/10.1016/S0006-3495(02)73903-9",
+  "evidence": "Qualitative published behavior and a historical model-generated regression trajectory; not raw experimental observations",
+  "path_base": "Directory containing this source_manifest.json",
+  "documentation": "../documentation/README.md",
+  "reference": "../documentation/evidence/nested_lp_trajectory.csv",
+  "reference_sha256": "380bd6421cebe1244683616cf35131d8a6688bf6afe3fea3210eac4adccc52af",
+  "raw_experimental_data_included": false,
+  "source_pdf_included": false,
+  "independent_experimental_validation": false,
+  "benchmark_scope": "Explicitly generated current-model regression, not experimental measurement; original untraced constant is retained in regression_baseline.json",
+  "regression_baseline": "regression_baseline.json"
+}

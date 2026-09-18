@@ -1,0 +1,26 @@
+{
+  "biology": {
+    "conditions": {},
+    "mechanism": "pathway-lp"
+  },
+  "numerics": {
+    "jacobian_relative_step": 1e-6,
+    "jacobian_state_scale": 1e-6,
+    "absolute_tolerance": 1e-11,
+    "backend": "scipy",
+    "maximum_step": {"unit": "s", "value": 30.0},
+    "relative_tolerance": 1e-08,
+    "step": {"unit": "h", "value": 0.05}
+  },
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {"unit": "L", "value": 1.0},
+    "mode": "batch",
+    "runtime": {"unit": "h", "value": 10.0}
+  },
+  "recipe": {
+    "name": "batch"
+  }
+}

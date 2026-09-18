@@ -1,0 +1,80 @@
+# reduced-CHO reconstruction scientific-case manifest for the best-publicly-reproducible reduced-
+# CHO vertical slice. This file freezes source identity, validation separation,
+# canonical units, known omissions, source ambiguities, and permitted claims.
+# PharmaPy loads no biological constants from undocumented defaults: values are
+# either cited to the two supplied preprints or explicitly marked reconstructed.
+
+case_id: reddy-cho-k1-a11-vrc01-public-reconstruction
+version: 1
+claim_scope: best-publicly-reproducible qualitative and figure-digitized replication
+model_authority:
+  title: A dynamic metabolic flux analysis (DMFA) model for performance predictions of diverse CHO cell culture process modes and conditions
+  doi: 10.64898/2026.01.11.698917
+  version: bioRxiv 2026-01-12
+  sha256: 8dc549d43ba581a70e9c6bedf8452680572e69ad8b59933554913ecbbdffe79e
+  displayed_license: CC-BY-NC-ND-4.0
+  repository_disposition: code transcription only; do not redistribute source PDF or adapted tables
+validation_authority:
+  title: Pseudo perfusion of Chinese Hamster Ovary (CHO) cells as a reliable platform for data generation to model and guide continuous perfusion biomanufacturing
+  doi: 10.1101/2025.11.27.691016
+  version: bioRxiv 2025-12-01
+  sha256: b0e69a9c6c4285d2bd5513b6041e2ddffef34d44549882389eb71c53fd5c9113
+  displayed_license: CC-BY-NC-ND-4.0
+biology:
+  cell_line: CHO-K1
+  clone: A11
+  product: VRC01 IgG1 monoclonal antibody
+  expression: stable producer
+canonical_units:
+  time: day
+  extracellular_concentration: mmol/L
+  extracellular_amount: mmol
+  volume: L
+  viable_cells: million cells
+  product_amount: g
+  phenotype_flux: source-reported cell-specific basis
+calibration_assignment:
+  role: transferred published parameters; no refitting without raw data
+  batches: [Reddy-fedbatch-pH-6.75, Reddy-fedbatch-pH-7.00, Reddy-fedbatch-pH-7.25]
+validation_assignment:
+  batches: [Reddy-intensified-pH-7.12, Reddy-perfusion, Malinov-pseudo-perfusion, Malinov-continuous-perfusion]
+  measurements: figure-digitized or qualitative only
+metrics:
+  - trajectory_direction
+  - peak_time_error_day
+  - peak_magnitude_scaled_error
+  - steady_state_bias_scaled
+  - metabolic_switch_presence
+  - nonnegative_inventory
+  - stoichiometric_residual_inf
+  - material_handoff_closure
+capability_envelope:
+  pH: [6.75, 7.25]
+  temperature_C: prescribed 37
+  dissolved_oxygen_percent: prescribed 40
+  modes: [batch, fed-batch, intensified-fed-batch, pseudo-perfusion, perfusion]
+  osmolality_mOsm_kg: source default 320 when unavailable; high-osmolality predictions provisional
+source_ambiguities:
+  - id: REDDY_OBJECTIVE_INDEX_46_47
+    resolution: preserve reaction 46 exclusion from the printed internal normalizer
+  - id: REDDY_ZERO_NORMALIZER
+    resolution: strict error or explicitly named numerical floor with sensitivity test
+  - id: REDDY_INTENSIFIED_FEED_DUPLICATED_7B
+    resolution: do not silently relabel the published 38 mL addition as 7a
+  - id: REDDY_C31_METABOLITE_SOURCE_DIMENSION
+    resolution: use dimensionally consistent cell-specific-rate times viable-cell inventory
+  - id: REDDY_BIOMASS_PRODUCT_EXCHANGE_DIRECTION
+    resolution: reverse reactions 67 and 68 canonically so source formation reactions can balance
+missing_information:
+  - raw 864-point calibration dataset
+  - raw held-out intensified and perfusion measurements
+  - complete proprietary ActiPro and Cell Boost compositions
+  - exact feed, bicarbonate, antifoam, sample, and bleed event logs
+  - parameter bounds, covariance, and original optimizer seeds
+  - reference reconciled intracellular flux trajectories
+  - source code and exact IPOPT/Pyomo environment
+prohibited_claims:
+  - exact reproduction of unpublished observations
+  - independent experimental validation
+  - universal CHO parameterization
+  - exact proprietary-media material closure

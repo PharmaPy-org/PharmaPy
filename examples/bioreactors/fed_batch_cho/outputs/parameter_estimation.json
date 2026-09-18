@@ -1,0 +1,99 @@
+{
+  "status": "PASS",
+  "checks": {
+    "optimizer_success": true,
+    "local_identifiability": true,
+    "parameter_recovery": true,
+    "training_prediction": true,
+    "held_out_prediction": true,
+    "solver_stability": true
+  },
+  "estimate": 50.93777074651448,
+  "estimates": {
+    "product_rate_coefficient": 50.93777074651448
+  },
+  "parameter_relative_errors": {
+    "product_rate_coefficient": 0.0005651406728570974
+  },
+  "covariance": [
+    [
+      0.00039540174232464737
+    ]
+  ],
+  "identifiable": true,
+  "jacobian_rank": 1,
+  "objective": 0.09522046577925729,
+  "evaluations": 11,
+  "native_estimator": "ParameterEstimation",
+  "native_unit": "SemiBatchReactor",
+  "time_unit": "day",
+  "synthetic_data": {
+    "seed": 1701,
+    "true_parameters": {
+      "product_rate_coefficient": 50.909
+    },
+    "noise_model": "Independent additive Gaussian product errors with SD 0.001 g/L; illustrative assay assumptions, not measured experimental uncertainty."
+  },
+  "acceptance": {
+    "parameter_relative_error": 0.05,
+    "standardized_rmse": 3.0,
+    "solver_peak_relative_difference": 0.05
+  },
+  "refinement_factor": 0.5,
+  "metrics": {
+    "product": {
+      "training_standardized_rmse": 0.2519529926782074,
+      "held_out_standardized_rmse": 0.9641806360887192,
+      "solver_difference_in_noise_sd": 4.102817687298047,
+      "solver_peak_relative_difference": 0.03446055741013838
+    }
+  },
+  "observations": [
+    {
+      "name": "product",
+      "unit": "g/L",
+      "quantity": "state",
+      "result_attribute": "product_g_liquid0",
+      "divide_by_volume": true,
+      "mass_attribute": "mass_j_liquid0",
+      "multiplier": 0.001,
+      "event_side": "post",
+      "sample_times": [
+        2.0,
+        3.5,
+        5.5,
+        6.5,
+        8.5
+      ],
+      "split": [
+        "training",
+        "training",
+        "training",
+        "held_out",
+        "held_out"
+      ],
+      "values": [
+        0.012294603635900167,
+        0.040576470210635464,
+        0.11920309914489907,
+        0.1141946954175056,
+        0.10936513404569893
+      ],
+      "noise_free_values": [
+        0.011855861579170505,
+        0.04024828505564633,
+        0.11851981076100682,
+        0.11501397797865218,
+        0.10867356962980125
+      ],
+      "predictions": [
+        0.011909587796000041,
+        0.04043067477733738,
+        0.11905836688790727,
+        0.11554494845066521,
+        0.10917511998185057
+      ]
+    }
+  ],
+  "evidence_limit": "Synthetic same-model recovery and withheld-time prediction; not independent experimental validation. Covariance is a local residual-scaled approximation."
+}

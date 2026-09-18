@@ -1,0 +1,9 @@
+{
+  "comparison_kind": "generated_model_regression_not_experimental_validation",
+  "final_product_g": 0.1151827044005793,
+  "final_vcd_million_ml": 8.841154148245362,
+  "native_unit": "SemiBatchReactor",
+  "relative_final_product_error": 2.8059148554748643e-11,
+  "relative_final_vcd_error": 8.854095848688788e-06,
+  "status": "PASS"
+}

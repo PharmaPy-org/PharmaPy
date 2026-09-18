@@ -1,0 +1,182 @@
+{
+  "status": "PASS",
+  "checks": {
+    "optimizer_success": true,
+    "local_identifiability": true,
+    "parameter_recovery": true,
+    "training_prediction": true,
+    "held_out_prediction": true,
+    "solver_stability": true
+  },
+  "estimate": 10.002061255519905,
+  "estimates": {
+    "glucose_uptake_max": 10.002061255519905
+  },
+  "parameter_relative_errors": {
+    "glucose_uptake_max": 0.0002061255519905103
+  },
+  "covariance": [
+    [
+      3.618250756658344e-05
+    ]
+  ],
+  "identifiable": true,
+  "jacobian_rank": 1,
+  "objective": 6.100716273071697,
+  "evaluations": 6,
+  "native_estimator": "ParameterEstimation",
+  "native_unit": "BatchReactor",
+  "time_unit": "h",
+  "synthetic_data": {
+    "seed": 31415,
+    "true_parameters": {
+      "glucose_uptake_max": 10.0
+    },
+    "noise_model": "Independent additive Gaussian errors: glucose SD 0.03 mmol/L, biomass SD 0.0001 gDW/L; illustrative assay assumptions, not measured experimental uncertainty."
+  },
+  "acceptance": {
+    "parameter_relative_error": 0.05,
+    "standardized_rmse": 3.0,
+    "solver_difference_in_noise_sd": 0.1
+  },
+  "integration_tolerances": {
+    "relative_tolerance": 1e-08,
+    "absolute_tolerance": 1e-11
+  },
+  "metrics": {
+    "glucose": {
+      "training_standardized_rmse": 1.3982529998673865,
+      "held_out_standardized_rmse": 0.6353690192498402,
+      "solver_difference_in_noise_sd": 0.00011469096271217913
+    },
+    "biomass": {
+      "training_standardized_rmse": 1.0465403407883755,
+      "held_out_standardized_rmse": 1.7715846502259347,
+      "solver_difference_in_noise_sd": 0.0022627311441203446
+    }
+  },
+  "observations": [
+    {
+      "name": "glucose",
+      "quantity": "species_concentration",
+      "species": "glucose",
+      "unit": "mmol/L",
+      "sample_times": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        4.5,
+        5.0,
+        5.5,
+        6.0,
+        7.0
+      ],
+      "split": [
+        "training",
+        "training",
+        "training",
+        "training",
+        "held_out",
+        "held_out",
+        "held_out",
+        "held_out",
+        "held_out"
+      ],
+      "values": [
+        10.756632756446841,
+        10.703764619313752,
+        10.592504958764186,
+        10.154733528012114,
+        9.539356963981547,
+        8.680676462096477,
+        7.427958029271739,
+        5.540050930305017,
+        0.019397385652271053
+      ],
+      "noise_free_values": [
+        10.781903142507119,
+        10.72783242956831,
+        10.566280345191496,
+        10.083578598381006,
+        9.556455644751587,
+        8.699524743645773,
+        7.412160325771356,
+        5.56708585386657,
+        9.42935846749991e-09
+      ],
+      "predictions": [
+        10.781897946694151,
+        10.72780428167606,
+        10.566161433589514,
+        10.083122183222743,
+        9.55559173817186,
+        8.698037689593416,
+        7.409764755528452,
+        5.563383065202977,
+        9.123586915953588e-09
+      ]
+    },
+    {
+      "name": "biomass",
+      "quantity": "biomass_concentration",
+      "unit": "gDW/L",
+      "sample_times": [
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        4.5,
+        5.0,
+        5.5,
+        6.0,
+        7.0
+      ],
+      "split": [
+        "training",
+        "training",
+        "training",
+        "training",
+        "held_out",
+        "held_out",
+        "held_out",
+        "held_out",
+        "held_out"
+      ],
+      "values": [
+        0.002851176557593552,
+        0.008997867404334847,
+        0.02654530463388821,
+        0.07977448411683681,
+        0.13575275639513978,
+        0.21132156414668382,
+        0.30940936783400325,
+        0.43648896726376657,
+        0.7879246978173067
+      ],
+      "noise_free_values": [
+        0.0029877458698059894,
+        0.008926647182839023,
+        0.026670951827474105,
+        0.079690108499274,
+        0.13575528007444657,
+        0.21137831003587676,
+        0.30943085665146913,
+        0.43654833474420923,
+        0.78779355352177
+      ],
+      "predictions": [
+        0.0029881556445472777,
+        0.008929097096356383,
+        0.026681934142665186,
+        0.07973386861234491,
+        0.13582962584354416,
+        0.21148512233267444,
+        0.3095850077516527,
+        0.43677060473632806,
+        0.7878059696836545
+      ]
+    }
+  ],
+  "evidence_limit": "Synthetic same-model recovery and withheld-time prediction; not independent experimental validation. Covariance is a local residual-scaled approximation."
+}

@@ -1,0 +1,15 @@
+{
+  "parameters": [{"name": "glucose_uptake_max", "initial_value": 7.0, "lower_bound": 1.0, "upper_bound": 20.0}],
+  "time_unit": "h",
+  "training_times": [1.0, 2.0, 3.0, 4.0],
+  "held_out_times": [4.5, 5.0, 5.5, 6.0, 7.0],
+  "measurements": [
+    {"name": "glucose", "quantity": "species_concentration", "species": "glucose", "unit": "mmol/L"},
+    {"name": "biomass", "quantity": "biomass_concentration", "unit": "gDW/L"}
+  ],
+  "covariance": [[0.0009, 0.0], [0.0, 0.00000001]],
+  "synthetic_data": {"seed": 31415, "true_parameters": {"glucose_uptake_max": 10.0}, "noise_model": "Independent additive Gaussian errors: glucose SD 0.03 mmol/L, biomass SD 0.0001 gDW/L; illustrative assay assumptions, not measured experimental uncertainty."},
+  "finite_difference_step": 0.0001,
+  "integration_tolerances": {"relative_tolerance": 0.00000001, "absolute_tolerance": 0.00000000001},
+  "acceptance": {"parameter_relative_error": 0.05, "standardized_rmse": 3.0, "solver_difference_in_noise_sd": 0.1}
+}

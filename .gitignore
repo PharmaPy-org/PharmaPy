@@ -6,6 +6,8 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
+.pytest_cache/
+__pycache__/
 
 # pyenv
 *.python-version
@@ -84,3 +86,11 @@ ENV/
 source/crystallization/
 .vscode
 refactor_old_cryst_test.py
+
+# Packaged bioreactor comparison figures
+!examples/bioreactors/*/documentation/published_figures/*.png
+!examples/bioreactors/*/outputs/figures/*.png
+
+# Local bioreactor runner scripts (not distributed)
+examples/bioreactors/*/run_*.py
+examples/bioreactors/design_runner.py

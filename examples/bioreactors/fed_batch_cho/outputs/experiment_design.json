@@ -1,0 +1,452 @@
+{
+  "status": "PASS",
+  "acceptance_profile": "capability",
+  "required_checks": [
+    "replayed",
+    "matched_cost",
+    "predicted_uncertainty_benefit",
+    "ranking_and_benefit_stability",
+    "finite_confirmation"
+  ],
+  "capability_status": "PASS",
+  "empirical_benefit_status": "NOT_DEMONSTRATED",
+  "checks": {
+    "replayed": true,
+    "matched_cost": true,
+    "predicted_uncertainty_benefit": true,
+    "ranking_and_benefit_stability": true,
+    "finite_confirmation": true,
+    "realized_prediction_benefit": false
+  },
+  "criterion": "D",
+  "baseline_id": "condition-6.8",
+  "selected_id": "condition-7.2",
+  "ranking": [
+    "condition-7.2",
+    "condition-6.8",
+    "condition-7.0"
+  ],
+  "baseline_score": 6.6548524905847755,
+  "selected_score": 7.033761855615742,
+  "score_improvement": 0.3789093650309665,
+  "replayed": true,
+  "candidate_evaluations": [
+    {
+      "identifier": "condition-6.8",
+      "values": {
+        "culture_condition": 6.8
+      },
+      "feasible": true,
+      "reason": "",
+      "cost": 3.0,
+      "predictions": {
+        "product@172800.0": 0.011930578269806072,
+        "product@302400.0": 0.04050193327238299,
+        "product@475200.0": 0.11926479165333397
+      },
+      "sensitivities": [
+        [
+          0.001867390848221122
+        ],
+        [
+          0.0063394170780424345
+        ],
+        [
+          0.01856330590494459
+        ]
+      ],
+      "information_matrix": [
+        [
+          388.2716835899468
+        ]
+      ],
+      "total_information": [
+        [
+          776.5433671798936
+        ]
+      ],
+      "parameter_sd": [
+        0.03588534639267666
+      ],
+      "criterion_score": 6.6548524905847755
+    },
+    {
+      "identifier": "condition-7.0",
+      "values": {
+        "culture_condition": 7.0
+      },
+      "feasible": true,
+      "reason": "",
+      "cost": 3.0,
+      "predictions": {
+        "product@172800.0": 0.025536888189961807,
+        "product@302400.0": 0.11302213618606313,
+        "product@475200.0": 0.13960975914132595
+      },
+      "sensitivities": [
+        [
+          0.0026350463200678796
+        ],
+        [
+          0.011662275467347603
+        ],
+        [
+          0.014614990888589138
+        ]
+      ],
+      "information_matrix": [
+        [
+          356.5500968587446
+        ]
+      ],
+      "total_information": [
+        [
+          744.8217804486915
+        ]
+      ],
+      "parameter_sd": [
+        0.036641548246108435
+      ],
+      "criterion_score": 6.613144968887442
+    },
+    {
+      "identifier": "condition-7.2",
+      "values": {
+        "culture_condition": 7.2
+      },
+      "feasible": true,
+      "reason": "",
+      "cost": 3.0,
+      "predictions": {
+        "product@172800.0": 0.03164848261888781,
+        "product@302400.0": 0.12615170623632288,
+        "product@475200.0": 0.250576812993114
+      },
+      "sensitivities": [
+        [
+          0.002491890001958713
+        ],
+        [
+          0.009932732669203298
+        ],
+        [
+          0.025320925149293284
+        ]
+      ],
+      "information_matrix": [
+        [
+          746.0179444758334
+        ]
+      ],
+      "total_information": [
+        [
+          1134.28962806578
+        ]
+      ],
+      "parameter_sd": [
+        0.029691902073539413
+      ],
+      "criterion_score": 7.033761855615742
+    }
+  ],
+  "baseline_information": [
+    [
+      388.2716835899468
+    ]
+  ],
+  "calibration": {
+    "estimates": {
+      "product_rate_coefficient": 50.94901132861456
+    },
+    "residual_scaled_covariance": [
+      [
+        3.911103560212413e-05
+      ]
+    ],
+    "observations": {
+      "product": [
+        0.012294603551001676,
+        0.04057646997215844,
+        0.11920306243172604
+      ]
+    }
+  },
+  "sample_times_s": [
+    172800.0,
+    302400.0,
+    475200.0
+  ],
+  "withheld_times_s": [
+    561600.0,
+    734400.0
+  ],
+  "predicted_sd_reduction_vs_matched_control": 0.17258978780266643,
+  "stability": [
+    {
+      "perturbation_factor": 0.5,
+      "refined_solver": false,
+      "selected_id": "condition-7.2",
+      "sd_reduction": 0.07183667262804672
+    },
+    {
+      "perturbation_factor": 2.0,
+      "refined_solver": false,
+      "selected_id": "condition-7.2",
+      "sd_reduction": 0.10709065519030347
+    },
+    {
+      "perturbation_factor": 1.0,
+      "refined_solver": true,
+      "selected_id": "condition-7.2",
+      "sd_reduction": 0.07561437519446335
+    }
+  ],
+  "confirmation": [
+    {
+      "seed": 2701,
+      "selected_estimates": {
+        "product_rate_coefficient": 50.945016342270016
+      },
+      "control_estimates": {
+        "product_rate_coefficient": 50.94899162160927
+      },
+      "selected_prediction_mse": 0.2398855195971365,
+      "control_prediction_mse": 0.29587484873380715,
+      "selected_observations": {
+        "product": [
+          0.031729240510727105,
+          0.12472641534001556,
+          0.25089000251213167
+        ]
+      },
+      "control_observations": {
+        "product": [
+          0.012036323198221462,
+          0.039220415682484785,
+          0.11962239575783122
+        ]
+      }
+    },
+    {
+      "seed": 2702,
+      "selected_estimates": {
+        "product_rate_coefficient": 50.88996296951534
+      },
+      "control_estimates": {
+        "product_rate_coefficient": 50.885943017043395
+      },
+      "selected_prediction_mse": 0.0671025985346898,
+      "control_prediction_mse": 0.09840756227390293,
+      "selected_observations": {
+        "product": [
+          0.03195979159244785,
+          0.12612269536720067,
+          0.2478109989377401
+        ]
+      },
+      "control_observations": {
+        "product": [
+          0.012266874279942205,
+          0.0406166957096699,
+          0.11654339218343965
+        ]
+      }
+    },
+    {
+      "seed": 2703,
+      "selected_estimates": {
+        "product_rate_coefficient": 50.941087121170746
+      },
+      "control_estimates": {
+        "product_rate_coefficient": 50.92987489686817
+      },
+      "selected_prediction_mse": 0.19067449705467318,
+      "control_prediction_mse": 0.08063033301954398,
+      "selected_observations": {
+        "product": [
+          0.03044370752236321,
+          0.12622698175593863,
+          0.24977531353073767
+        ]
+      },
+      "control_observations": {
+        "product": [
+          0.010750790209857565,
+          0.04072098209840787,
+          0.11850770677643721
+        ]
+      }
+    },
+    {
+      "seed": 2704,
+      "selected_estimates": {
+        "product_rate_coefficient": 50.93568316789182
+      },
+      "control_estimates": {
+        "product_rate_coefficient": 50.941896209288
+      },
+      "selected_prediction_mse": 0.13175886697008954,
+      "control_prediction_mse": 0.2003843155532835,
+      "selected_observations": {
+        "product": [
+          0.03134357346090028,
+          0.12641055598982243,
+          0.2498738499123646
+        ]
+      },
+      "control_observations": {
+        "product": [
+          0.011650656148394637,
+          0.04090455633229167,
+          0.11860624315806415
+        ]
+      }
+    },
+    {
+      "seed": 2705,
+      "selected_estimates": {
+        "product_rate_coefficient": 50.93067074980195
+      },
+      "control_estimates": {
+        "product_rate_coefficient": 50.91743487686749
+      },
+      "selected_prediction_mse": 0.08686708086283179,
+      "control_prediction_mse": 0.01315527909057675,
+      "selected_observations": {
+        "product": [
+          0.031152057549769716,
+          0.1271584087636228,
+          0.24888167868569583
+        ]
+      },
+      "control_observations": {
+        "product": [
+          0.011459140237264073,
+          0.04165240910609203,
+          0.11761407193139536
+        ]
+      }
+    }
+  ],
+  "baseline_prediction_mse": 0.2964925104132893,
+  "mean_selected_prediction_mse": 0.14325771260388415,
+  "mean_control_prediction_mse": 0.1376904677342229,
+  "paired_prediction_benefit_mean": -0.0055672448696613,
+  "paired_prediction_benefit_standard_error": 0.03620251000044146,
+  "parameter_order": [
+    "product_rate_coefficient"
+  ],
+  "configuration": {
+    "criterion": "D",
+    "baseline_id": "condition-6.8",
+    "maximum_cost": 3.0,
+    "assay_cost": 1.0,
+    "variable_paths": {
+      "culture_condition": {
+        "document": "case",
+        "path": "biology.conditions.ph"
+      }
+    },
+    "variable_bounds": {
+      "culture_condition": [
+        6.8,
+        7.2
+      ]
+    },
+    "candidates": [
+      {
+        "identifier": "condition-6.8",
+        "values": {
+          "culture_condition": 6.8
+        },
+        "cost": 0.0
+      },
+      {
+        "identifier": "condition-7.0",
+        "values": {
+          "culture_condition": 7.0
+        },
+        "cost": 0.0
+      },
+      {
+        "identifier": "condition-7.2",
+        "values": {
+          "culture_condition": 7.2
+        },
+        "cost": 0.0
+      }
+    ],
+    "parameters": [
+      {
+        "name": "product_rate_coefficient",
+        "mechanism_path": "parameters.ph_coefficients.Q_MAB.0",
+        "initial_value": 50.91,
+        "lower_bound": 50.8,
+        "upper_bound": 51.0,
+        "relative_step": 1e-05
+      }
+    ],
+    "observations": [
+      {
+        "name": "product",
+        "unit": "g/L",
+        "quantity": "state",
+        "result_attribute": "product_g_liquid0",
+        "divide_by_volume": true,
+        "mass_attribute": "mass_j_liquid0",
+        "multiplier": 0.001,
+        "event_side": "post"
+      }
+    ],
+    "observation_density_kg_m3": 1000.0,
+    "sample_times_s": [
+      172800.0,
+      302400.0,
+      475200.0
+    ],
+    "withheld_times_s": [
+      561600.0,
+      734400.0
+    ],
+    "prediction_controls": {
+      "culture_condition": 7.0
+    },
+    "covariance": [
+      [
+        1e-06
+      ]
+    ],
+    "case_overrides": {},
+    "fit_relative_step": 1e-06,
+    "refinement_factor": 0.5,
+    "synthetic_data": {
+      "true_parameters": {
+        "product_rate_coefficient": 50.909
+      },
+      "baseline_seed": 1701,
+      "confirmation_seeds": [
+        2701,
+        2702,
+        2703,
+        2704,
+        2705
+      ]
+    },
+    "acceptance": {
+      "profile": "capability",
+      "minimum_sd_reduction": 0.01
+    },
+    "rationale": {
+      "decision": "Choose pH for an additional equal-cost culture to reduce uncertainty in a local productivity coefficient after baseline calibration.",
+      "times": "Days 2, 3.5 and 5.5 span growth and the day-3/day-4/day-5 feeds. Days 6.5 and 8.5 are withheld for prediction assessment.",
+      "noise": "Illustrative independent Gaussian product assay SD 0.001 g/L, not a measured assay specification. Errors are independent across times and cultures.",
+      "scope": "Narrow coefficient bounds express local calibration around the source parameterization; this is not global CHO identification. Product observations use the reconciled product state. Inventory/constraint accounting is checked separately; full elemental closure is not asserted.",
+      "volume": "Declared constant density 1000 kg/m3; use each sample's recorded mass, not final culture volume.",
+      "confirmation": "Five predeclared paired noise seeds; small synthetic demonstration, not statistical certification. The WP3 capability profile requires stable 1% predicted parameter-SD reduction versus an equal-budget repeat and all numerical gates. Lower aggregate withheld squared error is separately reported, not guaranteed. The predictive-benefit profile additionally requires that observed comparison to pass; neither profile establishes statistical superiority."
+    }
+  },
+  "baseline_absolute_parameter_sd": [
+    0.05074954355897975
+  ],
+  "evidence_limit": "Synthetic same-model study; local information and small paired-seed comparison, not independent validation or guaranteed experimental benefit."
+}

@@ -1,0 +1,6 @@
+{
+  "glucose": {"formula": "C6H12O6", "mw": 180.156, "t_crit": 700.0, "p_crit": 5000.0, "cp_liq": [220.0], "cp_solid": [220.0], "rho_liq": 1000.0, "rho_solid": 1500.0, "visc_liq": [-3.0, 500.0, 0.0, 0.0], "p_vap": [1.0, 1000.0, -50.0], "mol_vol": 0.18, "delta_hvap": 40000.0, "tref_hvap": 373.15, "surf_tension": 0.07},
+  "acetate": {"formula": "C2H4O2", "mw": 60.052, "t_crit": 592.0, "p_crit": 5800.0, "cp_liq": [123.0], "cp_solid": [123.0], "rho_liq": 1000.0, "rho_solid": 1500.0, "visc_liq": [-3.0, 500.0, 0.0, 0.0], "p_vap": [1.0, 1000.0, -50.0], "mol_vol": 0.06, "delta_hvap": 24000.0, "tref_hvap": 391.0, "surf_tension": 0.03},
+  "oxygen": {"formula": "O2", "mw": 31.998, "t_crit": 154.6, "p_crit": 5043.0, "cp_liq": [29.4], "cp_solid": [29.4], "rho_liq": 1000.0, "rho_solid": 1141.0, "visc_liq": [-3.0, 500.0, 0.0, 0.0], "p_vap": [1.0, 1000.0, -50.0], "mol_vol": 0.032, "delta_hvap": 6820.0, "tref_hvap": 90.2, "surf_tension": 0.013},
+  "water": {"formula": "H2O", "mw": 18.015, "t_crit": 647.1, "p_crit": 22064.0, "cp_liq": [75.3], "cp_solid": [37.5], "rho_liq": 1000.0, "rho_solid": 917.0, "visc_liq": [-3.0, 500.0, 0.0, 0.0], "p_vap": [16.3872, 3885.7, -42.98], "mol_vol": 0.018, "delta_hvap": 40650.0, "tref_hvap": 373.15, "surf_tension": 0.072}
+}

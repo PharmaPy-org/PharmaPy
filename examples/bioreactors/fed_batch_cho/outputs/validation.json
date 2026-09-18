@@ -1,0 +1,7 @@
+{
+  "baseline": "../inputs/regression_baseline.json",
+  "criterion": "generated model baseline; declared relative tolerance",
+  "independent_experimental_validation": false,
+  "maximum_relative_error": 8.854095848688788e-06,
+  "status": "PASS"
+}

@@ -1,0 +1,2506 @@
+{
+  "model": {
+    "extracellular_species": [
+      "GLC",
+      "LAC",
+      "GLN",
+      "GLU",
+      "ASN",
+      "ASP",
+      "ALA",
+      "TRP",
+      "NH3",
+      "PHE",
+      "TYR",
+      "SER",
+      "GLY",
+      "MET",
+      "THR",
+      "ILE",
+      "VAL",
+      "ARG",
+      "HIS",
+      "LEU",
+      "LYS"
+    ],
+    "internal_reactions": [
+      "R001",
+      "R002",
+      "R003",
+      "R004",
+      "R005",
+      "R006",
+      "R007",
+      "R008",
+      "R009",
+      "R010",
+      "R011",
+      "R012",
+      "R013",
+      "R014",
+      "R015",
+      "R016",
+      "R017",
+      "R018",
+      "R019",
+      "R020",
+      "R021",
+      "R022",
+      "R023",
+      "R024",
+      "R025",
+      "R026",
+      "R027",
+      "R028",
+      "R029",
+      "R030",
+      "R031",
+      "R032",
+      "R033",
+      "R034",
+      "R035",
+      "R036",
+      "R037",
+      "R038",
+      "R039",
+      "R040",
+      "R041",
+      "R042",
+      "R043",
+      "R044",
+      "R045"
+    ],
+    "rule_graph": [
+      {
+        "identifier": "mu_glc",
+        "expression": {
+          "op": "monod",
+          "args": [
+            {
+              "concentration": "GLC"
+            },
+            {
+              "parameter": "monod.GLC"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "mu_met",
+        "expression": {
+          "op": "monod",
+          "args": [
+            {
+              "concentration": "MET"
+            },
+            {
+              "parameter": "monod.MET"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "contribution_glu",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "parameter": "biphasic_growth.GLU"
+            },
+            {
+              "op": "monod",
+              "args": [
+                {
+                  "concentration": "GLU"
+                },
+                {
+                  "parameter": "monod.GLU"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "contribution_gln",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "parameter": "biphasic_growth.GLN"
+            },
+            {
+              "op": "monod",
+              "args": [
+                {
+                  "concentration": "GLN"
+                },
+                {
+                  "parameter": "monod.GLN"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "contribution_asp",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "parameter": "biphasic_growth.ASP"
+            },
+            {
+              "op": "monod",
+              "args": [
+                {
+                  "concentration": "ASP"
+                },
+                {
+                  "parameter": "monod.ASP"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "contribution_asn",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "parameter": "biphasic_growth.ASN"
+            },
+            {
+              "op": "monod",
+              "args": [
+                {
+                  "concentration": "ASN"
+                },
+                {
+                  "parameter": "monod.ASN"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "mu_max",
+        "expression": {
+          "op": "quadratic",
+          "args": [
+            {
+              "parameter": "ph_coefficients.MU_MAX.0"
+            },
+            {
+              "parameter": "ph_coefficients.MU_MAX.1"
+            },
+            {
+              "parameter": "ph_coefficients.MU_MAX.2"
+            },
+            {
+              "condition": "ph"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "osmo_exponent",
+        "expression": {
+          "op": "negate",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "subtract",
+                  "args": [
+                    {
+                      "condition": "osmolality"
+                    },
+                    {
+                      "parameter": "osmolality_midpoint"
+                    }
+                  ]
+                },
+                {
+                  "parameter": "osmolality_slope"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "osmo_fraction",
+        "expression": {
+          "op": "subtract",
+          "args": [
+            1.0,
+            {
+              "op": "divide",
+              "args": [
+                1.0,
+                {
+                  "op": "add",
+                  "args": [
+                    1.0,
+                    {
+                      "op": "exp",
+                      "args": [
+                        {
+                          "ref": "osmo_exponent"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "mu_osmo",
+        "expression": {
+          "op": "maximum",
+          "args": [
+            0.0,
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "ref": "mu_max"
+                },
+                {
+                  "ref": "osmo_fraction"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "growth",
+        "expression": {
+          "op": "maximum",
+          "args": [
+            0.0,
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "ref": "mu_osmo"
+                },
+                {
+                  "ref": "mu_glc"
+                },
+                {
+                  "ref": "mu_met"
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "ref": "contribution_glu"
+                    },
+                    {
+                      "ref": "contribution_gln"
+                    }
+                  ]
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    {
+                      "ref": "contribution_asn"
+                    },
+                    {
+                      "ref": "contribution_asp"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "death_exponent",
+        "expression": {
+          "op": "negate",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "subtract",
+                  "args": [
+                    {
+                      "state": "ivcd_million_cell_day_per_ml"
+                    },
+                    {
+                      "parameter": "death_ivcd_midpoint"
+                    }
+                  ]
+                },
+                {
+                  "parameter": "death_ivcd_slope"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "death",
+        "expression": {
+          "op": "add",
+          "args": [
+            {
+              "parameter": "death_constant_per_day"
+            },
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "parameter": "death_maximum_per_day"
+                },
+                {
+                  "op": "add",
+                  "args": [
+                    1.0,
+                    {
+                      "op": "exp",
+                      "args": [
+                        {
+                          "ref": "death_exponent"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "y_glc",
+        "expression": {
+          "op": "quadratic",
+          "args": [
+            {
+              "parameter": "ph_coefficients.Y_X_GLC.0"
+            },
+            {
+              "parameter": "ph_coefficients.Y_X_GLC.1"
+            },
+            {
+              "parameter": "ph_coefficients.Y_X_GLC.2"
+            },
+            {
+              "condition": "ph"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "aa_scaling",
+        "expression": {
+          "op": "quadratic",
+          "args": [
+            {
+              "parameter": "ph_coefficients.AA_SCALING.0"
+            },
+            {
+              "parameter": "ph_coefficients.AA_SCALING.1"
+            },
+            {
+              "parameter": "ph_coefficients.AA_SCALING.2"
+            },
+            {
+              "condition": "ph"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "glucose",
+        "expression": {
+          "op": "add",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "divide",
+                  "args": [
+                    {
+                      "ref": "growth"
+                    },
+                    {
+                      "ref": "y_glc"
+                    }
+                  ]
+                },
+                1000.0
+              ]
+            },
+            {
+              "parameter": "glucose_maintenance"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "glutamine",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "op": "multiply",
+                  "args": [
+                    {
+                      "ref": "mu_osmo"
+                    },
+                    {
+                      "ref": "mu_glc"
+                    },
+                    {
+                      "ref": "contribution_gln"
+                    },
+                    {
+                      "op": "add",
+                      "args": [
+                        {
+                          "ref": "contribution_asn"
+                        },
+                        {
+                          "ref": "contribution_asp"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "parameter": "amino_acid_yields.GLN"
+                }
+              ]
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "glutamine_exchange",
+        "expression": {
+          "op": "negate",
+          "args": [
+            {
+              "ref": "glutamine"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "asparagine",
+        "expression": {
+          "op": "add",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "divide",
+                  "args": [
+                    {
+                      "op": "multiply",
+                      "args": [
+                        {
+                          "ref": "mu_osmo"
+                        },
+                        {
+                          "ref": "mu_glc"
+                        },
+                        {
+                          "ref": "contribution_asn"
+                        },
+                        {
+                          "op": "add",
+                          "args": [
+                            {
+                              "ref": "contribution_gln"
+                            },
+                            {
+                              "ref": "contribution_glu"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "parameter": "amino_acid_yields.ASN"
+                    }
+                  ]
+                },
+                1000.0
+              ]
+            },
+            {
+              "parameter": "asparagine_maintenance"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "lactate_early",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "quadratic",
+              "args": [
+                {
+                  "parameter": "ph_coefficients.Y_LAC_GLC.0"
+                },
+                {
+                  "parameter": "ph_coefficients.Y_LAC_GLC.1"
+                },
+                {
+                  "parameter": "ph_coefficients.Y_LAC_GLC.2"
+                },
+                {
+                  "condition": "ph"
+                }
+              ]
+            },
+            {
+              "ref": "glucose"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "lactate_late",
+        "expression": {
+          "op": "negate",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "divide",
+                  "args": [
+                    {
+                      "ref": "growth"
+                    },
+                    {
+                      "parameter": "cell_yield_on_lactate"
+                    }
+                  ]
+                },
+                1000.0,
+                {
+                  "parameter": "figure_late_lactate_uptake_scale"
+                },
+                {
+                  "op": "monod",
+                  "args": [
+                    {
+                      "concentration": "LAC"
+                    },
+                    {
+                      "parameter": "monod.LAC"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "lactate",
+        "expression": {
+          "op": "greater-select",
+          "threshold": 0.05,
+          "args": [
+            {
+              "concentration": "GLN"
+            },
+            {
+              "ref": "lactate_early"
+            },
+            {
+              "ref": "lactate_late"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "alanine_late",
+        "expression": {
+          "op": "negate",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "divide",
+                  "args": [
+                    {
+                      "ref": "growth"
+                    },
+                    {
+                      "parameter": "amino_acid_yields.ALA"
+                    }
+                  ]
+                },
+                1000.0
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "alanine",
+        "expression": {
+          "op": "greater-select",
+          "threshold": 0.05,
+          "args": [
+            {
+              "concentration": "GLN"
+            },
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "parameter": "alanine_from_glucose"
+                },
+                {
+                  "ref": "glucose"
+                }
+              ]
+            },
+            {
+              "ref": "alanine_late"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "glutamate",
+        "expression": {
+          "op": "greater-select",
+          "threshold": 0.05,
+          "args": [
+            {
+              "concentration": "GLN"
+            },
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "parameter": "glutamate_from_glutamine"
+                },
+                {
+                  "ref": "glutamine"
+                }
+              ]
+            },
+            {
+              "op": "negate",
+              "args": [
+                {
+                  "parameter": "glutamate_maintenance"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "aspartate",
+        "expression": {
+          "op": "greater-select",
+          "threshold": 0.05,
+          "args": [
+            {
+              "concentration": "GLN"
+            },
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "parameter": "aspartate_from_glutamine"
+                },
+                {
+                  "ref": "glutamine"
+                }
+              ]
+            },
+            {
+              "op": "negate",
+              "args": [
+                {
+                  "parameter": "aspartate_maintenance"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "serine_yield",
+        "expression": {
+          "op": "greater-select",
+          "threshold": 0.05,
+          "args": [
+            {
+              "concentration": "GLN"
+            },
+            {
+              "parameter": "amino_acid_yields.SER_EARLY"
+            },
+            {
+              "parameter": "amino_acid_yields.SER_LATE"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "serine",
+        "expression": {
+          "op": "negate",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "divide",
+                  "args": [
+                    {
+                      "ref": "growth"
+                    },
+                    {
+                      "ref": "serine_yield"
+                    }
+                  ]
+                },
+                {
+                  "ref": "aa_scaling"
+                },
+                1000.0
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "glycine_late",
+        "expression": {
+          "op": "negate",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "op": "divide",
+                  "args": [
+                    {
+                      "ref": "growth"
+                    },
+                    {
+                      "parameter": "amino_acid_yields.GLY"
+                    }
+                  ]
+                },
+                1000.0
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "glycine",
+        "expression": {
+          "op": "greater-select",
+          "threshold": 0.05,
+          "args": [
+            {
+              "concentration": "GLN"
+            },
+            {
+              "op": "negate",
+              "args": [
+                {
+                  "op": "multiply",
+                  "args": [
+                    {
+                      "parameter": "glycine_from_serine"
+                    },
+                    {
+                      "ref": "serine"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "ref": "glycine_late"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "ammonia",
+        "expression": {
+          "op": "add",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "parameter": "ammonia_from_glutamine"
+                },
+                {
+                  "ref": "glutamine"
+                }
+              ]
+            },
+            {
+              "op": "negate",
+              "args": [
+                {
+                  "op": "multiply",
+                  "args": [
+                    {
+                      "parameter": "ammonia_growth_demand"
+                    },
+                    {
+                      "ref": "growth"
+                    },
+                    1000.0,
+                    {
+                      "parameter": "figure_ammonia_growth_demand_scale"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "op": "quadratic",
+              "args": [
+                {
+                  "parameter": "ph_coefficients.R_AMM_2.0"
+                },
+                {
+                  "parameter": "ph_coefficients.R_AMM_2.1"
+                },
+                {
+                  "parameter": "ph_coefficients.R_AMM_2.2"
+                },
+                {
+                  "condition": "ph"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "aa_trp",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.TRP"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_phe",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.PHE"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_tyr",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.TYR"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_met",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.MET"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_thr",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.THR"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_ile",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.ILE"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_val",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.VAL"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_arg",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.ARG"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_his",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.HIS"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_leu",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.LEU"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "aa_lys",
+        "expression": {
+          "op": "multiply",
+          "args": [
+            {
+              "op": "divide",
+              "args": [
+                {
+                  "ref": "growth"
+                },
+                {
+                  "parameter": "amino_acid_yields.LYS"
+                }
+              ]
+            },
+            {
+              "ref": "aa_scaling"
+            },
+            1000.0
+          ]
+        }
+      },
+      {
+        "identifier": "product_specific",
+        "expression": {
+          "op": "quadratic",
+          "args": [
+            {
+              "parameter": "ph_coefficients.Q_MAB.0"
+            },
+            {
+              "parameter": "ph_coefficients.Q_MAB.1"
+            },
+            {
+              "parameter": "ph_coefficients.Q_MAB.2"
+            },
+            {
+              "condition": "ph"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "product_flux",
+        "expression": {
+          "op": "divide",
+          "args": [
+            {
+              "op": "multiply",
+              "args": [
+                {
+                  "ref": "product_specific"
+                },
+                {
+                  "constant": "product_g_per_cmol"
+                }
+              ]
+            },
+            {
+              "constant": "product_molecular_weight_g_mol"
+            }
+          ]
+        }
+      },
+      {
+        "identifier": "glutamine_degradation",
+        "expression": {
+          "parameter": "figure_glutamine_degradation_per_day"
+        }
+      }
+    ],
+    "kinetic_outputs": {
+      "growth": "growth",
+      "growth_reaction": "R067",
+      "death": "death",
+      "exchange_fluxes": {
+        "R046": "lactate",
+        "R047": "glucose",
+        "R048": "alanine",
+        "R049": "aa_trp",
+        "R050": "ammonia",
+        "R051": "asparagine",
+        "R052": "aspartate",
+        "R053": "aa_phe",
+        "R054": "aa_tyr",
+        "R055": "serine",
+        "R056": "glycine",
+        "R057": "aa_met",
+        "R058": "aa_thr",
+        "R059": "aa_ile",
+        "R060": "aa_val",
+        "R061": "glutamate",
+        "R062": "aa_arg",
+        "R063": "glutamine_exchange",
+        "R064": "aa_his",
+        "R065": "aa_leu",
+        "R066": "aa_lys",
+        "R067": "growth",
+        "R068": "product_flux"
+      }
+    },
+    "exchange_mappings": [
+      {
+        "species": "LAC",
+        "reaction": "R046",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "GLC",
+        "reaction": "R047",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "ALA",
+        "reaction": "R048",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "TRP",
+        "reaction": "R049",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "NH3",
+        "reaction": "R050",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "ASN",
+        "reaction": "R051",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "ASP",
+        "reaction": "R052",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "PHE",
+        "reaction": "R053",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "TYR",
+        "reaction": "R054",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "SER",
+        "reaction": "R055",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "GLY",
+        "reaction": "R056",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "MET",
+        "reaction": "R057",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "THR",
+        "reaction": "R058",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "ILE",
+        "reaction": "R059",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "VAL",
+        "reaction": "R060",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "GLU",
+        "reaction": "R061",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "ARG",
+        "reaction": "R062",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "GLN",
+        "reaction": "R063",
+        "internal_coefficient": -1.0
+      },
+      {
+        "species": "HIS",
+        "reaction": "R064",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "LEU",
+        "reaction": "R065",
+        "internal_coefficient": 1.0
+      },
+      {
+        "species": "LYS",
+        "reaction": "R066",
+        "internal_coefficient": 1.0
+      }
+    ],
+    "degradation_mappings": [
+      {
+        "source": "GLN",
+        "products": {
+          "NH3": 1.0
+        },
+        "rate_output": "glutamine_degradation"
+      }
+    ],
+    "product_mapping": {
+      "reaction": "R068",
+      "molecular_weight_g_mol": 145755.29,
+      "mass_per_cmol_g": 22.54
+    },
+    "constants": {
+      "growth_flux_to_per_day": 1.0,
+      "cell_flux_to_mmol": 0.000001,
+      "cell_product_scale": 1E-9,
+      "product_g_per_cmol": 22.54,
+      "product_molecular_weight_g_mol": 145755.29,
+      "seconds_per_day": 86400.0
+    },
+    "normalization_exclusions": [
+      "R046"
+    ],
+    "condition_bounds": {
+      "ph": [
+        6.75,
+        7.25
+      ]
+    },
+    "reconciliation_relative_bound": 2.5,
+    "reconciliation_bound_increment": 0.1,
+    "problem_name": "configured rate-reconciled cell culture"
+  },
+  "mechanism": "rate-reconciled-culture",
+  "network": {
+    "exchange_reactions": [
+      "R041",
+      "R042",
+      "R043",
+      "R044",
+      "R045",
+      "R046",
+      "R047",
+      "R048",
+      "R049",
+      "R050",
+      "R051",
+      "R052",
+      "R053",
+      "R054",
+      "R055",
+      "R056",
+      "R057",
+      "R058",
+      "R059",
+      "R060",
+      "R061",
+      "R062",
+      "R063",
+      "R064",
+      "R065",
+      "R066",
+      "R067",
+      "R068"
+    ],
+    "identifier": "reddy-cho-k1-a11-vrc01",
+    "internal_metabolites": [
+      "GLC",
+      "ATP",
+      "G6P",
+      "PYR",
+      "NADH",
+      "LAC",
+      "GLU",
+      "ALA",
+      "AKG",
+      "AcCoA",
+      "CO2",
+      "OXA",
+      "CIT",
+      "SucCoA",
+      "Suc",
+      "Fum",
+      "FADH2",
+      "TRP",
+      "ASN",
+      "NH3",
+      "ASP",
+      "PHE",
+      "TYR",
+      "Acetoac",
+      "SER",
+      "GLY",
+      "LEU",
+      "THR",
+      "HIS",
+      "GLN",
+      "CYS",
+      "VAL",
+      "ILE",
+      "MET",
+      "LYS",
+      "O2",
+      "ARG",
+      "ORN",
+      "Urea",
+      "CLN",
+      "Biomass",
+      "IgG"
+    ],
+    "objective": {
+      "R067": 1.0
+    },
+    "reactions": [
+      {
+        "identifier": "R001",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": -1.0,
+          "G6P": 1.0,
+          "GLC": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R002",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": 3.0,
+          "G6P": -1.0,
+          "NADH": 2.0,
+          "PYR": 2.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R003",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "LAC": 1.0,
+          "NADH": -1.0,
+          "PYR": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R004",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": 1.0,
+          "ALA": 1.0,
+          "GLU": -1.0,
+          "PYR": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R005",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AcCoA": 1.0,
+          "CO2": 1.0,
+          "NADH": 1.0,
+          "PYR": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R006",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AcCoA": -1.0,
+          "CIT": 1.0,
+          "OXA": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R007",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": 1.0,
+          "CIT": -1.0,
+          "CO2": 1.0,
+          "NADH": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R008",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1.0,
+          "CO2": 1.0,
+          "NADH": 1.0,
+          "SucCoA": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R009",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": 1.0,
+          "Suc": 1.0,
+          "SucCoA": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R010",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "FADH2": 1.0,
+          "Fum": 1.0,
+          "Suc": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R011",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "CO2": 1.0,
+          "Fum": -1.0,
+          "PYR": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R012",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "Fum": -1.0,
+          "NADH": 1.0,
+          "OXA": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R013",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ALA": 1.0,
+          "AcCoA": 2.0,
+          "CO2": 4.0,
+          "NADH": 2.0,
+          "TRP": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R014",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "ASN": -1.0,
+          "ASP": 1.0,
+          "NH3": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R015",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1.0,
+          "ASP": -1.0,
+          "GLU": 1.0,
+          "OXA": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R016",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "NADH": -1.0,
+          "PHE": -1.0,
+          "TYR": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R017",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1.0,
+          "Acetoac": 1.0,
+          "CO2": 1.0,
+          "Fum": 1.0,
+          "GLU": 1.0,
+          "TYR": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R018",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "CO2": -1.0,
+          "GLY": 2.0,
+          "NADH": -1.0,
+          "NH3": -1.0,
+          "SER": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R019",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1.0,
+          "ATP": -1.0,
+          "AcCoA": 1.0,
+          "Acetoac": 1.0,
+          "FADH2": 1.0,
+          "GLU": 1.0,
+          "LEU": -1.0,
+          "NADH": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R020",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AcCoA": 1.0,
+          "GLY": 1.0,
+          "NADH": 1.0,
+          "THR": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R021",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "GLU": 1.0,
+          "HIS": -1.0,
+          "NH3": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R022",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLN": -1.0,
+          "GLU": 1.0,
+          "NH3": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R023",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": 1.0,
+          "GLU": -1.0,
+          "NADH": 1.0,
+          "NH3": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R024",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "CYS": -1.0,
+          "NH3": 1.0,
+          "PYR": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R025",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1.0,
+          "ATP": -1.0,
+          "CO2": 2.0,
+          "FADH2": 1.0,
+          "GLU": 1.0,
+          "NADH": 3.0,
+          "SucCoA": 1.0,
+          "VAL": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R026",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1.0,
+          "ATP": -1.0,
+          "AcCoA": 1.0,
+          "FADH2": 1.0,
+          "GLU": 1.0,
+          "ILE": -1.0,
+          "NADH": 2.0,
+          "SucCoA": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R027",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "NADH": 1.0,
+          "NH3": 1.0,
+          "Suc": 1.0,
+          "THR": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R028",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": -2.0,
+          "CYS": 1.0,
+          "MET": -1.0,
+          "NADH": 1.0,
+          "NH3": 1.0,
+          "SER": -1.0,
+          "SucCoA": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R029",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AcCoA": 2.0,
+          "Acetoac": -1.0,
+          "Suc": 1.0,
+          "SucCoA": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R030",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -2.0,
+          "AcCoA": 2.0,
+          "FADH2": 1.0,
+          "GLU": 2.0,
+          "LYS": -1.0,
+          "NADH": 3.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R031",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": 2.5,
+          "NADH": -1.0,
+          "O2": -0.5
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R032",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": 1.5,
+          "FADH2": -1.0,
+          "O2": -0.5
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R033",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ARG": -1.0,
+          "ORN": 1.0,
+          "Urea": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R034",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": -2.0,
+          "CLN": 1.0,
+          "CO2": -1.0,
+          "NH3": -1.0,
+          "ORN": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R035",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ARG": 1.0,
+          "ASP": -1.0,
+          "ATP": -1.0,
+          "CLN": -1.0,
+          "Fum": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R036",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1.0,
+          "GLU": 2.0,
+          "NADH": 1.0,
+          "ORN": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R037",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": 2.0,
+          "G6P": -1.0,
+          "GLU": -2.0,
+          "NADH": 1.0,
+          "SER": 2.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R038",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "NH3": 1.0,
+          "PYR": 1.0,
+          "SER": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R039",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ALA": -0.0077,
+          "ARG": -0.0063,
+          "ASN": -0.0046,
+          "ASP": -0.0119,
+          "ATP": -0.5444,
+          "AcCoA": -0.0843,
+          "Biomass": 1.0,
+          "CO2": 0.0132,
+          "CYS": -0.002,
+          "Fum": 0.0063,
+          "G6P": -0.0123,
+          "GLN": -0.0167,
+          "GLU": 0.0041,
+          "GLY": -0.0126,
+          "HIS": -0.002,
+          "ILE": -0.0038,
+          "LEU": -0.0082,
+          "LYS": -0.0072,
+          "MET": -0.0018,
+          "NADH": -0.1178,
+          "NH3": -0.0025,
+          "PHE": -0.0034,
+          "SER": -0.0071,
+          "THR": -0.0052,
+          "TRP": -0.001,
+          "TYR": -0.0028,
+          "VAL": -0.005
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R040",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ALA": -0.0096,
+          "ARG": -0.0083,
+          "ASN": -0.008,
+          "ASP": -0.0087,
+          "ATP": -0.816,
+          "CYS": -0.0056,
+          "GLN": -0.0096,
+          "GLU": -0.0105,
+          "GLY": -0.0142,
+          "HIS": -0.0037,
+          "ILE": -0.0053,
+          "IgG": 1.0,
+          "LEU": -0.0148,
+          "LYS": -0.0127,
+          "MET": -0.0022,
+          "PHE": -0.0068,
+          "SER": -0.0232,
+          "THR": -0.0152,
+          "TRP": -0.004,
+          "TYR": -0.0087,
+          "VAL": -0.0182
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R041",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "Urea": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R042",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R043",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "CYS": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R044",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "O2": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R045",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "CO2": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R046",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "LAC": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R047",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "GLC": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R048",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "ALA": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R049",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "TRP": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R050",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "NH3": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R051",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ASN": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R052",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "ASP": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R053",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "PHE": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R054",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "TYR": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R055",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "SER": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R056",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLY": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R057",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "MET": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R058",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "THR": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R059",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ILE": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R060",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "VAL": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R061",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLU": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R062",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ARG": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R063",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLN": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R064",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "HIS": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R065",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "LEU": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R066",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "LYS": 1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R067",
+        "lower": 0.0,
+        "name": "canonical export; printed source arrow reversed",
+        "stoichiometry": {
+          "Biomass": -1.0
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R068",
+        "lower": 0.0,
+        "name": "canonical export; printed source arrow reversed",
+        "stoichiometry": {
+          "IgG": -1.0
+        },
+        "upper": 1000000.0
+      }
+    ],
+    "version": "public-reconstruction-1"
+  },
+  "parameters": {
+    "alanine_from_glucose": 0.363,
+    "amino_acid_yields": {
+      "ALA": 36.695,
+      "ARG": 53.992,
+      "ASN": 22.209,
+      "GLN": 1.327,
+      "GLY": 300.543,
+      "HIS": 111.776,
+      "ILE": 39.378,
+      "LEU": 25.467,
+      "LYS": 40.051,
+      "MET": 90.708,
+      "PHE": 54.739,
+      "SER_EARLY": 8.684,
+      "SER_LATE": 17.621,
+      "THR": 42.504,
+      "TRP": 151.565,
+      "TYR": 73.629,
+      "VAL": 30.0
+    },
+    "ammonia_from_glutamine": 0.65,
+    "ammonia_growth_demand": 0.068,
+    "asparagine_maintenance": 115.079,
+    "aspartate_from_glutamine": 0.1,
+    "aspartate_maintenance": 105.692,
+    "biphasic_growth": {
+      "ASN": 0.858,
+      "ASP": 0.142,
+      "GLN": 0.344,
+      "GLU": 0.656
+    },
+    "cell_yield_on_lactate": 9.881,
+    "death_constant_per_day": 0.01,
+    "death_ivcd_midpoint": 120.0,
+    "death_ivcd_slope": 0.1,
+    "death_maximum_per_day": 0.338,
+    "figure_ammonia_growth_demand_scale": 8.0,
+    "figure_glutamine_degradation_per_day": 0.2,
+    "figure_late_lactate_uptake_scale": 6.0,
+    "glucose_maintenance": 918.109,
+    "glutamate_from_glutamine": 0.2,
+    "glutamate_maintenance": 156.979,
+    "glycine_from_serine": 0.728,
+    "monod": {
+      "ASN": 1.0,
+      "ASP": 0.109,
+      "GLC": 4.007,
+      "GLN": 0.239,
+      "GLU": 0.001,
+      "LAC": 2.731,
+      "MET": 0.001
+    },
+    "osmolality_midpoint": 429.598,
+    "osmolality_slope": 0.072,
+    "ph_coefficients": {
+      "AA_SCALING": [
+        -1.44,
+        19.8,
+        -67.04
+      ],
+      "MU_MAX": [
+        -5.222,
+        73.572,
+        -257.851
+      ],
+      "Q_MAB": [
+        50.909,
+        194.225,
+        -3381.181
+      ],
+      "R_AMM_2": [
+        212.237,
+        -3166.862,
+        11935.112
+      ],
+      "Y_LAC_GLC": [
+        -7.595,
+        108.228,
+        -383.444
+      ],
+      "Y_X_GLC": [
+        -13.435,
+        180.598,
+        -600.754
+      ]
+    }
+  },
+  "rate_provider": {
+    "type": "rule-graph",
+    "identifier": "declared-kinetic-rules",
+    "version": "1",
+    "output_units": {
+      "aa_arg": "cMol/(10^6 cell day)",
+      "aa_his": "cMol/(10^6 cell day)",
+      "aa_ile": "cMol/(10^6 cell day)",
+      "aa_leu": "cMol/(10^6 cell day)",
+      "aa_lys": "cMol/(10^6 cell day)",
+      "aa_met": "cMol/(10^6 cell day)",
+      "aa_phe": "cMol/(10^6 cell day)",
+      "aa_thr": "cMol/(10^6 cell day)",
+      "aa_trp": "cMol/(10^6 cell day)",
+      "aa_tyr": "cMol/(10^6 cell day)",
+      "aa_val": "cMol/(10^6 cell day)",
+      "alanine": "cMol/(10^6 cell day)",
+      "ammonia": "cMol/(10^6 cell day)",
+      "asparagine": "cMol/(10^6 cell day)",
+      "aspartate": "cMol/(10^6 cell day)",
+      "death": "1/day",
+      "glucose": "cMol/(10^6 cell day)",
+      "glutamate": "cMol/(10^6 cell day)",
+      "glutamine_degradation": "1/day",
+      "glutamine_exchange": "cMol/(10^6 cell day)",
+      "glycine": "cMol/(10^6 cell day)",
+      "growth": "1/day",
+      "lactate": "cMol/(10^6 cell day)",
+      "product_flux": "cMol/(10^6 cell day)",
+      "serine": "cMol/(10^6 cell day)"
+    }
+  },
+  "recipes": {
+    "fed_batch": [
+      {
+        "time": 3.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 4.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 5.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 5.0,
+        "event_type": "target_concentration",
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 50.0
+      },
+      {
+        "time": 6.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 6.0,
+        "event_type": "target_concentration",
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 50.0
+      },
+      {
+        "time": 7.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 7.0,
+        "event_type": "target_concentration",
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 50.0
+      },
+      {
+        "time": 8.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 8.0,
+        "event_type": "target_concentration",
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 50.0
+      },
+      {
+        "time": 9.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 9.0,
+        "event_type": "target_concentration",
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 50.0
+      },
+      {
+        "time": 10.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 10.0,
+        "event_type": "target_concentration",
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 50.0
+      },
+      {
+        "time": 11.0,
+        "event_type": "feed",
+        "concentrations_mmol_l": {},
+        "volume_l": 0.02475
+      },
+      {
+        "time": 11.0,
+        "event_type": "target_concentration",
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 50.0
+      }
+    ]
+  },
+  "state": {
+    "dead_cells_million": 0.0,
+    "integral": 0.0,
+    "product_g": 0.0,
+    "species_mmol": {
+      "ALA": 0.0,
+      "ARG": 0.75,
+      "ASN": 4.35,
+      "ASP": 1.5,
+      "GLC": 22.5,
+      "GLN": 4.5,
+      "GLU": 2.25,
+      "GLY": 0.75,
+      "HIS": 0.22499999999999998,
+      "ILE": 0.6000000000000001,
+      "LAC": 0.0,
+      "LEU": 0.75,
+      "LYS": 0.75,
+      "MET": 1.125,
+      "NH3": 2.25,
+      "PHE": 0.30000000000000004,
+      "SER": 4.5,
+      "THR": 0.5249999999999999,
+      "TRP": 0.06,
+      "TYR": 0.30000000000000004,
+      "VAL": 0.6000000000000001
+    },
+    "viable_cells_million": 300.00000000000006,
+    "volume_l": 0.75
+  }
+}

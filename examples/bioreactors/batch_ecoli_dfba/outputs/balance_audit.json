@@ -1,0 +1,5 @@
+{
+  "finite": true,
+  "nonnegative_inventory_constraint": true,
+  "raw_minimum_species_mass_kg": 0.0
+}

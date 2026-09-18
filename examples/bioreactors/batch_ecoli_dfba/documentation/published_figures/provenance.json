@@ -1,0 +1,12 @@
+{
+  "source_document": "PBS Edit 6.pdf",
+  "source_document_sha256": "b7e1abeb490cecad5d6c5db901165201f3d880a33bbd85850854bad76eecd832",
+  "pdf_page": 55,
+  "pdf_image_xref": 216,
+  "paper_doi": "10.1016/S0006-3495(02)73903-9",
+  "image": "published_panel.png",
+  "image_sha256": "0d1dc697fc15bfadb9db6edb07a821f54f9044ae843489ccf85048b7aa2c9220",
+  "extraction": "Original embedded image bytes; no redrawing or digitization",
+  "scope": "Published comparison panel embedded in the supplied presentation; not independently checked against the publisher original",
+  "raw_data": false
+}

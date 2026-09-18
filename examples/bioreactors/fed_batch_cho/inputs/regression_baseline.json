@@ -1,0 +1,33 @@
+{
+  "command": "python examples/bioreactors/refresh_regression.py",
+  "endpoints": {
+    "final_product_g": 0.11518270439734737,
+    "final_vcd_million_ml": 8.841075868512217
+  },
+  "generated_at_utc": "2026-09-13T02:57:42.181339+00:00",
+  "git_head": "bd200f5e474243d60237cde344c174a2e4468137",
+  "historical_note": "Old constants had no established generation lineage; preserved here, not represented as measurements.",
+  "independent_experimental_validation": false,
+  "inputs_sha256": {
+    "case.json": "dee991ae1627dc850c894a301d014ef77dd7c93132e1862bbc1850663b23ed08",
+    "mechanism.json": "2b7496c6f977be08702cccbfe5ace7fe04c624107640ed7677a6560bf577d3ad",
+    "thermo.json": "5a7073e56099c9a76fb4bfdf45a4c5a8bf603b392c5fa7ec99898d256a52fc24"
+  },
+  "kind": "generated_model_regression",
+  "packages": {
+    "autograd": "1.9.1",
+    "matplotlib": "3.11.2",
+    "numpy": "2.4.6",
+    "pandas": "3.0.5",
+    "scipy": "1.17.1"
+  },
+  "python": "3.11.15",
+  "relative_tolerance": 0.02,
+  "source_digest_rule": "sorted PharmaPy/**/*.py: relative POSIX path, NUL, then file bytes",
+  "source_tree_python_sha256": "a7005c5c7e867785a7834c3f7aa56b9c85f6e0b045f1061aa4a54c48f905d01a",
+  "superseded_untraced_constants": {
+    "final_product_g": 1.65453652125779,
+    "final_vcd_million_ml": 6.380513082505868
+  },
+  "tolerance_scope": "unchanged project regression threshold, not an industry accuracy standard"
+}
