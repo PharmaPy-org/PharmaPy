@@ -124,7 +124,7 @@ def get_remaining_states(dict_states_in, stream, inlets, time):
     return di_out
 
 
-def get_inputs_new(time, stream, dict_states_in,solvent_pass=False, **kwargs_interp):
+def get_inputs_new(time, stream, dict_states_in, **kwargs_interp):
     """
     Get inputs based on stream(s) object and names of inlet states
 
@@ -147,19 +147,9 @@ def get_inputs_new(time, stream, dict_states_in,solvent_pass=False, **kwargs_int
 
     """
 
-    if stream.DynamicInlet is not None:# and(not isinstance(time,np.ndarray) or len(time)==1):
-        inputs = {obj: {} for obj in dict_states_in.keys()}
-        inlet = stream.DynamicInlet.evaluate_inputs(time, **kwargs_interp)
-        reinit=True
-        for key, value in inlet.items():
-            setattr(stream,key,value)
-            if '_flow' in key:
-                setattr(stream,key.replace('_flow',''),value)
-            if isinstance(time,np.ndarray) or (value == 0 and 'vol' in key):
-                reinit=False
-        if reinit: stream.init_phases(solvent_pass)
-
-        inputs['Inlet'] = inlet
+    if stream.DynamicInlet is not None:
+        inputs = stream.DynamicInlet.evaluate_inputs(time, **kwargs_interp)
+        inputs = {'Inlet': inputs}
 
     elif stream.y_upstream is not None and stream.time_upstream is not None:
         t_inlet = stream.time_upstream

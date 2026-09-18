@@ -367,23 +367,14 @@ class SlurryStream(Slurry):
         # self.mole_flow = self.moles
         self.vol_flow = self.vol
 
-        self._DynamicInlet = None
+        self.DynamicInlet = None
         self.controllable = ['vol_flow', 'temp']
         self.input_states = ['vol_flow', 'temp', 'distrib']
 
         # del self.mass
         # del self.moles
         # del self.vol
-    @property
-    def DynamicInlet(self):
-        return self._DynamicInlet
 
-    @DynamicInlet.setter
-    def DynamicInlet(self, dynamic_object):
-        # dynamic_object.controllable = self.controllable
-        dynamic_object.parent_instance = self
-
-        self._DynamicInlet = dynamic_object
     @property
     def Phases(self):
         return self._Phases
@@ -396,8 +387,7 @@ class SlurryStream(Slurry):
         self._Phases = phases_list
 
         classify_phases(self)
-        self.init_phases()
-    def init_phases(self,solvent_pass=False):
+
         if self.moments is not None:
             if self.vol == 0:
                 raise ValueError('If the moments are provided, Slurry volume needs to be larger than 0.')
@@ -413,7 +403,7 @@ class SlurryStream(Slurry):
             self.mass_slurry = np.dot(vol_phases, dens_phases)
             self.mass_flow = self.mass_slurry
 
-            self.Liquid_1.updatePhase(mass_flow=mass_liq,solvent_pass=solvent_pass)
+            self.Liquid_1.updatePhase(mass_flow=mass_liq)
 
             self.Solid_1.updatePhase(moments=self.moments)
             self.Solid_1.mass_flow = mass_sol
@@ -455,7 +445,7 @@ class SlurryStream(Slurry):
             # self.Solid_1.x_distrib = self.x_distrib
             self.moments = self.Solid_1.getMoments(self.x_distrib,
                                                    self.distrib)
-            
+
             if self.vol > 0:
                 dens_liq = self.Liquid_1.getDensity()
                 dens_sol = self.Solid_1.getDensity()
@@ -468,23 +458,6 @@ class SlurryStream(Slurry):
                 self.mass_slurry = np.dot(vol_phases, dens_phases)
                 self.mass_flow = self.mass_slurry
 
-            
-            elif self.mass_slurry is None and self.DynamicInlet is not None: # patch for dynamic inlet o|-<(z
-                self.mass_slurry=0 
-                dens_liq = self.Liquid_1.getDensity()
-                dens_sol = self.Solid_1.getDensity()
-                dens_phases = np.array([dens_liq, dens_sol])
-                mass_share = self.getFractions(vol_basis=False)
-                mass_phases = self.mass_slurry * mass_share
-
-                mass_liq, mass_sol = mass_phases
-
-                self.vol = np.dot(mass_phases, 1/dens_phases)
-                vol_share = self.getFractions(vol_basis=False)*dens_phases
-                vol_phases = vol_share * self.vol
-
-                
-                self.mass_flow = self.mass_slurry
             elif self.mass_slurry > 0:
                 mass_share = self.getFractions(vol_basis=False)
                 mass_phases = self.mass_slurry * mass_share
@@ -502,7 +475,7 @@ class SlurryStream(Slurry):
             self.Solid_1.vol_flow = vol_phases[1]
 
         self.num_species = self.Liquid_1.num_species
-        self.temp = self.Liquid_1.temp if self.DynamicInlet is not None else energy_balance(self, 'mass_flow')
+        self.temp = energy_balance(self, 'mass_flow')
         self.solid_conc = self.getSolidsConcentr(basis='mass')
 
     def InterpolateInputs(self, time):
@@ -534,13 +507,7 @@ class SlurryStream(Slurry):
                 inputs[attr] = getattr(self, attr)
 
         else:
-            inputs = {}
-            for attr in self.input_states:
-                inputs[attr] = getattr(self, attr)
-            dynamic_input = self.DynamicInlet.evaluate_inputs(time)
-            for key, value in dynamic_input.items():
-                inputs[key] = value
-            
+            inputs = self.DynamicInlet.evaluate_inputs(time)
 
         return inputs
 
