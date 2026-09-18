@@ -10,7 +10,7 @@ target/
 # pyenv
 *.python-version
 *.pyc
-*.egg-info
+
 # celery beat schedule file
 celerybeat-schedule
 
@@ -82,5 +82,3 @@ ENV/
 *.rar
 
 source/crystallization/
-.vscode
-refactor_old_cryst_test.py
