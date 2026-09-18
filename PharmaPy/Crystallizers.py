@@ -130,7 +130,7 @@ class _BaseCryst:
 
         # ---------- Building objects
         self._Phases = None
-        self._CrystKinetics = None
+        self._Kinetics = None
         self._Utility = None
         self.material_from_upstream = False
 
@@ -291,16 +291,16 @@ class _BaseCryst:
             self.nomenclature()
 
     @property
-    def CrystKinetics(self):
-        return self._CrystKinetics
+    def Kinetics(self):
+        return self._Kinetics
 
-    @CrystKinetics.setter
-    def CrystKinetics(self, instance):
-        self._CrystKinetics = instance
+    @Kinetics.setter
+    def Kinetics(self, instance):
+        self._Kinetics = instance
 
-        name_params = self._CrystKinetics.name_params
+        name_params = self._Kinetics.name_params
         if self.mask_params is None:
-            self.mask_params = [True] * self._CrystKinetics.num_params
+            self.mask_params = [True] * self._Kinetics.num_params
             self.name_params = name_params
 
         else:
@@ -308,10 +308,6 @@ class _BaseCryst:
                                 if self.mask_params[ind]]
 
         self.mask_params = np.array(self.mask_params)
-
-    #alias for back compatability. User always refers to kinetics, this allows
-    # to recycle code for Reactive Crystallizer
-    Kinetics = CrystKinetics
 
     @property
     def Utility(self):
@@ -453,10 +449,10 @@ class _BaseCryst:
 
         # Kinetic terms
         mu_susp = mu*(1e-6)**np.arange(self.num_distr) / vol  # m**n/m**3_susp
-        nucl, growth, dissol = self.CrystKinetics.get_kinetics(comp_kin, temp, kv,
+        nucl, growth, dissol = self.Kinetics.get_kinetics(comp_kin, temp, kv,
                                                           mu_susp)
 
-        growth = growth * self.CrystKinetics.alpha_fn(conc)
+        growth = growth * self.Kinetics.alpha_fn(conc)
 
         ind_mom = np.arange(1, len(mu))
 
@@ -486,12 +482,12 @@ class _BaseCryst:
         else:
             comp_kin = conc
 
-        nucl, growth, dissol = self.CrystKinetics.get_kinetics(comp_kin, temp,
+        nucl, growth, dissol = self.Kinetics.get_kinetics(comp_kin, temp,
                                                           kv_cry, moms)
 
         nucl = nucl * self.scale * vol
 
-        impurity_factor = self.CrystKinetics.alpha_fn(conc)
+        impurity_factor = self.Kinetics.alpha_fn(conc)
         growth = growth * impurity_factor  # um/s
 
         dissol = dissol  # um/s
@@ -532,7 +528,7 @@ class _BaseCryst:
             return dcsd_dt, np.array(mass_transfer)
 
     def unit_model(self, time, states, params=None, sw=None,
-                    mat_bce=False, enrgy_bce=False):
+                   mat_bce=False, enrgy_bce=False):
 
         di_states = unpack_states(states, self.dim_states, self.name_states)
 
@@ -540,8 +536,8 @@ class _BaseCryst:
         u_input = self.get_inputs(time)
 
         di_states = complete_dict_states(time, di_states,
-                                        ('temp', 'temp_ht', 'vol'),
-                                        self.Slurry, self.controls)
+                                         ('temp', 'temp_ht', 'vol'),
+                                         self.Slurry, self.controls)
 
         # ---------- Physical properties
         self.Liquid_1.updatePhase(mass_conc=di_states['mass_conc'])
@@ -813,7 +809,7 @@ class _BaseCryst:
                 x_distr = getattr(self.Solid_1, 'x_distrib', [])
                 self.states_in_dict['Inlet']['distrib'] = len(x_distr)
 
-        self.CrystKinetics.target_idx = self.target_ind
+        self.Kinetics.target_idx = self.target_ind
 
         # ---------- Solid phase states
         if 'vol' in self.states_uo:
@@ -898,7 +894,7 @@ class _BaseCryst:
             states_init = np.append(states_init, self.Liquid_1.temp)
             self.len_states += [1]
 
-        merged_params = self.CrystKinetics.concat_params()[self.mask_params]
+        merged_params = self.Kinetics.concat_params()[self.mask_params]
 
         # ---------- Create problem
         problem = self.set_ode_problem(eval_sens, states_init,
@@ -966,7 +962,7 @@ class _BaseCryst:
         self.reset()
         self.params_iter = params
 
-        self.CrystKinetics.set_params(params)
+        self.Kinetics.set_params(params)
 
         self.elapsed_time = 0
 
@@ -1056,17 +1052,17 @@ class _BaseCryst:
         def get_mu_labels(mu_idx, msmpr=False):
             out = []
             for idx in mu_idx:
-                name = r'$\mu_{%i}$' % idx
+                name = '$\mu_{%i}$' % idx
 
                 if idx == 0:
                     unit = '#'
                 elif idx == 1:
                     unit = 'm'
                 else:
-                    unit = r'$\mathrm{m^{%i}}$' % idx
+                    unit = '$\mathrm{m^{%i}}$' % idx
 
                 if msmpr:
-                    unit += r' $\mathrm{m^{-3}}$'
+                    unit += ' $\mathrm{m^{-3}}$'
 
                 unit = r' (%s)' % unit
 
@@ -1130,7 +1126,7 @@ class _BaseCryst:
         axis.set_xscale('log')
 
         fig.texts[0].remove()
-        axis.set_xlabel(r'$x$ ($\mathregular{\mu m}$)')
+        axis.set_xlabel('$x$ ($\mathregular{\mu m}$)')
 
         return fig, axis
 
@@ -1186,7 +1182,7 @@ class _BaseCryst:
             sens_data = reorder_sens(self.sensit, separate_sens=True)
 
         # Name states
-        name_mom = [r'\mu_%i' % i for i in range(self.num_distr)]
+        name_mom = ['\mu_%i' % i for i in range(self.num_distr)]
         name_conc = ["C_{" + self.name_species[ind] + "}"
                      for ind in range(len(self.Liquid_1.name_species))]
 
@@ -1199,7 +1195,7 @@ class _BaseCryst:
 
         name_states = name_mom + name_conc + name_others
         name_params = [name for ind, name in
-                       enumerate(self.CrystKinetics.name_params)
+                       enumerate(self.Kinetics.name_params)
                        if self.mask_params[ind]]
 
         fig, axis = plot_sens(self.result.time, sens_data,
@@ -1304,7 +1300,7 @@ class BatchCryst(_BaseCryst):
                  controls=None, adiabatic=False,
                  rad_zero=0, reset_states=False,
                  h_conv=1000, vol_ht=None, basis='mass_conc',
-                 jac_type=None, state_events=None, param_wrapper=None, isothermal=False):
+                 jac_type=None, state_events=None, param_wrapper=None):
 
 
         super().__init__(mask_params, method, target_comp, scale, vol_tank,
@@ -1314,7 +1310,7 @@ class BatchCryst(_BaseCryst):
 
         self.is_continuous = False
         self.oper_mode = 'Batch'
-        self.isothermal=isothermal
+
         self.vol_offset = 0.75
 
     def jac_states(self, time, states, params, return_only=True):
@@ -1333,7 +1329,7 @@ class BatchCryst(_BaseCryst):
 
             num_states = len(states)
             conc_tg = w_conc[self.target_ind]
-            c_sat = self.CrystKinetics.get_solubility(temp, w_conc)
+            c_sat = self.Kinetics.get_solubility(temp, w_conc)
 
             moms = states[:self.num_distr]
             idx_moms = np.arange(1, len(moms))
@@ -1343,16 +1339,16 @@ class BatchCryst(_BaseCryst):
             kv = self.Solid_1.kv
 
             # Kinetics
-            b_pr = self.CrystKinetics.prim_nucl
-            b_sec = self.CrystKinetics.sec_nucl
+            b_pr = self.Kinetics.prim_nucl
+            b_sec = self.Kinetics.sec_nucl
 
             nucl = b_pr + b_sec
-            gr = self.CrystKinetics.growth
+            gr = self.Kinetics.growth
 
-            g_exp = self.CrystKinetics.params['growth'][-1]
-            bp_exp = self.CrystKinetics.params['nucl_prim'][-1]
-            k_s, _, bs_exp, bs2_exp = self.CrystKinetics.params['nucl_sec']
-            # bs2_exp = self.CrystKinetics.params['nucl_sec'][-1]
+            g_exp = self.Kinetics.params['growth'][-1]
+            bp_exp = self.Kinetics.params['nucl_prim'][-1]
+            k_s, _, bs_exp, bs2_exp = self.Kinetics.params['nucl_sec']
+            # bs2_exp = self.Kinetics.params['nucl_sec'][-1]
 
             jacobian = np.zeros((num_states, num_states))
 
@@ -1446,9 +1442,9 @@ class BatchCryst(_BaseCryst):
         rho_c = self.Solid_1.getDensity(temp=temp)
         rho_l = self.Liquid_1.getDensity(temp=temp)
 
-        b_sec = self.CrystKinetics.sec_nucl
+        b_sec = self.Kinetics.sec_nucl
 
-        dbp, dbs, dg, _, _ = self.CrystKinetics.deriv_cryst(conc_tg, w_conc, temp)
+        dbp, dbs, dg, _, _ = self.Kinetics.deriv_cryst(conc_tg, w_conc, temp)
         dbs_ds2 = b_sec * np.log(max(eps, kv * moms[3]*1e-18))
         dbs = np.append(dbs, dbs_ds2)
 
@@ -1562,9 +1558,8 @@ class BatchCryst(_BaseCryst):
             return heat_components
         else:
             # Balance inside the tank
-            if not self.isothermal:
-                dtemp_dt = (-source_term - ht_term) / capacitance / vol
-            else: dtemp_dt = 0
+            dtemp_dt = (-source_term - ht_term) / capacitance / vol
+
             if temp_ht is not None:
                 ht_dict = self.Utility.get_inputs(time)
                 tht_in = ht_dict['temp_in']
@@ -1604,7 +1599,7 @@ class BatchCryst(_BaseCryst):
             control = self.controls['temp']
             dp['temp'] = control['fun'](time, *control['args'], **control['kwargs'])
 
-        sat_conc = self.CrystKinetics.get_solubility(dp['temp'], dp['mass_conc'])
+        sat_conc = self.Kinetics.get_solubility(dp['temp'], dp['mass_conc'])
 
         supersat = dp['mass_conc'][:, self.target_ind] - sat_conc
 
@@ -1656,7 +1651,7 @@ class BatchCryst(_BaseCryst):
         q_heat = np.zeros((len(time), 2))
 
         if self.params_iter is None:
-            merged_params = self.CrystKinetics.concat_params()[self.mask_params]
+            merged_params = self.Kinetics.concat_params()[self.mask_params]
         else:
             merged_params = self.params_iter
 
@@ -1777,7 +1772,7 @@ class MSMPR(_BaseCryst):
 
         def fun_of_frac(w_tank, full_output=False):
 
-            nucl, growth, _ = self.CrystKinetics.get_kinetics(w_tank, temp, kv)
+            nucl, growth, _ = self.Kinetics.get_kinetics(w_tank, temp, kv)
 
             # growth *= 1e-6
 
@@ -1920,7 +1915,7 @@ class MSMPR(_BaseCryst):
             control = self.controls['temp']
             dp['temp'] = control['fun'](time, *control['args'], **control['kwargs'])
 
-        sat_conc = self.CrystKinetics.get_solubility(dp['temp'], dp['mass_conc'])
+        sat_conc = self.Kinetics.get_solubility(dp['temp'], dp['mass_conc'])
 
         supersat = dp['mass_conc'][:, self.target_ind] - sat_conc
 
@@ -2043,7 +2038,7 @@ class MSMPR(_BaseCryst):
         q_heat = np.zeros((len(time), 3))
 
         if self.params_iter is None:
-            merged_params = self.CrystKinetics.concat_params()[self.mask_params]
+            merged_params = self.Kinetics.concat_params()[self.mask_params]
         else:
             merged_params = self.params_iter
 
