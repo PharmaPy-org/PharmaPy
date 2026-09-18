@@ -102,16 +102,16 @@ does not establish predictive superiority, statistical significance, or independ
 experimental validity. No numeric threshold or seed was changed. The selected
 pH is an output, not a coded acceptance requirement.
 
-The previous full verification had 52 passed and 3 failures from that gate.
-Current notebook acceptance is against the explicitly selected capability
-profile, while retaining trajectory/metric comparisons and empirical-status
-reporting. See the parent folder's `installation_report.json` for the latest
-environment and full-suite outcome. A capability PASS does not qualify empirical
-predictive superiority.
+Notebook acceptance uses the explicitly selected capability profile, retaining
+trajectory/metric comparisons and empirical-status reporting. The packaged CHO
+study reports `capability_status: PASS` and
+`empirical_benefit_status: NOT_DEMONSTRATED`. A capability PASS does not establish
+empirical predictive superiority.
 
-The new uninterrupted pinned-environment verification passed all 67 tests,
-including both notebook replays, on 2026-09-14. The CHO notebook reports
-`capability_status: PASS` and `empirical_benefit_status: NOT_DEMONSTRATED`.
+See the [shared verification instructions](../README.md#reproduce-and-check-the-demonstrator)
+for a fresh check of this checkout. The installation report records its generating
+run; historical test counts are not a claim that the current commit has been
+fully reverified.
 
 Executable workflow notebook: open
 `examples/bioreactors/fed_batch_cho/workflow.ipynb` in VS Code or Jupyter and

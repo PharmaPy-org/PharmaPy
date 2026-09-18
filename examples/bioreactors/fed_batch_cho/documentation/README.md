@@ -84,8 +84,8 @@ that the inaccessible original author implementation used the same coupling.
 The source flux basis and pseudo-biomass/product coefficients remain declared
 reconstruction assumptions, not independently verified elemental chemistry.
 
-The packaged consistency report was generated using the input `consistency.json` declares 0.1, 0.05 and 0.025-day
-meshes and acceptance thresholds before evaluation. The generated
+The packaged consistency report uses `inputs/consistency.json`, which declares
+0.1, 0.05 and 0.025-day meshes and acceptance thresholds before evaluation. The generated
 `outputs/consistency.json` independently checks S v, accepted flux bounds,
 growth/product increments, extracellular exchange plus degradation increments,
 scheduled material additions, cumulative inventories, and mesh agreement.
@@ -150,11 +150,12 @@ The inventory-constrained product endpoint at 0.1 day is approximately 0.115 g
 The corrected model does not reproduce the old constants; their failures are
 preserved in the investigation record. The provenance task replaces them with
 traceable current-model regression baselines, not revised experimental targets.
-The previously generated
-experiment-design report and notebook outputs predate this correction and
-must not be cited as qualification of the corrected model. Rerun them after
-the inventory-consistency gate is resolved. This task does not close provenance,
-final WP3 acceptance.
+Reports generated before the inventory correction do not qualify the corrected
+model. The current packaged design study uses the capability acceptance profile
+and separately reports empirical benefit as `NOT_DEMONSTRATED`; see the
+[example README](../README.md). Use the [full verification command](../../README.md#reproduce-and-check-the-demonstrator)
+to assess the current checkout. Model-output regression and synthetic inference
+checks do not resolve the missing independent experimental evidence.
 
 The public reconstruction record also flags objective indexing, zero
 normalizers, ambiguous feed labeling, rate-to-inventory units, and biomass/product

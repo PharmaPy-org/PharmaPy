@@ -37,16 +37,30 @@ Each example's `workflow.ipynb` now runs the example tasks directly through
 PharmaPy APIs instead of importing `run_*.py`. Numbered markdown sections and
 Python comment blocks describe what to edit, required units, and how to execute
 each cell with Shift+Enter. Configuration is loaded into editable dictionaries;
-construction, propagation, result extraction, plots, and inference are visible.
+construction, propagation, result extraction, and plots are visible. The two
+flagship notebooks also expose inference and experiment-design steps.
 The shared `run_design_study` library coordinator retains the full calibrated
 synthetic design/refit/refinement study. It is not a laboratory data-acquisition
 workflow. Redundant command-line runner scripts are not distributed.
 
-Default execution leaves packaged inputs and outputs unchanged. A custom case
-skips reference regression when its configuration differs; acceptance checks
-for physical results and the declared study remain active. Optional export goes
-to a separate folder and includes the effective input dictionaries. See each
-notebook's introductory instructions before adapting species or model families.
+Default execution (`WRITE_ARTIFACTS = False`) leaves packaged inputs and outputs
+unchanged. In the flagship notebooks, custom configurations skip the original-case
+regression comparison while physical and study acceptance checks remain active;
+optional export defaults to `custom_results/`. In the generic notebooks, optional
+export defaults to `outputs/` and replaces the supplied CSV, plot, and summary;
+change `EXPORT_DIR` first to preserve those files. Generic analytical checks
+assume the declared one-pathway, constant-density, pre-depletion model and must be
+revised if that model is changed.
+
+| Notebook | Forward simulation and plots | Additional steps |
+| --- | --- | --- |
+| [Generic batch](generic_batch/workflow.ipynb) | 1–6 | 7: optional export |
+| [Generic fed-batch](generic_fed_batch/workflow.ipynb) | 1–6 | 7: optional export |
+| [E. coli](batch_ecoli_dfba/workflow.ipynb) | 1–6 | 7–10: estimation; 11–12: design; 13: regression; 14: optional export |
+| [CHO](fed_batch_cho/workflow.ipynb) | 1–6 | 7–8: calibration/design; 9: regression; 10: optional export |
+
+Run cells in order with Shift+Enter, restarting after configuration changes.
+See each notebook's instructions before adapting species or model families.
 
 ## Reproduce and check the demonstrator
 
@@ -58,7 +72,7 @@ python3.11 examples/bioreactors/verify_installation.py
 
 This creates a new isolated environment outside the checkout, installs the exact
 versions in `requirements-py311.txt`, runs `pip check`, and executes `tests/Bioreactor`
-including both full notebook workflows. Packaged simulation and inference outputs
+including both full flagship notebook workflows and the generic notebook checks. Packaged simulation and inference outputs
 are preserved as references. It exits nonzero on failed acceptance and writes
 `installation_report.json`. Allow time for repeated dynamic fits. The environment
 is retained; `--environment /path/to/new/environment` chooses its location.
@@ -69,9 +83,25 @@ command. This is source-checkout execution, not installation through the legacy
 root `requirements.txt`, which also requests optional Assimulo. No inherited
 `PYTHONPATH`, external dependency overlay, or existing PharmaPy environment is used.
 
-After setup, open either `workflow.ipynb` using that environment and execute its
+After setup, open any of the four `workflow.ipynb` files using that environment and execute its
 cells in order. For a forward simulation alone, run Steps 1–6. Library callers
 can use `build_bioreactor(case, mechanism, thermo_path).solve()` directly.
+
+### Focused notebook checks
+
+To check the flagship notebooks' direct API use and instructional structure
+without running their long fitting studies, use the configured environment:
+
+```sh
+python -m pytest -q -p no:cacheprovider -o pythonpath=. tests/Bioreactor/test_bioreactor_workflow_notebooks.py -k uses_library_directly
+```
+
+The test requires each code cell to start with `# STEP `, contain at least two
+comment lines among the next five lines, and compile. It does not require the
+literal `# WHAT TO DO:` marker. These checks alone do not qualify simulation or
+inference results. The generic execution tests are in
+`tests/Bioreactor/test_bioreactor_generic_example.py`; they also exercise edited
+uptake rates and feed volumes. Full verification remains the command above.
 
 ### Explicit experiment-design acceptance
 
@@ -108,7 +138,7 @@ would still fail the `predictive-benefit` profile.
 
 ## Evidence and baselines
 
-Each example packages its scientific references under `documentation/` and records
+Each flagship example packages its scientific references under `documentation/` and records
 evidence checksums in `inputs/source_manifest.json`. Current endpoint checks use
 `inputs/regression_baseline.json`: generated model outputs with input/source hashes
 and generation metadata, **not experimental measurements**. Previously untraced
@@ -120,3 +150,12 @@ Each flagship folder also includes one executable `workflow.ipynb` that calls
 the PharmaPy library directly without writing artifacts. The notebooks demonstrate the
 complete simulation plus E. coli parameter estimation/design or CHO experiment design;
 they do not contain an alternative model or execution path.
+
+The generic examples instead package `case.json`, `mechanism.json`, and
+`thermo.json`, with `trajectories.csv`, `trajectories.png`, and `summary.json` as
+outputs. Their evidence is comparison with an independent analytical solution
+and declared mass accounting, not a published-data benchmark. The fed-batch case
+adds one pulse at three hours; it preserves pre/post event rows and checks
+biomass continuity, nutrient addition, volume change, and dilution. Neither
+generic example demonstrates estimation, experiment design, or experimental
+predictive accuracy.

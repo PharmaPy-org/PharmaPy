@@ -9,6 +9,20 @@ Read our [link to documentation page] for more information on how to install and
 
 To install PharmaPy, download and unzip the code from this page, and then follow the instructions on the `install_instructions.txt` file.
 
+## Bioreactor examples
+
+The [bioreactor guide](examples/bioreactors/README.md) describes native batch and
+fed-batch simulations, JSON inputs, executable notebooks, and verification.
+Start with the [generic batch](examples/bioreactors/generic_batch/workflow.ipynb)
+or [generic fed-batch](examples/bioreactors/generic_fed_batch/workflow.ipynb)
+notebook for a small forward-only example with analytical and mass-balance checks.
+The E. coli and CHO examples add metabolic modeling and synthetic inference/design
+studies. These demonstrations do not establish independent experimental accuracy.
+
+For the isolated bioreactor verification environment, use the Python 3.11 setup
+command in that guide; its pinned dependencies and optional-solver scope differ
+from the legacy installation instructions above.
+
 <!-- BEGIN Status badges -->
 [![Downloads]]
 <!-- END Status badges -->

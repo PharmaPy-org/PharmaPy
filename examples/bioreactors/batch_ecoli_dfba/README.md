@@ -3,7 +3,8 @@
 ## Calibrated experiment design
 
 Run the experiment-design cells in [workflow.ipynb](workflow.ipynb)
-from the repository root to regenerate `outputs/experiment_design.json`.
+after the forward cells to recompute the design report in memory. To save it,
+enable the final export step; its default destination is `custom_results/`.
 The study settings and scientific rationale are in `inputs/design.json`.
 
 This is a full offline qualification, not a quick screen: one baseline fit,
@@ -111,8 +112,7 @@ The known truth and held-out values are used only for generation and assessment;
 the optimizer receives training observations only. Reported parameter covariance
 is a local residual-scaled approximation, not a guarantee of global identifiability.
 This demonstrates dynamic inference and extrapolation on synthetic data, not
-independent experimental validation. The command exits unsuccessfully if any
-declared acceptance check fails.
+independent experimental validation. Notebook execution raises an error if any declared acceptance check fails.
 
 Executable workflow notebook: open
 `examples/bioreactors/batch_ecoli_dfba/workflow.ipynb` in VS Code or Jupyter and
