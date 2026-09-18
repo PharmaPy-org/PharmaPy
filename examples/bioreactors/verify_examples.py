@@ -1,4 +1,4 @@
-"""Validate the library and both directly executable workflow notebooks."""
+"""Validate the library and directly executable workflow notebooks."""
 
 import hashlib
 import importlib.metadata

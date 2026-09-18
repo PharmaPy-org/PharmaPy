@@ -11,6 +11,20 @@ The shared construction path is:
 
 - `batch_ecoli_dfba`: arbitrary-pathway batch dFBA and published qualitative benchmark.
 - `fed_batch_cho`: input-declared kinetic rules, rate-reconciled MFA, and fed-batch events.
+- `generic_batch`: a small forward-only homework example with one nutrient and one
+  pathway, an analytical solution, and a nutrient-to-biomass mass-balance check.
+- `generic_fed_batch`: the same homework model with a nutrient-feed pulse, both
+  event-side states, dilution, and feed-corrected analytical/mass-balance checks.
+
+Start with [the generic notebook](generic_batch/workflow.ipynb) for a short introduction.
+It needs only `case.json`, `mechanism.json`, and `thermo.json`; its seven steps show
+input editing, native simulation, result extraction, independent checks, plotting,
+and optional export. The supplied outputs are an illustrative six-hour batch run,
+not experimental measurements. No estimation or design study is run in this example.
+Then use [the generic fed-batch notebook](generic_fed_batch/workflow.ipynb) to see
+the same seven-step workflow with a scheduled feed. Its inputs and output file
+types match the batch example. The notebook explains the native carrier-volume
+convention for specifying feeds.
 
 Biological-rate providers share a validated native mechanism contract. The
 registered `rule-graph`, `affine-surrogate`, and `hybrid` providers can be

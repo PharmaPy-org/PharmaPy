@@ -1,0 +1,65 @@
+{
+  "mechanism": "pathway-lp",
+  "transport": null,
+  "flux_time_unit": "1/h",
+  "model": {
+    "state_ids": [
+      "nutrient"
+    ],
+    "pathway_ids": [
+      "assimilation"
+    ],
+    "exchange_matrix": [
+      [
+        -10.0
+      ]
+    ],
+    "growth_coefficients": [
+      1.0
+    ],
+    "objective_coefficients": [
+      1.0
+    ],
+    "parameters": {
+      "nutrient_uptake_max": 2.0
+    },
+    "uptake_constraints": [
+      {
+        "identifier": "nutrient_uptake",
+        "type": "constant",
+        "species": "nutrient",
+        "maximum_parameter": "nutrient_uptake_max"
+      }
+    ],
+    "pathway_bound_rules": [
+      {
+        "type": "disable-at-depletion",
+        "species": "nutrient",
+        "pathways": [
+          "assimilation"
+        ]
+      }
+    ],
+    "depletion_tolerance": 1e-10,
+    "problem_name": "idealized single-nutrient fed-batch growth"
+  },
+  "recipes": {
+    "fed_batch": [
+      {
+        "time": 3.0,
+        "event_type": "feed",
+        "volume_l": 0.1,
+        "concentrations_mmol_l": {
+          "nutrient": 50.0
+        }
+      }
+    ]
+  },
+  "state": {
+    "biomass_kg": 0.0001,
+    "liquid_volume_m3": 0.001,
+    "species_mol": {
+      "nutrient": 0.01
+    }
+  }
+}

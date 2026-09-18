@@ -94,3 +94,7 @@ refactor_old_cryst_test.py
 # Local bioreactor runner scripts (not distributed)
 examples/bioreactors/*/run_*.py
 examples/bioreactors/design_runner.py
+
+# Generic forward-simulation demonstration output
+!examples/bioreactors/generic_batch/outputs/trajectories.png
+!examples/bioreactors/generic_fed_batch/outputs/trajectories.png

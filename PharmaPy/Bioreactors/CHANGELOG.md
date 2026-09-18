@@ -158,6 +158,24 @@ scheduled feeds and concentration targets, kinetic-target reconciliation with
 network and finite-step inventory constraints, product-trajectory calibration, packaged standalone-fit
 and mesh-refinement evidence, and information-based pH follow-up selection.
 
+### Generic forward-only homework example
+
+`examples/bioreactors/generic_batch/` contains three input JSON files, a seven-step
+notebook, and trajectory CSV/PNG plus a summary report. It configures one nutrient
+and one pathway through the existing native construction API, verifies the
+six-hour trajectory against exponential growth and nutrient depletion formulas,
+and checks conservation of liquid mass plus dry biomass. The supplied run stays
+before depletion. No runtime modeling code, estimation, or design workflow is added.
+
+### Generic fed-batch homework example
+
+`examples/bioreactors/generic_fed_batch/` provides the matching three JSON inputs,
+seven-step notebook, and CSV/PNG/summary outputs for one scheduled nutrient pulse.
+It uses the unchanged pathway model through `SemiBatchReactor`, retains both sides
+of the feed event, and checks the piecewise solution, biomass continuity, dilution,
+and feed-corrected mass conservation. Feed amounts follow the existing carrier-volume
+plus separately added solute-mass convention. No runtime modeling code is added.
+
 ## Final behavior and boundaries
 
 The endpoint supports single, perfectly mixed liquid-phase batch and fed-batch

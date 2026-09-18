@@ -7,9 +7,9 @@ ROOT = Path(__file__).parents[2]
 EXAMPLES = ROOT / "examples/bioreactors"
 
 
-def test_only_scoped_flagship_examples_are_present():
+def test_only_declared_examples_are_present():
     folders = sorted(path.name for path in EXAMPLES.iterdir() if path.is_dir())
-    assert folders == ["batch_ecoli_dfba", "fed_batch_cho"]
+    assert folders == ["batch_ecoli_dfba", "fed_batch_cho", "generic_batch", "generic_fed_batch"]
 
 
 def test_flagship_examples_are_self_contained_and_accepted():
