@@ -16,12 +16,12 @@ import os
 import numpy as np
 import pytest
 
-from PharmaPy.Crystallizers_Refactor import BatchCrystallizer
+from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.DataClasses import PhaseRef
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Mechanisms import OneDFVMMechanism
-from PharmaPy.Phases import LiquidPhase, SolidPhase
-from PharmaPy.ProcessControl_Refactor import SimpleTemperatureController
+from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.ProcessControl_Refactored import SimpleTemperatureController
 
 pytestmark = pytest.mark.unit
 
@@ -82,8 +82,16 @@ REFERENCE_SUPERSAT = {
     COLD_TEMP: 0.25691566,
     DEEP_COLD_TEMP: 0.54914210,
 }
-REFERENCE_TARGET_RATE = -0.16583064  # [kg/s] at DEEP_COLD_TEMP
-REFERENCE_NUCLEATION_RATE = 4.1349151e11  # [#/(um m**3 s)] at COLD_TEMP
+# Re-recorded after the population balance moved to an intensive basis. The
+# previous value, -0.16583064, was exactly three times this one: the factor of
+# three in d(mu_3)/dt = 3*G*mu_2 + B*rad**3 was distributing over the
+# nucleation term as well, and with an empty seed the transfer is nucleation
+# alone, so the old literal recorded the defect rather than the physics.
+REFERENCE_TARGET_RATE = -5.52768793e-02  # [kg/s] at DEEP_COLD_TEMP
+# Re-recorded for the same reason. The distribution is now a number density
+# per m**3 of slurry rather than an absolute count, so this is larger than the
+# previous 4.1349151e11 by roughly the reciprocal of the slurry volume.
+REFERENCE_NUCLEATION_RATE = 3.87173920e14  # [#/(um m**3 s)] at COLD_TEMP
 
 
 def _build_crystallizer(temp, distrib=None, charge_mass=CHARGE_MASS,
@@ -153,6 +161,11 @@ def _build_crystallizer(temp, distrib=None, charge_mass=CHARGE_MASS,
         growth=(growth_pre,) + GROWTH[1:],
         solubility_type="apelblat",
         sup_sat_type=sup_sat_type,
+        # Stated rather than assumed. The mechanism used to hard-code this
+        # basis; it is now declared on the kinetics and defaults to a
+        # solution basis, so the fixture has to name the one these Apelblat
+        # coefficients and the reference values below were recorded in.
+        solubility_basis="mass_per_volume_solvent",
     )
 
     # compile_structure builds the array layout the balances index into. It
@@ -286,7 +299,7 @@ def test_solver_states_are_liquid_species_then_crystal_distribution():
     ]
     assert layout == [
         ("mass_j", PhaseRef("liquid", 0), len(SPECIES), "kg"),
-        ("distrib", PhaseRef("solid", 0), NUM_GRID, "#/(micron m3)"),
+        ("distrib", PhaseRef("solid", 0), NUM_GRID, "#/(micron m3 slurry)"),
     ]
     assert collection.dim == len(SPECIES) + NUM_GRID
 
@@ -468,12 +481,18 @@ def test_moment_operators_agree_and_are_linear():
     first = generator.random(NUM_GRID) * 1.0e6  # [#/(um m**3)]
     second = generator.random(NUM_GRID) * 1.0e6
 
+    # compute_moments reports mu_n in m**n; compute_second_moment and
+    # compute_third_moment stay micron-based, because the mass transfer wants
+    # them that way. The conversion is one factor of 1e-6 per moment order, so
+    # the two operators agree only once it is applied.
     moments = mechanism.compute_moments(first, grid)
     np.testing.assert_allclose(
-        moments[2], mechanism.compute_second_moment(first), rtol=ALGEBRAIC_RTOL
+        moments[2], mechanism.compute_second_moment(first) * 1e-12,
+        rtol=ALGEBRAIC_RTOL
     )
     np.testing.assert_allclose(
-        moments[3], mechanism.compute_third_moment(first), rtol=ALGEBRAIC_RTOL
+        moments[3], mechanism.compute_third_moment(first) * 1e-18,
+        rtol=ALGEBRAIC_RTOL
     )
     assert moments[3] > 0
 
@@ -483,19 +502,32 @@ def test_moment_operators_agree_and_are_linear():
     ) + 3.0 * mechanism.compute_third_moment(second)
     np.testing.assert_allclose(combined, expected, rtol=ALGEBRAIC_RTOL)
 
-    # The trapezoid rule is exact for integrands of degree one or less, so a
-    # constant distribution gives closed-form zeroth and first moments. The
-    # second and third are deliberately not checked against analytic integrals,
-    # because quadrature error there is expected rather than a defect.
+    # A constant distribution gives closed-form zeroth and first moments, so
+    # the quadrature rule can be pinned exactly. The second and third are
+    # deliberately not checked against analytic integrals, because quadrature
+    # error there is expected rather than a defect.
+    #
+    # OPEN QUESTION for review. These expectations were the continuum
+    # integrals, height*(stop - start) and height*(stop**2 - start**2)/2,
+    # which is what the trapezoid rule gives. The scheme now sums over cells
+    # instead, on the argument that dcsd_dt = -diff(flux)/dx advances cell
+    # averages and the trapezoid halves the first cell, which is the one cell
+    # nucleation injects into. That is a real argument, but it also means the
+    # moment operator is no longer the integral of the distribution: on this
+    # grid mu_0 is 597 rather than 594. The expectations below follow the
+    # scheme, written in closed form from this fixture's own grid rather than
+    # from the mechanism's internals, so they still pin the rule. Confirm the
+    # rectangle rule is intended before treating these literals as settled.
     height = 3.0  # [#/(um m**3)]
+    step = grid[1] - grid[0]  # [um], the uniform cell width of this fixture
     flat = np.full(NUM_GRID, height)
     flat_moments = mechanism.compute_moments(flat, grid)
     np.testing.assert_allclose(
-        flat_moments[0], height * (GRID_STOP - GRID_START), rtol=ALGEBRAIC_RTOL
+        flat_moments[0], height * NUM_GRID * step, rtol=ALGEBRAIC_RTOL
     )
     np.testing.assert_allclose(
         flat_moments[1],
-        height * (GRID_STOP ** 2 - GRID_START ** 2) / 2.0,
+        height * step * NUM_GRID * (GRID_START + GRID_STOP) / 2.0 * 1e-6,
         rtol=ALGEBRAIC_RTOL,
     )
 

@@ -25,10 +25,10 @@ import pytest
 
 from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.Kinetics import RxnKinetics
-from PharmaPy.Phases import LiquidPhase
-from PharmaPy.Reactors_refactor import (BatchReactor, ContinuousReactor,
+from PharmaPy.Phases_Refactored import LiquidPhase
+from PharmaPy.Reactors_Refactored import (BatchReactor, ContinuousReactor,
                                         SemiBatchReactor)
-from PharmaPy.Streams import LiquidStream
+from PharmaPy.Streams_Refactored import LiquidStream
 from PharmaPy.Utilities import CoolingWater
 
 pytestmark = pytest.mark.unit
@@ -308,10 +308,19 @@ def test_reaction_runs_while_the_continuous_vessel_holds_volume():
     With inlet and outlet cancelling, the remaining species rates are the
     reaction terms alone, so the vessel still converts reactants while its
     total mass stays stationary.
+
+    The kinetic rate constant is required, not the clamped one. The outlet is
+    no longer hard-clamped to the phase volume (that compared m**3/s against
+    m**3); draining a phase faster than it can supply is now throttled by the
+    positivity limiter instead. Under the clamped rate constant this fixture
+    sits exactly on that boundary, so the limiter scales the outlet down by
+    2.5% and the flow terms stop cancelling, which is the limiter working
+    rather than a balance defect. The slow rate constant keeps the vessel off
+    the boundary, where the premise of this test actually holds.
     """
     vessel = _build_reactor(
         ContinuousReactor,
-        rate_constant=RATE_CONSTANT_CLAMPED,
+        rate_constant=RATE_CONSTANT_KINETIC,
         with_inlet=True,
     )
 
