@@ -303,7 +303,6 @@ class _BaseReactor:
     def set_names(self):
         mask_species = [True] * self.num_species
         if self.name_species is not None:
-            #give bool array True if named species in partic_species
             mask_species = [name in self.partic_species
                             for name in self.name_species]
 
@@ -1135,7 +1134,7 @@ class CSTR(_BaseReactor):
             pass
         else:
             def fobj(time, states): return self.unit_model(
-                time, states, merged_params) # TODO merged_params in sw spot!!
+                time, states, merged_params)
 
             problem = Explicit_Problem(fobj, states_init,
                                        t0=self.elapsed_time)

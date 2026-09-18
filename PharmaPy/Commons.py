@@ -587,7 +587,7 @@ def integration(states, time):
 
     integral = np.zeros(states.shape[1])
     for ind, row in enumerate(states.T):
-        integral[ind] = simpson(row, time) # TODO add logic to handle even length arrays
+        integral[ind] = simpson(row, x=time)
 
     return integral
 
