@@ -1,4 +1,4 @@
-"""Mixed old/new flowsheet tests.
+"""Mixed pre-refactor/refactored flowsheet integration tests.
 
 Since the phase stack was split, old unit operations import PharmaPy.Phases /
 Streams / MixedPhases while the MultiPhaseVessel units import the *_Refactored
@@ -15,12 +15,30 @@ told apart from a mistake in how the units are driven:
 
 Stages 0 and 1 are controls. If they pass and 2/3 fail, the failure is a real
 old/new interoperability gap rather than a usage error.
+
+Each stage is a test: it raises AssertionError with a diagnostic message when
+the flowsheet is wrong, and returns a short summary string otherwise. Running
+the module directly still prints the whole staged table, which is the faster
+way to read a multi-stage failure.
 """
 
+import importlib.util
 import os
 import traceback
 
 import numpy as np
+import pytest
+
+HAS_ASSIMULO = importlib.util.find_spec("assimulo") is not None
+pytestmark = [
+    pytest.mark.assimulo,
+    pytest.mark.integration,
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        not HAS_ASSIMULO,
+        reason="assimulo is not installed; solver-backed integration tests skipped",
+    ),
+]
 
 # ---------------------------------------------------------------- old stack
 from PharmaPy.Phases import LiquidPhase, SolidPhase
@@ -156,7 +174,7 @@ def quiet(run_kwargs):
 # =====================================================================
 # Stage 0 -- drive an old Filter directly. Control for Filter usage.
 # =====================================================================
-def stage0_filter_alone():
+def test_stage0_filter_alone():
     vol_liq = 2750e-6
     liquid = LiquidPhase(path_thermo=PATH, vol=vol_liq,
                          mass_frac=[0, 0, 0, 0, 1])
@@ -180,7 +198,7 @@ def stage0_filter_alone():
 # =====================================================================
 # Stage 1 -- all-old flowsheet. Control for the SimulationExec harness.
 # =====================================================================
-def stage1_all_old():
+def test_stage1_all_old():
     flst = SimulationExec(PATH, flowsheet='R01 --> CR01 --> F01')
 
     liquid_init = LiquidPhase(PATH, temp=TEMP_INIT, mole_conc=CONC_INIT.copy(),
@@ -214,7 +232,7 @@ def stage1_all_old():
 # =====================================================================
 # Stage 2 -- new reactor -> new crystallizer -> old filter
 # =====================================================================
-def stage2_new_new_old():
+def test_stage2_new_new_old():
     flst = SimulationExec(PATH, flowsheet='R01 --> CR01 --> F01')
 
     liquid_init = NewLiquidPhase(PATH, temp=TEMP_INIT,
@@ -262,7 +280,7 @@ def stage2_new_new_old():
 # Stage 3 -- new continuous reactor -> old hold -> new semibatch cryst
 #            -> old filter
 # =====================================================================
-def stage3_new_old_new_old():
+def test_stage3_new_old_new_old():
     flst = SimulationExec(PATH, flowsheet='R01 --> HOLD01 --> CR01 --> F01')
 
     liquid_init = NewLiquidPhase(PATH, temp=TEMP_INIT,
@@ -392,7 +410,7 @@ def _continuous_reactor():
         controller=ContinuousVesselController(temp_func=lambda t: TEMP_INIT))
 
 
-def stage4_new_batch_to_batch():
+def test_stage4_new_batch_to_batch():
     """The handoff must be exact, and splitting a batch must reproduce it."""
     flst = SimulationExec(PATH, flowsheet='R01 --> R02')
     flst.R01 = _new_reactor(NewBatchReactor)
@@ -429,7 +447,7 @@ def stage4_new_batch_to_batch():
     return 'handoff exact (%.1e), split==single (%.1e)' % (drift, gap)
 
 
-def stage5_new_continuous_to_continuous():
+def test_stage5_new_continuous_to_continuous():
     """The downstream unit must follow the upstream trajectory.
 
     The control is the case that used to pass: a standalone unit fed the
@@ -465,7 +483,7 @@ def stage5_new_continuous_to_continuous():
     return 'differs from constant-snapshot control by %.3e' % divergence
 
 
-def stage6_new_continuous_to_semibatch():
+def test_stage6_new_continuous_to_semibatch():
     """No holding vessel needed: a semibatch vessel accepts a flow."""
     flst = SimulationExec(PATH, flowsheet='R01 --> R02')
     flst.R01 = _continuous_reactor()
@@ -544,7 +562,7 @@ def stage6_new_continuous_to_semibatch():
             'control by %.3e' % (flst.R02.Phases.mass, divergence))
 
 
-def stage7_new_continuous_to_batch_refused():
+def test_stage7_new_continuous_to_batch_refused():
     """Continuous -> Batch needs a hold, and must say so."""
     flst = SimulationExec(PATH, flowsheet='R01 --> R02')
     flst.R01 = _continuous_reactor()
@@ -621,7 +639,7 @@ def _semibatch_cryst(solid_fn=_cryst_solid):
     return unit
 
 
-def stage8_continuous_to_semibatch_matrix():
+def test_stage8_continuous_to_semibatch_matrix():
     """Each continuous source feeding each semibatch destination."""
     cases = (
         ('reactor -> reactor', _continuous_reactor,
@@ -778,7 +796,7 @@ def _crystal_mass(mech, mu3):
             * mech.VOLUME_UNIT_FACTOR * mech.slurry_volume)
 
 
-def stage9_fvm_versus_moments():
+def test_stage9_fvm_versus_moments():
     """Two discretisations, one physics, compared on mass."""
     moments_unit, moments_mech = _cross_crystallizer(
         lambda solid: MomentsPopulationBalance(
@@ -849,16 +867,16 @@ def stage9_fvm_versus_moments():
 
 
 STAGES = (
-    ('0  old Filter alone                                 ', stage0_filter_alone),
-    ('1  all-old   R01 -> CR01 -> F01                     ', stage1_all_old),
-    ('2  new R01 -> new CR01 -> old F01                   ', stage2_new_new_old),
-    ('3  new R01 -> old HOLD01 -> new CR01 -> old F01     ', stage3_new_old_new_old),
-    ('4  new -> new   Batch -> Batch                      ', stage4_new_batch_to_batch),
-    ('5  new -> new   Continuous -> Continuous            ', stage5_new_continuous_to_continuous),
-    ('6  new -> new   Continuous -> Semibatch             ', stage6_new_continuous_to_semibatch),
-    ('7  new -> new   Continuous -> Batch (must refuse)   ', stage7_new_continuous_to_batch_refused),
-    ('8  continuous -> semibatch, all pairings            ', stage8_continuous_to_semibatch_matrix),
-    ('9  1D-FVM vs moments, compared on mass              ', stage9_fvm_versus_moments),
+    ('0  old Filter alone                                 ', test_stage0_filter_alone),
+    ('1  all-old   R01 -> CR01 -> F01                     ', test_stage1_all_old),
+    ('2  new R01 -> new CR01 -> old F01                   ', test_stage2_new_new_old),
+    ('3  new R01 -> old HOLD01 -> new CR01 -> old F01     ', test_stage3_new_old_new_old),
+    ('4  new -> new   Batch -> Batch                      ', test_stage4_new_batch_to_batch),
+    ('5  new -> new   Continuous -> Continuous            ', test_stage5_new_continuous_to_continuous),
+    ('6  new -> new   Continuous -> Semibatch             ', test_stage6_new_continuous_to_semibatch),
+    ('7  new -> new   Continuous -> Batch (must refuse)   ', test_stage7_new_continuous_to_batch_refused),
+    ('8  continuous -> semibatch, all pairings            ', test_stage8_continuous_to_semibatch_matrix),
+    ('9  1D-FVM vs moments, compared on mass              ', test_stage9_fvm_versus_moments),
 )
 
 
