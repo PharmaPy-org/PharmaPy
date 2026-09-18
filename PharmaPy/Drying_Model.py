@@ -4,7 +4,6 @@ Created on Tue Jul 28 00:24:18 2020
 
 @author: huri
 """
-import warnings
 import numpy as np
 import numpy.matlib
 from PharmaPy._assimulo import CVode, Explicit_Problem
@@ -590,12 +589,7 @@ class Drying:
         if time_grid is not None:
             final_time = time_grid[-1] + self.elapsed_time
             self.elapsed_time = time_grid[0]
-        if any(np.isnan(self.derivatives)):
-            warnings.warn("""There are null values in your derivative.
-                             If your simulation fails, check that all pertinent
-                             species have a visc_gas in Pa_s and vapor pressure
-                             listed in the json""",
-                             ValueError)
+        
         if not verbose:
           sim.verbosity = 50
           
