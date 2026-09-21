@@ -7,13 +7,46 @@ Created on Sun Apr  5 17:28:24 2020
 
 import json
 import pathlib
-from typing import Any, Dict, Sequence, Union
+import warnings
+from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
 
 _DatabasePath = Union[str, pathlib.Path]
+
+
+VALID_ACTIVITY_MODELS = ('ideal', 'UNIFAC', 'UNIQUAC')
+
+
+def validate_activity_model(model: str, param_name: str = 'gamma_model') -> None:
+    """Validate a case-sensitive activity-coefficient model selector.
+
+    Parameters
+    ----------
+    model : {'ideal', 'UNIFAC', 'UNIQUAC'}
+        Activity model selector. Activity coefficients have molar basis [-].
+    param_name : str, optional
+        Public parameter name to include in the error message.
+
+    Raises
+    ------
+    ValueError
+        If the selector is not one of ``VALID_ACTIVITY_MODELS``.
+
+    Notes
+    -----
+    Public names ``gamma_model``, ``gamma_method``, ``activity_model``, and
+    ``method`` retain their existing names and defaults. Only the three exact
+    spellings above are accepted; unknown names no longer fall through to a
+    different model. This validates selection, not availability of the model's
+    required property data. Extractors retain their public validator alias.
+    """
+    if model not in VALID_ACTIVITY_MODELS:
+        raise ValueError(
+            f"{param_name} must be one of {VALID_ACTIVITY_MODELS}, "
+            f"got {model!r}")
 
 
 def ParseDatabase(
@@ -211,9 +244,38 @@ class ThermoPhysicalManager:
         return cpMass, cpMole
 
     def getCpMix(self, temp, mass_frac=None, mole_frac=None, phase='liquid',
-                 basis='mass'):
-        # mass_frac = np.asarray(mass_frac)
+                 basis: str = 'mass'):
+        """Mix pure heat capacities over the species axis.
 
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature [K], scalar or shape (num_temperatures,).
+        mass_frac, mole_frac : ndarray, optional
+            Species fractions [-], shape (num_species,) for fixed composition
+            or (num_temperatures, num_species) for paired profiles. The
+            requested basis takes precedence; the other basis is converted
+            when needed.
+        phase : {'liquid', 'solid', 'vapor'}, optional
+            Pure-component Cp correlation; default liquid.
+        basis : {'mass', 'mole'}, optional
+            Cp basis, default mass.
+
+        Returns
+        -------
+        float or ndarray
+            Mixture Cp [J/kg/K] for mass or [J/mol/K] for mole. A single
+            temperature and fixed composition return a scalar; multiple
+            temperatures return shape (num_temperatures,). Composition
+            profiles retain their row axis, including a one-row profile.
+
+        Raises
+        ------
+        ValueError
+            If basis is neither 'mass' nor 'mole'.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
         cp_mass, cp_mole = self.getCpPure(temp, phase=phase)
 
         if basis == 'mass':
@@ -221,7 +283,7 @@ class ThermoPhysicalManager:
                 mass_frac = self.frac_to_frac(mole_frac=mole_frac)
 
             if mass_frac.ndim == 1:
-                cpMix = np.dot(mass_frac, cp_mass)
+                cpMix = np.dot(cp_mass, mass_frac)
             elif mass_frac.ndim == 2:
                 cpMix = (mass_frac * cp_mass).sum(axis=1)
 
@@ -230,7 +292,7 @@ class ThermoPhysicalManager:
                 mole_frac = self.frac_to_frac(mass_frac)
 
             if mole_frac.ndim == 1:
-                cpMix = np.dot(mole_frac, cp_mole)
+                cpMix = np.dot(cp_mole, mole_frac)
             elif mole_frac.ndim == 2:
                 cpMix = (mole_frac * cp_mole).sum(axis=1)
 
@@ -367,29 +429,103 @@ class ThermoPhysicalManager:
 
         return mw_av
 
-    def getViscosityPure(self, phase='liquid', temp=None):
-        if temp is None:
-            temp = self.temp
+    def getViscosityPure(self, phase: str = 'liquid',
+                         temp: Optional[Union[float, np.ndarray]] = None) -> np.ndarray:
+        """Return pure-component dynamic viscosities.
+
+        Parameters
+        ----------
+        phase : {'liquid', 'vapor'}, optional
+            Phase whose pure viscosities are requested.
+        temp : float or ndarray, optional
+            Temperature [K]. The liquid branch accepts a scalar only and
+            defaults to the phase temperature. The vapor branch ignores it.
+
+        Returns
+        -------
+        ndarray
+            Pure viscosities [Pa*s], shape (num_species,). Vapor values come
+            directly from the database's ``visc_gas`` entries in species order.
+
+        Raises
+        ------
+        ValueError
+            If ``phase`` is unknown, or vapor ``visc_gas`` data [Pa*s] are
+            absent or contain NaN entries for missing species.
+
+        Notes
+        -----
+        Vapor data are supplied constants [Pa*s], with no temperature
+        correlation. The database provider must establish their applicable
+        temperature and pressure range; shipped databases do not supply them.
+        Liquid correlations retain their existing temperature dependence.
+        """
+        if phase not in ('liquid', 'vapor'):
+            raise ValueError(
+                f"phase must be one of ('liquid', 'vapor'), got {phase!r}")
 
         if phase == 'liquid':
+            if temp is None:
+                temp = self.temp  # [K]
+
             visc_cts = np.atleast_2d(self.visc_liq)
             temp_term = np.array([1, 1/temp, temp, temp**2])
 
             viscosity = 10**(np.dot(visc_cts, temp_term))/1000  # Pa*s
 
         elif phase == 'vapor':
-            # to be impelemented
-            viscosity = self.visc_gas
+            if (not hasattr(self, 'visc_gas')
+                    or np.isnan(self.visc_gas).any()):
+                raise ValueError(
+                    "Vapor viscosity requires the missing 'visc_gas' property "
+                    "[Pa*s]. Supply a pure-component value for every species "
+                    "in the property JSON, valid at the requested conditions.")
+            viscosity = self.visc_gas  # [Pa*s]
 
         return viscosity
 
-    def getViscosityMix(self, temp=None, mass_frac=None, mole_frac=None,
-                        phase='liquid'):
+    def getViscosityMix(self, temp: Optional[Union[float, np.ndarray]] = None,
+                        mass_frac: Optional[np.ndarray] = None,
+                        mole_frac: Optional[np.ndarray] = None,
+                        phase: str = 'liquid') -> Union[float, np.ndarray]:
+        """Mix dynamic viscosities on the mole-fraction basis.
 
-        if temp is None:
-            temp = self.temp
+        Parameters
+        ----------
+        temp : float or ndarray, optional
+            Temperature [K]. The liquid branch accepts a scalar only and
+            defaults to the phase temperature. The vapor branch ignores it.
+        mass_frac, mole_frac : ndarray, optional
+            Mass or mole fractions [-], shape (num_species,) or
+            (num_points, num_species). Mole fractions take precedence;
+            if neither is supplied, use the phase mole fractions.
+        phase : {'liquid', 'vapor'}, optional
+            Select logarithmic liquid mixing or the dilute-gas Wilke rule.
 
-        visc_comp = self.getViscosityPure(phase, temp)
+        Returns
+        -------
+        float or ndarray
+            Mixture viscosity [Pa*s], scalar for one composition or shape
+            (num_points,) for a composition profile.
+
+        Raises
+        ------
+        ValueError
+            If ``phase`` is unknown, or required vapor ``visc_gas`` data
+            [Pa*s] are absent or contain NaN entries for missing species.
+
+        Notes
+        -----
+        Wilke, J. Chem. Phys. 18, 517 (1950), doi:10.1063/1.1747673;
+        Poling, Prausnitz and O'Connell, The Properties of Gases and Liquids,
+        5th ed., equations 9-5.13 and 9-5.14:
+        ``mu = sum_i y_i*mu_i / sum_j y_j*phi_ij``, where
+        ``phi_ij = (1 + sqrt(mu_i/mu_j)*(M_j/M_i)**0.25)**2
+        / sqrt(8*(1 + M_i/M_j))``. The rule assumes a low-pressure gas;
+        molar masses use the same units for every species.
+        """
+
+        visc_comp = self.getViscosityPure(phase, temp)  # [Pa*s]
 
         if mass_frac is None and mole_frac is None:
             mole_frac = self.mole_frac
@@ -403,15 +539,15 @@ class ThermoPhysicalManager:
 
         elif phase == 'vapor':
             if visc_comp.ndim == 1:
-                visc_term = np.outer(visc_comp, 1/visc_comp)
-                mw_term = np.outer(self.mw, 1/self.mw)
+                visc_term = np.outer(visc_comp, 1/visc_comp)  # [-]
+                mw_term = np.outer(self.mw, 1/self.mw)  # [-], M_i/M_j
 
-                phi_mix = (1 + visc_term**0.5 * mw_term**0.25)**2 / \
-                    np.sqrt(8*(1 + mw_term))
+                phi_mix = (1 + visc_term**0.5 * (1/mw_term)**0.25)**2 / \
+                    np.sqrt(8*(1 + mw_term))  # [-]
 
-                interactions = np.dot(mole_frac, phi_mix.T)
+                interactions = np.dot(mole_frac, phi_mix.T)  # [-]
 
-                viscMix = (visc_comp * mole_frac / interactions).sum(axis=1)
+                viscMix = (visc_comp * mole_frac / interactions).sum(axis=-1)  # [Pa*s]
 
         return viscMix
 
@@ -693,8 +829,56 @@ class ThermoPhysicalManager:
 
             return temp_sat
 
-    def getKeqVLE(self, temp=None, pres=None, x_liq=None, y_vap=None,
-                  gamma_model='ideal'):
+    def getKeqVLE(self, temp: Optional[Union[float, np.ndarray]] = None,
+                  pres: Optional[float] = None,
+                  x_liq: Optional[np.ndarray] = None,
+                  y_vap: Optional[np.ndarray] = None,
+                  gamma_model: str = 'ideal') -> np.ndarray:
+        """Return vapor-liquid equilibrium ratios on a molar basis.
+
+        Parameters
+        ----------
+        temp : float or ndarray, optional
+            Temperature [K], scalar or shape (num_points,); defaults to
+            the phase temperature.
+        pres : float, optional
+            Total pressure [Pa]; defaults to the phase pressure.
+        x_liq : ndarray, optional
+            Liquid mole fractions [-], shape (num_species,) or
+            (num_points, num_species); defaults to the phase composition.
+        y_vap : ndarray, optional
+            Vapor mole fractions [-]. Retained for API compatibility; unused
+            by the current ideal-vapor model.
+        gamma_model : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Liquid activity model; its required parameters must be supplied
+            in the property database.
+
+        Returns
+        -------
+        ndarray
+            Ratios ``y_i/x_i`` [-], with species on the last axis. A scalar
+            temperature and composition vector give (num_species,); a
+            temperature vector gives (num_points, num_species), including
+            a one-row vector.
+
+        Raises
+        ------
+        ValueError
+            If ``gamma_model`` is not a supported, case-sensitive selector.
+
+        Notes
+        -----
+        ``K_i = gamma_i*p_i/pres``. For each temperature/species pair with
+        ``temp > t_crit_i``, ``p_i`` is the Henry constant [Pa] on a liquid
+        mole-fraction basis; otherwise it is Antoine saturation pressure [Pa].
+        At the critical temperature itself, the Antoine branch is retained.
+        The vector-temperature branch is validated for ``gamma_model='ideal'``.
+        Non-ideal models require paired two-dimensional ``x_liq`` with shape
+        (num_points, num_species). UNIQUAC with a temperature vector and a
+        one-dimensional composition mis-indexes the temperature profile; this
+        pre-existing limitation remains a follow-up, not a supported contract.
+        """
+        validate_activity_model(gamma_model)
 
         if temp is None:
             temp = self.temp
@@ -707,14 +891,13 @@ class ThermoPhysicalManager:
 
         crit = isinstance(temp, np.ndarray) and temp.ndim == 1
         if crit:
-            p_vap = self.AntoineEquation(temp)
-            supercrit = np.ones_like(p_vap) * temp[:, np.newaxis] > self.t_crit
+            p_vap = self.AntoineEquation(temp)  # [Pa]
+            supercrit = temp[:, np.newaxis] > self.t_crit
             if np.any(supercrit):
-                for row in supercrit:
-                    p_vap[:, row] = self.henry_constant[row]
+                p_vap = np.where(supercrit, self.henry_constant, p_vap)  # [Pa]
         else:
             supercrit = temp > self.t_crit
-            p_vap = self.AntoineEquation(temp)
+            p_vap = self.AntoineEquation(temp)  # [Pa]
             if any(supercrit):
                 p_vap[supercrit] = self.henry_constant[supercrit]
 
@@ -729,15 +912,18 @@ class ThermoPhysicalManager:
 
         return k_vals
 
-    def UNIQUAC(self, mole_frac=None, temp=None):
+    def UNIQUAC(self, mole_frac: Optional[np.ndarray] = None,
+                temp: Optional[Union[float, np.ndarray]] = None) -> np.ndarray:
         r""" Calculate activity coefficients :math:`\gamma_i` using UNIQUAC model.
 
         Parameters
         ------------
-        x_liq : ndarray
-            liquid molar fractions for n components.
-        temp : float
-            temperature [K]
+        mole_frac : ndarray
+            Liquid mole fractions [-], shape (num_species,) or
+            (num_points, num_species). Required by the model.
+        temp : float or ndarray
+            Temperature [K], scalar for one composition or a paired
+            (num_points,) profile. Required by the model.
         amk : ndarray
             n x n array containing interaction parameters [J/mol]:
                 component m (row) respect to component k (column):
@@ -752,17 +938,19 @@ class ThermoPhysicalManager:
                \end{bmatrix}
 
         ri : ndarray
-            molecular volume constants (n-sized array).
+            Database molecular volume constants [-], shape (num_species,).
         qi : ndarray
-            molecular surface area constants (n-sized array).
+            Database molecular surface area constants [-], shape (num_species,).
         qip : ndarray
-            molecular surface area for systems containing water or alcohols
-            (n-sized array). Usually, qi = qip.
+            Database molecular surface area constants [-] for systems with
+            water or alcohols, shape (num_species,). If absent, use ``qi`` locally
+            and warn once per instance. This inherited fallback is an explicit
+            assumption and may be unsuitable for water/alcohol mixtures.
 
         Returns
         -----------
         output : ndarray
-            n-sized array with activity coefficients.
+            Activity coefficients [-], with the same shape as ``mole_frac``.
 
         Notes
         ---------------------------
@@ -811,10 +999,17 @@ class ThermoPhysicalManager:
 
         """
 
+        if not hasattr(self, 'qip') and not getattr(self, '_warned_qip_fallback', False):
+            warnings.warn(
+                "UNIQUAC qip is absent; assuming qip = qi. This fallback may "
+                "be unsuitable for water or alcohol mixtures; supply validated "
+                "qip values for those systems.", UserWarning, stacklevel=2)
+            self._warned_qip_fallback = True
+
         # Rename
         ri = self.ri
         qi = self.qi
-        qip = self.qip
+        qip = getattr(self, 'qip', self.qi)  # [-], local fallback leaves database fields unchanged
         amk = self.amk
 
         x_liq = mole_frac
