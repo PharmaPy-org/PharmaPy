@@ -2525,9 +2525,9 @@ class MSMPR(_BaseCryst):
         final_fn : float
             Dynamic model's target derivative, evaluated by calling
             material_balances at the returned analytical moments, in
-            [kg/m**3/s] or [kg/kg/s], according to the unit's basis. Density
-            is evaluated at the attached liquid composition, so this residual
-            cannot expose error from the constant-density approximation.
+            [kg/m**3/s] on both kinetics-input bases. Density is evaluated at
+            the attached liquid composition, so this residual cannot expose
+            error from the constant-density approximation.
 
         Raises
         ------
@@ -2557,8 +2557,9 @@ class MSMPR(_BaseCryst):
         phi_in=1 and no inlet solids. With D=Q/V [1/s], target concentration
         c [kg/m**3], and phi=1-kv*mu_3, this is
         0=D*(c_in-c*phi)-R*(1-c/rho_l). The derivative divides this expression
-        by phi, and also by rho_l for mass_frac. Thus this is the dynamic
-        model's solute bookkeeping, not a separate stream mass balance.
+        by phi and remains [kg/m**3/s] for both kinetics-input bases. Thus this
+        is the dynamic model's solute bookkeeping, not a separate stream mass
+        balance.
 
         Assumes constant tank liquid density and holdup, no inlet solids,
         zero-size nuclei, and positive size- and population-independent
@@ -2926,13 +2927,13 @@ class MSMPR(_BaseCryst):
                 0.0, None, inputs, [[rho_liquid, rho_solid], [rho_inlet, None]],
                 moments_si, population_state, concentrations, temp, None,
                 self.vol_slurry, [1.0, 0.0])
-            # [population unit/s], [composition unit/s], actual dynamic balance
+            # [population unit/s], [kg/m**3/s], actual dynamic balance
         finally:
             self.Liquid_1.temp, self.Solid_1.temp = liquid_temp, solid_temp  # [K]
             if self.method != 'moments':
                 self.Solid_1.moments[:] = solid_moments  # [m**n], preserve inventory
         final_fn = derivative[len(population_state) + self.target_ind]
-        # [configured composition unit/s], actual dynamic target derivative
+        # [kg/m**3/s], actual dynamic target derivative on both kinetic bases
         return x_vec, f_convg, composition, info, final_fn
 
     def material_balances(self, time, params, u_inputs, rhos, mu_n,

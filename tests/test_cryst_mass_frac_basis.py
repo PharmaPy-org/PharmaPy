@@ -174,6 +174,7 @@ class _Kinetics:
         self.sec_nucl = 0.0  # [#/m**3/s]
         self.growth = GROWTH_RATE  # [um/s]
         self.dissol = 0.0  # [um/s]
+        self.mu_sec_nucl = 3  # third-moment order for secondary nucleation
         self.params = {
             'nucl_prim': [0.0, 0.0, 0.0],
             'nucl_sec': [0.0, 0.0, 0.0, 0.0],
@@ -182,18 +183,51 @@ class _Kinetics:
         }  # [rate prefactor, J/mol, exponent [-]]; secondary adds exponent [-]
 
     def set_params(self, params):
-        """Set the active growth prefactor.
+        """Set the full kinetic parameter vector.
 
         Parameters
         ----------
         params : array-like
-            One active growth-rate prefactor [um/s].
+            Full parameter vector in ``concat_params`` order. Entries retain
+            their mechanism-specific native units.
 
         Returns
         -------
         None
+
+        Raises
+        ------
+        ValueError
+            If ``params`` does not contain all kinetic parameters.
         """
-        self.growth_parameter = np.asarray(params)[0]  # [um/s]
+        params_array = np.asarray(params, dtype=float)
+        # [native kinetic parameter units by mechanism]
+        if params_array.shape != (NUM_KINETIC_PARAMETERS,):
+            raise ValueError(
+                f'expected {NUM_KINETIC_PARAMETERS} kinetic parameters; '
+                f'got shape {params_array.shape}'
+            )
+
+        offset = 0
+        for mechanism, values in self.params.items():
+            count = len(values)
+            self.params[mechanism] = params_array[offset:offset + count].tolist()
+            offset += count
+
+        self.growth_parameter = params_array[GROWTH_PREFACTOR_INDEX]  # [um/s]
+
+    def concat_params(self):
+        """Return the full kinetic vector in mechanism order.
+
+        Returns
+        -------
+        numpy.ndarray
+            Concatenated parameters in their mechanism-specific native units.
+        """
+        return np.concatenate([
+            np.asarray(values, dtype=float)
+            for values in self.params.values()
+        ])  # [native kinetic parameter units by mechanism]
 
     def get_kinetics(self, conc, temp, kv, moms):
         """Return constant nucleation, growth, and dissolution rates.
@@ -421,10 +455,10 @@ def _semibatch_balance(basis):
     """
     crystallizer = _configure(SemibatchCryst.__new__(SemibatchCryst), basis)
 
-    # Mixed units by field: flow [m**3/s], moments [um**n/m**3], and inlet
+    # Mixed units by field: flow [m**3/s], moments [m**n/m**3], and inlet
     # concentrations [kg/m**3].
     u_inputs = {
-        'Inlet': {'vol_flow': INLET_VOL_FLOW, 'distrib': INLET_MOMENTS_RAW},
+        'Inlet': {'vol_flow': INLET_VOL_FLOW, 'mu_n': INLET_MOMENTS},
         'Liquid_1': {'mass_conc': INLET_CONC},
     }
 
@@ -688,7 +722,6 @@ def test_batch_mass_frac_parameter_jacobian_matches_finite_difference():
 
     def residual(candidate_params):
         """Evaluate the residual after setting the growth prefactor [um/s]."""
-        crystallizer.Kinetics.set_params(candidate_params)
         return crystallizer.unit_model(0.0, states, params=candidate_params)
 
     finite_difference = _central_difference_jacobian(residual, active_params)
