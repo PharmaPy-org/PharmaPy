@@ -6,14 +6,38 @@ Created on Thu Sep 16 15:06:16 2021
 """
 
 
-def analyze_controls(di):
+def analyze_controls(di: dict) -> dict:
+    """Normalize named control callables and records.
+
+    Parameters
+    ----------
+    di : dict
+        Control names mapped to callables or records containing ``fun``.
+        Callables accept time [s] and return values in the controlled units.
+
+    Returns
+    -------
+    dict
+        Records containing ``fun``, ``args`` and ``kwargs`` for each control.
+
+    Raises
+    ------
+    KeyError
+        If a control record lacks ``fun``.
+    TypeError
+        If the supplied function is not callable.
+
+    Notes
+    -----
+    Supplied records receive missing ``args`` and ``kwargs`` defaults in place.
+    """
 
     controls = {}
 
     for key, val in di.items():
         if isinstance(val, dict) and key != 'kwargs':
             if 'fun' not in val:
-                raise KeyError("'%s' dictionary must have a 'fun' field")
+                raise KeyError("'%s' dictionary must have a 'fun' field" % key)
             elif not callable(val['fun']):
                 raise TypeError(
                     "Object passed to the 'fun' field must be a "
