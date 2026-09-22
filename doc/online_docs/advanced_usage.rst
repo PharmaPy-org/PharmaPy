@@ -199,3 +199,13 @@ Piecewise linear interpolators can also be used. In this case, the passed known 
 
 Note that the values on the second column always match the value of the first column in the next raw, for continuity purposes. Higher orders will follow the same structure, where each row will represent a subinterval and the number of columns will dictate the interpolation order, which must be passed using the :code:`order` argument.
 
+
+Evaporator reporting times
+==========================
+
+``Evaporator.solve_unit(runtime, time_grid=times)`` accepts absolute reporting
+points [s] within the current segment. They must be finite and strictly
+increasing; the solver also reports the segment start. ``runtime`` remains the
+segment duration [s], including on continuation. Omitting ``time_grid`` retains
+adaptive reporting. This supports comparisons at shared times without changing
+the native IDA solver or interpolating the returned trajectory.
