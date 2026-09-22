@@ -59,6 +59,28 @@ def order_state_names(names):
     return material + energy
 
 
+def _ordered_state_layout(metadata: dict) -> tuple[list[str], list[int]]:
+    """Order named material/energy states with their matching block dimensions.
+
+    Parameters
+    ----------
+    metadata : dict
+        State-name mapping with a ``dim`` entry per block. Units belong to
+        each entry (concentrations [mol/L], volumes [m**3], temperatures [K]).
+        Insertion order is retained within material and energy groups.
+
+    Returns
+    -------
+    names : list of str
+        Material state names followed by energy state names.
+    dimensions : list of int
+        Component counts in exactly the returned name order.
+    """
+    names = order_state_names(list(metadata))
+    dimensions = [metadata[name]['dim'] for name in names]
+    return names, dimensions
+
+
 def get_sundials_callable(events, eval_sens, param_vals, unit_model, get_jac):
     flag_events = len(events) > 0
 
@@ -719,10 +741,7 @@ class _BaseReactor:
             for key, val in self.states_di.items():
                 self.states_di[key]['depends_on'].append('vol')
 
-        name_states = list(self.states_di.keys())
-
-        self.name_states = order_state_names(name_states)
-        self.dim_states = [self.states_di[name]['dim'] for name in self.name_states]
+        self.name_states, self.dim_states = _ordered_state_layout(self.states_di)
 
         # Input names
         len_in = [self.num_species, 1, 1]
