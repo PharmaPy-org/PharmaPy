@@ -105,6 +105,10 @@ MIN_TEMP_SEPARATION = 1.0  # [K]
 MIN_RESIDUAL_SEPARATION = 0.1  # [-]
 MIN_VAPOR_FRAC_SEPARATION = 0.05  # [-]
 
+# Retain the original startup regression's 1e-8 relative temperature budget,
+# slightly tighter than MINPACK's default sqrt(float64 epsilon) step tolerance.
+STARTUP_RTOL = 1e-8  # [-], same independent bubble-point oracle before/after migration
+
 # Three-species extension of the fixture above, used only by the shortcut
 # flow-split test. ``global_material_bce`` builds the bottoms flow from four
 # index sets -- the two declared keys, the species ranked above the light key,
@@ -730,7 +734,7 @@ def test_dynamic_startup_temperature_uses_configured_activity_model(tmp_path):
     ideal_temp = _expected_bubble_temp(
         column.Liquid_1, holdup_frac, model='ideal')  # [K]
     initial, derivatives = column.init_unit()  # [K], [-]; [-], [1/s]
-    np.testing.assert_allclose(initial[:, 0], expected_temp, rtol=1e-8)
+    np.testing.assert_allclose(initial[:, 0], expected_temp, rtol=STARTUP_RTOL)
     np.testing.assert_array_equal(
         initial[:, 1:], np.tile(holdup_frac, (column.num_plates + 1, 1)))
     assert abs(expected_temp - ideal_temp) > MIN_TEMP_SEPARATION  # [K]
@@ -770,10 +774,10 @@ def test_dynamic_startup_integrates_real_nonideal_column(tmp_path):
     np.testing.assert_array_equal(time, grid)
     initial = states[0].reshape(column.num_plates + 1, column.len_states)
     # First column [K], remaining columns mole fractions [-].
-    np.testing.assert_allclose(initial[:, 0], expected_temp, rtol=1e-8)
+    np.testing.assert_allclose(initial[:, 0], expected_temp, rtol=STARTUP_RTOL)
     np.testing.assert_allclose(initial[:, 1:], np.tile(
-        composition, (column.num_plates + 1, 1)), rtol=1e-8, atol=0)
-    np.testing.assert_allclose(column.result.temp[0], expected_temp, rtol=1e-8)
+        composition, (column.num_plates + 1, 1)), rtol=STARTUP_RTOL, atol=0)
+    np.testing.assert_allclose(column.result.temp[0], expected_temp, rtol=STARTUP_RTOL)
     np.testing.assert_array_equal(column.result.time, time)
     assert column.OutletBottom.mole_flow + column.OutletDistillate.mole_flow == pytest.approx(
         FEED_MOLE_FLOW)
