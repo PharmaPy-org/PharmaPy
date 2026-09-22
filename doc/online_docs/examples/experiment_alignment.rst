@@ -58,9 +58,12 @@ Compatibility and ordering
   insertion order as older versions did. Pass ``y_data`` as a list in
   ``x_data`` order, or name the experiments in ``x_data``. A one-entry
   observation dictionary remains valid for a single unnamed experiment.
-* Legacy callback dictionaries with unnamed multiple datasets retain insertion
-  order. Prefer positional lists, or name the experiments in ``x_data`` so keys
-  can be checked.
+* Callback mappings with multiple experiment keys also require named
+  ``x_data``. Construction now raises ``ValueError`` instead of pairing them
+  by insertion order. Pass ``args_fun`` and ``kwargs_fun`` as lists in
+  ``x_data`` order, or name the experiments in ``x_data`` so keys can be
+  checked. A single experiment's direct keyword dictionary may still contain
+  multiple callback keywords.
 * Alignment changes experiment order only. State columns, nested spectral and
   non-spectral measurements, sampling masks, units and physical bases retain
   their existing meaning. Nested measurement fields must already follow the

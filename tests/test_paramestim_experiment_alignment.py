@@ -206,9 +206,11 @@ def test_single_keyed_observation_mapping_accepts_unnamed_times(
     (False, 'direct'), (True, 'direct'), (False, 'list'), (True, 'list'),
     (True, 'keyed')])
 def test_single_experiment_callback_conventions(named, representation):
+    """Preserve the exact argument nesting as well as callback results."""
     times = np.array([0., 1., 3.])  # [s]
     observations = np.array([1., 5., 13.])  # [mol/L], C0=1, gain=2, rate=2
     args = (1.,)  # [mol/L]
+    expected_args = args  # [mol/L], one scalar callback argument
     kwargs = {'gain': 2.}  # [-]
     if representation == 'list':
         args, kwargs = [args], [kwargs]
@@ -219,6 +221,7 @@ def test_single_experiment_callback_conventions(named, representation):
         {'batch': times} if named else times,
         {'batch': observations} if named else observations,
         args_fun=args, kwargs_fun=kwargs)
+    assert estimator.args_fun[0] == expected_args
     np.testing.assert_allclose(estimator.get_objective([2.], out_array=True),
                                np.zeros(3), rtol=0., atol=ROUNDING_ATOL)
 
@@ -385,6 +388,7 @@ def tuple_initial_concentration(parameters, time_s, initial):
 
 @pytest.mark.parametrize('wrapped', [False, True])
 def test_single_tuple_valued_callback_argument_has_an_explicit_escape(wrapped):
+    """Keep exactly one tuple layer inside the callback argument container."""
     times = np.array([0., 1., 3.])  # [s], constant-rate verification schedule
     observations = np.array([1., 3., 7.])  # [mol/L], C0=1, rate=2
     args = ((1.,),)  # [mol/L], one callback argument that is itself a tuple
@@ -393,5 +397,52 @@ def test_single_tuple_valued_callback_argument_has_an_explicit_escape(wrapped):
     estimator = ParameterEstimation(tuple_initial_concentration, [2.], times,
                                     observations, args_fun=args)
     assert isinstance(estimator.args_fun[0][0], tuple)
+    assert estimator.args_fun[0] == ((1.,),)  # [mol/L], exact input nesting
+    np.testing.assert_allclose(estimator.get_objective([2.], out_array=True),
+                               np.zeros(3), rtol=0., atol=ROUNDING_ATOL)
+
+
+@pytest.mark.parametrize('label', ['args_fun', 'kwargs_fun'])
+@pytest.mark.parametrize('mapping_order', ['declared', 'reversed'])
+@pytest.mark.parametrize('container', [list, tuple])
+def test_keyed_callback_mappings_require_named_experiments(
+        experiments, label, mapping_order, container):
+    """Reject ambiguous callback keys before either order can change a fit."""
+    mapping = experiments[label]  # args [mol/L]; kwargs gains [-]
+    if mapping_order == 'reversed':
+        mapping = dict(reversed(list(mapping.items())))
+    # Times [s], concentrations [mol/L], and gains [-] retain positional order.
+    inputs = {key: container(value.values())
+              for key, value in experiments.items()}
+    inputs[label] = mapping
+    with pytest.raises(ValueError, match=label + ' experiment keys') as error:
+        ParameterEstimation(accumulating_concentration, [2.], **inputs)
+    message = str(error.value)
+    assert repr(list(mapping)) in message
+    assert 'unnamed x_data' in message
+    assert 'x_data as a dictionary with the same keys' in message
+    assert f'{label} as a list in x_data order' in message
+
+
+def test_single_unnamed_experiment_accepts_one_keyed_positional_container():
+    """Keep the unambiguous one-experiment positional mapping supported."""
+    times = np.array([0., 1., 3.])  # [s], constant-rate verification schedule
+    observations = np.array([1., 3., 7.])  # [mol/L], C0=1, rate=2
+    args = {'batch': (1.,)}  # [mol/L], sole callback argument
+    estimator = ParameterEstimation(accumulating_concentration, [2.], times,
+                                    observations, args_fun=args)
+    assert estimator.args_fun[0] == args['batch']
+    np.testing.assert_allclose(estimator.get_objective([2.], out_array=True),
+                               np.zeros(3), rtol=0., atol=ROUNDING_ATOL)
+
+
+def test_single_unnamed_experiment_accepts_multiple_direct_keywords():
+    """Multiple callback keywords describe one experiment, not several."""
+    times = np.array([0., 1., 3.])  # [s], constant-rate verification schedule
+    observations = np.array([1., 5., 13.])  # [mol/L], C0=1, gain=2, rate=2
+    kwargs = {'initial_mol_l': 1., 'gain': 2.}  # [mol/L], [-]
+    estimator = ParameterEstimation(accumulating_concentration, [2.], times,
+                                    observations, kwargs_fun=kwargs)
+    assert estimator.kwargs_fun[0] == kwargs
     np.testing.assert_allclose(estimator.get_objective([2.], out_array=True),
                                np.zeros(3), rtol=0., atol=ROUNDING_ATOL)

@@ -149,7 +149,8 @@ def _experiment_arguments(data, count: int, names: Optional[list],
     Raises
     ------
     ValueError
-        If keys or the number of argument containers do not match the data.
+        If keys or the number of argument containers do not match the data,
+        or multiple experiment keys cannot be aligned with unnamed data.
     TypeError
         If positional arguments are not iterable or keyword arguments are not
         a dictionary. Positional errors identify experiment keys or, for
@@ -161,7 +162,8 @@ def _experiment_arguments(data, count: int, names: Optional[list],
     dictionary contains callback keywords. A dictionary keyed by the sole
     experiment name with a dictionary value instead denotes keyed keywords;
     use a one-element list to pass that same structure as callback keywords.
-    Unnamed multiple datasets retain legacy dictionary insertion order.
+    Experiment mappings with multiple entries require named datasets;
+    otherwise use a list in the positional dataset order.
     """
     if data is None:
         return [{} if keyword else () for _ in range(count)]
@@ -173,6 +175,11 @@ def _experiment_arguments(data, count: int, names: Optional[list],
     if single_keywords and not keyed_keywords:
         values = [data]
     elif isinstance(data, dict):
+        if names is None and len(data) > 1:
+            raise ValueError(
+                f"{label} experiment keys {list(data)!r} cannot be aligned "
+                "with unnamed x_data; pass x_data as a dictionary with the "
+                f"same keys, or {label} as a list in x_data order")
         values = (list(data.values()) if names is None else
                   _ordered_experiment_values(data, names, label))
     elif (count == 1 and not keyword
@@ -375,12 +382,16 @@ class ParameterEstimation:
             ``[(initial,)]`` passes ``initial``, not ``(initial,)``. Use
             ``((initial,),)`` when the callback argument is itself a tuple.
             With named experiments, a mapping must have exactly the
-            ``x_data`` keys. Other iterable argument containers, such as
-            lists and one-dimensional arrays, retain their callback meaning.
+            ``x_data`` keys. Mappings with multiple entries require named
+            ``x_data``; otherwise use a list in ``x_data`` order. Other
+            iterable argument containers, such as lists and one-dimensional
+            arrays, retain their callback meaning.
             The default is None.
         kwargs_fun : dict or list of dicts, optional
             Callback keywords in model-defined units. For multiple experiments,
             use a list in ``x_data`` order or a mapping with exactly its keys.
+            Experiment mappings with multiple entries require named
+            ``x_data``; otherwise use a list in ``x_data`` order.
             For one experiment, a dictionary contains callback keywords, except
             that ``{experiment_name: keyword_dict}`` denotes keyed keywords.
             To pass that reserved structure to the callback itself, wrap it in
@@ -423,8 +434,8 @@ class ParameterEstimation:
         ------
         ValueError
             If experiment mappings disagree, experiment counts differ, no
-            experiments are supplied, or ``y_data`` maps more than one
-            experiment while ``x_data`` is unnamed.
+            experiments are supplied, or an observation/callback mapping
+            has multiple experiment keys while ``x_data`` is unnamed.
         TypeError
             If positional arguments are not iterable or keyword arguments are
             not a dictionary. Positional errors identify experiment keys or,
@@ -434,10 +445,11 @@ class ParameterEstimation:
         -----
         Lists and arrays retain positional ordering. Nested state observation
         dictionaries are passed through without treating state names as
-        experiment names. Observation mappings with more than one experiment
-        cannot be aligned with unnamed ``x_data`` and are rejected. Callback
-        mappings used with unnamed multiple datasets retain their legacy
-        insertion order; use lists to make that explicit.
+        experiment names. Observation and callback mappings with multiple
+        experiment keys cannot be aligned with unnamed ``x_data`` and are
+        rejected; use lists in ``x_data`` order instead. A single
+        experiment's direct keyword dictionary may still contain multiple
+        callback keywords.
         No physical-unit or state-column conversion is performed.
 
         """
