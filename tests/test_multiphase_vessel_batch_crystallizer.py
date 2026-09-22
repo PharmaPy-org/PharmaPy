@@ -16,12 +16,12 @@ import os
 import numpy as np
 import pytest
 
-from PharmaPy.Crystallizers_Refactor import BatchCrystallizer
+from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.DataClasses import PhaseRef
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Mechanisms import OneDFVMMechanism
-from PharmaPy.Phases import LiquidPhase, SolidPhase
-from PharmaPy.ProcessControl_Refactor import SimpleTemperatureController
+from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.ProcessControl_Refactored import SimpleTemperatureController
 
 pytestmark = pytest.mark.unit
 

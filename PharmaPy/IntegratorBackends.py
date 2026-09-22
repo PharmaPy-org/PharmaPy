@@ -1,5 +1,6 @@
 import numpy as np
 from abc import ABC, abstractmethod
+from scipy.integrate import solve_ivp
 from PharmaPy._assimulo import (CVode, Explicit_Problem, IDA,
                                 Implicit_Problem)
 from PharmaPy.Commons import TerminateSimulation
@@ -1136,5 +1137,749 @@ class DiffeqpyBackend(IntegratorBackend):
 
             if value is not None:
                 out[ours] = int(value)
+
+        return out
+
+
+class _ScipyStateEvent:
+    """
+    One of the vessel's switching surfaces, in the shape solve_ivp wants.
+
+    Carries two surfaces and swaps between them once per segment:
+
+        armed     ->  g(t, y)
+        disarmed  ->  g(t, y)**2 - band**2
+
+    The disarmed surface is negative while ``|g|`` stays inside ``band`` and
+    roots exactly when ``|g|`` leaves it, which is what makes restarting at a
+    root safe. scipy's ``prepare_events`` reads ``terminal`` and ``direction``
+    off the callable itself, so those are plain attributes.
+    """
+
+    def __init__(self, unit, index, direction, terminal):
+
+        self.unit = unit
+        self.index = index
+
+        self.native_direction = float(direction)
+
+        self.disarmed = False
+        self.band = 0.0
+
+        self.terminal = terminal
+        self.direction = float(direction)
+
+    def __call__(self, time, states):
+
+        # evaluate_events memoizes on (time, states.tobytes()), so asking N
+        # events about one point costs one complete_state, not N.
+        value = float(self.unit.evaluate_events(time, states)[self.index])
+
+        if self.disarmed:
+            return value * value - self.band * self.band
+
+        return value
+
+
+class ScipyBackend(IntegratorBackend):
+    """
+    scipy.integrate.solve_ivp backend.
+
+    The one backend with nothing to install: scipy is already required by
+    PharmaPy, whereas AssimuloBackend needs compiled SUNDIALS libraries and
+    DiffeqpyBackend needs a Julia runtime. It covers the ODE reactors and
+    crystallizers and is a drop-in for AssimuloBackend at any call site.
+
+    ``method`` defaults to ``'BDF'``, the integrator AssimuloBackend uses
+    (``iter='Newton'``, ``discr='BDF'``), so the two backends can be compared
+    directly on the same model. Option names follow Assimulo's (``maxh``,
+    ``atol``, ``rtol``) and are translated onto scipy's; genuine scipy
+    keywords such as ``jac_sparsity`` pass through untouched.
+
+    What it cannot do, and refuses rather than faking:
+
+    - **Differential-algebraic systems.** solve_ivp has no DAE mode, so a unit
+      declaring algebraic states is refused at compile time and pointed at
+      AssimuloDAEBackend or DiffeqpyBackend.
+    - **Sensitivities.** Parameter estimation still needs AssimuloBackend.
+    - **A Krylov linear solver.** scipy's implicit methods always do a direct
+      linear solve, so a crystallizer's ``set_linear_solver("krylov")`` is
+      recorded and not acted on. On a large discretized phase that dense
+      finite-difference Jacobian is the main cost against CVode with SPGMR;
+      passing ``jac_sparsity`` through ``options`` is how to recover it.
+
+    Events
+    ------
+    Every StateEvent in the refactored vessel is non-terminal: they exist so
+    the integrator stops at the switching surface and *restarts* there rather
+    than shortening steps to stumble across a kink. solve_ivp only records a
+    non-terminal event, so this backend drives the restart itself, treating
+    every event as terminal for one segment and relaunching from the root.
+
+    Restarting exactly at a root would re-trigger it: scipy's
+    ``find_active_events`` counts ``g <= 0 and g_new >= 0`` as a crossing, and
+    at a root ``g`` is zero to within brentq's tolerance and lands on either
+    side of it. So at each segment start an event whose value sits inside a
+    band around zero is *disarmed* - replaced by a surface that roots when the
+    value leaves the band - and re-armed once it has. The band is hysteretic
+    (disarm below ``band/2``, re-arm at ``band``) so a re-arm root cannot fall
+    straight back through the disarm threshold.
+
+    The same rule handles a surface that sits identically at zero over an
+    interval, such as a level controller holding its target: it stays disarmed
+    and never fires until the level genuinely moves. A crossing costs two
+    restarts rather than one, the second being the re-arm.
+
+    Parameters
+    ----------
+    options : dict, optional
+        Solver options, in either vocabulary.
+    method : str, optional
+        A scipy solve_ivp method. Default ``'BDF'``.
+    segment_events : bool, optional
+        Stop and restart at each switching surface. Default True. Set False to
+        hand the events to scipy as they are, which integrates straight
+        through a non-terminal one.
+    event_atol, event_rtol : float, optional
+        Absolute and relative width of the disarm band. The relative part is
+        scaled by the largest magnitude that event has reached, because event
+        functions live on very different scales.
+    max_restarts, max_short_segments, min_segment :
+        Budgets that turn a degenerate switching surface into a diagnostic
+        naming it, rather than a hang.
+    """
+
+    supports_algebraic = False
+
+    METHODS = ("BDF", "LSODA", "Radau", "RK45", "RK23", "DOP853")
+
+    # Assimulo option -> solve_ivp keyword. atol and rtol need no entry, scipy
+    # spells them the same way.
+    OPTION_ALIASES = {
+        "maxh": "max_step",
+        "inith": "first_step",
+    }
+
+    # Assimulo/Sundials controls with no scipy counterpart. scipy only warns
+    # about a keyword it does not recognise, but that warning would fire on
+    # every segment of every solve, so they are dropped here instead.
+    IGNORED_OPTIONS = frozenset({
+        "verbosity", "report_continuously", "time_limit", "clock_step",
+        "iter", "discr", "maxord", "minh", "maxsteps", "num_threads",
+        "usejac", "pbar", "sensmethod", "suppress_sens",
+        "suppress_alg", "algvar", "make_consistent",
+    })
+
+    # Owned by fast_solve. Letting one through would produce "solve_ivp() got
+    # multiple values for keyword argument", which says much less than this.
+    RESERVED_OPTIONS = frozenset({
+        "fun", "t_span", "y0", "method", "t_eval", "events", "dense_output",
+        "args",
+    })
+
+    def __init__(self, options=None, method="BDF", segment_events=True,
+                 event_atol=1e-10, event_rtol=1e-6,
+                 max_restarts=200, max_short_segments=3, min_segment=None,
+                 stall_calls=200000):
+
+        super().__init__()
+
+        if method not in self.METHODS:
+            raise ValueError(
+                f"Unknown method {method!r}. Choose one of "
+                f"{sorted(self.METHODS)}."
+            )
+
+        # Copied, not stored: AssimuloBackend's options={'maxh': 1} default is
+        # one dict shared by every instance ever constructed.
+        self.options = dict(options) if options else {}
+
+        self.method = method
+        self.segment_events = bool(segment_events)
+
+        self.event_atol = float(event_atol)
+        self.event_rtol = float(event_rtol)
+
+        self.max_restarts = int(max_restarts)
+        self.max_short_segments = int(max_short_segments)
+        self.min_segment = min_segment
+        self.stall_calls = int(stall_calls)
+
+        self._progress_time = -np.inf
+        self._progress_tol = 0.0
+        self._stalled_calls = 0
+        self._stall_final = None
+
+        self._rhs = None
+        self._events = []
+        self._scale = np.zeros(0)
+
+        self._counters = {}
+        self._nsegments = 0
+        self._nrestarts = 0
+        self._event_log = []
+
+        self.eval_sens = False
+        self.jac_v_prod = False
+
+    # ------------------------------------------------------------------
+    # Configuration
+    # ------------------------------------------------------------------
+
+    def set_linear_solver(self, kind):
+        """
+        Record the request; scipy has no linear solver to select.
+
+        BDF and Radau always form a Jacobian and do a direct LU, LSODA does
+        dense or banded, and the explicit methods do no linear algebra at all,
+        so there is nothing to translate a "krylov" request onto. The base
+        class calls this a performance hint rather than a correctness
+        requirement, and that is how it is treated: the hint is kept and
+        reported by ``statistics``, so it is visibly received rather than
+        silently lost.
+
+        Synthesising a ``jac_sparsity`` from the hint was rejected. Only the
+        model knows its own sparsity pattern, and a guessed one that misses a
+        structurally nonzero entry gives a wrong Jacobian and a wrong answer -
+        too much to risk for a performance hint.
+        """
+
+        super().set_linear_solver(kind)
+
+    def translate_options(self):
+        """Map the configured options onto solve_ivp keyword arguments."""
+
+        translated = {}
+
+        for name, value in self.options.items():
+
+            if name in self.IGNORED_OPTIONS:
+                continue
+
+            if name in self.RESERVED_OPTIONS:
+                raise ValueError(
+                    f"{name!r} is set by ScipyBackend itself and cannot be "
+                    "passed as an option. Use time_grid instead of t_eval, "
+                    "and the unit's state events instead of events."
+                )
+
+            if name == "linear_solver":
+                self.set_linear_solver(value)
+                continue
+
+            translated[self.OPTION_ALIASES.get(name, name)] = value
+
+        # Assimulo's CVode defaults, so switching backends does not silently
+        # change the accuracy a model was tuned against.
+        translated.setdefault("atol", 1e-6)
+        translated.setdefault("rtol", 1e-6)
+
+        return translated
+
+    def make_rhs(self, unit):
+        """
+        Wrap the unit's model as a solve_ivp right-hand side.
+
+        The copy is not optional. unit_model refills and returns the same
+        ``_solver_rate_buffer`` on every call, and scipy wraps a right-hand
+        side in ``np.asarray(fun(t, y), dtype=float)``, which does not copy an
+        array that is already float64 - so the solver would be left holding a
+        buffer the next evaluation overwrites.
+        """
+
+        def rhs(time, states):
+
+            # scipy's implicit solvers do not fail when they cannot get past
+            # a point: BDF clamps its step back up to min_step (about 1e-12
+            # at t ~ 1e3) and keeps going, so a right-hand side it cannot
+            # cross becomes an integration that runs for hours rather than
+            # one that raises. Watching the furthest time reached catches
+            # that, and unlike a plain call budget it will not fire on a
+            # problem that is merely large, because such a problem still
+            # advances.
+            if time > self._progress_time + self._progress_tol:
+                self._progress_time = time
+                self._stalled_calls = 0
+            else:
+                self._stalled_calls += 1
+
+                if self._stalled_calls > self.stall_calls:
+                    reached = (
+                        f"{self._progress_time:g}"
+                        if np.isfinite(self._progress_time) else "the start"
+                    )
+                    of_final = (
+                        f" of {self._stall_final:g}"
+                        if self._stall_final is not None else ""
+                    )
+                    raise RuntimeError(
+                        f"scipy {self.method} stalled at t={reached}"
+                        f"{of_final}: {self._stalled_calls} right-hand side "
+                        "evaluations without advancing, so the step size has "
+                        "collapsed. That usually means the model is not "
+                        "smooth enough there for an implicit solver to step "
+                        "across, a kinetic regime change being the common "
+                        "cause. Try another method, or use AssimuloBackend, "
+                        "whose CVode can root-find the switch and restart on "
+                        "it. Raise stall_calls if the model really is this "
+                        "expensive per unit of time."
+                    )
+
+            return np.array(
+                unit.unit_model(time=time, states=states),
+                dtype=float,
+            )
+
+        return rhs
+
+    def make_events(self, unit):
+        """Wrap each of the unit's StateEvents for solve_ivp."""
+
+        events = unit.compiled_events
+
+        if not events:
+            return []
+
+        return [
+            _ScipyStateEvent(
+                unit,
+                index,
+                event.direction,
+                # In segmenting mode every event ends its segment, because
+                # this backend performs the restart itself. Otherwise scipy's
+                # own meaning of terminal applies.
+                terminal=1 if self.segment_events
+                else int(bool(event.terminal)),
+            )
+            for index, event in enumerate(events)
+        ]
+
+    # ------------------------------------------------------------------
+    # Event bookkeeping
+    # ------------------------------------------------------------------
+
+    def event_bands(self):
+        """Half-width of the dead band around zero, per event."""
+
+        return self.event_atol + self.event_rtol * self._scale
+
+    def arm_events(self, unit, time, states):
+        """
+        Choose each event's surface for the segment starting at (time, states).
+
+        An event sitting inside half a band of zero is disarmed, so the
+        segment cannot terminate on the root it just restarted from. The
+        disarmed surface is given ``direction=1`` because only ``|g|`` growing
+        out of the band is a boundary; falling back in is not.
+        """
+
+        if not self._events:
+            return
+
+        values = np.abs(
+            np.asarray(unit.evaluate_events(time, states), dtype=float)
+        )
+
+        self._scale = np.maximum(self._scale, values)
+        bands = self.event_bands()
+
+        for index, event in enumerate(self._events):
+
+            if values[index] < 0.5 * bands[index]:
+                event.disarmed = True
+                event.band = bands[index]
+                event.direction = 1.0
+            else:
+                event.disarmed = False
+                event.band = 0.0
+                event.direction = event.native_direction
+
+    def find_boundary(self, solution):
+        """
+        The root that ended this segment, and the state there.
+
+        scipy's handle_events sorts the roots it found and truncates at the
+        first terminating one, so the largest reported root is the one the
+        segment stopped at. y_events carries the state there, which is why
+        dense output is not needed.
+        """
+
+        index = None
+        time = None
+
+        for candidate, roots in enumerate(solution.t_events):
+
+            if len(roots) == 0:
+                continue
+
+            root = float(roots[-1])
+
+            if time is None or root > time:
+                index, time = candidate, root
+
+        if index is None:
+            raise RuntimeError(
+                "scipy reported an event stop but recorded no root."
+            )
+
+        states = np.asarray(solution.y_events[index][-1], dtype=float)
+
+        return index, time, states
+
+    def find_triggered(self, unit, index, time, states):
+        """
+        Every armed surface at zero here, not just the one scipy named.
+
+        scipy reports the event it terminated on; Assimulo hands handle_event
+        a flag per event and can report several at once. This recovers the
+        rest, so a unit sees the same set under either backend.
+        """
+
+        triggered = [index]
+
+        if len(self._events) > 1:
+
+            values = np.abs(
+                np.asarray(unit.evaluate_events(time, states), dtype=float)
+            )
+            bands = self.event_bands()
+
+            for candidate, event in enumerate(self._events):
+
+                if candidate == index or event.disarmed:
+                    continue
+
+                if values[candidate] <= bands[candidate]:
+                    triggered.append(candidate)
+
+        return sorted(triggered)
+
+    def describe_event(self, unit, index):
+        """Name an event the way the model declared it."""
+
+        events = unit.compiled_events
+        position = self._events[index].index
+
+        if position >= len(events):
+            return f"event {position}"
+
+        event = events[position]
+
+        return f"{event.name!r} (source {type(event.source).__name__})"
+
+    # ------------------------------------------------------------------
+    # IntegratorBackend interface
+    # ------------------------------------------------------------------
+
+    def compile_integrator(self, unit, eval_sens=False, jac_v_prod=False,
+                           options=None, verbose=True, any_event=True):
+
+        if eval_sens:
+            raise NotImplementedError(
+                "ScipyBackend does not compute sensitivities. Use "
+                "AssimuloBackend for parameter estimation."
+            )
+
+        # Checked before unit.reset(), unlike AssimuloBackend, so a unit this
+        # backend cannot solve is left exactly as the caller had it.
+        self.check_algebraic_support(unit)
+
+        self.eval_sens = eval_sens
+        self.jac_v_prod = jac_v_prod
+
+        unit.reset()
+
+        states_init = unit.create_solver_init_states()
+        unit.save_initial_solver_state(states_init, unit.elapsed_time)
+
+        if options:
+            self.options.update(options)
+
+        self._rhs = self.make_rhs(unit)
+        self._events = self.make_events(unit)
+        self._scale = np.zeros(len(self._events))
+
+        # The unit's chance to request a linear solver before the first solve.
+        unit.configure_solver()
+
+        self._compiled = True
+
+        return states_init
+
+    def solve(self, unit, runtime=None, time_grid=None, eval_sens=False,
+              jac_v_prod=False, verbose=True, options=None, any_event=True):
+
+        if (
+            not self._compiled
+            or eval_sens != self.eval_sens
+            or jac_v_prod != self.jac_v_prod
+        ):
+
+            states_init = self.compile_integrator(
+                unit,
+                eval_sens,
+                jac_v_prod,
+                options,
+                verbose,
+                any_event,
+            )
+
+            unit.derivatives = np.array(
+                unit.unit_model(time=unit.elapsed_time, states=states_init),
+                dtype=float,
+            )
+
+        time, states = self.fast_solve(
+            unit,
+            runtime=runtime,
+            time_grid=time_grid,
+            verbose=verbose,
+        )
+
+        unit.retrieve_results(time, states)
+
+        return time, states
+
+    def fast_solve(self, unit, runtime=None, time_grid=None, verbose=True):
+
+        if not self._compiled:
+            raise RuntimeError("Integrator has not been compiled.")
+
+        states_init = np.asarray(
+            unit.create_solver_init_states(), dtype=float
+        )
+
+        start_time = float(unit.elapsed_time)
+
+        if runtime is not None:
+            final_time = start_time + float(runtime)
+        elif time_grid is not None:
+            final_time = float(time_grid[-1])
+        else:
+            raise ValueError(
+                "Either runtime or time_grid must be supplied."
+            )
+
+        grid = None
+
+        if time_grid is not None:
+
+            grid = np.asarray(time_grid, dtype=float).reshape(-1)
+
+            if np.any(np.diff(grid) < 0):
+                raise ValueError("time_grid must be non-decreasing.")
+
+            # solve_ivp rejects a t_eval that leaves t_span, where Assimulo's
+            # ncp_list simply ignores the excess. Clip rather than hand the
+            # caller a scipy error about an argument they did not pass.
+            grid = grid[(grid >= start_time) & (grid <= final_time)]
+
+        kwargs = self.translate_options()
+
+        min_segment = self.min_segment
+
+        if min_segment is None:
+            # brentq resolves a root to about 4*eps*|t|. Anything an order
+            # below that is not a new boundary, it is the same one again.
+            min_segment = max(
+                16 * np.finfo(float).eps * max(1.0, abs(final_time)),
+                1e-12 * (final_time - start_time),
+            )
+
+        self._counters = {}
+        self._nsegments = 0
+        self._nrestarts = 0
+        self._event_log = []
+
+        # Progress is measured against the span, so the stall detector means
+        # the same thing whether the run covers 10 seconds or 10 hours.
+        self._progress_time = -np.inf
+        self._progress_tol = 1e-9 * max(final_time - start_time, 1.0)
+        self._stalled_calls = 0
+        self._stall_final = final_time
+
+        times = []
+        states = []
+
+        # Assimulo's simulate() always reports t0. With t_eval=None scipy
+        # seeds its own output with it; with t_eval it does not, and the
+        # segment grids below are sliced strictly after their start, so this
+        # is the only place t0 is emitted.
+        if grid is not None:
+            times.append(np.array([start_time]))
+            states.append(states_init[None, :].copy())
+
+        segment_time = start_time
+        segment_states = states_init
+        short_segments = 0
+
+        while True:
+
+            if self.segment_events:
+                self.arm_events(unit, segment_time, segment_states)
+
+            segment_grid = None
+
+            if grid is not None:
+                segment_grid = grid[
+                    np.searchsorted(grid, segment_time, side="right"):
+                ]
+
+            solution = solve_ivp(
+                self._rhs,
+                (segment_time, final_time),
+                segment_states,
+                method=self.method,
+                t_eval=segment_grid,
+                events=self._events or None,
+                **kwargs,
+            )
+
+            self._nsegments += 1
+
+            for name in ("nfev", "njev", "nlu"):
+                self._counters[name] = (
+                    self._counters.get(name, 0)
+                    + int(getattr(solution, name, 0) or 0)
+                )
+
+            segment_times = np.asarray(solution.t, dtype=float).reshape(-1)
+
+            # With t_eval set and nothing collected in it, scipy leaves t and
+            # y as the list [], so y is (0,) rather than (0, n_states).
+            if segment_times.size:
+                times.append(segment_times)
+                states.append(np.asarray(solution.y, dtype=float).T)
+
+            if solution.status == -1:
+
+                reached = (
+                    segment_times[-1] if segment_times.size else segment_time
+                )
+
+                raise RuntimeError(
+                    f"scipy {self.method} failed: {solution.message} The last "
+                    f"time reached was {reached:g} of {final_time:g}."
+                )
+
+            if solution.status == 0:
+                break
+
+            index, event_time, event_states = self.find_boundary(solution)
+            was_rearm = self._events[index].disarmed
+
+            if event_time <= segment_time:
+                raise RuntimeError(
+                    f"ScipyBackend made no progress at t={event_time:g}: "
+                    f"state event {self.describe_event(unit, index)} roots at "
+                    "the point the segment started from."
+                )
+
+            triggered = self.find_triggered(
+                unit, index, event_time, event_states
+            )
+
+            # Assimulo reports the event point; so does this. The guard is for
+            # a root that coincided with a grid point already emitted.
+            if not times or times[-1][-1] != event_time:
+                times.append(np.array([event_time]))
+                states.append(event_states[None, :].copy())
+
+            # A re-arm is bookkeeping, not a regime change, so the unit is not
+            # asked about it.
+            if not was_rearm:
+                if unit.handle_event(event_time, triggered):
+                    break
+
+            self._nrestarts += 1
+            self._event_log.append(
+                (
+                    event_time,
+                    self._events[index].index,
+                    "rearm" if was_rearm else "event",
+                    tuple(self._events[i].index for i in triggered),
+                )
+            )
+
+            if self._nrestarts > self.max_restarts:
+                raise RuntimeError(
+                    f"ScipyBackend restarted {self._nrestarts} times, the "
+                    f"last at t={event_time:g} of {final_time:g} on state "
+                    f"event {self.describe_event(unit, index)}. That is event "
+                    "chatter rather than progress. Raise max_restarts if the "
+                    "model really switches this often, raise event_rtol "
+                    f"(currently {self.event_rtol:g}) to widen the re-arm "
+                    "band, or pass ScipyBackend(segment_events=False) to "
+                    "integrate straight through the switching surfaces."
+                )
+
+            # A re-arm segment is legitimately tiny and cannot chain, since
+            # re-arming leaves |g| at the band and the next segment is armed.
+            if not was_rearm:
+
+                if event_time - segment_time < min_segment:
+
+                    short_segments += 1
+
+                    if short_segments > self.max_short_segments:
+                        raise RuntimeError(
+                            f"ScipyBackend stalled at t={event_time:g}: "
+                            f"{short_segments} consecutive segments shorter "
+                            f"than {min_segment:g}, all on state event "
+                            f"{self.describe_event(unit, index)}. The surface "
+                            "is not crossing transversally. Raise event_rtol "
+                            f"(currently {self.event_rtol:g}), or pass "
+                            "ScipyBackend(segment_events=False)."
+                        )
+                else:
+                    short_segments = 0
+
+            segment_time = event_time
+            segment_states = event_states
+
+        if not times:
+            return (
+                np.array([start_time]),
+                states_init[None, :].copy(),
+            )
+
+        return np.concatenate(times), np.vstack(states)
+
+    @property
+    def statistics(self):
+        """
+        Solver counters, under the names AssimuloBackend reports.
+
+        scipy's OdeResult carries only nfev, njev and nlu. The counters CVode
+        prints and scipy does not track - nsteps, nerrfails, nniters, nnfails
+        - are absent rather than zero, so a caller comparing backends sees a
+        missing key instead of a fabricated number.
+
+        nsegments and nrestarts are this backend's own rather than the
+        solver's: they count how often the run stopped at a switching surface
+        and started again, which is the cost of the event handling rather than
+        of the integration.
+        """
+
+        if not self._counters and not self._nsegments:
+            return {}
+
+        mapping = {
+            "nfcns": "nfev",
+            "njacs": "njev",
+            "nlus": "nlu",
+        }
+
+        out = {
+            ours: int(self._counters[theirs])
+            for ours, theirs in mapping.items()
+            if theirs in self._counters
+        }
+
+        out["nsegments"] = self._nsegments
+        out["nrestarts"] = self._nrestarts
+
+        if self.linear_solver is not None:
+            out["linear_solver_hint"] = self.linear_solver
 
         return out

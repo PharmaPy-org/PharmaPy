@@ -38,7 +38,7 @@ class MultiPhaseVessel():
       state_events={},
       adiabatic=False,Phases=None,
       basis='mass_j',ht_mode="jacket",diam=0,area_base=0,
-      emit_events=True):
+      emit_events=True, positivity_horizon=1.0):
 
         # Built here rather than as a default argument: a default is
         # evaluated once at class-definition time, so every vessel in the
@@ -95,6 +95,20 @@ class MultiPhaseVessel():
 
         #Integrator
         self.integrator = integrator
+
+        # Window over which depletion is anticipated, in seconds.
+        #
+        # Both positivity guards use it: calculate_scale throttles the outlet
+        # and cross-phase terms so a phase inventory survives this long, and
+        # RxnKinetics scales its reaction extents on the same window. It is
+        # not the solver step -- it is a fixed look-ahead, so a species whose
+        # inventory would not last this long is throttled no matter how short
+        # a step the integrator is actually taking.
+        #
+        # Shrinking it throttles less and lets a species approach zero more
+        # closely; 1.0 is the value every result on this branch was produced
+        # with, so it stays the default.
+        self.positivity_horizon = positivity_horizon
 
 
 
@@ -1109,7 +1123,7 @@ class MultiPhaseVessel():
         for mechanism in getattr(self, "_workspace_mechanisms", ()):
             mechanism.update_state(completed_state, unit=self)
 
-    def pack_state_rates(self, material_rates, global_rates=None,
+    def pack_state_rates(self, material_rates=None, global_rates=None,
                          algebraic_residuals=None):
         """
         Pack one vector the solver can consume.
@@ -1135,15 +1149,26 @@ class MultiPhaseVessel():
                 ).reshape(-1)
                 continue
 
-            try:
+            if material_rates is not None and key in material_slices:
                 buffer[solver_slices[key]] = material_rates[material_slices[key]]
-            except KeyError:
-                raise KeyError(
-                    f"StateKey {key} is a solver state but was not produced "
-                    "by the global balances"
-                ) from None
+                continue
 
-            buffer[solver_slices[key]] = np.asarray(value).reshape(-1)
+            if global_rates is not None and key in global_rates:
+                buffer[solver_slices[key]] = np.asarray(
+                    global_rates[key]
+                ).reshape(-1)
+                continue
+
+            # unit_model's diagnostic paths (mat_bce, enrgy_bce) deliberately
+            # supply one half of the balances only, and the slots the other
+            # half would have filled keep the zero the buffer was filled with.
+            # When both halves were supplied, a key neither produced is a real
+            # packing error and still raises.
+            if material_rates is not None and global_rates is not None:
+                raise KeyError(
+                    f"StateKey {key} not found in material_rates or "
+                    "global_rates"
+                )
 
         return buffer
 
@@ -1176,7 +1201,9 @@ class MultiPhaseVessel():
             self.model_call_count = 0
             self._timers={}
         self.model_call_count += 1
-        limiter_dt = limiter_dt if limiter_dt is not None else 1.0
+        limiter_dt = (
+            limiter_dt if limiter_dt is not None else self.positivity_horizon
+        )
         t0=perf_counter()
         unpacked_state = self.solver_state_collection.unpack(states)
         self._timers['unpack'] = self._timers.get('unpack',0)+perf_counter()-t0
@@ -1248,6 +1275,15 @@ class MultiPhaseVessel():
 
         # Phase layouts
         self.phase_states.compile(self.Phases)
+
+        # Mechanisms that run their own positivity guard read the horizon off
+        # themselves rather than taking it as an argument, which would mean a
+        # new keyword on every get_solver_state_rates signature. Refreshed
+        # here rather than at construction because compile_structure runs at
+        # the top of every solve, so a horizon changed after the mechanism was
+        # built still reaches it.
+        for mechanism in self.iter_mechanisms():
+            mechanism.positivity_horizon = self.positivity_horizon
 
         # Persistent numerical buffers
         self._material_contributions = MaterialContributionBuffer(

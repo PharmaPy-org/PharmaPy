@@ -25,10 +25,10 @@ import pytest
 
 from PharmaPy.IntegratorBackends import AssimuloBackend
 from PharmaPy.Kinetics import RxnKinetics
-from PharmaPy.Phases import LiquidPhase
-from PharmaPy.Reactors_refactor import (BatchReactor, ContinuousReactor,
+from PharmaPy.Phases_Refactored import LiquidPhase
+from PharmaPy.Reactors_Refactored import (BatchReactor, ContinuousReactor,
                                         SemiBatchReactor)
-from PharmaPy.Streams import LiquidStream
+from PharmaPy.Streams_Refactored import LiquidStream
 from PharmaPy.Utilities import CoolingWater
 
 pytestmark = pytest.mark.unit

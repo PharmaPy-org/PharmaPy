@@ -20,8 +20,8 @@ import numpy as np
 import pytest
 
 from PharmaPy.IntegratorBackends import AssimuloBackend
-from PharmaPy.Phases import LiquidPhase
-from PharmaPy.Reactors_refactor import BatchReactor
+from PharmaPy.Phases_Refactored import LiquidPhase
+from PharmaPy.Reactors_Refactored import BatchReactor
 from PharmaPy.Utilities import CoolingWater
 
 pytestmark = pytest.mark.unit
