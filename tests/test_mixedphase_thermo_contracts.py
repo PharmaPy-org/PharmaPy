@@ -196,21 +196,15 @@ def test_slurry_capacitance_is_sum_of_real_phases(thermo_path, solid_fraction, b
         assert actual * volume == pytest.approx(total_capacity, rel=RTOL, abs=0)
 
 
-class OdeBoundaryReached(Exception):
-    """Stop after the real solve_unit packs its initial state."""
-
-
 @pytest.mark.parametrize('unit_type', [BatchCryst, SemibatchCryst])
 def test_crystallizer_initial_state_contains_liquid_volume(
-        thermo_path, monkeypatch, unit_type):
-    """Seed liquid volume and micrometre moments at the solver boundary.
+        thermo_path, unit_type):
+    """Prepare liquid volume and micrometre moments without a solver.
 
     Parameters
     ----------
     thermo_path : str
         Thermophysical database path.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only solver construction.
     unit_type : type
         Batch or semibatch crystallizer class.
     """
@@ -219,40 +213,15 @@ def test_crystallizer_initial_state_contains_liquid_volume(
                      vol_tank=slurry.vol)
     unit.Phases = slurry
     unit.Kinetics = CrystKinetics()
-    captured = []
-
-    def capture_problem(eval_sens, states_init, params, jac_v_prod):
-        """Capture packed states and stop before constructing a solver.
-
-        Parameters
-        ----------
-        eval_sens, jac_v_prod : bool
-            Solver options.
-        states_init : ndarray
-            Total moments [um**n], concentrations [kg/m**3], volume [m**3],
-            and temperature [K], in the crystallizer's named state order.
-        params : ndarray
-            Kinetic parameters in the kinetics provider's units.
-
-        Raises
-        ------
-        OdeBoundaryReached
-            Always, after recording the actual initial state.
-        """
-        captured.append(states_init.copy())
-        raise OdeBoundaryReached
-
-    monkeypatch.setattr(unit, 'set_ode_problem', capture_problem)
-    with pytest.raises(OdeBoundaryReached):
-        unit.solve_unit(runtime=1.0)  # [s], initialization only
-    assert len(captured) == 1
+    initial, _ = unit.initialize_states(runtime=1.0)  # [s], prepare only
+    # Initial vector: moments [um**n], concentrations [kg/m**3], volume [m**3], [K].
     volume_index = unit.num_distr + unit.num_species
-    assert captured[0][volume_index] == pytest.approx(9e-4, rel=RTOL, abs=0)
+    assert initial[volume_index] == pytest.approx(9e-4, rel=RTOL, abs=0)
     moments = slurry.Solid_1.moments  # [m**n], total phase moments
     expected_moments = np.array([moments[0], moments[1] * 1e6,
                                  moments[2] * 1e12, moments[3] * 1e18])
     # [um**n], exact SI phase to raw solver-state length conversion (#224)
-    np.testing.assert_allclose(captured[0][:unit.num_distr],
+    np.testing.assert_allclose(initial[:unit.num_distr],
                                expected_moments, rtol=RTOL, atol=0)
 
 
