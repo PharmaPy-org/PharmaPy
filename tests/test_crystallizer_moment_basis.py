@@ -1,6 +1,6 @@
 """#224/#227 micrometre state seeding and finite-size nucleation balances.
 
-Core probes stop at solver construction; the marked test runs real CVode.
+Core probes prepare states without a solver; the marked test runs real CVode.
 The seed grid fixture has non-unit kv and two cubic metres of liquid.
 """
 
@@ -11,52 +11,26 @@ from PharmaPy.Crystallizers import BatchCryst, MSMPR
 from test_crystallizer_heat_duty import make_unit as make_heat_unit
 
 from test_crystallizer_parameter_evaluations import (
-    InitializationCaptured, RTOL, TEMPERATURE, make_unit,
+    RTOL, TEMPERATURE, make_unit,
 )
 
 
 @pytest.mark.unit
-def test_seeded_moments_initial_rhs(data_path, monkeypatch):
+def test_seeded_moments_initial_rhs(data_path):
     """Compare initialized moments and their growth RHS to grid integrals.
 
     Parameters
     ----------
     data_path : dict
         Repository thermodynamic database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only the optional solver construction boundary.
     """
     unit, _ = make_unit(data_path, 'moments')
     # Trapezoids of the fixture's x**n*f, with x in um, give these totals.
     expected = np.array([4.5e8, 1.05e10, 2.85e11, 8.85e12])  # [um**n]
-    captures = []
-
-    def capture(eval_sens, states_init, params_mergd, jacv_prod):
-        """Capture the real initial state and RHS before constructing CVode.
-
-        Parameters
-        ----------
-        eval_sens, jacv_prod : bool
-            Solver options.
-        states_init : ndarray
-            Moments [um**n], concentrations [kg/m**3], liquid volume [m**3].
-        params_mergd : ndarray
-            Active parameters in native kinetic units.
-
-        Raises
-        ------
-        InitializationCaptured
-            Always, after evaluating the public RHS.
-        """
-        captures.append((states_init.copy(),
-                         unit.unit_model(0.0, states_init, params_mergd)))
-        raise InitializationCaptured
-
-    monkeypatch.setattr(unit, 'set_ode_problem', capture)
-    with pytest.raises(InitializationCaptured):
-        unit.solve_unit(runtime=1.0, verbose=False)  # [s], initialization only
-    initial, rhs = captures[0]  # [state units], [state units/s]
-    np.testing.assert_allclose(initial[:4], expected, rtol=RTOL, atol=0)
+    initial_state, _ = unit.initialize_states(runtime=1.0)
+    parameters = unit.Kinetics.concat_params()[unit.mask_params]  # native kinetic units
+    rhs = unit.unit_model(0.0, initial_state, parameters)  # [state units/s]
+    np.testing.assert_allclose(initial_state[:4], expected, rtol=RTOL, atol=0)
     force = unit.Liquid_1.mass_conc[0] / 2.0 - 1  # [-], fixture solubility=2 kg/m**3
     growth_rhs = np.array([0, 4.5e8, 2.1e10, 8.55e11]) * force  # [um**n/s]
     np.testing.assert_allclose(rhs[:4], growth_rhs, rtol=RTOL, atol=0)
@@ -64,15 +38,13 @@ def test_seeded_moments_initial_rhs(data_path, monkeypatch):
 
 
 @pytest.mark.unit
-def test_msmpr_seeds_volume_specific_micrometre_moments(data_path, monkeypatch):
+def test_msmpr_seeds_volume_specific_micrometre_moments(data_path):
     """Convert SI slurry moments without changing their volume denominator.
 
     Parameters
     ----------
     data_path : dict
         Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only the optional solver construction boundary.
     """
     batch, _ = make_unit(data_path, 'moments')
     unit = MSMPR('A', method='moments',
@@ -82,29 +54,8 @@ def test_msmpr_seeds_volume_specific_micrometre_moments(data_path, monkeypatch):
     expected = np.array([4.5e8, 1.05e10, 2.85e11, 8.85e12]) / unit.Slurry.vol
     # [um**n/m**3], independently integrated total seed divided by slurry volume
 
-    def capture(eval_sens, states_init, params_mergd, jacv_prod):
-        """Check volume-specific initial states before constructing CVode.
-
-        Parameters
-        ----------
-        eval_sens, jacv_prod : bool
-            Solver options.
-        states_init : ndarray
-            Moments [um**n/m**3] and liquid concentrations [kg/m**3].
-        params_mergd : ndarray
-            Active parameters in native kinetic units.
-
-        Raises
-        ------
-        InitializationCaptured
-            Always, after checking the initial state.
-        """
-        np.testing.assert_allclose(states_init[:4], expected, rtol=RTOL, atol=0)
-        raise InitializationCaptured
-
-    monkeypatch.setattr(unit, 'set_ode_problem', capture)
-    with pytest.raises(InitializationCaptured):
-        unit.solve_unit(runtime=1.0, verbose=False)  # [s], initialization only
+    initial_state, _ = unit.initialize_states(runtime=1.0)
+    np.testing.assert_allclose(initial_state[:4], expected, rtol=RTOL, atol=0)
     assert unit.states_di['mu_n']['units'] == 'm**n/m**3'
 
 

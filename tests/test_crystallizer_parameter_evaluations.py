@@ -1,6 +1,6 @@
 """#222 parameter handoff and repeatable initialization with real phases.
 
-Core initialization probes stop at the optional solver boundary. The Assimulo
+Core probes use the solver-independent initialization API. The Assimulo
 regression also exercises two complete FVM solves with reset enabled.
 """
 
@@ -107,10 +107,6 @@ def test_solver_parameters_double_growth_mass_source(data_path, method, masked):
                                   original[~unit.mask_params])
 
 
-class InitializationCaptured(Exception):
-    """Stop after real initialization and before optional solver construction."""
-
-
 @pytest.mark.unit
 @pytest.mark.parametrize('method', ['moments', '1D-FVM'])
 def test_integer_kinetics_accept_fractional_active_parameters(data_path, method):
@@ -177,62 +173,36 @@ def test_fvm_output_option_is_validated(data_path):
 
 @pytest.mark.unit
 @pytest.mark.parametrize('explicit_volume', [False, True])
-def test_repeated_initialization_keeps_geometry(data_path, monkeypatch, explicit_volume):
+def test_repeated_initialization_keeps_geometry(data_path, explicit_volume):
     """Check inferred and explicitly assigned vessel geometry without CVode.
 
     Parameters
     ----------
     data_path : dict
         Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only the optional solver-construction boundary.
     explicit_volume : bool
         Assign the vessel volume before initialization when True.
     """
     unit, _ = make_unit(data_path)
     if explicit_volume:
         unit.vol_tank = LIQUID_VOLUME  # [m**3], explicit working vessel volume
-    captures = []
-
-    def capture(eval_sens, states_init, params_mergd, jacv_prod):
-        """Record geometry and stop at solver construction.
-
-        Parameters
-        ----------
-        eval_sens, jacv_prod : bool
-            Solver callback options.
-        states_init : ndarray
-            Initial states in model units.
-        params_mergd : ndarray
-            Active kinetic parameters in native units.
-
-        Raises
-        ------
-        InitializationCaptured
-            Always, after recording volume [m**3], diameter [m], area [m**2].
-        """
-        captures.append([unit.vol_tank, unit.diam_tank, unit.area_base])
-        raise InitializationCaptured
-
-    monkeypatch.setattr(unit, 'set_ode_problem', capture)
+    captures = []  # Each row: volume [m**3], diameter [m], base area [m**2].
     for _ in range(2):
-        with pytest.raises(InitializationCaptured):
-            unit.solve_unit(runtime=1.0, verbose=False)  # [s], initialization only
+        unit.initialize_states(runtime=1.0)  # [s], geometry preparation only
+        captures.append([unit.vol_tank, unit.diam_tank, unit.area_base])
     expected_volume = LIQUID_VOLUME if explicit_volume else unit.Slurry.vol  # [m**3]
     assert captures[0][0] == pytest.approx(expected_volume, rel=RTOL, abs=0)
     np.testing.assert_allclose(captures[1], captures[0], rtol=RTOL, atol=0)
 
 
 @pytest.mark.unit
-def test_reset_precedes_initial_state_capture(data_path, monkeypatch):
+def test_reset_precedes_initial_state_capture(data_path):
     """Restore changed liquid and solid inventories before building the ODE.
 
     Parameters
     ----------
     data_path : dict
         Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only the optional solver-construction boundary.
     """
     unit, _ = make_unit(data_path)
     expected = np.concatenate((unit.Solid_1.distrib,
@@ -243,29 +213,44 @@ def test_reset_precedes_initial_state_capture(data_path, monkeypatch):
                               mass_frac=[0.2, 0.1, 0.1, 0.1, 0.5])  # [-]
     unit.Solid_1.updatePhase(distrib=2 * DISTRIBUTION)  # [#/um], doubled seed
 
-    def capture(eval_sens, states_init, params_mergd, jacv_prod):
-        """Assert the original charge at the solver boundary.
+    initial_state, _ = unit.initialize_states(runtime=1.0)
+    np.testing.assert_allclose(initial_state, expected, rtol=RTOL, atol=0)
 
-        Parameters
-        ----------
-        eval_sens, jacv_prod : bool
-            Solver callback options.
-        states_init : ndarray
-            Initial CSD [#/um], concentrations [kg/m**3], liquid volume [m**3].
-        params_mergd : ndarray
-            Active kinetic parameters in native units.
 
-        Raises
-        ------
-        InitializationCaptured
-            After checking the initial state.
-        """
-        np.testing.assert_allclose(states_init, expected, rtol=RTOL, atol=0)
-        raise InitializationCaptured
+@pytest.mark.unit
+@pytest.mark.parametrize('entry_point', ['initialize_states', 'solve_unit'])
+def test_initialization_requires_time_specification(data_path, entry_point):
+    """Reject missing time before constructing an optional solver.
 
-    monkeypatch.setattr(unit, 'set_ode_problem', capture)
-    with pytest.raises(InitializationCaptured):
-        unit.solve_unit(runtime=1.0, verbose=False)  # [s], initialization only
+    Parameters
+    ----------
+    data_path : dict
+        Repository database paths.
+    entry_point : str
+        Preparation API or integrating public entry point.
+    """
+    unit, _ = make_unit(data_path)
+    with pytest.raises(ValueError, match='Supply runtime.*or time_grid'):
+        getattr(unit, entry_point)()
+
+
+@pytest.mark.unit
+def test_initialization_endpoint_uses_grid_precedence(data_path):
+    """Retain absolute grid precedence over duration after elapsed time.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository database paths.
+    """
+    unit, _ = make_unit(data_path)
+    unit.elapsed_time = 3.0  # [s], an already completed segment
+    duration = 2.0  # [s], requested additional segment
+    _, endpoint = unit.initialize_states(runtime=duration)  # endpoint [s]
+    assert endpoint == pytest.approx(5.0)  # [s], elapsed plus duration
+    grid = np.array([3.0, 4.0])  # [s], explicitly earlier reporting endpoint
+    _, endpoint = unit.initialize_states(runtime=duration, time_grid=grid)
+    assert endpoint == pytest.approx(4.0)  # [s], final grid entry takes precedence
 
 
 @pytest.mark.assimulo

@@ -31,7 +31,7 @@ import copy
 import inspect
 import string
 import warnings
-from typing import Sequence
+from typing import Optional, Sequence
 
 import numpy as np
 
@@ -1159,6 +1159,133 @@ class _BaseCryst:
 
         return events
 
+    def initialize_states(self, runtime: Optional[float] = None,
+                          time_grid: Optional[Sequence[float]] = None
+                          ) -> tuple[np.ndarray, float]:
+        """Prepare the crystallizer charge and geometry without a solver.
+
+        Parameters
+        ----------
+        runtime : float, optional
+            Duration [s] from the elapsed time after any requested reset.
+        time_grid : sequence of float, optional
+            Absolute output times [s]. The final entry overrides runtime.
+
+        Returns
+        -------
+        states_init : numpy.ndarray
+            Initial vector in ``name_states`` order: total crystal moments
+            [um**n] or numerically scaled CSD [#/um], concentrations [kg/m**3],
+            liquid volume [m**3] for Batch/Semibatch, and optional liquid and
+            jacket temperatures [K]. MSMPR populations are per slurry volume
+            [um**n/m**3] or [#/m**3/um] and omit the volume state.
+        final_time : float
+            Absolute integration endpoint [s].
+
+        Raises
+        ------
+        ValueError
+            If neither runtime nor an output grid is supplied.
+
+        Notes
+        -----
+        Applies ``reset_states`` before reading phase inventories, updates
+        state dimensions and geometry, and infers an unset working volume.
+        The returned population is in the solver's micrometer basis; reported
+        result moments use meters. ``solve_unit`` uses this same preparation.
+        """
+        if runtime is None and time_grid is None:
+            raise ValueError("Supply runtime [s] or time_grid [s] for initialization")
+
+        if self.__class__.__name__ != 'BatchCryst' and self.method != 'moments':
+            x_distr = getattr(self.Solid_1, 'x_distrib', [])  # [um]
+            self.states_in_dict['Inlet']['distrib'] = len(x_distr)
+
+        self.Kinetics.target_idx = self.target_ind
+
+        if self.reset_states:
+            self.reset()
+
+        # ---------- Solid phase states
+        if 'vol' in self.states_uo:
+            if self.method == 'moments':
+                init_solid = self.Solid_1.moments * 1e6**np.arange(self.num_distr)
+                # SI phase moments converted to [um**n]; exactly 1e6 um per meter
+
+            elif self.method == '1D-FVM':
+                init_solid = self.Solid_1.distrib * self.scale  # [#/um], numerical scaling
+
+        else:
+            if self.method == 'moments':
+                init_solid = self.Slurry.moments * 1e6**np.arange(self.num_distr)
+                # SI slurry moments converted to [um**n/m**3]; exactly 1e6 um/m
+
+            elif self.method == '1D-FVM':
+                init_solid = self.Slurry.distrib * self.scale  # [#/m**3/um], scaled
+
+        self.dx = self.Slurry.dx if self.method == '1D-FVM' else None  # [um]
+        self.x_grid = self.Slurry.x_distrib  # [um], absent for gridless moments
+        if self.method == '1D-FVM':
+            self._validate_nucleus_grid()
+
+        # ---------- Liquid phase states
+        init_liquid = self.Liquid_1.mass_conc.copy()  # [kg/m**3]
+
+        self.num_species = len(init_liquid)
+
+        self.len_states = [self.num_distr, self.num_species]
+
+        if 'vol' in self.states_uo:  # Batch or semibatch
+            vol_init = self.Liquid_1.vol  # [m**3], ODE liquid-volume state
+            init_susp = np.append(init_liquid, vol_init)  # [kg/m**3], [m**3]
+
+            self.len_states.append(1)
+        else:
+            init_susp = init_liquid  # [kg/m**3]
+
+        # ---------- Read time
+        if runtime is not None:
+            final_time = runtime + self.elapsed_time  # [s]
+
+        if time_grid is not None:
+            final_time = time_grid[-1]  # [s]
+
+        if self.scale_flag:
+            self.scale_flag = False
+
+        states_init = np.append(init_solid, init_susp)  # mixed units documented above
+
+        if self.vol_tank is None:
+            if isinstance(self, SemibatchCryst):
+                time_vec = np.linspace(self.elapsed_time, final_time)  # [s]
+                vol_flow = self.get_inputs(time_vec)['Inlet']['vol_flow']  # [m**3/s]
+
+                self.vol_tank = trapezoidal_rule(time_vec, vol_flow)  # [m**3]
+
+            else:
+                self.vol_tank = self.Slurry.vol  # [m**3]
+
+        # Existing cylindrical geometry assumes working liquid height = diameter.
+        self.diam_tank = (4/np.pi * self.vol_tank)**(1/3)  # [m]
+        self.area_base = np.pi/4 * self.diam_tank**2  # [m**2]
+
+        if 'temp_ht' in self.states_uo:
+
+            if len(self.profiles_runs) == 0:
+                temp_ht = self.Liquid_1.temp  # [K]
+            else:
+                temp_ht = self.profiles_runs[-1]['temp_ht'][-1]  # [K]
+
+            states_init = np.concatenate(
+                (states_init, [self.Liquid_1.temp, temp_ht]))
+
+            self.len_states += [1, 1]
+        elif 'temp' in self.states_uo:
+            states_init = np.append(states_init, self.Liquid_1.temp)
+            self.len_states += [1]
+
+        return states_init, final_time
+
     def solve_unit(self, runtime=None, time_grid=None,
                    eval_sens: bool = False,
                    jac_v_prod: bool = False, verbose: bool = True, test=False,
@@ -1222,94 +1349,8 @@ class _BaseCryst:
         not require a size grid or slurry grid-spacing metadata.
         """
 
-        if self.__class__.__name__ != 'BatchCryst' and self.method != 'moments':
-            x_distr = getattr(self.Solid_1, 'x_distrib', [])
-            self.states_in_dict['Inlet']['distrib'] = len(x_distr)
-
-        self.Kinetics.target_idx = self.target_ind
-
-        if self.reset_states:
-            self.reset()
-
-        # ---------- Solid phase states
-        if 'vol' in self.states_uo:
-            if self.method == 'moments':
-                init_solid = self.Solid_1.moments * 1e6**np.arange(self.num_distr)
-                # SI phase moments converted to [um**n]; exactly 1e6 um per meter
-
-            elif self.method == '1D-FVM':
-                x_grid = self.Solid_1.x_distrib
-                init_solid = self.Solid_1.distrib * self.scale
-
-        else:
-            if self.method == 'moments':
-                init_solid = self.Slurry.moments * 1e6**np.arange(self.num_distr)
-                # SI slurry moments converted to [um**n/m**3]; exactly 1e6 um/m
-
-            elif self.method == '1D-FVM':
-                x_grid = self.Slurry.x_distrib
-                init_solid = self.Slurry.distrib * self.scale
-
-        self.dx = self.Slurry.dx if self.method == '1D-FVM' else None  # [um]
-        self.x_grid = self.Slurry.x_distrib
-        if self.method == '1D-FVM':
-            self._validate_nucleus_grid()
-
-        # ---------- Liquid phase states
-        init_liquid = self.Liquid_1.mass_conc.copy()
-
-        self.num_species = len(init_liquid)
-
-        self.len_states = [self.num_distr, self.num_species]
-
-        if 'vol' in self.states_uo:  # Batch or semibatch
-            vol_init = self.Liquid_1.vol  # [m**3], ODE liquid-volume state
-            init_susp = np.append(init_liquid, vol_init)
-
-            self.len_states.append(1)
-        else:
-            init_susp = init_liquid
-
-        # ---------- Read time
-        if runtime is not None:
-            final_time = runtime + self.elapsed_time
-
-        if time_grid is not None:
-            final_time = time_grid[-1]
-
-        if self.scale_flag:
-            self.scale_flag = False
-
-        states_init = np.append(init_solid, init_susp)
-
-        if self.vol_tank is None:
-            if isinstance(self, SemibatchCryst):
-                time_vec = np.linspace(self.elapsed_time, final_time)
-                vol_flow = self.get_inputs(time_vec)['Inlet']['vol_flow']
-
-                self.vol_tank = trapezoidal_rule(time_vec, vol_flow)
-
-            else:
-                self.vol_tank = self.Slurry.vol
-
-        # Existing cylindrical geometry assumes working liquid height = diameter.
-        self.diam_tank = (4/np.pi * self.vol_tank)**(1/3)  # [m]
-        self.area_base = np.pi/4 * self.diam_tank**2  # [m**2]
-
-        if 'temp_ht' in self.states_uo:
-
-            if len(self.profiles_runs) == 0:
-                temp_ht = self.Liquid_1.temp
-            else:
-                temp_ht = self.profiles_runs[-1]['temp_ht'][-1]
-
-            states_init = np.concatenate(
-                (states_init, [self.Liquid_1.temp, temp_ht]))
-
-            self.len_states += [1, 1]
-        elif 'temp' in self.states_uo:
-            states_init = np.append(states_init, self.Liquid_1.temp)
-            self.len_states += [1]
+        states_init, final_time = self.initialize_states(runtime, time_grid)
+        # Initial vector: mixed units documented by initialize_states; endpoint [s].
 
         merged_params = self.Kinetics.concat_params()[self.mask_params]
 

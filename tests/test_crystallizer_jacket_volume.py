@@ -9,7 +9,7 @@ import pytest
 from PharmaPy.Crystallizers import BatchCryst, MSMPR, SemibatchCryst
 from PharmaPy.Utilities import CoolingWater
 from test_mixedphase_thermo_contracts import make_slurry
-from test_crystallizer_parameter_evaluations import InitializationCaptured, make_unit
+from test_crystallizer_parameter_evaluations import make_unit
 
 pytestmark = pytest.mark.unit
 
@@ -93,15 +93,13 @@ def test_constructor_keeps_unspecified_jacket_volume():
 
 @pytest.mark.parametrize('unit_type', [MSMPR, SemibatchCryst])
 def test_default_jacket_inventory_repeats_across_initializations(
-        data_path, monkeypatch, unit_type):
+        data_path, unit_type):
     """Infer jacket inventory from its balance after two real initializations.
 
     Parameters
     ----------
     data_path : dict
         Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Stop at optional solver construction after geometry initialization.
     unit_type : type
         MSMPR or SemibatchCryst.
     """
@@ -113,33 +111,11 @@ def test_default_jacket_inventory_repeats_across_initializations(
     unit.Phases = slurry
     unit.Kinetics = CrystKinetics()
     unit.Utility = CoolingWater(vol_flow=1e-5, temp_in=290.0)  # [m**3/s], [K]
-    captures = []
-
-    def capture(eval_sens, states_init, params_mergd, jacv_prod):
-        """Stop after geometry is initialized and before the solver is built.
-
-        Parameters
-        ----------
-        eval_sens, jacv_prod : bool
-            Solver options.
-        states_init : ndarray
-            Initial state vector in model units.
-        params_mergd : ndarray
-            Active vector in native kinetic units.
-
-        Raises
-        ------
-        InitializationCaptured
-            Always, after recording working volume [m**3].
-        """
-        captures.append(unit.vol_tank)
-        raise InitializationCaptured
-
-    monkeypatch.setattr(unit, 'set_ode_problem', capture)
+    captures = []  # [m**3], repeated working volumes
     inventories = []  # [m**3], jacket inventories inferred from the balance
     for _ in range(2):
-        with pytest.raises(InitializationCaptured):
-            unit.solve_unit(runtime=1.0, verbose=False)  # [s], initialization only
+        unit.initialize_states(runtime=1.0)  # [s], geometry preparation only
+        captures.append(unit.vol_tank)
         densities = slurry.getDensity()  # [kg/m**3], liquid/solid
         volume = slurry.vol if unit_type is MSMPR else slurry.Liquid_1.vol  # [m**3]
         moments = slurry.moments if unit_type is MSMPR else slurry.Solid_1.moments
