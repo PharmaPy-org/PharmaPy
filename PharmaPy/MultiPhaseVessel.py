@@ -1123,7 +1123,7 @@ class MultiPhaseVessel():
         for mechanism in getattr(self, "_workspace_mechanisms", ()):
             mechanism.update_state(completed_state, unit=self)
 
-    def pack_state_rates(self, material_rates=None, global_rates=None,
+    def pack_state_rates(self, material_rates, global_rates=None,
                          algebraic_residuals=None):
         """
         Pack one vector the solver can consume.
@@ -1133,6 +1133,14 @@ class MultiPhaseVessel():
         both in one vector of the same length means the backends differ only
         in how they interpret it (mass matrix, or an implicit residual), and
         unit_model's return shape never changes.
+
+        Every solver state is visited, not just the phase-owned ones.
+        Iterating the material keys alone leaves a state with no owning
+        phase, currently the vessel temperature, at the zero the buffer was
+        filled with, silently discarding the energy balance. material_rates
+        is optional because unit_model requests the energy balance on its
+        own, in which case only global_rates is supplied and the material
+        slots stay zero.
         """
 
         buffer = self._solver_rate_buffer
