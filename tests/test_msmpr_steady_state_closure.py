@@ -145,11 +145,11 @@ def test_steady_state_matches_dynamic_balance(data_path, basis, secondary, seed)
         0.0, None, inputs, [[DENSITY, 2000.0], [DENSITY, 2000.0]],
         moments_si, moments_um, concentrations, TEMPERATURE, None,
         unit.vol_slurry, [1.0, 0.0])
-    # RHS: [um**n/m**3/s], [composition basis/s]; inlet is entirely liquid.
+    # RHS: [um**n/m**3/s], [kg/m**3/s]; inlet is entirely liquid.
     dilution_rate = unit.Inlet.vol_flow / unit.vol_slurry  # [1/s]
     np.testing.assert_allclose(rhs[:unit.num_distr] / expected_moments,
                                0, rtol=0, atol=ROUND_OFF * dilution_rate)
-    composition_rate_scale = dilution_rate * 0.2 * scale  # [basis unit/s]
+    composition_rate_scale = dilution_rate * 0.2 * DENSITY  # [kg/m**3/s]
     assert abs(rhs[unit.num_distr]) <= ROUND_OFF * composition_rate_scale
 
 
@@ -215,7 +215,8 @@ def test_zero_transfer_keeps_inlet_composition(data_path, case):
     np.testing.assert_allclose(distribution, 1e8 * np.exp(-grid / 100),
                                rtol=ROUND_OFF, atol=0)
     dilution_rate = unit.Inlet.vol_flow / unit.vol_slurry  # [1/s]
-    assert abs(residual) <= ROUND_OFF * dilution_rate * expected_fraction
+    residual_scale = dilution_rate * expected_fraction * DENSITY  # [kg/m**3/s]
+    assert abs(residual) <= ROUND_OFF * residual_scale
 
 
 def test_configured_moment_count_reaches_kinetics(data_path):
@@ -281,7 +282,8 @@ def assert_dynamic_closure(unit, composition, distribution, growth, kinetic_rtol
     Returns
     -------
     float
-        Dynamic target derivative [composition unit/s].
+        Dynamic target mass-concentration derivative [kg/m**3/s] on both
+        kinetics-input bases.
     """
     dilution = unit.Inlet.vol_flow / unit.vol_slurry  # [1/s]
     length = growth / dilution  # [um], exponential decay length
@@ -304,7 +306,7 @@ def assert_dynamic_closure(unit, composition, distribution, growth, kinetic_rtol
                           POPULATION_CLOSURE_RTOL)  # [-], numerical bound and gate
     np.testing.assert_allclose(rhs[:4] / moments_um, 0, rtol=0,
                                atol=population_rtol * dilution)
-    target_scale = dilution * inlet_concentrations[0] / scale  # [basis unit/s]
+    target_scale = dilution * inlet_concentrations[0]  # [kg/m**3/s]
     assert abs(rhs[4]) <= ROUND_OFF * target_scale
     return rhs[4]
 
@@ -338,8 +340,10 @@ def test_variable_growth_bracket(data_path, exponent, expected, seed):
     assert distribution[0] > 0
     assert distribution[0] * growth == pytest.approx(1e8, rel=ROUND_OFF, abs=0)
     actual = assert_dynamic_closure(unit, composition, distribution, growth)
-    assert residual == pytest.approx(actual, rel=0, abs=ROUND_OFF * 0.2)
-    # [kg/kg/s], D=1/s and inlet mass fraction .2 set the residual scale.
+    concentration_rate_scale = 0.2 * DENSITY  # [kg/m**3/s], D=1/s
+    assert residual == pytest.approx(
+        actual, rel=0, abs=ROUND_OFF * concentration_rate_scale
+    )
 
 
 def test_singular_seed_does_not_choose_negative_population(data_path):
@@ -420,7 +424,7 @@ def test_steady_population_applies_dynamic_impurity_factor(data_path):
     solid_fraction = 3e-8 * 110**3  # [-], corrected G=110 um/s
     expected = (0.2 - 2 * solid_fraction) / (1 - 3 * solid_fraction)  # [kg/kg]
     assert composition == pytest.approx(expected, rel=ROUND_OFF)
-    assert abs(residual) < ROUND_OFF
+    assert abs(residual) < ROUND_OFF * DENSITY  # [kg/m**3/s]
     assert_dynamic_closure(unit, composition, distribution, 110.0)  # [um/s]
 
 
@@ -683,7 +687,7 @@ def test_solubility_scan_preserves_non_target_species(data_path, basis):
     _, distribution, composition, _, residual = unit.solve_steady_state(
         0.15 * basis_scale, TEMPERATURE)
     assert composition / basis_scale == pytest.approx(2 / 13, rel=ROUND_OFF)
-    assert abs(residual) < ROUND_OFF * basis_scale
+    assert abs(residual) < ROUND_OFF * DENSITY  # [kg/m**3/s]
     assert_dynamic_closure(unit, composition, distribution, 100.0)  # [um/s]
 
 
@@ -1069,12 +1073,12 @@ def test_steady_solve_initializes_fresh_kinetics(data_path, basis):
     assert unit.Kinetics.target_idx is None
     _, distribution, composition, info, residual = unit.solve_steady_state(
         0.15 * scale, TEMPERATURE)
-    # [#/m**3/um], [basis unit], convergence information, [basis unit/s]
+    # [#/m**3/um], [basis unit], convergence information, [kg/m**3/s]
     assert info.converged
     # Same independent equation as the fixture: .2-w+.03*(3*w-2)=0.
     assert composition / scale == pytest.approx(2 / 13, rel=ROUND_OFF, abs=0)
     assert distribution[0] == pytest.approx(1e8, rel=ROUND_OFF, abs=0)
-    assert abs(residual) <= ROUND_OFF * scale  # [basis unit/s], D=1/s roundoff
+    assert abs(residual) <= ROUND_OFF * DENSITY  # [kg/m**3/s], D=1/s roundoff
 
 
 @pytest.mark.assimulo
