@@ -204,18 +204,22 @@ def test_bootstrap_params_does_not_swallow_keyboard_interrupt():
         stats.bootstrap_params(num_samples=3)
 
 
-@pytest.mark.assimulo
-def test_batch_cryst_ad_fallback_configures_finite_difference_problem():
-    """Unsupported AD requests configure an operational NumPy fallback."""
-    assimulo_problem = pytest.importorskip("assimulo.problem")
-
+def test_batch_cryst_ad_fallback_selects_finite_difference():
+    """Unsupported AD requests select the solver-free NumPy fallback."""
     with pytest.warns(RuntimeWarning, match="finite-difference") as caught:
-        crystallizer = Crystallizers.BatchCryst(
-            target_comp="solute", jac_type="AD"
-        )
+        crystallizer = Crystallizers.BatchCryst(target_comp="solute", jac_type="AD")
 
     assert Path(caught[0].filename).resolve() == Path(__file__).resolve()
     assert crystallizer.jac_type == "finite_diff"
+
+
+@pytest.mark.assimulo
+def test_batch_cryst_finite_difference_problem_configures_callbacks():
+    """The real Assimulo problem receives finite-difference callbacks."""
+    assimulo_problem = pytest.importorskip("assimulo.problem")
+    crystallizer = Crystallizers.BatchCryst(
+        target_comp="solute", jac_type="finite_diff"
+    )
 
     initial_states = np.array([1.0])  # [-], unevaluated handoff sentinel
     kinetic_params = np.array([2.0])  # [-], unevaluated handoff sentinel
