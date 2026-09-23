@@ -5,7 +5,8 @@ Assimulo. Pure feeds of A, solvent, and B have unequal amounts; reversing the
 thermo database order checks that composition columns retain their meaning.
 Instantaneous continuous mixing has zero duration, so its raw usage is zero
 while its reported flow rates are nonzero. Separation holdup issue #311 is
-outside these liquid-only fixtures.
+outside these liquid-only fixtures. An unknown ``basis`` must raise
+``ValueError`` rather than fail on an unbound local.
 """
 
 import json
@@ -99,3 +100,21 @@ def test_stream_table_preserves_order_and_material_basis(
     np.testing.assert_allclose(table[reported_quantity], expected_totals, rtol=REL_TOL, atol=0)
     np.testing.assert_allclose(table["temp"], TEMPERATURE, rtol=REL_TOL, atol=0)
     np.testing.assert_allclose(table["pres"], PRESSURE, rtol=REL_TOL, atol=0)
+
+
+@pytest.mark.parametrize("basis", ["molar", "Mass"])
+def test_stream_table_rejects_unknown_basis(data_path, basis):
+    """An alternate spelling or casing of a basis is rejected, not guessed."""
+    thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
+    solvent_only = [0.0, 0.0, 0.0, 1.0]  # [-], species order A, B, C, solv
+    solvent_mass = 1.0  # [kg], any positive holdup yields a solved flowsheet
+    sim = SimulationExec(thermo_path, {"MIX": []})
+    sim.MIX = Mixer()
+    sim.MIX.Inlets = LiquidPhase(
+        thermo_path, temp=TEMPERATURE, pres=PRESSURE, mass=solvent_mass,
+        mass_frac=solvent_only,
+    )
+    sim.SolveFlowsheet(verbose=False)
+
+    with pytest.raises(ValueError, match=r"^basis must be either 'mass' or 'mole'$"):
+        sim.result.GetStreamTable(basis=basis)

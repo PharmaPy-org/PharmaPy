@@ -279,12 +279,20 @@ class SimulationResult:
             amounts and flows are [kg] and [kg/s]; molar amounts and flows
             are [mol] and [mol/s]. Inapplicable fields are NaN.
 
+        Raises
+        ------
+        ValueError
+            If ``basis`` is not ``'mass'`` or ``'mole'``.
+
         Notes
         -----
         Continuous raw inlet amounts integrate over the receiving unit's
         reported duration. Instantaneous static mixers have zero duration and
         hence zero raw usage, while their flow-rate columns remain nonzero.
         """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be either 'mass' or 'mole'")
+
         uo_dict = self.sim.uos_instances
 
         base = ['temp', 'pres']
