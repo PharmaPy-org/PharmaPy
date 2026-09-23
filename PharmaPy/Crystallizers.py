@@ -868,9 +868,9 @@ class _BaseCryst:
             Packed state vector, shape (num_states,). Population states use
             [um**n] or scaled [#/um] for Batch/Semibatch and the corresponding
             slurry-volume-specific basis for MSMPR. Remaining states are
-            liquid composition on the configured basis ([kg/m**3] for
-            mass_conc or [kg/kg] for mass_frac), liquid volume [m**3] when
-            applicable, and tank then jacket temperatures [K] when integrated.
+            liquid mass concentration [kg/m**3] on both kinetics-input
+            bases, liquid volume [m**3] when applicable, and tank then
+            jacket temperatures [K] when integrated.
         params : array-like or None, optional
             Active kinetic parameters in the kinetics model's native units;
             None retains the configured values.
