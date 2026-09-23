@@ -7,7 +7,6 @@ Created on Thu Aug 13 11:13:10 2020
 """
 
 import numpy as np
-from PharmaPy.Gaussians import gaussian
 
 
 def getBipartiteNames(first, second):
@@ -344,25 +343,3 @@ class NameAnalyzer:
                                                   basis='mass')
 
         return out
-
-
-if __name__ == '__main__':
-    names_up = ['temp', 'mole_conc', 'vol_flow']
-    names_down = ['mole_frac', 'temp', 'num_distrib', 'mass_flow']
-
-    num_species = 2
-    num_distr = 100
-
-    # Data
-    states_up = np.array([300, 0.7, 1, 0.001])
-    states_down = np.array([0.35, 0.65, 320])
-
-    x_distrib = np.linspace(0, 1000, num_distr)
-    distrib = gaussian(x_distrib, 400, 10, 1e10)
-
-    states_down = np.append(states_down, distrib)
-    states_down = np.append(states_down, 1)
-
-    # With name analyzer
-    analyzer = NameAnalyzer(names_up, names_down, num_species,
-                            num_distr)

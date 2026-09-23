@@ -95,6 +95,13 @@ class LiquidInlet:
 
 
 def _common_energy_attrs(cryst):
+    """Supply the model and utility attributes normally set by construction.
+
+    Parameters
+    ----------
+    cryst : MSMPR or SemibatchCryst
+        Bare model instance receiving synthetic energy-balance collaborators.
+    """
     cryst.Solid_1 = StubPhase()
     cryst.Slurry = StubSlurry()
     cryst.controls = {}
@@ -103,6 +110,7 @@ def _common_energy_attrs(cryst):
     cryst.area_base = 0.01  # [m**2]
     cryst.u_ht = 500.0  # [J/s/m**2/K]
     cryst.vol_tank = 1.0e-3  # [m**3]
+    cryst.vol_offset = 0.75  # [-], established working/vessel volume design ratio
 
 
 COMMON_ENERGY_KW = {
