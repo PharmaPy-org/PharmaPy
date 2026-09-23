@@ -589,6 +589,48 @@ def test_deliquoring_rejects_empty_retained_inventory(deliquoring_result):
     assert unit.Outlet.Liquid_1.mass == before
 
 
+@pytest.mark.unit
+def test_deliquoring_inventory_increase_invalidates_removal(deliquoring_result):
+    """Retain signed removals when a trajectory raises a species inventory.
+
+    Conservative transport cannot raise an inventory without inflow, so the
+    invalid-diagnostic branch is reached through prescribed reduced states.
+    The uniform final field drains to S = 0.6 with liquid volume fractions
+    0.4 for the first species and 0.15 for each other species. From the
+    saturated 0.2 reference, the first species' inventory rises from 0.2 to
+    0.24 of its pure-component pore mass, while each other species falls to
+    0.09.
+
+    Parameters
+    ----------
+    deliquoring_result : tuple
+        Unit with sat_inf = 0.2 [-] and reference concentration rho_j/5
+        [kg/m**3]; its prescribed final fields are not used here.
+    """
+    unit, _, _ = deliquoring_result
+    cake = unit.Outlet
+    # Reduced C* = (v - 0.2)/0.8 for volume fraction v: 0.4 -> 1/4 and
+    # 0.15 -> -1/16. Reduced S* = 0.5 maps to S = 0.2 + 0.5*0.8 = 0.6.
+    final_concentration = np.full((3, 5), -1 / 16)  # [-]
+    final_concentration[:, 0] = 1 / 4  # [-]
+    final_states = np.column_stack((np.full(3, .5), final_concentration))  # [-]
+    initial_states = np.column_stack((np.ones(3), np.zeros((3, 5))))  # [-], saturated reference
+    states = np.vstack((initial_states.ravel(), final_states.ravel()))  # [-]
+    with pytest.warns(RuntimeWarning, match='inventory increased beyond numerical roundoff'):
+        unit.retrieve_results(np.array([0., 2.]), states)  # [-]
+    pure_pore_mass = cake.porosity * cake.cake_vol * unit.rho_j  # [kg], pores filled by species j
+    expected_removed = (.2 - .6 * .15) * pure_pore_mass  # [kg]
+    expected_removed[0] = (.2 - .6 * .4) * pure_pore_mass[0]  # [kg], negative: an increase
+    assert not unit.removal_diagnostics_valid
+    assert not unit.result.removal_diagnostics_valid
+    np.testing.assert_allclose(unit.liquid_removed_species, expected_removed, rtol=RTOL)
+    np.testing.assert_allclose(unit.result.liquid_removed_species, expected_removed, rtol=RTOL)
+    assert unit.liquid_removed == pytest.approx(expected_removed.sum(), rel=RTOL)
+    np.testing.assert_allclose(unit.result.mass_liquid_removed,
+                               [0., expected_removed.sum()], rtol=RTOL)
+    assert np.isnan(unit.liquid_removed_mass_frac).all()
+
+
 @pytest.mark.assimulo
 @pytest.mark.integration
 @pytest.mark.parametrize('runtime', [1e-4, 1e-2])
