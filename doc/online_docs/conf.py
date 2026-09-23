@@ -12,6 +12,34 @@
 #
 import os
 import sys
+from importlib.metadata import packages_distributions, version as distribution_version
+
+# The import package this documentation describes. The distribution that ships
+# it is resolved below rather than hardcoded, so packaging renames do not stale
+# the docs.
+import_package = 'PharmaPy'
+
+# Resolve the installed distribution *before* the source tree goes on sys.path
+# below. A checkout can carry build metadata from an earlier editable install --
+# in particular a stale `PharmaPy.egg-info` predating the rename to
+# `pharmapy-sim` -- and importlib.metadata treats any `*.egg-info` on sys.path as
+# an installed distribution. Resolving first keeps that stale metadata out of the
+# lookup; doing it after the insert reports both names and fails the build.
+#
+# `packages_distributions` was added in Python 3.10, so building the docs
+# requires 3.10 or newer even though `[project].requires-python` allows 3.9 for
+# the package itself. CI, Read the Docs, and the pixi `docs` environment pin 3.11.
+distribution_names = sorted(set(packages_distributions().get(import_package, [])))
+if len(distribution_names) != 1:
+    raise RuntimeError(
+        f"Expected exactly one installed distribution providing "
+        f"{import_package!r}, found {distribution_names!r}. Build the "
+        f"documentation from an environment where PharmaPy is installed, for "
+        f"example `pixi run docs` or `pip install -e \".[docs]\"`. If several "
+        f"names are listed, delete stale `*.egg-info` directories from the "
+        f"repository root and reinstall."
+    )
+
 # sys.path.insert(0, os.path.abspath('.'))
 sys.path.insert(0, os.path.abspath('../../'))
 # sys.path.insert(0, os.path.abspath('sphinxext'))
@@ -30,12 +58,15 @@ autodoc_mock_imports = ["numpy", "scipy", "matplotlib", "pandas", "autograd", "a
 
 # -- Project information -----------------------------------------------------
 
-project = 'PharmaPy'
-copyright = '2023, Purdue University, Daniel Casas-Orozco, Dan Laky, Inyoung Hur'
-author = 'Daniel Casas-Orozco, Dan Laky, Inyoung Hur'
+project = import_package
+copyright = '2023, Purdue University and the PharmaPy contributors'
+author = 'The original PharmaPy developers and PharmaPy-org contributors'
 
-# The full version, including alpha/beta/rc tags
-release = '2023'
+# The full version, including alpha/beta/rc tags, read from the distribution
+# resolved during path setup above.
+release = distribution_version(distribution_names[0])
+
+version = release
 
 
 # -- General configuration ---------------------------------------------------
@@ -47,6 +78,16 @@ extensions = ['sphinx.ext.doctest', 'sphinx.ext.autodoc', 'sphinx.ext.napoleon',
 ]
 
 bibtex_bibfiles = ['references.bib']
+
+# Render the example notebooks from their committed outputs instead of executing
+# them. nbsphinx defaults to 'auto', which executes any notebook that has no
+# outputs; under the warning-as-error docs build (`-W` in CI,
+# `fail_on_warning: true` on Read the Docs) an execution error in a notebook
+# would then fail the build of an unrelated change. Keeping this 'never' makes
+# the build depend only on what is committed. `ipykernel` stays in the docs
+# dependencies so contributors can regenerate those committed notebook outputs
+# in the locked documentation environment.
+nbsphinx_execute = 'never'
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
@@ -68,7 +109,7 @@ html_logo = 'images/PharmaPy_logo.jpeg'
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ['static','images']
+html_static_path = ['images']
 html_context = {
     "footer_logos": {
         "row1": [
