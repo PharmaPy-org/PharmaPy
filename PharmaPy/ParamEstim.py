@@ -6,9 +6,8 @@ Created on Mon Oct 28 15:35:48 2019
 @author: casas100
 """
 
-# from reactor_module import ReactorClass
 import numpy as np
-from scipy.linalg import svd, inv, ldl
+from scipy.linalg import inv, ldl
 from itertools import cycle
 
 import matplotlib.pyplot as plt
@@ -1442,53 +1441,3 @@ class MultipleCurveResolution(ParameterEstimation):
             residual = 1/2 * np.dot(weighted_resid, weighted_resid)
             penalty = self.mult_penalty*(np.maximum(-molar_abs, 0)**2).sum()
             return residual + penalty
-
-
-if __name__ == '__main__':
-    import englezos_example as englezos
-
-    # Data
-    data = np.genfromtxt('../data/englezos_example.csv', delimiter=',',
-                         skip_header=1)
-    t_exp, c3_exp = data.T
-
-    init_conc = [60, 60, 0]
-    param_seed = [1e-5, 1e-5]
-#    param_seed = [0.4577e-5, 0.2797e-3]
-
-    reaction_matrix = np.array([-2, -1, 2])
-    species = ('$NO$', '$O_2$', '$NO_2$')
-
-    param_object = ParameterEstimation(
-        reaction_matrix, param_seed,
-        t_exp, c3_exp,
-        y_init=init_conc,
-        measured_ind=(-1,),
-        kinetic_model=englezos.bodenstein_linder,
-        df_dstates=englezos.jac_conc,
-        df_dtheta=englezos.jac_par,
-        names_species=species)
-
-    simulate = True
-
-    if simulate:
-        param_object.solve_model(init_conc, x_eval=t_exp, eval_sens=True)
-        param_object.plot_states()
-        fig_sens, axes_sens = param_object.plot_sens(fig_size=(5, 2))
-
-        sens_total = param_object.reorder_sens()
-        U, sing_vals, V = svd(sens_total)
-        cond_number = max(sing_vals) / min(sing_vals)
-
-        labels = list('ab')
-        for ax, lab in zip(axes_sens, labels):
-            ax.text(0.05, 0.9, lab, transform=ax.transAxes)
-
-        fig_sens.savefig('../img/sens_englezos.pdf', bbox_inches='tight')
-
-    else:
-        optim_options = {'max_iter': 150, 'full_output': True, 'tau': 1e-2}
-
-        params_optim, covar, info = param_object.optimize_fn(
-            optim_options=optim_options)
-        param_object.plot_data_model()
