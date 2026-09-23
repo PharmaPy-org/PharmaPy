@@ -11,12 +11,12 @@ reverse-term contribution ``-d/dC[prod(C_prod**beta)/Keq]`` is missing from the
 Jacobian. This is pure NumPy (no solver backend), so no assimulo marker.
 """
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 
 from PharmaPy.Kinetics import RxnKinetics
+from PharmaPy.Reactors import _BaseReactor
 
 
 # A <-> B (reversible); C and solv are inert padding species in the database.
@@ -62,33 +62,6 @@ def _irreversible_kinetics(data_path):
         stoich_matrix=STOICH,
         partic_species=PARTIC,
     )
-
-
-def _stub_assimulo_modules(monkeypatch):
-    assimulo = ModuleType("assimulo")
-
-    solvers = ModuleType("assimulo.solvers")
-    solvers.CVode = object
-    solvers.LSODAR = object
-
-    problem = ModuleType("assimulo.problem")
-    problem.Explicit_Problem = object
-
-    monkeypatch.setitem(sys.modules, "assimulo", assimulo)
-    monkeypatch.setitem(sys.modules, "assimulo.solvers", solvers)
-    monkeypatch.setitem(sys.modules, "assimulo.problem", problem)
-
-
-def _import_base_reactor(monkeypatch):
-    try:
-        from PharmaPy.Reactors import _BaseReactor
-    except ModuleNotFoundError as exc:
-        if exc.name != "assimulo":
-            raise
-        _stub_assimulo_modules(monkeypatch)
-        from PharmaPy.Reactors import _BaseReactor
-
-    return _BaseReactor
 
 
 def test_reversible_jacobian_includes_reverse_term(data_path):
@@ -218,8 +191,7 @@ def test_reversible_jacobian_uses_runtime_delta_hrxn(data_path):
     np.testing.assert_allclose(analytical, fd, rtol=1e-5, atol=1e-5)
 
 
-def test_reactor_jacobian_passes_runtime_delta_hrxn(monkeypatch):
-    base_reactor = _import_base_reactor(monkeypatch)
+def test_reactor_jacobian_passes_runtime_delta_hrxn():
     runtime_deltah = np.array([-4.0e4])  # [J/mol_rxn]
 
     class CaptureKinetics:
@@ -259,7 +231,7 @@ def test_reactor_jacobian_passes_runtime_delta_hrxn(monkeypatch):
     )
 
     states = np.array([1.0, 1.0])  # [mol/L]
-    jac = base_reactor.get_jacobians(
+    jac = _BaseReactor.get_jacobians(
         reactor, time=0.0, states=states, sw=None, sens=None, params=None)
 
     np.testing.assert_allclose(jac, np.eye(2))

@@ -1,62 +1,12 @@
-import sys
-from pathlib import Path
-from types import ModuleType
+"""Algebra-only reactor energy-balance regressions without Assimulo."""
 
 import numpy as np
 import pytest
 
+import PharmaPy.Reactors as reactors
+
 
 pytestmark = pytest.mark.unit
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-PACKAGE_INIT = REPO_ROOT / "PharmaPy" / "__init__.py"
-
-
-def _stub_assimulo_modules(monkeypatch):
-    """Let algebra-only reactor tests import without the optional solver."""
-    assimulo = ModuleType("assimulo")
-
-    solvers = ModuleType("assimulo.solvers")
-    solvers.CVode = object
-    solvers.LSODAR = object
-
-    problem = ModuleType("assimulo.problem")
-    problem.Explicit_Problem = object
-
-    monkeypatch.setitem(sys.modules, "assimulo", assimulo)
-    monkeypatch.setitem(sys.modules, "assimulo.solvers", solvers)
-    monkeypatch.setitem(sys.modules, "assimulo.problem", problem)
-
-
-def _prefer_source_package():
-    """Avoid importing the outer checkout package named PharmaPy."""
-    loaded = sys.modules.get("PharmaPy")
-    loaded_path = getattr(loaded, "__file__", None)
-    if loaded is not None and (
-            loaded_path is None or Path(loaded_path).resolve() != PACKAGE_INIT):
-        del sys.modules["PharmaPy"]
-
-    try:
-        sys.path.remove(str(REPO_ROOT))
-    except ValueError:
-        pass
-    sys.path.insert(0, str(REPO_ROOT))
-
-
-@pytest.fixture
-def reactors(monkeypatch):
-    _prefer_source_package()
-
-    try:
-        import PharmaPy.Reactors as reactors_module
-    except ModuleNotFoundError as exc:
-        if exc.name != "assimulo":
-            raise
-        _stub_assimulo_modules(monkeypatch)
-
-        import PharmaPy.Reactors as reactors_module
-
-    return reactors_module
 
 
 class _StubLiquid:
@@ -115,15 +65,14 @@ def _flow_term(reactor):
     return float(heat_profile[0, -1])
 
 
-def test_semibatch_flow_term_uses_inlet_composition_for_sensible_enthalpy(
-        reactors):
+def test_semibatch_flow_term_uses_inlet_composition_for_sensible_enthalpy():
     reactor = reactors.SemibatchReactor(vol_tank=1.0, isothermal=True)
     _configure_energy_balance_stubs(reactor)
 
     assert _flow_term(reactor) == pytest.approx(0.0)
 
 
-def test_cstr_flow_term_keeps_holdup_composition_for_outflow(reactors):
+def test_cstr_flow_term_keeps_holdup_composition_for_outflow():
     reactor = reactors.CSTR(isothermal=True)
     _configure_energy_balance_stubs(reactor)
 

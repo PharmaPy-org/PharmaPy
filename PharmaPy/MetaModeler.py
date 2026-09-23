@@ -189,6 +189,15 @@ class MetaModelingClass:
             open_object.write(' '*8 + 'return\n\n')
 
     def CreatePharmaPyTemplate(self):
+        """Write the configured unit-operation template to ``file_name``.
+
+        Notes
+        -----
+        Generated solver constructors come from :mod:`PharmaPy.solvers`, so
+        importing a template does not require the optional Assimulo backend.
+        Assimulo is loaded only when the generated ``solve_model`` method is
+        called.
+        """
         op = open(self.file_name, 'w')
 
         if self.model_type == 'DAE':
@@ -206,9 +215,9 @@ class MetaModelingClass:
 
         packages = [
             'import numpy as np\n',
-            'from assimulo.problem import %s\n' % self.problem,
+            'from PharmaPy.solvers import %s, %s\n' % (
+                self.problem, self.solver),
             'from PharmaPy.Phases import classify_phases\n',
-            'from assimulo.solvers import %s\n\n' % self.solver,
             '\n']
 
         packages += pharmapy_modules
