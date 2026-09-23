@@ -73,6 +73,14 @@ _ASSIMULO_IMPORT_BLOCKER = textwrap.dedent('''
             return None
 
     sys.meta_path.insert(0, _BlockAssimulo())
+
+    try:
+        import assimulo
+    except ModuleNotFoundError as exc:
+        if exc.name != "assimulo":
+            raise AssertionError(f"unexpected blocked module: {exc.name}") from exc
+    else:
+        raise AssertionError("Assimulo import blocker did not reject the backend")
     ''')
 
 
