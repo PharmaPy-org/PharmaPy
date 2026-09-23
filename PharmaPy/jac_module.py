@@ -63,7 +63,39 @@ def numerical_jac(func, x, args=(), dx=None, abs_tol=None, rel_tol=None,
     return jac
 
 
-def numerical_jac_central(func, x, rel_tol, abs_tol, dx=None, args=()):
+def numerical_jac_central(func, x, rel_tol=None, abs_tol=None, dx=None,
+                          args=(), num_nonnegative=0):
+    """Approximate a vector-valued Jacobian with second-order differences.
+
+    Parameters
+    ----------
+    func : callable
+        Function mapping ``x`` to a one-dimensional output vector.
+    x : array-like
+        Differentiated coordinates [coordinate-dependent units].
+    rel_tol : float, optional
+        Relative tolerance passed to a callable ``dx`` rule [-].
+    abs_tol : float or array-like, optional
+        Absolute tolerance passed to a callable ``dx`` rule [coordinate
+        units].
+    dx : float, array-like, or callable, optional
+        Difference step [coordinate units], or a step-selection callable.
+    args : tuple, optional
+        Additional function arguments [argument-dependent units].
+    num_nonnegative : int, optional
+        Number of leading coordinates constrained to be nonnegative [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        Jacobian [output units / coordinate units].
+
+    Notes
+    -----
+    Interior coordinates use centered differences. A leading nonnegative
+    coordinate uses the second-order forward stencil when a centered step
+    would cross zero.
+    """
 
     if dx is None:
         dx = np.ones_like(x) * eps
@@ -75,10 +107,23 @@ def numerical_jac_central(func, x, rel_tol, abs_tol, dx=None, args=()):
     num_x = len(x)
     jac = []
     delx = np.zeros_like(x)
+    f_zero = None
 
     for j in range(num_x):
         delx[j] = dx[j]
-        jac.append((func(x + delx, *args) - func(x - delx, *args)) /2. / dx[j])
+        if j < num_nonnegative and x[j] < dx[j]:
+            if f_zero is None:
+                f_zero = np.atleast_1d(func(x, *args))
+            jac.append((
+                -3 * f_zero
+                + 4 * np.atleast_1d(func(x + delx, *args))
+                - np.atleast_1d(func(x + 2 * delx, *args))
+            ) / 2. / dx[j])
+        else:
+            jac.append((
+                np.atleast_1d(func(x + delx, *args))
+                - np.atleast_1d(func(x - delx, *args))
+            ) / 2. / dx[j])
         delx[j] = 0
 
     return np.column_stack(jac)
@@ -144,41 +189,3 @@ def numerical_jacv(func, x, v, args=()):
     jac_v = (func(x + sig*v, *args) - f_eval) / sig
 
     return jac_v
-
-
-def jac_fun(x):
-    x1, x2 = x
-    dim = len(x)
-    jac = np.zeros((dim, dim))
-
-    jac[0, 0] = 2*x1
-    jac[0, 1] = -3/2*x2**2
-    jac[1, 0] = 1
-    jac[1, 1] = 1/2/np.sqrt(x2)
-
-    return jac
-
-
-if __name__ == '__main__':
-    from autograd import jacobian, make_jvp
-    from jax import jvp
-
-    # Autograd fns
-    jac_ad = jacobian(fun)
-    jacv_ad = make_jvp(fun)
-
-
-    # Nominal x
-    x_test = np.array([1., 2.])
-
-    # Evaluate jacs
-    jacfun_eval = jac_fun(x_test)
-    # jacauto_eval = jac_ad(x_test)
-    jacnum_eval = numerical_jac(fun, x_test)
-
-    # Evaluate J*v
-    v_test = np.array([0.5, 0.5])
-    jacv_analytic = np.dot(jacfun_eval, v_test)
-    jacv_numeric = numerical_jacv(fun, x_test, v_test)
-    _, jacv_autograd = jacv_ad(x_test)(v_test)
-    # _, jacv_jax = jvp(fun, (x_test,), (v_test,))

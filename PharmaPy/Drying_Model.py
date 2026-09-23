@@ -4,6 +4,8 @@ Created on Tue Jul 28 00:24:18 2020
 
 @author: huri
 """
+from typing import Union
+
 import numpy as np
 import numpy.matlib
 from PharmaPy._assimulo import CVode, Explicit_Problem
@@ -405,8 +407,12 @@ class Drying:
 
         return model_eqns.ravel()
 
-    def material_balance(self, time, satur, temp_gas, temp_sol, y_gas, x_liq,
-                         u_gas, dens_gas, dry_rate, inputs, return_terms=False):
+    def material_balance(self, time: float, satur: np.ndarray,
+                         temp_gas: np.ndarray, temp_sol: np.ndarray,
+                         y_gas: np.ndarray, x_liq: np.ndarray,
+                         u_gas: np.ndarray, dens_gas: np.ndarray,
+                         dry_rate: np.ndarray, inputs: dict,
+                         return_terms: bool = False) -> Union[list, int]:
         """Evaluate the saturation and composition material balances.
 
         Parameters
@@ -424,7 +430,7 @@ class Drying:
         x_liq : ndarray
             Liquid mass fractions by node and volatile species [-].
         u_gas : ndarray
-            Gas velocity by spatial node [m/s].
+            Superficial Darcy gas velocity by spatial node [m/s].
         dens_gas : ndarray
             Gas density by spatial node [kg/m**3].
         dry_rate : ndarray
@@ -444,11 +450,20 @@ class Drying:
 
         Notes
         -----
-        Gas transfer converts a component mass source per bed volume
-        [kg/m**3/s] into a gas mass-fraction derivative with one gas holdup
-        denominator: ``epsilon_gas * dens_gas``. ``epsilon_gas`` is already
-        ``porosity * (1 - satur)`` [-], so the transfer term must not divide
-        by an additional ``(1 - satur)``.
+        The pore gas is an open, constant-pressure control volume with
+        holdup ``H = porosity*(1-S)*dens_gas`` [kg/m**3]. Component and total
+        balances are ``d(H*y_i)/dt = F_i + r_i - y_i*V`` and
+        ``dH/dt = sum(F_j + r_j) - V``, where convection ``F_i``, evaporation
+        ``r_i``, and the vent ``V`` have units [kg/m**3/s]. The vent carries
+        the bulk composition and cancels identically in the quotient rule:
+        ``H*dy_i/dt = F_i + r_i - y_i*sum(F_j + r_j)``.
+        The code already expresses convection in non-conservative form,
+        ``-u_gas/epsilon_gas * dy_i/dz``, using superficial Darcy velocity;
+        its species sum vanishes for normalized inlet and interior fields.
+        The total-source subtraction preserves normalization and restores
+        small normalization errors when total accumulation is positive:
+        ``d(sum(y)-1)/dt = -sum((F+r)/H)*(sum(y)-1)``. A separate
+        saturation-only correction would violate this closure.
         """
         
         satur[satur < eps] = eps
@@ -473,7 +488,6 @@ class Drying:
         epsilon_gas = self.porosity * (1 - satur)  # [-]
         epsilon_gas[epsilon_gas <= eps] = eps  # [-]
 
-        # fluxes_yg = high_resolution_fvm(y_gas, boundary_cond=y_gas_inputs)
         fluxes_yg = upwind_fvm(y_gas, boundary_cond=y_gas_inputs)  # [-]
 
         dygas_dz = np.diff(fluxes_yg, axis=0).T / self.dz  # [1/m]
@@ -483,10 +497,9 @@ class Drying:
         # [kg/m**3/s] / ([-] * [kg/m**3]) = [1/s].
         # epsilon_gas already includes porosity*(1 - satur), the gas holdup.
         transfer_gas = dry_rate.T / epsilon_gas / dens_gas  # [1/s]
-        # Dynamic saturation correction term
-        total_mass_correction = y_gas.T / (1 - satur) * dsat_dt  # [1/s]
-
-        dygas_dt = convection + transfer_gas + total_mass_correction  # [1/s]
+        component_accumulation = convection + transfer_gas  # [1/s], divided by H
+        total_accumulation = component_accumulation.sum(axis=0)  # [1/s], divided by H
+        dygas_dt = component_accumulation - y_gas.T * total_accumulation  # [1/s]
 
         if return_terms:
             self.masstrans_comp = 1
@@ -496,8 +509,12 @@ class Drying:
         else:
             return [dsat_dt, dygas_dt.T, dxliq_dt.T]
 
-    def energy_balance(self, time, temp_gas, temp_sol, satur, y_gas, x_liq,
-                       u_gas, rho_gas, dry_rate, inputs, return_terms=False):
+    def energy_balance(self, time: float, temp_gas: np.ndarray,
+                       temp_sol: np.ndarray, satur: np.ndarray,
+                       y_gas: np.ndarray, x_liq: np.ndarray,
+                       u_gas: np.ndarray, rho_gas: np.ndarray,
+                       dry_rate: np.ndarray, inputs: dict,
+                       return_terms: bool = False) -> Union[list, tuple]:
         """Evaluate gas and condensed-phase energy balances.
 
         Parameters
@@ -515,7 +532,7 @@ class Drying:
         x_liq : ndarray
             Liquid mass fractions by node and volatile species [-].
         u_gas : ndarray
-            Gas velocity by spatial node [m/s].
+            Superficial Darcy gas velocity by spatial node [m/s].
         rho_gas : ndarray
             Gas density by spatial node [kg/m**3].
         dry_rate : ndarray
@@ -529,13 +546,14 @@ class Drying:
         Returns
         -------
         list of ndarray
-            ``dTcond_dt`` by spatial node [K/s] and the legacy gas-temperature
-            solver channel ``dTg_dt`` when ``return_terms`` is False.
+            ``[dTg_dt, dTcond_dt]``: gas and condensed temperature derivatives
+            by spatial node [K/s] when ``return_terms`` is False.
         tuple of ndarray
             When ``return_terms`` is True, returns the diagnostic terms
             ``(convec_term, drying, heat_cond, heat_loss_emp)`` instead.
-            ``convec_term`` is the raw ``u_gas * dTg_dz`` diagnostic
-            [kg*K/m**3/s]. ``drying`` is the condensed-temperature latent
+            ``convec_term`` is ``u_gas * epsilon_gas * rho_gas * dT/dz``
+            [kg*K/m**3/s], weighted by pore gas holdup. ``drying`` is the
+            condensed-temperature latent
             contribution [K/s]; ``heat_cond`` and ``heat_loss_emp`` are
             gas-temperature-rate contributions [K/s].
 
@@ -543,10 +561,19 @@ class Drying:
         -----
         ``latent_heat`` is requested on a mass basis [J/kg] and spans every
         species, so its volatile columns are paired with the matching
-        ``dry_rate`` columns to give the latent power [J/m**3/s]. The existing
-        gas-convection discretization is preserved in this branch; ``dTg_dz``
-        [kg*K/m**4] and ``conv_term`` [J*kg/m**6/s] are annotated as
-        implemented so that their current physical basis is explicit.
+        ``dry_rate`` columns to give the latent power [J/m**3/s].
+        ``u_gas`` is the superficial Darcy velocity supplied by ``unit_model``.
+        Convective power per bed volume is ``-u_gas*rho_gas*cp*dT/dz``
+        [J/m**3/s]. Dividing by the gas heat capacity per bed volume,
+        ``epsilon_gas*rho_gas*cv`` [J/m**3/K], gives the temperature-rate
+        contribution ``-(u_gas/epsilon_gas)*(cp/cv)*dT/dz`` [K/s]. The
+        thermal front therefore moves at ``(cp/cv)*u_gas/epsilon_gas`` [m/s],
+        while composition convects at ``u_gas/epsilon_gas`` [m/s], with
+        density cancelling exactly once. The cv holdup is the constant-volume
+        pore-gas closure prescribed by issue #37; material_balance uses a
+        constant-pressure vent closure. A constant-pressure gas energy holdup
+        would use cp instead of cv. That closure requires a maintainer decision
+        and is unchanged here.
         """
 
         mw_avg_gas = self._gas_mixture_molar_mass(y_gas)  # [g/mol]
@@ -581,13 +608,13 @@ class Drying:
         fluxes_Tg = high_resolution_fvm(temp_gas,
                                         boundary_cond=temp_gas_inputs)  # [K]
 
-        dTg_dz = np.diff(fluxes_Tg) / self.dz * epsilon_gas * rho_gas  # [kg*K/m**4]
+        dTg_dz = np.diff(fluxes_Tg) / self.dz * rho_gas  # [kg*K/m**4]
 
-        conv_term = -u_gas * dTg_dz * cpg_mix * rho_gas  # [J*kg/m**6/s]
+        conv_term = -u_gas * dTg_dz * cpg_mix  # [J/m**3/s]
 
         dTg_dt = (
             conv_term + sensible_heat - heat_transf - heat_loss
-        ) / denom_gas  # legacy solver output [K/s]; issue #37 owns units.
+        ) / denom_gas  # [K/s]
 
         # ----- Condensed phases equations
         dens_liq = self.rho_liq  # [kg/m**3]
@@ -607,7 +634,7 @@ class Drying:
         dTcond_dt = (-drying_terms + heat_transf - heat_loss_cond) / denom_cond  # [K/s]
 
         if return_terms:
-            self.convec_term = u_gas * dTg_dz  # [kg*K/m**3/s]
+            self.convec_term = u_gas * epsilon_gas * dTg_dz  # [kg*K/m**3/s]
             self.drying = drying_terms / denom_cond  # [K/s]
             self.heat_cond = heat_transf/ denom_gas  # [K/s]
             self.heat_loss_emp = heat_loss/ denom_gas  # [K/s]
