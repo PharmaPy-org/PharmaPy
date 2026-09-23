@@ -116,5 +116,8 @@ def test_stream_table_rejects_unknown_basis(data_path, basis):
     )
     sim.SolveFlowsheet(verbose=False)
 
-    with pytest.raises(ValueError, match=r"^basis must be either 'mass' or 'mole'$"):
+    expected_message = r"^basis must be either 'mass' or 'mole'$"
+    with pytest.raises(ValueError, match=expected_message) as excinfo:
         sim.result.GetStreamTable(basis=basis)
+    # GetRawMaterials raises the same message; require the table's own guard.
+    assert excinfo.traceback[-1].name == "GetStreamTable"
