@@ -145,6 +145,9 @@ def test_stream_handoff_follows_graph_edges_not_execution_order(data_path):
     assert len(flowsheet.C.Inlets) == 2
     assert len(flowsheet.D.Inlets) == 1
     source_masses = np.array([3.0, 6.0])  # [kg]
+    # Issue #309 tracks hash-seed-dependent inlet arrival order. Keep this
+    # provisional assertion order-independent until deterministic traversal
+    # lands, then replace the sort with an order-sensitive assertion.
     destination_inlets = sorted(
         flowsheet.C.Inlets, key=lambda inlet: inlet.mass
     )
