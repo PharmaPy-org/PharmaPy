@@ -64,6 +64,32 @@ def high_resolution_fvm(f, boundary_cond, limiter_type='Van Leer'):
 
 
 def upwind_fvm(f, boundary_cond):
+    """Prepend the inlet-face value to first-order upwind face values.
+
+    Parameters
+    ----------
+    f : numpy.ndarray, shape (num_nodes,) or (num_nodes, num_columns)
+        Values assigned to the downstream face of each cell, ordered from
+        the inlet (z = 0) to the outlet, in the units of the transported
+        quantity.
+    boundary_cond : float or numpy.ndarray, shape (num_columns,)
+        Value on the inlet face, in the units of ``f``.
+
+    Returns
+    -------
+    numpy.ndarray, shape (num_nodes + 1,) or (num_nodes + 1, num_columns)
+        Face values in the units of ``f``: index 0 is the inlet face and
+        index i + 1 is the downstream face of cell i, which takes the value
+        of cell i (the upwind donor for flow toward increasing z).
+
+    Notes
+    -----
+    This is not interchangeable with ``PharmaPy.Commons.upwind_fvm``, which
+    returns ``np.diff`` of this augmented array, i.e. num_nodes face
+    differences. ``DeliquoringStep.material_balance`` multiplies these face
+    values by the face liquid flux before differencing, so substituting the
+    Commons helper would change the discrete species balance.
+    """
     f_aug = np.concatenate(([boundary_cond], f))
 
     return f_aug
