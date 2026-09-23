@@ -1,11 +1,11 @@
 """Import-boundary regressions for the optional Assimulo solver stack.
 
-The core CI lane asserts that Assimulo is genuinely absent before collection,
-so its solver-free cases cannot disappear behind skips. Assimulo-marked cases
-exercise the installed backend's malformed-module and missing-symbol paths.
+Absent-backend cases block Assimulo imports inside isolated child processes so
+they run in every development environment. The core CI lane also asserts that
+Assimulo is genuinely absent, while Assimulo-marked cases exercise the
+installed backend's malformed-module and missing-symbol paths.
 """
 
-from importlib.util import find_spec
 import os
 from pathlib import Path
 import subprocess
@@ -37,9 +37,47 @@ LAZY_CONSTRUCTORS = (
     "Implicit_Problem",
 )
 
+_ASSIMULO_IMPORT_BLOCKER = textwrap.dedent('''
+    import sys
 
-def _run_in_solver_free_environment(script, tmp_path):
-    """Run Python source in an environment that genuinely lacks Assimulo.
+    class _BlockAssimulo:
+        """Reject Assimulo imports in this child process only."""
+
+        @staticmethod
+        def find_spec(fullname, path=None, target=None):
+            """Reject module specifications for the Assimulo package.
+
+            Parameters
+            ----------
+            fullname : str
+                Fully qualified name of the requested module.
+            path : sequence of str or None, optional
+                Parent package search path supplied by the import system.
+            target : module or None, optional
+                Existing module supplied when resolving a reload.
+
+            Returns
+            -------
+            None
+                Signal that unrelated modules should use later finders.
+
+            Raises
+            ------
+            ModuleNotFoundError
+                If Assimulo or one of its submodules is requested.
+            """
+            if fullname == "assimulo" or fullname.startswith("assimulo."):
+                raise ModuleNotFoundError(
+                    f"No module named {fullname!r}", name=fullname
+                )
+            return None
+
+    sys.meta_path.insert(0, _BlockAssimulo())
+    ''')
+
+
+def _run_with_assimulo_blocked(script, tmp_path):
+    """Run Python source with Assimulo blocked in the child process.
 
     Parameters
     ----------
@@ -55,17 +93,15 @@ def _run_in_solver_free_environment(script, tmp_path):
 
     Notes
     -----
-    This helper skips the calling test when Assimulo is installed. The locked
-    solver-free core environment is therefore the lane that executes these
-    tests.
+    The process-local import blocker leaves the parent interpreter unchanged,
+    so absent-backend regressions run whether or not Assimulo is installed.
+    The locked core CI lane separately verifies behavior under genuine absence.
     """
-    if find_spec("assimulo") is not None:
-        pytest.skip("requires the solver-free core environment")
-
     environment = os.environ.copy()
     environment["MPLCONFIGDIR"] = str(tmp_path)
+    blocked_script = f"{_ASSIMULO_IMPORT_BLOCKER}\n{script}"
     return subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", blocked_script],
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,
@@ -82,7 +118,7 @@ def test_model_modules_import_without_assimulo(tmp_path):
         for module_name in {AFFECTED_MODULES!r}:
             importlib.import_module(module_name)
         """)
-    result = _run_in_solver_free_environment(script, tmp_path)
+    result = _run_with_assimulo_blocked(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
 
@@ -117,7 +153,7 @@ def test_solver_construction_reports_missing_assimulo(symbol_name, tmp_path):
                 "{symbol_name} construction unexpectedly succeeded"
             )
         """)
-    result = _run_in_solver_free_environment(script, tmp_path)
+    result = _run_with_assimulo_blocked(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
 
