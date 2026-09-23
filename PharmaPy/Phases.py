@@ -144,6 +144,12 @@ class LiquidPhase(ThermoPhysicalManager):
         index of solvent components in the liquid phase. It must be
         only specified if 'mass_frac' or 'mole_frac' are not given.
     """
+    # Frames between the zero-amount warning and the code that constructed
+    # the phase: ``__init__`` sits one frame below its caller. Subclasses
+    # whose ``__init__`` delegates here add one frame each so Python's
+    # per-location ``default`` filter reports every constructing line.
+    _zero_amount_stacklevel = 2
+
     def __init__(self, path_thermo=None, temp: float = 298.15, pres=101325,
                  mass=0, vol=0, moles=0,
                  mass_frac: Optional[ArrayLike] = None,
@@ -195,6 +201,9 @@ class LiquidPhase(ThermoPhysicalManager):
         RuntimeWarning
             If all amounts are zero and check_input is True. The caller's
             warning policy determines whether this is shown, ignored, or raised.
+            The warning is attributed to the line that constructed the phase,
+            so a per-location policy such as ``default`` reports each
+            constructing line once.
 
         Notes
         -----
@@ -306,7 +315,8 @@ class LiquidPhase(ThermoPhysicalManager):
             if check_input:
                 warnings.warn("'mass', 'moles' and 'vol' are all set to zero. "
                               "Model may not perform as intended.",
-                              RuntimeWarning)
+                              RuntimeWarning,
+                              stacklevel=self._zero_amount_stacklevel)
 
         self.y_upstream = None
 

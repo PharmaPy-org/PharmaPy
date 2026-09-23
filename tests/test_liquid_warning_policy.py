@@ -2,10 +2,14 @@
 
 The four-species fixture uses equal mass fractions. Crystallization uses a
 synthetic constant solubility solely to exercise its public deprecation notice;
-no solver or crystallization rate evaluation is required.
+no solver or crystallization rate evaluation is required. The default-policy
+case records the exact constructing lines, which requires the zero-amount
+warning to be attributed to the caller rather than to ``Phases.py``.
 """
 
+import inspect
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -99,4 +103,34 @@ def test_disabled_input_check_preserves_warning_policy(liquid_constructor):
         assert [(item.category, str(item.message)) for item in seen] == [
             (UserWarning, "application probe"),
         ]
+        assert warnings.filters == original_filters
+
+
+def test_zero_amount_default_policy_reports_each_constructing_line(
+        liquid_constructor):
+    """Python's ``default`` filter reports once per constructing line.
+
+    ``default`` keys repetition on the warning location, so that location must
+    be the caller's line: repeated construction from one line reports once,
+    each further constructing line reports again, and every record points at
+    this module. Without a stacklevel that skips the constructor frames, one
+    ``Phases.py`` location would report a single warning for the whole session,
+    whichever constructor or caller line produced it.
+    """
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("default")
+        original_filters = warnings.filters.copy()
+        repeated_line = inspect.currentframe().f_lineno + 2
+        for _ in range(2):
+            liquid_constructor()
+        further_line = inspect.currentframe().f_lineno + 1
+        liquid_constructor()
+
+        assert [(item.category, Path(item.filename).resolve(), item.lineno)
+                for item in seen] == [
+            (RuntimeWarning, Path(__file__).resolve(), repeated_line),
+            (RuntimeWarning, Path(__file__).resolve(), further_line),
+        ]
+        assert all(str(item.message).startswith(ZERO_AMOUNT_MESSAGE)
+                   for item in seen)
         assert warnings.filters == original_filters
