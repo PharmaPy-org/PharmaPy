@@ -64,6 +64,32 @@ def high_resolution_fvm(f, boundary_cond, limiter_type='Van Leer'):
 
 
 def upwind_fvm(f, boundary_cond):
+    """Prepend the inlet-face value to first-order upwind face values.
+
+    Parameters
+    ----------
+    f : numpy.ndarray, shape (num_nodes,) or (num_nodes, num_columns)
+        Values assigned to the downstream face of each cell, ordered from
+        the inlet (z = 0) to the outlet, in the units of the transported
+        quantity.
+    boundary_cond : float or numpy.ndarray, shape (num_columns,)
+        Value on the inlet face, in the units of ``f``.
+
+    Returns
+    -------
+    numpy.ndarray, shape (num_nodes + 1,) or (num_nodes + 1, num_columns)
+        Face values in the units of ``f``: index 0 is the inlet face and
+        index i + 1 is the downstream face of cell i, which takes the value
+        of cell i (the upwind donor for flow toward increasing z).
+
+    Notes
+    -----
+    This is not interchangeable with ``PharmaPy.Commons.upwind_fvm``, which
+    returns ``np.diff`` of this augmented array, i.e. num_nodes face
+    differences. ``DeliquoringStep.material_balance`` multiplies these face
+    values by the face liquid flux before differencing, so substituting the
+    Commons helper would change the discrete species balance.
+    """
     f_aug = np.concatenate(([boundary_cond], f))
 
     return f_aug
@@ -470,52 +496,75 @@ class DeliquoringStep:
         Parameters
         ----------
         theta : float
-            Reduced time [-].
-        sat_star : numpy.ndarray
-            Reduced saturation [-], shape (num_nodes,).
-        conc_star : numpy.ndarray
-            Reduced species concentrations [-], shape (num_nodes, num_species).
+            Non-dimensional deliquoring time [-]. The balance is autonomous.
+        sat_star : numpy.ndarray, shape (num_nodes,)
+            Reduced liquid saturation in each axial cake cell [-].
+        conc_star : numpy.ndarray, shape (num_nodes, num_species)
+            Reduced liquid-phase mass concentration in each cell and species
+            [-].
 
         Returns
         -------
-        numpy.ndarray
-            Flattened reduced-state derivatives with respect to theta [-].
+        numpy.ndarray, shape (num_nodes * (num_species + 1),)
+            Interleaved reduced-saturation and concentration derivatives per
+            unit non-dimensional time [-].
 
         Notes
         -----
-        DELIQUORING_SATURATION_FLOOR [-] regularizes the reciprocal-power
+        The underlying non-dimensional formulation follows the existing
+        Wakeman deliquoring model.
+        ``DELIQUORING_SATURATION_FLOOR`` [-] regularizes the reciprocal-power
         capillary expression at zero and negative reduced saturation, using
         the same numerical floor as initialization. It is not a physical
         irreducible-saturation parameter. The existing Wakeman exponents
         (5 for pore-size index and 3.4 for relative permeability) are retained.
+        The first-order upwind finite-volume balance uses the same liquid flux
+        at each face for saturation and every mobile-liquid species. This makes
+        the discrete liquid-held solute inventory conservative at each right-
+        hand-side evaluation. The integrated trajectory advances reduced
+        saturation and concentration rather than solute holdup, so trajectory-
+        level conservation remains subject to the integrator error tolerance.
         """
 
-        lambd = 5
+        lambd = 5  # [-], existing Wakeman pore-size index; see module citation
         sat_star = np.maximum(sat_star, DELIQUORING_SATURATION_FLOOR)  # [-]
 
-        sat_aug = np.append(sat_star, sat_star[-1])
-        p_liq = (self.p_gas - self.p_thresh*sat_aug**(-1/lambd))/self.p_thresh
+        sat_aug = np.append(sat_star, sat_star[-1])  # [-]
+        p_liq = (
+            self.p_gas - self.p_thresh * sat_aug**(-1 / lambd)
+        ) / self.p_thresh  # [-], liquid pressure normalized by threshold pressure
 
-        dpliq_dz = np.diff(p_liq)
+        dpliq_dz = np.diff(p_liq)  # [-], reduced pressure difference between faces
 
-        k_rl = sat_star**3.4
+        # Destro et al. (2021) retain Wakeman's 3.4 relative-permeability exponent.
+        relative_permeability_exponent = 3.4  # [-]
+        k_rl = sat_star**relative_permeability_exponent  # [-]
 
         q_liq = -k_rl * dpliq_dz  # Non-dimensional liquid flux
 
-        sinf = self.sat_inf
-        sat_fun = (1 - sinf) / (sat_star*(1 - sinf) + sinf)
-        advection_vel = q_liq * sat_fun
+        sinf = self.sat_inf  # [-]
+        saturation = sat_star * (1 - sinf) + sinf  # [-]
 
-        conc_bound = conc_star[0]  # dC/dt|_{z=0} = 0
-        flux_sat = upwind_fvm(q_liq, boundary_cond=0)
-        flux_conc = upwind_fvm(conc_star, boundary_cond=conc_bound)
+        # Inlet-face concentration [-]. Inert while the inlet liquid flux is
+        # pinned to zero above, since flux_conc[0] = 0 * conc_bound; an
+        # inlet-solute boundary condition has to change both.
+        conc_bound = conc_star[0]
 
-        numerical_fluxes = np.column_stack((flux_sat, flux_conc))
+        flux_sat = upwind_fvm(q_liq, boundary_cond=0)  # [-]
+        conc_faces = upwind_fvm(conc_star, boundary_cond=conc_bound)  # [-]
+        flux_conc = flux_sat[:, np.newaxis] * conc_faces  # [-]
 
-        dstates_dtheta = -np.diff(numerical_fluxes, axis=0).T / self.delta_z
-        dstates_dtheta[1:] = dstates_dtheta[1:] * advection_vel
+        dsat_star_dtheta = -np.diff(flux_sat) / self.delta_z  # [-]
+        dsat_dtheta = (1 - sinf) * dsat_star_dtheta  # [-]
+        dsolute_holdup_dtheta = (
+            -(1 - sinf) * np.diff(flux_conc, axis=0)
+            / self.delta_z[:, np.newaxis]
+        )  # [-]
+        dconc_dtheta = (
+            dsolute_holdup_dtheta - conc_star * dsat_dtheta[:, np.newaxis]
+        ) / saturation[:, np.newaxis]  # [-]
 
-        return dstates_dtheta.T.ravel()
+        return np.column_stack((dsat_star_dtheta, dconc_dtheta)).ravel()
 
     def initialize_states(self, span_rtol: float = 1e-9) -> np.ndarray:
         """Remap cake fields and construct the reduced deliquoring state.
@@ -739,13 +788,13 @@ class DeliquoringStep:
         ``liquid_removed`` [kg] and ``liquid_removed_mass_frac`` [-] measure
         species inventory decreases from the REMAPPED initial field to the
         final field. ``result.mass_liquid_removed`` [kg] starts at zero.
-        Only roundoff-sized negative removals are floored at zero. The
-        existing nonconservative transport defect in
-        https://github.com/PharmaPy-org/PharmaPy/issues/29 can increase discrete
-        species inventories. Such runs warn and set removal_diagnostics_valid
-        to False; liquid_removed_species and total/history retain signed
-        decreases, while liquid_removed_mass_frac becomes NaN. This exposes
-        invalid removal accounting without claiming that transport is repaired.
+        Only roundoff-sized negative removals are floored at zero. If a solved
+        trajectory increases any discrete species inventory beyond roundoff,
+        the run warns and sets ``removal_diagnostics_valid`` to false;
+        ``liquid_removed_species`` and total/history retain signed decreases,
+        while ``liquid_removed_mass_frac`` becomes NaN. This keeps invalid
+        removal accounting visible instead of clipping it into a plausible
+        physical result.
 
         Linear remapping is not conservative. The signed difference between
         attached inlet species masses and remapped initial species masses is
@@ -802,9 +851,8 @@ class DeliquoringStep:
         self.removal_diagnostics_valid = bool(np.all(removed_by_time >= -removal_roundoff))
         if not self.removal_diagnostics_valid:
             warnings.warn(
-                "Deliquoring removal diagnostics are invalid: nonconservative "
-                "species transport increased an inventory (known #29, "
-                "https://github.com/PharmaPy-org/PharmaPy/issues/29). "
+                "Deliquoring removal diagnostics are invalid: a species "
+                "inventory increased beyond numerical roundoff. "
                 "Signed removals are retained; removal mass fractions are NaN.",
                 RuntimeWarning, stacklevel=2)
         roundoff_only = (removed_by_time < 0) & (removed_by_time >= -removal_roundoff)

@@ -19,6 +19,9 @@ from PharmaPy.SolidLiquidSep import DeliquoringStep, DisplacementWashing, Filter
 from test_separation_balance_fixes import RTOL, separation_phases
 
 
+CVODE_RESULT_RTOL = 1e-6  # [-], Assimulo CVode's default relative solver tolerance
+
+
 @pytest.fixture(params=[False, True], ids=["original_species", "permuted_species"])
 def deliquoring_result(separation_phases, request, tmp_path):
     """Build a three-cell, five-species result with known reduced states.
@@ -586,6 +589,48 @@ def test_deliquoring_rejects_empty_retained_inventory(deliquoring_result):
     assert unit.Outlet.Liquid_1.mass == before
 
 
+@pytest.mark.unit
+def test_deliquoring_inventory_increase_invalidates_removal(deliquoring_result):
+    """Retain signed removals when a trajectory raises a species inventory.
+
+    Conservative transport cannot raise an inventory without inflow, so the
+    invalid-diagnostic branch is reached through prescribed reduced states.
+    The uniform final field drains to S = 0.6 with liquid volume fractions
+    0.4 for the first species and 0.15 for each other species. From the
+    saturated 0.2 reference, the first species' inventory rises from 0.2 to
+    0.24 of its pure-component pore mass, while each other species falls to
+    0.09.
+
+    Parameters
+    ----------
+    deliquoring_result : tuple
+        Unit with sat_inf = 0.2 [-] and reference concentration rho_j/5
+        [kg/m**3]; its prescribed final fields are not used here.
+    """
+    unit, _, _ = deliquoring_result
+    cake = unit.Outlet
+    # Reduced C* = (v - 0.2)/0.8 for volume fraction v: 0.4 -> 1/4 and
+    # 0.15 -> -1/16. Reduced S* = 0.5 maps to S = 0.2 + 0.5*0.8 = 0.6.
+    final_concentration = np.full((3, 5), -1 / 16)  # [-]
+    final_concentration[:, 0] = 1 / 4  # [-]
+    final_states = np.column_stack((np.full(3, .5), final_concentration))  # [-]
+    initial_states = np.column_stack((np.ones(3), np.zeros((3, 5))))  # [-], saturated reference
+    states = np.vstack((initial_states.ravel(), final_states.ravel()))  # [-]
+    with pytest.warns(RuntimeWarning, match='inventory increased beyond numerical roundoff'):
+        unit.retrieve_results(np.array([0., 2.]), states)  # [-]
+    pure_pore_mass = cake.porosity * cake.cake_vol * unit.rho_j  # [kg], pores filled by species j
+    expected_removed = (.2 - .6 * .15) * pure_pore_mass  # [kg]
+    expected_removed[0] = (.2 - .6 * .4) * pure_pore_mass[0]  # [kg], negative: an increase
+    assert not unit.removal_diagnostics_valid
+    assert not unit.result.removal_diagnostics_valid
+    np.testing.assert_allclose(unit.liquid_removed_species, expected_removed, rtol=RTOL)
+    np.testing.assert_allclose(unit.result.liquid_removed_species, expected_removed, rtol=RTOL)
+    assert unit.liquid_removed == pytest.approx(expected_removed.sum(), rel=RTOL)
+    np.testing.assert_allclose(unit.result.mass_liquid_removed,
+                               [0., expected_removed.sum()], rtol=RTOL)
+    assert np.isnan(unit.liquid_removed_mass_frac).all()
+
+
 @pytest.mark.assimulo
 @pytest.mark.integration
 @pytest.mark.parametrize('runtime', [1e-4, 1e-2])
@@ -899,13 +944,28 @@ def test_washing_bulk_concentrations_close_species_inventory(separation_phases, 
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_nonconservative_deliquoring_surfaces_invalid_removal(data_path):
-    """Expose the unresolved species-advection defect in #29 during accounting.
+def test_washing_to_deliquoring_reports_conservative_removal(data_path):
+    """A heterogeneous washing field yields valid deliquoring removal.
 
-    The synthetic 1 Pa wash creates a nonuniform field that makes the existing
-    deliquoring equation increase a species inventory. Once
-    https://github.com/PharmaPy-org/PharmaPy/issues/29 is repaired, replace this
-    provisional invalid-diagnostic expectation with valid, nonnegative removal.
+    Parameters
+    ----------
+    data_path : dict
+        Repository test-data paths; ``flowsheet`` contains the compound
+        database used by the real washing and deliquoring collaborators.
+
+    Notes
+    -----
+    The synthetic 1 Pa wash creates the nonuniform species field that exposed
+    issue #29. ``expected_removed_mass`` pins this solve at Assimulo CVode's
+    default tolerances (BDF, rtol = atol = 1e-6), so ``CVODE_RESULT_RTOL``
+    guards reproducibility of that solver path, not accuracy. Re-solving the
+    same discretized model with CVode at rtol = 1e-10, atol = 1e-12 and with
+    SciPy's Radau integrator at rtol = 1e-11, atol = 1e-13 gives
+    2.59986863e-3 kg from both (agreeing to 4e-12 relative), 2.7e-6 relative
+    above the pin: the default solve's global integration error. If a solver
+    update moves the pin by that order, check the new value against such a
+    tight-tolerance solve before re-pinning. The positivity, composition, and
+    species-sum assertions carry the physical checks.
     """
     pytest.importorskip('assimulo')
     from PharmaPy.Phases import LiquidPhase, SolidPhase
@@ -920,11 +980,22 @@ def test_nonconservative_deliquoring_surfaces_invalid_removal(data_path):
     washer.solve_unit(deltaP=1., wash_ratio=.1, dynamic=False)  # [Pa], [-]
     unit = DeliquoringStep(num_nodes=4, diam_unit=.1)  # [m]
     unit.Phases = washer.Outlet
-    with pytest.warns(RuntimeWarning, match='nonconservative.*#29'):
-        unit.solve_unit(deltaP=5e4, runtime=.03, verbose=False)  # [Pa], [s]
-    assert not unit.removal_diagnostics_valid
-    assert np.any(unit.liquid_removed_species < 0)
-    assert np.isnan(unit.liquid_removed_mass_frac).all()
-    assert unit.liquid_removed == pytest.approx(unit.liquid_removed_species.sum(), rel=1e-12)
-    assert unit.result.mass_liquid_removed[-1] == pytest.approx(unit.liquid_removed, rel=1e-12)
+    unit.solve_unit(deltaP=5e4, runtime=.03, verbose=False)  # [Pa], [s]
+    expected_removed_mass = 2.59986168e-3  # [kg], default-tolerance CVode pin; see Notes
+    assert unit.removal_diagnostics_valid
+    assert np.all(unit.liquid_removed_species > 0)
+    np.testing.assert_allclose(
+        unit.liquid_removed_mass_frac,
+        unit.liquid_removed_species / unit.liquid_removed,
+        rtol=RTOL,
+    )
+    assert unit.liquid_removed_mass_frac.sum() == pytest.approx(1., rel=RTOL)
+    assert unit.liquid_removed == pytest.approx(
+        expected_removed_mass, rel=CVODE_RESULT_RTOL)
+    assert unit.liquid_removed == pytest.approx(
+        unit.liquid_removed_species.sum(), rel=RTOL)
+    assert unit.result.mass_liquid_removed[-1] == pytest.approx(
+        expected_removed_mass, rel=CVODE_RESULT_RTOL)
+    assert unit.result.mass_liquid_removed[-1] == pytest.approx(
+        unit.liquid_removed, rel=RTOL)
     assert unit.result.mass_liquid_removed[0] == 0
