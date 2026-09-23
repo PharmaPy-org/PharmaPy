@@ -412,9 +412,8 @@ class StatisticsClass:
         Warns
         -----
         RuntimeWarning
-            If NumPy reports a singular linear-algebra system during an
-            optimization; the warning includes the sample index and original
-            diagnostic.
+            If ``optimize_fn`` raises ``numpy.linalg.LinAlgError``; the warning
+            includes the sample index and original diagnostic.
 
         Raises
         ------
@@ -425,8 +424,10 @@ class StatisticsClass:
         -----
         The package's Levenberg-Marquardt implementation uses
         ``numpy.linalg.solve`` and ``numpy.linalg.inv``. Their documented
-        ``LinAlgError`` is the only failure treated as a recoverable numerical
-        bootstrap sample; programming and model errors propagate unchanged.
+        Exception type, rather than origin, defines recovery. Any
+        ``LinAlgError`` escaping ``optimize_fn`` is recorded as a NaN row,
+        including one raised inside a user model. Other programming and model
+        errors propagate unchanged.
 
         This recovery is therefore scoped to ``opt_method='LM'``.
         ``ParameterEstimation.optimize_fn`` also accepts ``'IPOPT'``, whose
