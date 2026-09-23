@@ -956,8 +956,16 @@ def test_washing_to_deliquoring_reports_conservative_removal(data_path):
     Notes
     -----
     The synthetic 1 Pa wash creates the nonuniform species field that exposed
-    issue #29. The expected total was independently verified for this public
-    CVode path after integrating the conservative face-flux equation.
+    issue #29. ``expected_removed_mass`` pins this solve at Assimulo CVode's
+    default tolerances (BDF, rtol = atol = 1e-6), so ``CVODE_RESULT_RTOL``
+    guards reproducibility of that solver path, not accuracy. Re-solving the
+    same discretized model with CVode at rtol = 1e-10, atol = 1e-12 and with
+    SciPy's Radau integrator at rtol = 1e-11, atol = 1e-13 gives
+    2.59986863e-3 kg from both (agreeing to 4e-12 relative), 2.7e-6 relative
+    above the pin: the default solve's global integration error. If a solver
+    update moves the pin by that order, check the new value against such a
+    tight-tolerance solve before re-pinning. The positivity, composition, and
+    species-sum assertions carry the physical checks.
     """
     pytest.importorskip('assimulo')
     from PharmaPy.Phases import LiquidPhase, SolidPhase
@@ -973,7 +981,7 @@ def test_washing_to_deliquoring_reports_conservative_removal(data_path):
     unit = DeliquoringStep(num_nodes=4, diam_unit=.1)  # [m]
     unit.Phases = washer.Outlet
     unit.solve_unit(deltaP=5e4, runtime=.03, verbose=False)  # [Pa], [s]
-    expected_removed_mass = 2.59986168e-3  # [kg], independently verified review case
+    expected_removed_mass = 2.59986168e-3  # [kg], default-tolerance CVode pin; see Notes
     assert unit.removal_diagnostics_valid
     assert np.all(unit.liquid_removed_species > 0)
     np.testing.assert_allclose(
