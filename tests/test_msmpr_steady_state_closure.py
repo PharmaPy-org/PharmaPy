@@ -1082,25 +1082,32 @@ def test_steady_solve_initializes_fresh_kinetics(data_path, basis):
 
 
 @pytest.mark.assimulo
-def test_steady_solution_matches_long_time_dynamic_solve(data_path):
+@pytest.mark.parametrize('basis', ['mass_frac', 'mass_conc'])
+def test_steady_solution_matches_long_time_dynamic_solve(data_path, basis):
     """Compare CVode startup with the independent constant-rate steady solution.
 
     Parameters
     ----------
     data_path : dict
         Repository thermodynamic database paths.
+    basis : str
+        Kinetics-input composition basis, mass_frac [kg/kg] or mass_conc
+        [kg/m**3]. The integrated state is mass concentration on both.
 
     Notes
     -----
-    The mass-concentration basis avoids the deferred #47 dynamic state-basis
-    defect. This synthetic case validates the model's own solute bookkeeping,
-    not stream mass conservation. Constant phase densities and rates match
+    The mass_frac case guards the #47 correction on the public dynamic path:
+    an MSMPR composition derivative divided by liquid density again leaves
+    the concentration state short of steady state. This synthetic case
+    validates the model's own solute bookkeeping, not stream mass
+    conservation. Constant phase densities and rates match
     solve_steady_state's documented assumptions.
     """
     pytest.importorskip('assimulo')
-    unit = make_public_unit(data_path, 'mass_conc')
-    _, _, composition, _, _ = unit.solve_steady_state(150.0, TEMPERATURE)
-    # [kg/m**3], positive-growth hint below the 200 kg/m**3 feed
+    unit = make_public_unit(data_path, basis)
+    scale = DENSITY if basis == 'mass_conc' else 1.0  # [kg/m**3] or [-]
+    _, _, composition, _, _ = unit.solve_steady_state(0.15 * scale, TEMPERATURE)
+    # [basis unit], positive-growth hint below the 0.2 [kg/kg] feed fraction
     residence_time = unit.Slurry.vol / unit.Inlet.vol_flow  # [s]
     duration = 50 * residence_time  # [s], exp(-50)*50**3 < 3e-17 population tail
     solver_rtol = 1e-9  # [-], tighter than the independent final-state check
@@ -1115,4 +1122,4 @@ def test_steady_solution_matches_long_time_dynamic_solve(data_path):
     expected_concentration = DENSITY * 2 / 13  # [kg/m**3], .2-w+.03*(3*w-2)=0
     assert unit.result.mass_conc[-1, unit.target_ind] == pytest.approx(
         expected_concentration, rel=comparison_rtol, abs=0)
-    assert composition == pytest.approx(expected_concentration, rel=ROUND_OFF, abs=0)
+    assert composition / scale == pytest.approx(2 / 13, rel=ROUND_OFF, abs=0)
