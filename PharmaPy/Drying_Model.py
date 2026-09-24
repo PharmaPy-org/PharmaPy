@@ -339,8 +339,14 @@ class Drying:
         ``k_perm`` [m**2] * ``k_ra`` [-] * ``dPg_dz`` [Pa/m] /
         ``visc_gas`` [Pa*s] = [m/s].
 
-        The ``x_liq`` supercritical slot reset preserves the existing state
-        layout.
+        The unresolved defect in issue #42 zeroes ``x_liq[:, -2]`` in the
+        volatile-liquid state. This is a provisional model limitation, not a
+        reset of a supercritical component.
+
+        ``gas_velocity`` [m/s] and ``rho_gas`` [kg/m**3] are diagnostics from
+        the most recent ``unit_model`` evaluation. They are not time profiles
+        and, after ``solve_unit``, need not correspond to a reported output
+        time.
         """
 
         num_comp = self.Liquid_1.num_species  # [-]
@@ -363,10 +369,12 @@ class Drying:
         sat_red = np.clip(sat_red, 0, 1)  # [-]
         k_ra = (1 - sat_red)**2 * (1 - sat_red**1.4)  # [-]
         vel_gas = self.k_perm * k_ra * self.dPg_dz / visc_gas  # [m/s]
+        self.gas_velocity = vel_gas  # [m/s]
 
         # ---------- Drying rate term
         mw_avg_gas = self._gas_mixture_molar_mass(y_gas)  # [g/mol]
         rho_gas = self.pres_gas / gas_ct / temp_gas * mw_avg_gas / 1000  # [kg/m**3]
+        self.rho_gas = rho_gas  # [kg/m**3]
         rho_liq_ = self.Liquid_1.rho_liq[self.idx_volatiles]  # [kg/m**3]
         self.rho_liq =  1 / np.sum((x_liq/ rho_liq_), axis=1)  # [kg/m**3]
         # Dry correction
@@ -645,6 +653,167 @@ class Drying:
 
             return [dTg_dt, dTcond_dt]
 
+    def initialize_states(self, deltaP):
+        """Configure model attributes and build the initial state grid.
+
+        Parameters
+        ----------
+        deltaP : float
+            Pressure drop across the drying cake and medium [Pa].
+
+        Returns
+        -------
+        numpy.ndarray
+            Node-wise initial states ordered as ``S`` [-] | ``y_gas`` [-] |
+            ``x_liq`` [-] | ``temp_gas`` [K] | ``temp_cond`` [K].
+
+        Notes
+        -----
+        This solver-independent initialization configures the permeability,
+        pressure, phase, and transfer attributes required by ``unit_model``.
+        ``Solid_1.x_distrib`` is stored in micrometers [um] and converted to
+        meters [m] before the irreducible-saturation correlation.
+        """
+        atmospheric_pressure = 101325  # [Pa], standard-atmosphere definition
+        liquid_indexes = np.arange(0, self.Liquid_1.num_species)  # [-]
+        volatile_indexes = [
+            index for index in liquid_indexes
+            if index not in self.idx_supercrit
+        ]  # [-]
+        self.num_volatiles = len(volatile_indexes)  # [-]
+        self.idx_volatiles = volatile_indexes  # [-]
+
+        num_gas_species = self.num_volatiles + len(self.idx_supercrit)  # [-]
+        self.len_states = [1, num_gas_species, self.num_volatiles, 1, 1]  # [-]
+        num_components = self.Liquid_1.num_species  # [-]
+
+        inlet_state_lengths = [1, num_gas_species]  # [-]
+        inlet_states = dict(zip(self.names_states_in, inlet_state_lengths))
+        self.states_in_dict = {'Inlet': inlet_states}
+
+        initial_gas_fraction = self.Vapor_1.mass_frac  # [-]
+        initial_liquid_fraction = self.CakePhase.Liquid_1.mass_frac  # [-]
+        initial_saturation = self.CakePhase.saturation  # [-]
+        initial_condensed_temp = self.CakePhase.Solid_1.temp  # [K]
+        initial_gas_temp = self.Vapor_1.temp  # [K]
+        cake_grid = self.CakePhase.z_external  # [m]
+
+        if initial_liquid_fraction.ndim == 1:
+            initial_liquid_fraction = initial_liquid_fraction[
+                volatile_indexes]  # [-]
+
+            if len(initial_saturation) != 1:
+                tiled_states = np.hstack((
+                    initial_gas_fraction,
+                    initial_liquid_fraction,
+                    initial_gas_temp,
+                    initial_condensed_temp,
+                ))  # [-] and [K]
+                tiled_states = np.tile(
+                    tiled_states, (self.num_nodes, 1))  # [-] and [K]
+                initial_states = np.column_stack((
+                    initial_saturation, tiled_states))  # [-] and [K]
+            else:
+                stacked_states = np.hstack((
+                    initial_saturation,
+                    initial_gas_fraction,
+                    initial_liquid_fraction,
+                    initial_gas_temp,
+                    initial_condensed_temp,
+                ))  # [-] and [K]
+                initial_states = np.tile(
+                    stacked_states, (self.num_nodes, 1))  # [-] and [K]
+        else:
+            initial_liquid_fraction = initial_liquid_fraction[
+                :, volatile_indexes]  # [-]
+            if initial_gas_fraction.ndim == 1:
+                initial_gas_fraction = np.tile(
+                    initial_gas_fraction, (self.num_nodes, 1))  # [-]
+            if isinstance(initial_condensed_temp, float):
+                initial_condensed_temp = (
+                    np.ones_like(initial_saturation) * initial_condensed_temp
+                )  # [K]
+            if isinstance(initial_gas_temp, float):
+                initial_gas_temp = (
+                    np.ones_like(initial_saturation) * initial_gas_temp
+                )  # [K]
+            stacked_states = np.column_stack((
+                initial_saturation,
+                initial_gas_fraction,
+                initial_liquid_fraction,
+                initial_gas_temp,
+                initial_condensed_temp,
+            ))  # [-] and [K]
+            initial_states = CubicSpline(
+                cake_grid, stacked_states)(self.z_centers)  # [-] and [K]
+
+        alpha = self.CakePhase.alpha  # [m/kg]
+        solid_density = self.Solid_1.getDensity()  # [kg/m**3]
+        porosity = self.CakePhase.porosity  # [-]
+
+        liquid_fraction = initial_states[
+            :, num_components + 1:
+            num_components + 1 + self.num_volatiles
+        ]  # [-]
+        full_liquid_fraction = np.zeros(
+            (self.num_nodes, num_components))  # [-]
+        full_liquid_fraction[:, self.idx_volatiles] = liquid_fraction
+        liquid_density = self.Liquid_1.getDensity(
+            temp=initial_condensed_temp,
+            mass_frac=full_liquid_fraction,
+            basis='mass',
+        )  # [kg/m**3]
+        surface_tension = self.Liquid_1.getSurfTension(
+            temp=initial_condensed_temp,
+            mass_frac=full_liquid_fraction,
+        )  # [N/m]
+
+        self.k_perm = (
+            1 / alpha / solid_density / (1 - porosity))  # [m**2]
+        self.rho_sol = solid_density  # [kg/m**3]
+        self.porosity = porosity  # [-]
+        self.cp_sol = self.Solid_1.getCp()  # [J/kg/K]
+
+        moments = self.Solid_1.getMoments(
+            mom_num=[0, 1, 2, 3, 4])  # [#, #*m, #*m**2, #*m**3, #*m**4]
+        self.a_V = (
+            moments[2] * (1 - porosity) / moments[3])  # [m**2/m**3]
+
+        medium_pressure_drop = (
+            deltaP * self.resist_medium
+            / (
+                alpha * solid_density * (1 - porosity) * self.cake_height
+                + self.resist_medium
+            )
+        )  # [Pa]
+        cake_pressure_drop = deltaP - medium_pressure_drop  # [Pa]
+        self.deltaP = cake_pressure_drop  # [Pa]
+        top_pressure = atmospheric_pressure + cake_pressure_drop  # [Pa]
+
+        self.dPg_dz = cake_pressure_drop / self.cake_height  # [Pa/m]
+        self.pres_gas = np.linspace(
+            top_pressure,
+            top_pressure - cake_pressure_drop,
+            num=self.num_nodes,
+        )  # [Pa]
+
+        size_grid_m = self.Solid_1.x_distrib * 1e-6  # [m]
+        distribution = self.Solid_1.distrib  # [#/m**3/um]
+        zeroth_moment = self.Solid_1.moments[0]  # [#/m**3]
+        self.s_inf = get_sat_inf(
+            size_grid_m,
+            distribution,
+            cake_pressure_drop,
+            porosity,
+            self.cake_height,
+            zeroth_moment,
+            (np.mean(surface_tension), liquid_density[0]),
+        )  # [-]
+        _validate_irreducible_saturation(
+            self.s_inf, cake_pressure_drop, size_grid_m, "Drying")
+
+        return initial_states
+
     def solve_unit(self, deltaP, runtime=None, time_grid=None, any_event=True,
                    verbose=True, sundials_opts=None):
         """Initialize and integrate the drying model.
@@ -689,108 +858,7 @@ class Drying:
         state before material and energy balances are evaluated.
         """
         
-        p_atm=101325  # [Pa]
-        # ---------- Initialization
-        # Volatile components
-        idx_liquid = np.arange(0, self.Liquid_1.num_species)
-        idx_volatiles = [i for i in idx_liquid if i not in self.idx_supercrit]
-        self.num_volatiles = len(idx_volatiles)
-        self.idx_volatiles = idx_volatiles
-
-        num_y_gas = self.num_volatiles + len(self.idx_supercrit)
-        num_x_liq = self.num_volatiles
-        self.len_states = [1, num_y_gas, num_x_liq, 1, 1]
-        num_comp = self.Liquid_1.num_species
-
-        len_states_in = [1, num_y_gas]
-        states_in_dict = dict(zip(self.names_states_in, len_states_in))
-        self.states_in_dict = {'Inlet': states_in_dict}
-
-        y_gas_init = self.Vapor_1.mass_frac  # [-]
-        x_liq_init = self.CakePhase.Liquid_1.mass_frac  # [-]
-
-        satur_init = self.CakePhase.saturation  # [-]
-
-        temp_cond_init = self.CakePhase.Solid_1.temp  # [K]
-        temp_gas_init = self.Vapor_1.temp  # [K]
-        z_cake = self.CakePhase.z_external  # [m]
-
-        if x_liq_init.ndim == 1:
-            x_liq_init = x_liq_init[idx_volatiles]
-            
-            if len(satur_init) != 1:
-                states_tuple = (y_gas_init, x_liq_init, temp_gas_init, temp_cond_init)
-
-                states_stacked = np.hstack(states_tuple)
-                state_tiled = np.tile(states_stacked, (self.num_nodes, 1))
-                states_prev = np.column_stack((satur_init, state_tiled))
-                
-            else:
-
-                states_tuple = (satur_init, y_gas_init, x_liq_init,
-                                temp_gas_init, temp_cond_init)
-    
-                states_stacked = np.hstack(states_tuple)
-                states_prev = np.tile(states_stacked, (self.num_nodes, 1))
-
-        else:
-            x_liq_init = x_liq_init[:, idx_volatiles]
-            if y_gas_init.ndim == 1:
-                y_gas_init = np.tile(y_gas_init, (self.num_nodes, 1))
-            if isinstance(temp_cond_init, float):
-                temp_cond_init = np.ones_like(satur_init) * temp_cond_init
-            if isinstance(temp_gas_init, float):
-                temp_gas_init = np.ones_like(satur_init) * temp_gas_init
-            states_stacked = np.column_stack(
-                (satur_init, y_gas_init, x_liq_init, temp_gas_init,
-                 temp_cond_init))
-
-            interp_obj = CubicSpline(z_cake, states_stacked)
-            states_prev = interp_obj(self.z_centers)
-
-        alpha = self.CakePhase.alpha  # [m/kg]
-        rho_sol = self.Solid_1.getDensity()  # [kg/m**3]
-        porosity = self.CakePhase.porosity  # [-]
-
-        xliq = states_prev[:, num_comp + 1: num_comp + 1 + self.num_volatiles]
-
-        xliq_init = np.zeros((self.num_nodes, num_comp))
-        xliq_init[:, self.idx_volatiles] = xliq
-        rho_liq = self.Liquid_1.getDensity(temp=temp_cond_init,
-                                           mass_frac=xliq_init, basis='mass')  # [kg/m**3]
-        surf_tens = self.Liquid_1.getSurfTension(temp=temp_cond_init,
-                                                 mass_frac=xliq_init)  # [N/m]
-
-        self.k_perm = 1 / alpha / rho_sol / (1 - porosity)  # [m**2]
-        self.rho_sol = rho_sol
-        self.porosity = porosity
-        self.cp_sol = self.Solid_1.getCp()  # [J/kg/K]
-
-        moments = self.Solid_1.getMoments(mom_num=[0, 1, 2, 3, 4])
-
-        self.a_V = moments[2] * (1 - porosity) / moments[3]  # [m**2/m**3]
-
-        deltaP_media = deltaP*self.resist_medium / \
-            (alpha*rho_sol*(1 - porosity)*self.cake_height +
-              self.resist_medium)  # [Pa]
-        deltaP -= deltaP_media  # [Pa]
-        self.deltaP = deltaP  # [Pa]
-        p_top = p_atm + deltaP  # [Pa]
-
-        self.dPg_dz = deltaP / self.cake_height  # [Pa/m]
-        self.pres_gas = np.linspace(p_top, p_top - deltaP,
-                                    num=self.num_nodes)  # [Pa]
-
-        x_csd = self.Solid_1.x_distrib * 1e-6  # [m]
-        csd = self.Solid_1.distrib  # [#/m**3/um]
-        mom_zero = self.Solid_1.moments[0]  # [#/m**3]
-
-        self.s_inf = get_sat_inf(x_csd, csd, deltaP, porosity,
-                                 self.cake_height, mom_zero,
-                                 (np.mean(surf_tens), rho_liq[0]))  # [-]
-        _validate_irreducible_saturation(
-            self.s_inf, deltaP, x_csd, "Drying"
-        )
+        states_prev = self.initialize_states(deltaP)
 
         # ---------- Solve model
         model = self.unit_model
