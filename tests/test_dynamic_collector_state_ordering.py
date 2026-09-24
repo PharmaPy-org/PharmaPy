@@ -76,8 +76,8 @@ def test_liquid_mixer_result_labels_match_state_vector(data_path):
     collector = DynamicCollector()
     collector.Inlet = inlet
 
-    # #284: LiquidPhase changes warning filters while emitting its zero-amount
-    # diagnostic, so a filter alone cannot enforce this initialization contract.
+    # Record warnings instead of erroring on RuntimeWarning alone: the
+    # assertion then rejects a warning of any category and lists its message.
     with warnings.catch_warnings(record=True) as initialization_warnings:
         time, _ = collector.solve_unit(runtime=RUNTIME, verbose=False)
     assert not initialization_warnings, [
