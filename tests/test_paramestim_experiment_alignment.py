@@ -291,6 +291,13 @@ def test_empty_experiments_are_rejected():
         ParameterEstimation(accumulating_concentration, [2.], {}, {})
 
 
+def test_missing_observations_are_rejected():
+    times = np.array([0., 1., 3.])  # [s]
+    with pytest.raises(TypeError, match='y_data is required'):
+        ParameterEstimation(accumulating_concentration, [2.], times,
+                            args_fun=(1.,))
+
+
 def configured_concentration(parameters, time_s, batch):
     """Evaluate a rate with a nested callback configuration.
 

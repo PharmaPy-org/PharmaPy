@@ -360,7 +360,7 @@ class ParameterEstimation:
             can be specified. Units follow the model independent variable
             (typically time [s]). Dictionary insertion order declares experiment
             order; other experiment mappings are aligned by those keys.
-        y_data : numpy array, list of arrays or dict, optional
+        y_data : numpy array, list of arrays or dict
             Experimental values for the dependent variable(s) y, in the model's
             state units and physical bases.
             Array y is of dimension len(x_i) x N_meas, where N_meas is less
@@ -369,7 +369,7 @@ class ParameterEstimation:
             dictionary, its keys must match those of ``x_data``. A dictionary
             with more than one experiment requires named ``x_data``; with
             unnamed ``x_data``, pass a list in ``x_data`` order instead.
-            The default is None.
+            Observations are required; ``None`` raises ``TypeError``.
         measured_ind : list of int, optional
             Indexes of the states returned by func that are measured and
             passed in each dataset contained in 'y_data'.
@@ -437,9 +437,9 @@ class ParameterEstimation:
             experiments are supplied, or an observation/callback mapping
             has multiple experiment keys while ``x_data`` is unnamed.
         TypeError
-            If positional arguments are not iterable or keyword arguments are
-            not a dictionary. Positional errors identify experiment keys or,
-            for unnamed experiments, zero-based positions.
+            If ``y_data`` is None, positional arguments are not iterable, or
+            keyword arguments are not a dictionary. Positional errors identify
+            experiment keys or, for unnamed experiments, zero-based positions.
 
         Notes
         -----
@@ -481,6 +481,11 @@ class ParameterEstimation:
 
         if isinstance(x_data, dict):
             self.experim_names = list(x_data.keys())
+
+        if y_data is None:
+            raise TypeError(
+                "y_data is required; pass observations for each experiment "
+                "in x_data")
 
         if isinstance(y_data, dict) and self.experim_names is not None:
             y_data = _ordered_experiment_values(

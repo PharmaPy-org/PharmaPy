@@ -19,10 +19,20 @@ from PharmaPy.SimExec import SimulationExec
 from PharmaPy.Utilities import CoolingWater
 
 
-@pytest.mark.parametrize('single', [False, True])
-def test_named_experiments_reach_the_matching_reactor_initial_state(single):
+def _batch_simulation(rate):
+    """Build a simulation around an isothermal first-order batch reactor.
+
+    Parameters
+    ----------
+    rate : float
+        First-order A -> B rate constant [1/s].
+
+    Returns
+    -------
+    SimulationExec
+        Flowsheet whose only unit, ``R01``, is the reactor.
+    """
     path = str(Path(__file__).parent / 'integration/data/pfr_test_pure_comp.json')
-    rate = 0.2  # [1/s], synthetic first-order rate, reaction time scale 5 s
     reactor = BatchReactor(isothermal=True, mask_params=[True, False],
                            return_sens=False)
     reactor.Kinetics = RxnKinetics(
@@ -35,6 +45,13 @@ def test_named_experiments_reach_the_matching_reactor_initial_state(single):
     # [K], [kg/s], satisfies the collaborator contract; temperature is fixed.
     simulation = SimulationExec(path, {'R01': []})
     simulation.R01 = reactor
+    return simulation
+
+
+@pytest.mark.parametrize('single', [False, True])
+def test_named_experiments_reach_the_matching_reactor_initial_state(single):
+    rate = 0.2  # [1/s], synthetic first-order rate, reaction time scale 5 s
+    simulation = _batch_simulation(rate)
     times = {'dilute': np.array([0., 1., 3.]),
              'concentrated': np.array([0., 2., 4., 6.])}  # [s]
     initial = {'dilute': .1, 'concentrated': .3}  # [mol/L], asymmetric charges
@@ -60,3 +77,23 @@ def test_named_experiments_reach_the_matching_reactor_initial_state(single):
         np.testing.assert_allclose(simulation.ParamInst.y_runs[index],
                                    observations[name], rtol=0., atol=2e-7)
     assert list(observations) == list(reversed(times))
+
+
+@pytest.mark.parametrize('count', [2, 3])
+def test_unnamed_experiments_are_rejected_before_arguments_are_misrouted(count):
+    rate = 0.2  # [1/s], synthetic first-order rate
+    simulation = _batch_simulation(rate)
+    times = [np.array([0., 1., 3.]), np.array([0., 2., 4., 6.]),
+             np.array([0., 1., 2.])][:count]  # [s]
+    observations = [np.column_stack((.1 * np.exp(-rate * time),
+                                     .3 - .1 * np.exp(-rate * time)))
+                    for time in times]  # [mol/L], A then B
+    # Three experiments once matched the three wrapper fields by count.
+    with pytest.raises(ValueError, match=(
+            rf'x_data holds {count} unnamed experiments; .*phase_modifiers'
+            r'.*pass x_data as a dictionary keyed by experiment name')):
+        simulation.SetParamEstimation(
+            times, observations, measured_ind=[0, 1],
+            optimize_flags=[True, False],
+            wrapper_kwargs={'sundials_opts': {'rtol': 1e-9, 'atol': 1e-11}})
+    assert not hasattr(simulation, 'ParamInst')

@@ -71,4 +71,10 @@ Compatibility and ordering
 
 ``SimulationExec.SetParamEstimation`` uses the same constructor. Its named
 phase/control modifiers therefore stay associated with the matching observations,
-including when only one named experiment is supplied.
+including when only one named experiment is supplied. Because modifiers and
+``wrapper_kwargs`` are routed to experiments by name, ``SetParamEstimation``
+requires named experiments whenever there is more than one: a list or tuple of
+several unnamed experiments in ``x_data`` raises ``ValueError`` before the
+estimator is built, where older versions misrouted those arguments by position.
+Pass ``x_data`` as a dictionary keyed by experiment name. A single unnamed array
+remains supported.
