@@ -10,110 +10,33 @@ transfer rate.
 Fixture values use the crystallizer solver's units: raw moments in
 [um**n/m**3], moments on a metre basis in [m**n/m**3], mass concentrations in
 [kg/m**3], densities in [kg/m**3], growth rate in [um/s], volumetric flow in
-[m**3/s], and slurry volume in [m**3]. The two densities are deliberately
-unequal (1000 vs 1500 [kg/m**3]) so that substituting one for the other is
-visible in the asserted values, and the two species carry different
-concentrations so a component mix-up cannot pass.
+[m**3/s], and slurry volume in [m**3]. The real database densities at 300 K
+are deliberately unequal (about 996 for the liquid and 1230 [kg/m**3] for the
+solid), so substituting one for the other is visible in the asserted values.
+The target and second species carry different
+concentrations, while two database padding species remain at zero, so a
+component mix-up cannot pass.
 """
 
 import numpy as np
 import pytest
 
 from PharmaPy.Crystallizers import MSMPR
+from PharmaPy.Kinetics import CrystKinetics
+from PharmaPy.MixedPhases import Slurry
+from PharmaPy.Phases import LiquidPhase, SolidPhase
 
 
 pytestmark = pytest.mark.unit
 
 
-class _Liquid:
-    """Liquid phase holding the crystallizing solute."""
-
-    def getDensity(self, temp=None):
-        """Return liquid density.
-
-        Parameters
-        ----------
-        temp : float or None, optional
-            Liquid temperature [K]. The constant-density fixture ignores it.
-
-        Returns
-        -------
-        float
-            Liquid density [kg/m**3].
-        """
-        liquid_density = 1000.0  # [kg/m**3]
-        return liquid_density
-
-
-class _Solid:
-    """Crystal phase; ``kv`` is the volumetric shape factor."""
-
-    kv = 0.5  # volumetric shape factor [-]
-
-    def getDensity(self, temp=None):
-        """Return crystal density.
-
-        Parameters
-        ----------
-        temp : float or None, optional
-            Crystal temperature [K]. The constant-density fixture ignores it.
-
-        Returns
-        -------
-        float
-            Crystal density [kg/m**3].
-        """
-        crystal_density = 1500.0  # [kg/m**3]
-        return crystal_density
-
-
-class _Kinetics:
-    """Constant growth kinetics, so the transfer rate is hand-computable."""
-
-    def get_kinetics(self, conc, temp, kv, moms):
-        """Return constant crystallization rates.
-
-        Parameters
-        ----------
-        conc : numpy.ndarray
-            Liquid-phase mass concentrations [kg/m**3].
-        temp : float
-            Liquid temperature [K].
-        kv : float
-            Crystal volumetric shape factor [-].
-        moms : numpy.ndarray
-            Crystal moments [um**n/m**3].
-
-        Returns
-        -------
-        tuple of float
-            Nucleation rate [#/m**3/s], growth rate [um/s], and dissolution
-            rate [um/s], respectively.
-        """
-        nucleation_rate = 0.0  # [#/m**3/s]
-        growth_rate = 20.0  # [um/s]
-        dissolution_rate = 0.0  # [um/s]
-        return nucleation_rate, growth_rate, dissolution_rate
-
-    def alpha_fn(self, conc):
-        """Return the growth-rate impurity factor.
-
-        Parameters
-        ----------
-        conc : numpy.ndarray
-            Liquid-phase mass concentrations [kg/m**3].
-
-        Returns
-        -------
-        float
-            Growth-rate impurity factor [-].
-        """
-        impurity_factor = 1.0  # [-]
-        return impurity_factor
-
-
-def _build_msmpr():
+def _build_msmpr(data_path):
     """Build an ``MSMPR`` populated with the regression fixture.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository test-data paths.
 
     Returns
     -------
@@ -123,20 +46,44 @@ def _build_msmpr():
 
     Notes
     -----
-    Construction bypasses ``__init__`` to isolate the balance from solver
-    setup while retaining the real public model method and collaborators.
+    The public constructors configure real phase, slurry, and kinetics
+    collaborators without invoking the optional solver backend.
     """
-    crystallizer = MSMPR.__new__(MSMPR)
-    crystallizer.num_distr = 4
-    crystallizer.num_species = 2
-    crystallizer.target_ind = 0
-    crystallizer.kron_jtg = np.array([1.0, 0.0])  # [-], target-component selector
-    crystallizer.basis = "mass_conc"
-    crystallizer.method = "moments"
-    crystallizer.rad = 1.0  # nuclei radius [um]
-    crystallizer.Liquid_1 = _Liquid()
-    crystallizer.Solid_1 = _Solid()
-    crystallizer._Kinetics = _Kinetics()
+    thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
+    liquid = LiquidPhase(
+        thermo_path,
+        temp=TEMP,
+        vol=SLURRY_VOL,  # [m**3]
+        mass_frac=np.array([0.4, 0.1, 0.1, 0.4]),  # [-]
+        verbose=False,
+    )
+    solid = SolidPhase(
+        thermo_path,
+        temp=TEMP,
+        moments=TANK_MOMENTS,
+        mass_frac=np.array([1.0, 0.0, 0.0, 0.0]),  # [-]
+        kv=0.5,  # [-]
+    )
+    slurry = Slurry(vol=SLURRY_VOL, moments=TANK_MOMENTS)
+    slurry.Phases = [liquid, solid]
+
+    crystallizer = MSMPR(
+        "A",
+        method="moments",
+        vol_tank=SLURRY_VOL,
+        adiabatic=True,
+        rad_zero=1.0,  # [um]
+    )
+    crystallizer.Phases = slurry
+    crystallizer.num_species = liquid.num_species  # [-]
+
+    kinetics = CrystKinetics(
+        coeff_solub=[0.0],  # [kg/m**3]
+        growth=[20.0, 0.0, 0.0],  # [um/s], [J/mol], [-]
+        sup_sat_type="absolute",
+    )
+    kinetics.target_idx = crystallizer.target_ind
+    crystallizer.Kinetics = kinetics
 
     return crystallizer
 
@@ -150,24 +97,29 @@ TANK_MOMENTS = TANK_MOMENTS_RAW * (1e-6) ** np.arange(4)  # [m**n/m**3]
 # below: 1 - kv * mu_3_in = 1 - 0.5 * 0.1 = 0.95 [-].
 INLET_MOMENTS = np.array([2.0e9, 1.0e5, 0.5, 0.1])
 
-TANK_CONC = np.array([200.0, 50.0])  # [kg/m**3], liquid-phase concentrations
-INLET_CONC = np.array([250.0, 60.0])  # [kg/m**3]
+TANK_CONC = np.array([
+    200.0, 50.0, 0.0, 0.0
+])  # [kg/m**3], liquid-phase concentrations
+INLET_CONC = np.array([250.0, 60.0, 0.0, 0.0])  # [kg/m**3]
 INLET_PHI = np.array([0.95, 0.05])  # [-], inlet [liquid, solid] volume fractions
 
 SLURRY_VOL = 1.0e-3  # [m**3]
 INLET_VOL_FLOW = 1.0e-5  # [m**3/s], giving an inverse residence time of 0.01 [1/s]
 TEMP = 300.0  # [K]
 
-# [[liquid, solid] tank densities, [liquid, solid] inlet densities] [kg/m**3].
-DENSITIES = [np.array([1000.0, 1500.0]), np.array([990.0, 1500.0])]
-
 RATE_RTOL = 1.0e-12  # [-], deterministic algebra roundoff allowance
 RATE_ATOL = 0.0  # [kg/m**3/s], no absolute slack for the nonzero rates
 
 
-def test_msmpr_transfer_term_uses_liquid_density():
+def test_msmpr_transfer_term_uses_liquid_density(data_path):
     """Use liquid density only in the MSMPR volume-shrinkage correction."""
-    crystallizer = _build_msmpr()
+    crystallizer = _build_msmpr(data_path)
+    liquid_density = crystallizer.Liquid_1.getDensity(temp=TEMP)  # [kg/m**3]
+    solid_density = crystallizer.Solid_1.getDensity(temp=TEMP)  # [kg/m**3]
+    densities = [
+        np.array([liquid_density, solid_density]),
+        np.array([liquid_density, solid_density]),
+    ]  # [kg/m**3]
 
     # Mixed units by field: volumetric flow [m**3/s], inlet moments
     # [m**n/m**3], and liquid-phase mass concentrations [kg/m**3].
@@ -182,7 +134,7 @@ def test_msmpr_transfer_term_uses_liquid_density():
         time=0.0,
         params=None,
         u_inputs=u_inputs,
-        rhos=DENSITIES,
+        rhos=densities,
         mu_n=TANK_MOMENTS,
         distrib=TANK_MOMENTS_RAW,
         mass_conc=TANK_CONC,
@@ -194,8 +146,12 @@ def test_msmpr_transfer_term_uses_liquid_density():
 
     # Crystal mass transfer keeps the *solid* density:
     # transf = rho_sol * kv * 3 * growth * mu_2_raw * 1e-18
-    #        = 1500 * 0.5 * 3 * 20 * 2.0e12 * 1e-18 = 0.09 [kg/m**3/s].
-    expected_transf = 0.09  # [kg/m**3/s]
+    # All factors below come from the real solid phase and stated kinetic
+    # fixture, so the result follows the database density at 300 K.
+    expected_transf = (
+        solid_density * crystallizer.Solid_1.kv * 3.0
+        * 20.0 * TANK_MOMENTS_RAW[2] * 1.0e-18
+    )  # [kg/m**3/s]
     np.testing.assert_allclose(
         transf,
         expected_transf,
@@ -206,14 +162,20 @@ def test_msmpr_transfer_term_uses_liquid_density():
     # Hand-computed liquid-phase balance, all terms in [kg/m**3/s]:
     #   flow_term    = 0.01 * (250*0.95 - 200*0.9,  60*0.95 - 50*0.9)
     #                = (0.575, 0.12)
-    #   transf_term  = 0.09 * (1 - 200/1000, 0 - 50/1000) = (0.072, -0.0045)
+    #   transf_term  = expected_transf
+    #                  * (1 - 200/liquid_density,
+    #                     0 - 50/liquid_density)
     #   dcomp_dt     = (flow_term - transf_term) / 0.9
-    #                = (0.503, 0.1245) / 0.9
-    # Using the solid density (1500) in transf_term instead would give
-    # (0.5522222..., 0.1366666...), about 1.2 % low on both components.
-    expected_dcomp_dt = np.array(
-        [0.55888888888888888, 0.13833333333333333]
+    # Using ``solid_density`` in the concentration correction instead would
+    # change both component rates; the assertion below pins the liquid basis.
+    flow_term = (
+        INLET_VOL_FLOW / SLURRY_VOL
+        * (INLET_CONC * INLET_PHI[0] - TANK_CONC * 0.9)
     )  # [kg/m**3/s]
+    transfer_term = expected_transf * (
+        crystallizer.kron_jtg - TANK_CONC / liquid_density
+    )  # [kg/m**3/s]
+    expected_dcomp_dt = (flow_term - transfer_term) / 0.9  # [kg/m**3/s]
     np.testing.assert_allclose(
         dmaterial_dt[crystallizer.num_distr:],
         expected_dcomp_dt,
