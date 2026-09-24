@@ -18,6 +18,21 @@ Vapor concentrations use the same ideal-gas basis: :code:`mole_conc = mole_frac 
 
 UNIQUAC data without :code:`qip` use :code:`qi` locally and emit a warning once per property object. This fallback assumes the ordinary surface parameter also describes the modified residual term; systems requiring special parameters, including relevant water/alcohol models, should provide :code:`qip` explicitly. The fallback does not create a :code:`qip` attribute, so callers can still detect missing data.
 
+Crystallizer initialization
+==========================
+
+Call ``unit.initialize_states(runtime=duration)`` or pass an absolute
+``time_grid`` to prepare a crystallizer without integrating it. The method
+returns the initial solver vector and absolute endpoint [s]; the final grid
+entry takes precedence over a duration. It applies ``reset_states``, refreshes
+state dimensions, and prepares vessel geometry exactly as ``solve_unit`` does.
+An unset working volume is inferred from the charge or semibatch feed.
+
+The vector follows ``name_states`` order. Crystal moments use micrometer
+lengths internally; FVM populations include the configured numerical scale.
+MSMPR crystal populations are per slurry volume. Batch and semibatch volume
+states are liquid volume [m**3]. Reported ``result.mu_n`` retains its SI basis.
+
 State events
 ============
 

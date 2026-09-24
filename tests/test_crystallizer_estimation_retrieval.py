@@ -1,7 +1,7 @@
 """#222 estimation, sensitivity, and retrieval parameter ownership regressions.
 
-Real short Assimulo solves exercise the wrapper and retrieval. Core probes stop
-only at solver construction when checking the wrapper's initial charge.
+Real short Assimulo solves exercise the wrapper and retrieval. Initial-charge
+checks use the first native solver result row.
 """
 
 import numpy as np
@@ -11,7 +11,7 @@ from PharmaPy.Crystallizers import BatchCryst, MSMPR
 from PharmaPy.Kinetics import CrystKinetics
 from test_crystallizer_heat_duty import make_unit as make_heat_unit
 from test_crystallizer_parameter_evaluations import (
-    make_unit, DISTRIBUTION, GROWTH_COLUMN, InitializationCaptured,
+    make_unit, DISTRIBUTION, GROWTH_COLUMN,
     LIQUID_VOLUME, RTOL, SATURATION)
 
 FEED_FLOW = 1e-5  # [m**3/s], finite MSMPR feed with valid slurry-stream inventory
@@ -116,54 +116,54 @@ def test_post_estimation_solve_uses_updated_kinetics(data_path, unit_type):
     np.testing.assert_array_equal(unit.Kinetics.concat_params(), updated)
 
 
-@pytest.mark.unit
-def test_estimation_modifiers_survive_solve_reset(data_path, monkeypatch):
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_estimation_modifiers_survive_solve_reset(data_path):
     """Follow wrapper -> real solve_unit -> solver boundary with reset enabled.
 
     Parameters
     ----------
     data_path : dict
         Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only optional solver construction.
     """
+    pytest.importorskip('assimulo')
     unit, _ = make_unit(data_path)
     unit.reset_states = True
     modified_volume = 2 * LIQUID_VOLUME  # [m**3], four-cubic-metre charge
     modified_distribution = 2 * DISTRIBUTION  # [#/um], doubled crystal seed
-    captures = []
 
-    def capture(eval_sens, states_init, params_mergd, jacv_prod):
-        """Record the actual ODE initial state and stop before CVode.
+    returned = unit.paramest_wrapper(
+        unit.Kinetics.concat_params(), TIME_GRID,
+        modify_phase={'Liquid': {'vol': modified_volume},
+                      'Solid': {'distrib': modified_distribution}})
+    initial_state = returned[0]  # [#/um], [kg/m**3], [m**3]
+    assert initial_state[-1] == pytest.approx(modified_volume, rel=RTOL, abs=0)
+    np.testing.assert_allclose(initial_state[:unit.num_distr], modified_distribution,
+                               rtol=RTOL, atol=0)
+    assert unit.reset_states is True  # Restored after the real solve.
 
-        Parameters
-        ----------
-        eval_sens, jacv_prod : bool
-            Solver configuration.
-        states_init : ndarray
-            CSD [#/um], concentrations [kg/m**3], liquid volume [m**3].
-        params_mergd : ndarray
-            Active parameters in native kinetic units.
 
-        Raises
-        ------
-        InitializationCaptured
-            Always, after capturing the state.
-        """
-        captures.append(states_init.copy())
-        raise InitializationCaptured
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_estimation_restores_reset_flag_after_solver_error(data_path):
+    """Keep reset ownership when native CVode rejects an invalid tolerance.
 
-    monkeypatch.setattr(unit, 'set_ode_problem', capture)
-    with pytest.raises(InitializationCaptured):
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    """
+    pytest.importorskip('assimulo')
+    from assimulo.exception import AssimuloException
+
+    unit, _ = make_unit(data_path)
+    unit.reset_states = True
+    invalid_tolerance = -1.0  # [-], negative error tolerances are invalid
+    with pytest.raises(AssimuloException, match='Relative tolerance.*non-negative'):
         unit.paramest_wrapper(
             unit.Kinetics.concat_params(), TIME_GRID,
-            modify_phase={'Liquid': {'vol': modified_volume},
-                          'Solid': {'distrib': modified_distribution}})
-    assert len(captures) == 1
-    assert captures[0][-1] == pytest.approx(modified_volume, rel=RTOL, abs=0)
-    np.testing.assert_allclose(captures[0][:unit.num_distr], modified_distribution,
-                               rtol=RTOL, atol=0)
-    assert unit.reset_states is True  # Restored even on a solver-boundary exception.
+            run_args={'sundials_opts': {'rtol': invalid_tolerance}})
+    assert unit.reset_states is True
 
 
 @pytest.mark.assimulo
