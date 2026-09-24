@@ -106,6 +106,10 @@ class BatchToFlowConnector:
 
 
 class LiquidStream(LiquidPhase):
+    # ``__init__`` delegates to ``LiquidPhase.__init__``, adding one frame
+    # between the zero-amount warning and the constructing caller.
+    _zero_amount_stacklevel = LiquidPhase._zero_amount_stacklevel + 1
+
     def __init__(self, path_thermo=None, temp=298.15, pres=101325,
                  mass_flow=0, vol_flow=0, mole_flow=0,
                  controls=None, args_control=None,
