@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 import numpy as np
 from PharmaPy.ThermoModule import validate_activity_model
@@ -76,6 +76,41 @@ def _solve_flash(model, seed: np.ndarray, vapor_index: int,
     if not np.isfinite(residual_tolerance) or residual_tolerance <= 0:
         raise ValueError("Flash residual_tolerance must be finite and positive")
     solution, info, status, message = fsolve(model, seed, full_output=True)
+    return _validate_flash_solution(model, solution, status, message,
+                                     vapor_index, residual_tolerance)
+
+
+def _validate_flash_solution(model, solution: np.ndarray, status: int,
+                             message: str, vapor_index: int,
+                             residual_tolerance: float) -> np.ndarray:
+    """Validate a nonlinear flash result before publishing phase amounts.
+
+    Parameters
+    ----------
+    model : callable
+        Scaled flash residual with dimensionless material/energy components.
+    solution : numpy.ndarray
+        Candidate fractions [-] and optional temperature [K]. Tolerance-sized
+        phase-bound excursions are clipped in place before residual evaluation.
+    status : int
+        MINPACK convergence status; one indicates convergence.
+    message : str
+        Native solver diagnostic included in convergence errors.
+    vapor_index : int
+        Position of the vapor fraction; the liquid fraction is at index zero.
+    residual_tolerance : float
+        Finite positive scaled residual and phase-bound allowance [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        The validated candidate with phase-bound roundoff clipped.
+
+    Raises
+    ------
+    RuntimeError
+        If convergence, finiteness, phase bounds, or scaled closure fails.
+    """
     if status != 1 or not np.all(np.isfinite(solution)):
         raise RuntimeError(f"Flash failed to converge: {message}")
     fractions = solution[[0, vapor_index]]  # [-]
@@ -1418,7 +1453,8 @@ class Evaporator:
                 self.allow_flow = False
 
     def solve_unit(self, runtime: float, verbose: bool = True,
-                   sundials_opts: Optional[dict] = None) -> tuple:
+                   sundials_opts: Optional[dict] = None,
+                   time_grid: Optional[Sequence[float]] = None) -> tuple:
         """ Solve Evaporator model
 
 
@@ -1437,6 +1473,10 @@ class Evaporator:
             options to be passed to SUNDIALS. For a list of available options,
             visit https://jmodelica.org/assimulo/DAE_IDA.html
             The default is None.
+        time_grid : sequence of float, optional
+            Absolute output times [s], finite and strictly increasing within
+            this segment's start/end bounds. IDA also reports the segment start.
+            Omit to retain adaptive output times. This does not change runtime.
 
         Returns
         -------
@@ -1445,8 +1485,25 @@ class Evaporator:
         states : numpy array
             Packed state profiles; order and units are in ``states_di``.
 
+        Raises
+        ------
+        ValueError
+            If time_grid is empty, not one-dimensional, nonfinite, unordered,
+            or outside the absolute simulation interval.
 
         """
+
+        final_time = self.elapsed_time + runtime  # [s], absolute segment endpoint
+        if time_grid is not None:
+            time_grid = np.asarray(time_grid, dtype=float)  # [s]
+            if (time_grid.ndim != 1 or time_grid.size == 0
+                    or not np.all(np.isfinite(time_grid))
+                    or np.any(np.diff(time_grid) <= 0)
+                    or time_grid[0] < self.elapsed_time
+                    or time_grid[-1] > final_time):
+                raise ValueError(
+                    "time_grid must contain finite, strictly increasing absolute "
+                    "times [s] within the simulation segment")
 
         self.args_inputs = (self, self.num_species)
 
@@ -1499,10 +1556,8 @@ class Evaporator:
                 if name == 'time_limit':
                     solver.report_continuously = True
 
-        runtime += self.elapsed_time
-
         # Solve
-        time, states, sdot = solver.simulate(runtime)
+        time, states, sdot = solver.simulate(final_time, ncp_list=time_grid)
 
         self.retrieve_results(time, states)
 
