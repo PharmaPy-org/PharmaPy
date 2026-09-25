@@ -197,6 +197,59 @@ def test_parameter_estimation_assembles_ipopt_result_info():
     assert covar_rate.shape == (1, 1)
 
 
+def test_assemble_solver_info_scales_by_measurement_standard_deviation():
+    """Variance weights make the assembled residuals dimensionless.
+
+    ``weight_matrix`` holds the concentration measurement variance
+    [(mol/L)**2], so ``sigma_inv`` is the reciprocal standard deviation
+    [L/mol]. The assembled residuals become [-] and the Jacobian takes the
+    reciprocal rate unit [L*s/mol], unlike the identity-weighted [mol/L]
+    residuals and [s] Jacobian checked in the previous test.
+    """
+    time_s = np.array([0.0, 1.0, 2.0])  # [s]
+    rate_mol_l_s = 2.0  # [mol/L/s]
+    residual_offset_mol_l = np.array([0.10, -0.05, 0.20])  # [mol/L]
+    y_obs_mol_l = rate_mol_l_s * time_s + residual_offset_mol_l  # [mol/L]
+    # Synthetic measurement standard deviation; any value other than 1
+    # distinguishes variance weighting from the identity default.
+    concentration_std_mol_l = 0.05  # [mol/L]
+    # [(mol/L)**2]
+    concentration_variance = np.array([[concentration_std_mol_l**2]])
+
+    def linear_model(params, x_data_s):
+        """Return concentration [mol/L] from rate [mol/L/s] and time [s]."""
+        return params[0] * x_data_s
+
+    def linear_jacobian(params, x_data_s):
+        """Return d(concentration)/d(rate) sensitivities with units [s]."""
+        return x_data_s[np.newaxis, :]
+
+    estimator = ParamEstim.ParameterEstimation(
+        linear_model,
+        param_seed=[1.0],  # [mol/L/s]
+        x_data=time_s,
+        y_data=y_obs_mol_l,
+        name_params=["rate_mol_l_s"],
+        jac_fun=linear_jacobian,
+        weight_matrix=concentration_variance,
+    )
+
+    opt_par_mol_l_s = np.array([rate_mol_l_s])  # [mol/L/s]
+    estimator.get_objective(opt_par_mol_l_s)
+    info = estimator.assemble_solver_info(opt_par_mol_l_s)
+
+    # Model minus data, divided by the standard deviation [-].
+    expected_residuals = -residual_offset_mol_l / concentration_std_mol_l
+    # d(residual)/d(rate) is time [s]; dividing by the standard deviation
+    # [mol/L] gives the reciprocal rate unit.
+    expected_jacobian_l_s_mol = (
+        time_s / concentration_std_mol_l
+    )[np.newaxis, :]  # [L*s/mol]
+
+    np.testing.assert_allclose(info["fun"], expected_residuals)
+    np.testing.assert_allclose(info["jac"], expected_jacobian_l_s_mol)
+
+
 def test_pcr_predict_uses_training_centering_for_single_new_spectrum():
     """Predict a single absorbance spectrum [AU] with training statistics."""
     # Calibration predictor rows are spectra [AU] at three wavelengths.

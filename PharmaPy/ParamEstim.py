@@ -865,20 +865,30 @@ class ParameterEstimation:
         Returns
         -------
         dict
-            ``fun`` contains dimensionless weighted residuals [-]. ``jac``
-            contains their Jacobian, with each row carrying the reciprocal
-            unit of its corresponding optimized parameter.
+            ``fun`` contains the ``sigma_inv``-weighted residuals, model
+            output minus data, in the basis of the measured states. Each
+            entry's unit is its measured state's unit divided by the square
+            root of the matching ``weight_matrix`` unit. With the default
+            identity ``weight_matrix`` each entry keeps its measured state's
+            unit, for example [mol/L]; entries are dimensionless [-] only when
+            ``weight_matrix`` holds measurement variances in squared state
+            units. ``jac`` has shape ``(n_params, n_data)``, and row ``p``
+            holds the derivatives of ``fun`` with respect to optimized
+            parameter ``p``, each in its ``fun`` entry's unit divided by that
+            parameter's unit.
 
         Notes
         -----
         Evaluating the objective with ``set_self=False`` preserves the raw
         residuals stored by the final solver callback (issue #78).
         """
+        # [measured-state unit / weight_matrix unit**0.5]; the measured-state
+        # unit with identity weights, [-] with state-variance weights.
         residuals = self.get_objective(
             opt_par, out_array=True, set_self=False
-        )  # [-]
+        )
+        # [residuals unit / optimized-parameter unit] for each row.
         jacobian = self.get_gradient(opt_par, out_array=True)
-        # Rows use reciprocal optimized-parameter units.
         return {'jac': jacobian, 'fun': residuals}
 
     def optimize_fn(self, optim_options: Optional[dict] = None,
