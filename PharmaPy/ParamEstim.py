@@ -605,7 +605,8 @@ class ParameterEstimation:
         self.optimize_flag = True  # [-]
         self.resid_runs = None
         self.params_residuals = None  # parameter units
-        self.weighted_residuals = None  # [-]
+        # [measured-state unit / weight_matrix unit**0.5]
+        self.weighted_residuals = None
         self.y_runs = None
         self.sens = None
         self.sens_runs = None
@@ -675,16 +676,20 @@ class ParameterEstimation:
         set_self : bool, optional
             If True, store the latest model outputs, raw residuals in model
             units as ``residuals`` with shape ``(sum_times, n_measured)`` in
-            data-major order, and ``sigma_inv``-weighted dimensionless
-            residuals [-] flattened state-major as ``weighted_residuals``. The
-            default is True.
+            data-major order, and ``sigma_inv``-weighted residuals flattened
+            state-major as ``weighted_residuals``. The default is True.
 
         Returns
         -------
         objective_or_residuals : float or numpy.ndarray
-            Dimensionless weighted scalar objective [-] when ``out_array`` is
-            False, or dimensionless weighted residual vector [-] when
-            ``out_array`` is True.
+            Weighted scalar objective ``1/2 * r.T @ r`` when ``out_array`` is
+            False, or the weighted residual vector ``r`` when ``out_array`` is
+            True. Each entry of ``r`` has its measured state's unit divided by
+            the square root of the matching ``weight_matrix`` unit: the
+            measured-state unit with the default identity weights, and
+            dimensionless [-] when ``weight_matrix`` holds measurement
+            variances in squared state units. The objective has the squared
+            unit of ``r``.
 
         """
         # Store parameter values
@@ -734,7 +739,9 @@ class ParameterEstimation:
             y_runs.append(y_run)
             resid_runs.append(resid_run)
 
-        weighted_residuals = [np.dot(resid, self.sigma_inv)  # [-]
+        # [measured-state unit / weight_matrix unit**0.5]; [-] only with
+        # state-variance weights.
+        weighted_residuals = [np.dot(resid, self.sigma_inv)
                               for resid in resid_runs]
 
         if len(sens_second) > 0:
@@ -746,8 +753,9 @@ class ParameterEstimation:
 
         residuals = self.optimize_flag * np.concatenate(resid_runs)
 
+        # Weighted-residual units as above, flattened state-major.
         residual_out = np.concatenate([ar.T.ravel()
-                                       for ar in weighted_residuals])  # [-]
+                                       for ar in weighted_residuals])
 
         if set_self:
             self.y_runs = y_runs
@@ -786,9 +794,15 @@ class ParameterEstimation:
         Returns
         -------
         jacobian_or_gradient : numpy.ndarray
-            Weighted residual Jacobian with units reciprocal to each optimized
-            parameter when ``out_array`` is True, or objective gradient with
-            the same reciprocal-parameter units when ``out_array`` is False.
+            Weighted residual Jacobian, shape ``(n_params, n_data)``, when
+            ``out_array`` is True: row ``p`` holds derivatives, each in its
+            weighted residual's unit divided by the unit of optimized
+            parameter ``p``. Objective gradient, shape ``(n_params,)``, when
+            ``out_array`` is False: entry ``p`` has the objective unit divided
+            by the unit of parameter ``p``. Both reduce to reciprocal-parameter
+            units only when ``weight_matrix`` holds measurement variances in
+            squared state units; ``get_objective`` documents the residual
+            units.
 
         """
 
@@ -924,9 +938,12 @@ class ParameterEstimation:
             ``(i, j)`` has the product of parameter i and parameter j units.
         info : dict
             Solver information at the accepted parameters. ``info['fun']`` is
-            the weighted residual vector [-], ordered by experiment then state
-            then sample. ``info['jac']`` has shape
-            ``(num_params, len(info['fun']))`` and reciprocal parameter units.
+            the weighted residual vector, ordered by experiment then state
+            then sample, in the units documented by ``assemble_solver_info``:
+            measured-state units with the default identity weights and [-]
+            with state-variance weights. ``info['jac']`` has shape
+            ``(num_params, len(info['fun']))``; each entry has its ``fun``
+            entry's unit divided by the matching parameter unit.
             With staggered measurement grids, columns include unobserved
             model-grid entries, so their count can exceed ``num_data_total``.
             LM additionally supplies its accepted ``x`` and solver diagnostics.
