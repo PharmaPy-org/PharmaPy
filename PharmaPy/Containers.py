@@ -147,20 +147,55 @@ class ContinuousHoldup:
 
         return dtemp_dt
 
-    def solve_unit(self, runtime, verbose=True):
-        w_init = self.Liquid_1.mass_frac
-        temp_init = self.Liquid_1.temp
+    def solve_unit(self, runtime: float, verbose: bool = True,
+                   sundials_opts: Optional[Mapping[str, object]] = None
+                   ) -> Tuple[np.ndarray, np.ndarray]:
+        """Integrate the fixed-mass holdup from its current liquid state.
 
-        states_init = np.hstack((w_init, temp_init))
+        Parameters
+        ----------
+        runtime : float
+            Duration from the current elapsed time [s].
+        verbose : bool, optional
+            Display CVode progress and statistics.
+        sundials_opts : mapping of str to object, optional
+            CVode options, using the same names and units as CVode. For
+            example, ``rtol`` is dimensionless and ``atol`` follows each
+            state: mass fractions [-] followed by temperature [K].
+            Omitted options retain the backend defaults.
+
+        Returns
+        -------
+        time : numpy.ndarray
+            Absolute integration times [s], shape (num_times,).
+        states : numpy.ndarray
+            Mass fractions [-] followed by temperature [K], shape
+            (num_times, num_species + 1).
+
+        Notes
+        -----
+        The terminal liquid state and elapsed time become the initial
+        conditions for the next call. The caller's option mapping is retained.
+        """
+        w_init = self.Liquid_1.mass_frac  # [-]
+        temp_init = self.Liquid_1.temp  # [K]
+
+        states_init = np.hstack((w_init, temp_init))  # [-], [K]
 
         problem = Explicit_Problem(self.unit_model, states_init,
                                    t0=self.elapsed_time)
         solver = CVode(problem)
 
+        if sundials_opts is not None:
+            for name, value in sundials_opts.items():
+                setattr(solver, name, value)
+                if name == 'time_limit':
+                    solver.report_continuously = True
+
         if not verbose:
             solver.verbosity = 50
 
-        final_time = runtime + self.elapsed_time
+        final_time = runtime + self.elapsed_time  # [s]
         time, states = solver.simulate(final_time)
 
         self.retrieve_results(time, states)

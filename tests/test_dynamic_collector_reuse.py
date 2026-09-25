@@ -1,7 +1,7 @@
 """collector configuration and static moment-feed regressions.
 
-Real phases and crystallizers reach ODE construction in the core lane. Marked
-Assimulo tests integrate frozen populations and constant liquid feeds.
+Core tests exercise feed routing through real streams. Marked Assimulo tests
+verify initial states and integrate frozen populations and constant feeds.
 
 
 Related issue scope:
@@ -15,9 +15,7 @@ from copy import deepcopy
 import numpy as np
 import pytest
 
-import PharmaPy.Containers as containers
 from PharmaPy.Containers import DynamicCollector
-from PharmaPy.Crystallizers import SemibatchCryst
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.MixedPhases import SlurryStream
 from PharmaPy.ProcessControl import DynamicInput
@@ -38,10 +36,6 @@ SOLVER_RTOL = 1e-7  # [-], reused from test_crystallizer_moment_inventory.test_m
 INTEGRATION_OPTIONS = {'rtol': 1e-9, 'atol': 1e-10}
 # Relative [-] and absolute [state units] tolerances from test_crystallizer_moment_inventory.py collector
 # regression: resolve the sqrt(eps) seed volume below the default absolute floor.
-
-
-class ProblemCaptured(Exception):
-    """Stop immediately before optional ODE construction."""
 
 
 def make_collector(data_path, mode, connected=True):
@@ -97,121 +91,55 @@ def make_collector(data_path, mode, connected=True):
     return collector
 
 
-@pytest.fixture
-def capture_problem(monkeypatch):
-    """Capture real initial states and times at the optional solver boundary.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Test-local constructor interception.
-
-    Returns
-    -------
-    list
-        Captured (model, states, time) tuples with model-native state units and
-        time [s]. Crystal states use [um**n] or [#/um], [kg/m**3], [m**3], [K];
-        liquid states use mass fractions [-], mass [kg], and temperature [K].
-    """
-    captured = []
-
-    def liquid_problem(rhs, y0, t0):
-        """Capture the liquid ODE state before integration.
-
-        Parameters
-        ----------
-        rhs : callable
-            Bound collector balance method.
-        y0 : ndarray
-            Mass fractions [-], mass [kg], and temperature [K].
-        t0 : float
-            Initial time [s].
-
-        Raises
-        ------
-        ProblemCaptured
-            Always, after recording the actual solver handoff.
-        """
-        captured.append((rhs.__self__, y0.copy(), t0))
-        raise ProblemCaptured
-
-    def crystal_problem(self, eval_sens, states_init, params, jac_v_prod):
-        """Capture the real crystallizer state before integration.
-
-        Parameters
-        ----------
-        self : SemibatchCryst
-            Real delegated model and seed phases.
-        eval_sens, jac_v_prod : bool
-            Sensitivity and Jacobian options.
-        states_init : ndarray
-            Population [um**n] or [#/um], concentrations [kg/m**3], liquid
-            volume [m**3], and temperature [K].
-        params : ndarray
-            Native kinetic parameters (unused with frozen kinetics).
-
-        Raises
-        ------
-        ProblemCaptured
-            Always, after recording the actual solver handoff.
-        """
-        captured.append((self, states_init.copy(), self.elapsed_time))
-        raise ProblemCaptured
-
-    monkeypatch.setattr(containers, 'Explicit_Problem', liquid_problem)
-    monkeypatch.setattr(SemibatchCryst, 'set_ode_problem', crystal_problem)
-    return captured
-
-
-@pytest.mark.unit
+@pytest.mark.assimulo
+@pytest.mark.integration
 @pytest.mark.parametrize('mode', ['liquid', 'moments', 'fvm'])
-def test_two_consecutive_setups(data_path, capture_problem, mode):
-    """Reach ODE construction twice without consuming either selector.
+def test_two_consecutive_setups(data_path, mode):
+    """Start two native solves without consuming either selector.
 
     Parameters
     ----------
     data_path : dict
         Repository thermodynamic database paths.
-    capture_problem : list
-        Real model, native initial states, and start time [s] at each handoff.
     mode : str
         Liquid, moment, or FVM population representation.
     """
+    pytest.importorskip('assimulo')
     collector = make_collector(data_path, mode)
     selectors = deepcopy((collector.names_states_in, collector.names_states_out))
-    for _ in range(2):
-        with pytest.raises(ProblemCaptured):
-            collector.solve_unit(runtime=DURATION, verbose=False)
-    assert len(capture_problem) == 2
-    first, second = capture_problem
-    np.testing.assert_allclose(second[1], first[1], rtol=RTOL, atol=0)
-    assert first[2] == second[2] == 0
+    starts = []  # [native state units], first solver state from each solve
+    for run in range(2):
+        time, states = collector.solve_unit(
+            runtime=DURATION, verbose=False, sundials_opts=INTEGRATION_OPTIONS)
+        starts.append(states[0].copy())
+        assert time[0] == pytest.approx(run * DURATION, rel=RTOL, abs=0)
+    np.testing.assert_allclose(starts[1], starts[0], rtol=RTOL, atol=0)
     assert (collector.names_states_in, collector.names_states_out) == selectors
     # Retained selectors must still support the public inlet setter.
     collector.Inlet = collector.Inlet
 
 
-@pytest.mark.unit
+@pytest.mark.assimulo
+@pytest.mark.integration
 @pytest.mark.parametrize('mode', ['moments', 'fvm'])
-def test_crystallizer_setup_preserves_caller_kwargs(data_path, capture_problem, mode):
+def test_crystallizer_setup_preserves_caller_kwargs(data_path, mode):
     """Keep target selection and caller-owned constructor options reusable.
 
     Parameters
     ----------
     data_path : dict
         Repository thermodynamic database paths.
-    capture_problem : list
-        Real delegated models and their solver handoffs.
     mode : str
         Moment or FVM population representation.
     """
+    pytest.importorskip('assimulo')
     collector = make_collector(data_path, mode)
     caller_kwargs = collector.kwargs_cryst
     expected = deepcopy(caller_kwargs)
-    with pytest.raises(ProblemCaptured):
-        collector.solve_unit(runtime=DURATION, verbose=False)
+    collector.solve_unit(runtime=DURATION, verbose=False,
+                         sundials_opts=INTEGRATION_OPTIONS)
     assert caller_kwargs == expected
-    model = capture_problem[0][0]
+    model = collector.CrystInst
     assert model.target_ind == expected['target_ind']
     assert model.num_interp_points == collector.num_interp_points
     # SolidPhase replaces absent species with its established epsilon floor.
@@ -248,27 +176,28 @@ def test_static_moment_input_values(data_path, field, time):
     assert not hasattr(collector.Inlet, 'mass_conc')
 
 
-@pytest.mark.unit
-def test_static_moment_seed_reaches_crystallizer(data_path, capture_problem):
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_static_moment_seed_reaches_crystallizer(data_path):
     """Initialize real phases from static feed composition and SI moments.
 
     Parameters
     ----------
     data_path : dict
         Repository thermodynamic database paths.
-    capture_problem : list
-        Real crystallizer phases captured at ODE construction.
     """
+    pytest.importorskip('assimulo')
     collector = make_collector(data_path, 'moments', connected=False)
-    with pytest.raises(ProblemCaptured):
-        collector.solve_unit(runtime=DURATION, verbose=False)
-    model = capture_problem[0][0]
+    collector.solve_unit(runtime=DURATION, verbose=False,
+                         sundials_opts=INTEGRATION_OPTIONS)
     seed_volume = np.sqrt(np.finfo(float).eps)  # [m**3], established collector seed
-    np.testing.assert_allclose(model.Solid_1.moments, MOMENTS * seed_volume,
+    np.testing.assert_allclose(collector.result.mu_n[0], MOMENTS * seed_volume,
                                rtol=RTOL, atol=0)
-    np.testing.assert_allclose(model.Liquid_1.mass_frac, FRACTIONS,
+    initial_concentration = collector.result.mass_conc[0]  # [kg/m**3]
+    np.testing.assert_allclose(initial_concentration,
+                               collector.Inlet.Liquid_1.mass_conc,
                                rtol=RTOL, atol=0)
-    assert model.Liquid_1.vol == pytest.approx(
+    assert collector.result.vol[0] == pytest.approx(
         seed_volume * (1 - KV * NUMBER_DENSITY * SIZE**3), rel=RTOL, abs=0)
 
 

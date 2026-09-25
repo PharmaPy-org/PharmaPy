@@ -29,6 +29,16 @@ Liquid heat capacity
 
 :code:`LiquidPhase.getCp` now defaults to the mass basis [J/kg/K], like its siblings; callers needing [J/mol/K] must pass :code:`basis='mole'`.
 
+Continuous holdup accuracy
+=========================
+
+:code:`ContinuousHoldup.solve_unit` accepts :code:`sundials_opts`, like the
+dynamic collector. Use :code:`{'rtol': relative_error, 'atol': absolute_error}`
+to set CVode accuracy when comparing segmented and uninterrupted runs.
+Relative error is dimensionless; absolute error follows the state order:
+species mass fractions [-], then liquid temperature [K]. Omitted options keep
+CVode's defaults, and the supplied mapping is not modified.
+
 Vapor density
 =============
 
@@ -222,4 +232,3 @@ Piecewise linear interpolators can also be used. In this case, the passed known 
    interpolator = PiecewiseLagrange(time_hor, temperatures, order=2)
 
 Note that the values on the second column always match the value of the first column in the next raw, for continuity purposes. Higher orders will follow the same structure, where each row will represent a subinterval and the number of columns will dictate the interpolation order, which must be passed using the :code:`order` argument.
-
