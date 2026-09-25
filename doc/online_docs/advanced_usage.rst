@@ -223,3 +223,13 @@ Piecewise linear interpolators can also be used. In this case, the passed known 
 
 Note that the values on the second column always match the value of the first column in the next raw, for continuity purposes. Higher orders will follow the same structure, where each row will represent a subinterval and the number of columns will dictate the interpolation order, which must be passed using the :code:`order` argument.
 
+
+Dynamic distillation initialization
+===================================
+
+After configuring the column with ``column_startup()``, use ``init_unit()`` to
+inspect the initial DAE state and material rates without Assimulo. Rows run from
+the top stage to the reboiler; the first state column is temperature [K] and the
+remaining columns are species mole fractions [-]. Every stage starts at the
+attached liquid composition and its configured activity-model bubble point.
+``solve_unit`` calls the same preparation after calculating the shortcut design.
