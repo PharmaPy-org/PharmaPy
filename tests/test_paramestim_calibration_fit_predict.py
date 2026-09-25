@@ -1,8 +1,17 @@
 """Regression tests for issue #78 fit and prediction paths.
 
 Dimensional fixture names carry units, and comments call out dimensionless
-intermediates as [-] where normalization or projection removes units.
+intermediates as [-] where normalization or projection removes units. The
+missing-cyipopt case blocks cyipopt imports inside an isolated child process,
+so it runs whether or not cyipopt is installed; the core CI lane separately
+asserts that cyipopt is genuinely absent.
 """
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 import numpy as np
 import pytest
@@ -13,33 +22,125 @@ from PharmaPy.Calibration import PCR_calibration
 
 pytestmark = pytest.mark.unit
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
-@pytest.mark.skipif(
-    ParamEstim.have_cyipopt,
-    reason=(
-        "covers the absent-cyipopt path; CI's 'Verify optional backends are "
-        "absent from the core lane' step keeps this from silently skipping"
-    ),
-)
-def test_parameter_estimation_reports_missing_cyipopt():
-    """The solver-free core lane reports how to enable IPOPT fitting."""
-    time_s = np.array([0.0, 1.0])  # [s]
-    observed_concentration_mol_l = np.array([0.0, 1.0])  # [mol/L]
+_CYIPOPT_IMPORT_BLOCKER = textwrap.dedent('''
+    import sys
 
-    def linear_model(params, x_data_s):
-        """Return concentration [mol/L] from rate [mol/L/s] and time [s]."""
-        return params[0] * x_data_s
+    class _BlockCyipopt:
+        """Reject cyipopt imports in this child process only."""
 
-    estimator = ParamEstim.ParameterEstimation(
-        linear_model,
-        param_seed=np.array([1.0]),  # [mol/L/s]
-        x_data=time_s,
-        y_data=observed_concentration_mol_l,
-        name_params=["rate_mol_l_s"],
+        @staticmethod
+        def find_spec(fullname, path=None, target=None):
+            """Reject module specifications for the cyipopt package.
+
+            Parameters
+            ----------
+            fullname : str
+                Fully qualified name of the requested module.
+            path : sequence of str or None, optional
+                Parent package search path supplied by the import system.
+            target : module or None, optional
+                Existing module supplied when resolving a reload.
+
+            Returns
+            -------
+            None
+                Signal that unrelated modules should use later finders.
+
+            Raises
+            ------
+            ModuleNotFoundError
+                If cyipopt or one of its submodules is requested.
+            """
+            if fullname == "cyipopt" or fullname.startswith("cyipopt."):
+                raise ModuleNotFoundError(
+                    f"No module named {fullname!r}", name=fullname
+                )
+            return None
+
+    sys.meta_path.insert(0, _BlockCyipopt())
+
+    try:
+        import cyipopt
+    except ModuleNotFoundError as exc:
+        if exc.name != "cyipopt":
+            raise AssertionError(f"unexpected blocked module: {exc.name}") from exc
+    else:
+        raise AssertionError("cyipopt import blocker did not reject the backend")
+    ''')
+
+
+def _run_with_cyipopt_blocked(script, tmp_path):
+    """Run Python source with cyipopt blocked in the child process.
+
+    Parameters
+    ----------
+    script : str
+        Python source to execute in the child process.
+    tmp_path : pathlib.Path
+        Temporary directory used for the Matplotlib configuration cache.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed child-process result with captured text output.
+
+    Notes
+    -----
+    ``PharmaPy.ParamEstim`` sets ``have_cyipopt`` once, at import time. The
+    child installs the blocker before that import, so the module takes its
+    missing-cyipopt branch without altering the parent interpreter.
+    """
+    environment = os.environ.copy()
+    environment["MPLCONFIGDIR"] = str(tmp_path)
+    blocked_script = f"{_CYIPOPT_IMPORT_BLOCKER}\n{script}"
+    return subprocess.run(
+        [sys.executable, "-c", blocked_script],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
     )
 
-    with pytest.raises(ImportError, match="cyipopt is an optional import"):
-        estimator.optimize_fn(method="IPOPT", verbose=False)
+
+def test_parameter_estimation_reports_missing_cyipopt(tmp_path):
+    """IPOPT selection without cyipopt reports how to enable IPOPT fitting."""
+    script = textwrap.dedent('''
+        import numpy as np
+
+        from PharmaPy import ParamEstim
+
+        if ParamEstim.have_cyipopt is not False:
+            raise AssertionError("blocked cyipopt was reported as available")
+
+        time_s = np.array([0.0, 1.0])  # [s]
+        observed_concentration_mol_l = np.array([0.0, 1.0])  # [mol/L]
+
+        def linear_model(params, x_data_s):
+            """Return concentration [mol/L] from rate [mol/L/s], time [s]."""
+            return params[0] * x_data_s
+
+        estimator = ParamEstim.ParameterEstimation(
+            linear_model,
+            param_seed=np.array([1.0]),  # [mol/L/s]
+            x_data=time_s,
+            y_data=observed_concentration_mol_l,
+            name_params=["rate_mol_l_s"],
+        )
+
+        try:
+            estimator.optimize_fn(method="IPOPT", verbose=False)
+        except ImportError as exc:
+            if "cyipopt is an optional import" not in str(exc):
+                raise AssertionError(str(exc)) from exc
+        else:
+            raise AssertionError("IPOPT selection unexpectedly succeeded")
+        ''')
+    result = _run_with_cyipopt_blocked(script, tmp_path)
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_parameter_estimation_assembles_ipopt_result_info():
