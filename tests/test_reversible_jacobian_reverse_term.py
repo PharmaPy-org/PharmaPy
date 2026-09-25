@@ -11,12 +11,11 @@ reverse-term contribution ``-d/dC[prod(C_prod**beta)/Keq]`` is missing from the
 Jacobian. This is pure NumPy (no solver backend), so no assimulo marker.
 """
 
-import sys
-from types import ModuleType, SimpleNamespace
-
 import numpy as np
 
 from PharmaPy.Kinetics import RxnKinetics
+from PharmaPy.Phases import LiquidPhase
+from PharmaPy.Reactors import BatchReactor
 
 
 # A <-> B (reversible); C and solv are inert padding species in the database.
@@ -64,33 +63,6 @@ def _irreversible_kinetics(data_path):
     )
 
 
-def _stub_assimulo_modules(monkeypatch):
-    assimulo = ModuleType("assimulo")
-
-    solvers = ModuleType("assimulo.solvers")
-    solvers.CVode = object
-    solvers.LSODAR = object
-
-    problem = ModuleType("assimulo.problem")
-    problem.Explicit_Problem = object
-
-    monkeypatch.setitem(sys.modules, "assimulo", assimulo)
-    monkeypatch.setitem(sys.modules, "assimulo.solvers", solvers)
-    monkeypatch.setitem(sys.modules, "assimulo.problem", problem)
-
-
-def _import_base_reactor(monkeypatch):
-    try:
-        from PharmaPy.Reactors import _BaseReactor
-    except ModuleNotFoundError as exc:
-        if exc.name != "assimulo":
-            raise
-        _stub_assimulo_modules(monkeypatch)
-        from PharmaPy.Reactors import _BaseReactor
-
-    return _BaseReactor
-
-
 def test_reversible_jacobian_includes_reverse_term(data_path):
     kin = _reversible_kinetics(data_path)
 
@@ -112,8 +84,10 @@ def test_reversible_jacobian_includes_reverse_term(data_path):
     fd = np.zeros((n, n))
     h = 1e-6  # [mol/L]
     for j in range(n):
-        cp = conc.copy(); cp[j] += h
-        cm = conc.copy(); cm[j] -= h
+        cp = conc.copy()
+        cp[j] += h
+        cm = conc.copy()
+        cm[j] -= h
         fd[:, j] = (net_rates(cp) - net_rates(cm)) / (2 * h)
 
     # Hand-computed truth for the participating (A, B) block: Keq = 2, kf = 1.
@@ -172,8 +146,10 @@ def test_reversible_jacobian_supports_batched_concentrations(data_path):
     h = 1e-6  # [mol/L]
     for i in range(n_times):
         for j in range(n_species):
-            cp = conc.copy(); cp[i, j] += h
-            cm = conc.copy(); cm[i, j] -= h
+            cp = conc.copy()
+            cp[i, j] += h
+            cm = conc.copy()
+            cm[i, j] -= h
             fd[i, :, j] = (net_rates(cp) - net_rates(cm))[i] / (2 * h)
 
     assert analytical.shape == fd.shape
@@ -211,58 +187,50 @@ def test_reversible_jacobian_uses_runtime_delta_hrxn(data_path):
     fd = np.zeros((n, n))
     h = 1e-6  # [mol/L]
     for j in range(n):
-        cp = conc.copy(); cp[j] += h
-        cm = conc.copy(); cm[j] -= h
+        cp = conc.copy()
+        cp[j] += h
+        cm = conc.copy()
+        cm[j] -= h
         fd[:, j] = (net_rates(cp) - net_rates(cm)) / (2 * h)
 
     np.testing.assert_allclose(analytical, fd, rtol=1e-5, atol=1e-5)
 
 
-def test_reactor_jacobian_passes_runtime_delta_hrxn(monkeypatch):
-    base_reactor = _import_base_reactor(monkeypatch)
-    runtime_deltah = np.array([-4.0e4])  # [J/mol_rxn]
+def test_reactor_jacobian_passes_runtime_delta_hrxn(data_path):
+    """The real reactor and phase pass temperature-corrected heat to kinetics."""
+    temperature = 350.0  # [K]
+    states = np.array([1.0, 1.0, 1.0, 1.0])  # [mol/L]
+    liquid = LiquidPhase(
+        _db(data_path),
+        temp=temperature,
+        vol=1.0,  # [m**3]
+        mole_conc=states,
+        verbose=False,
+    )
+    kinetics = _temperature_sensitive_reversible_kinetics(data_path)
+    reactor = BatchReactor(isothermal=True)
+    reactor.Phases = liquid
+    reactor.Kinetics = kinetics
+    reactor.set_names()
 
-    class CaptureKinetics:
-        num_species = 2
-        keq_params = np.array([2.0])
-        stoich_matrix = np.array([[-1.0, 1.0]])
-        delta_hrxn = np.array([-5.0e4])  # [J/mol_rxn]
-        tref_hrxn = 298.15  # [K]
-
-        def __init__(self):
-            self.calls = []
-
-        def derivatives(self, conc, temp, dstates=True, delta_hrxn=None):
-            self.calls.append((conc.copy(), temp, dstates, delta_hrxn.copy()))
-            return np.eye(2)
-
-    class CaptureLiquid:
-        temp = 350.0  # [K]
-
-        def __init__(self):
-            self.calls = []
-
-        def getHeatOfRxn(self, stoich_matrix, temp, mask, heat_rxn_ref,
-                         tref_hrxn):
-            self.calls.append(
-                (stoich_matrix.copy(), temp, mask.copy(),
-                 heat_rxn_ref.copy(), tref_hrxn))
-            return runtime_deltah
-
-    kinetics = CaptureKinetics()
-    liquid = CaptureLiquid()
-    reactor = SimpleNamespace(
-        Kinetics=kinetics,
-        Liquid_1=liquid,
-        isothermal=True,
-        mask_species=np.array([True, True]),
+    runtime_deltah = liquid.getHeatOfRxn(
+        kinetics.stoich_matrix,
+        temperature,
+        reactor.mask_species,
+        kinetics.delta_hrxn,
+        kinetics.tref_hrxn,
+    )  # [J/mol_rxn]
+    expected = kinetics.derivatives(
+        states, temperature, delta_hrxn=runtime_deltah
+    )
+    reference_only = kinetics.derivatives(
+        states, temperature, delta_hrxn=kinetics.delta_hrxn
     )
 
-    states = np.array([1.0, 1.0])  # [mol/L]
-    jac = base_reactor.get_jacobians(
-        reactor, time=0.0, states=states, sw=None, sens=None, params=None)
+    jac = reactor.get_jacobians(
+        time=0.0, states=states, sw=None, sens=None, params=None
+    )
 
-    np.testing.assert_allclose(jac, np.eye(2))
-    assert len(liquid.calls) == 1
-    assert len(kinetics.calls) == 1
-    np.testing.assert_allclose(kinetics.calls[0][3], runtime_deltah)
+    assert not np.allclose(runtime_deltah, kinetics.delta_hrxn)
+    assert not np.allclose(expected, reference_only)
+    np.testing.assert_allclose(jac, expected)

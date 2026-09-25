@@ -1,11 +1,11 @@
 """Regression tests for multistage DynamicExtractor efficiency corrections."""
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 
 import PharmaPy.DynamicExtraction as dynamic_extraction
+from PharmaPy.Phases import LiquidPhase
+from PharmaPy.Streams import LiquidStream
 
 
 pytestmark = pytest.mark.unit
@@ -74,117 +74,29 @@ def _invalid_distribution(x_light, x_heavy, temp):
     return np.array([0.60, 1.20])  # [-]
 
 
-class _InitializationBatchExtractor:
-    """Minimal batch extractor returning fixed extraction states.
+def _initialization_distribution(x_light, x_heavy, temp):
+    """Return component-wise coefficients that form two liquid phases.
 
     Parameters
     ----------
-    k_fun : callable, optional
-        Distribution-coefficient callback [-].
-    gamma_method : str, optional
-        Activity-coefficient method selector [-].
+    x_light, x_heavy : ndarray
+        Light- and heavy-phase mole fractions [-].
+    temp : ndarray
+        Stage temperatures [K].
+
+    Returns
+    -------
+    ndarray
+        Component distribution coefficients ``K_i`` [-].
+
+    Notes
+    -----
+    The coefficients are a test-design assumption spanning both sides of one.
+    With the representative feed below, the Rachford-Rice endpoint residuals
+    have opposite signs, guaranteeing a two-liquid-phase batch seed before
+    the real staged root solve.
     """
-    def __init__(self, k_fun=None, gamma_method="UNIQUAC"):
-        self.k_fun = k_fun
-        self.gamma_method = gamma_method
-        self.result = None
-
-    def solve_unit(self):
-        """Store a fixed batch-extraction result.
-
-        Returns
-        -------
-        None
-            The method stores light/heavy moles [mol], densities [mol/L], and
-            mole fractions [-] on ``self.result``.
-        """
-        self.result = SimpleNamespace(
-            rho_heavy=np.array(1000.0),  # [mol/L]
-            rho_light=np.array(900.0),  # [mol/L]
-            mol_light=6.0,  # [mol]
-            mol_heavy=4.0,  # [mol]
-            x_light=np.array([0.20, 0.35, 0.45]),  # [-]
-            x_heavy=np.array([0.25, 0.30, 0.45]),  # [-]
-        )
-
-
-class _InitializationPhase:
-    """Minimal liquid phase for initialization residual tests."""
-    name_species = ["a", "b", "c"]
-    temp = 298.15  # [K]
-
-    def getDensity(self, mole_frac=None, basis="mole", temp=None):
-        """Return fixed molar liquid density.
-
-        Parameters
-        ----------
-        mole_frac : ndarray, optional
-            Liquid mole fractions [-].
-        basis : str, optional
-            Density basis selector [-].
-        temp : ndarray, optional
-            Liquid temperatures [K].
-
-        Returns
-        -------
-        ndarray
-            Molar density [mol/L].
-        """
-        mole_frac = np.asarray(mole_frac)  # [-]
-
-        if mole_frac.ndim == 2:
-            return np.ones(mole_frac.shape[0]) * 1000.0  # [mol/L]
-
-        return np.array(1000.0)  # [mol/L]
-
-    def getEnthalpy(self, mole_frac, temp, basis="mole"):
-        """Return composition-weighted liquid enthalpy.
-
-        Parameters
-        ----------
-        mole_frac : ndarray
-            Liquid mole fractions [-].
-        temp : ndarray
-            Liquid temperatures [K].
-        basis : str, optional
-            Enthalpy basis selector [-].
-
-        Returns
-        -------
-        ndarray
-            Liquid enthalpy [J/mol].
-        """
-        species_enthalpy = np.array([10.0, 20.0, 30.0])  # [J/mol]
-
-        return np.asarray(mole_frac) @ species_enthalpy  # [J/mol]
-
-
-class _InitializationStream:
-    """Minimal inlet stream carrying only density."""
-    def __init__(self, density):
-        """Create a fixed-density inlet stream.
-
-        Parameters
-        ----------
-        density : float
-            Molar density [mol/L].
-        """
-        self.density = density  # [mol/L]
-
-    def getDensity(self, basis="mole"):
-        """Return the stream molar density.
-
-        Parameters
-        ----------
-        basis : str, optional
-            Density basis selector [-].
-
-        Returns
-        -------
-        ndarray
-            Molar density [mol/L].
-        """
-        return np.array(self.density)  # [mol/L]
+    return np.array([0.50, 0.80, 1.30, 2.00, 1.00])  # [-]
 
 
 def _three_stage_material_inputs():
@@ -325,59 +237,79 @@ def test_material_balances_reject_unbroadcastable_distribution_coefficients():
         extractor.material_balances(0.0, **_three_stage_material_inputs())
 
 
-def test_initialize_model_broadcasts_componentwise_distribution_coefficients(
-        monkeypatch):
-    """Initialization applies component-wise ``K_i`` to every stage."""
-    captured = {}
-
-    def _capture_root(fun, x0, args):
-        """Capture initialization residuals without solving them.
-
-        Parameters
-        ----------
-        fun : callable
-            Initialization residual function [-].
-        x0 : ndarray
-            Initial mole-fraction guess [-].
-        args : tuple
-            Residual arguments: temperatures [K], component moles [mol], and
-            holdups [mol].
-
-        Returns
-        -------
-        types.SimpleNamespace
-            Object carrying the unchanged mole-fraction guess [-].
-        """
-        residuals = fun(x0, *args)  # [-]
-        captured["y_residuals"] = residuals.reshape(3, 6)[:, 3:]  # [-]
-
-        return SimpleNamespace(x=x0)
-
-    monkeypatch.setattr(
-        dynamic_extraction, "BatchExtractor", _InitializationBatchExtractor)
-    monkeypatch.setattr(dynamic_extraction, "root", _capture_root)
-
+def test_initialize_model_solves_componentwise_distribution_coefficients(
+        data_path):
+    """Real phase and root collaborators solve every staged ``K_i`` row."""
+    database_path = data_path["flowsheet"] / "compound_database.json"
+    # Representative extraction pair: the feed is A-rich and the solvent
+    # stream is enriched in the database's designated solvent component.
+    feed_mole_fraction = np.array([0.35, 0.20, 0.15, 0.15, 0.15])  # [-]
+    solvent_mole_fraction = np.array([0.05, 0.20, 0.25, 0.25, 0.25])  # [-]
+    holdup_mole_fraction = (
+        feed_mole_fraction + solvent_mole_fraction
+    ) / 2  # [-]
     extractor = dynamic_extraction.DynamicExtractor(
         num_stages=3,
-        k_fun=_component_distribution,
+        k_fun=_initialization_distribution,
         eff=0.75,
     )
-    extractor.Liquid_1 = _InitializationPhase()
-    extractor.name_species = extractor.Liquid_1.name_species
-    extractor.num_comp = len(extractor.name_species)  # [-]
-    extractor.nomenclature()
+    extractor.Phases = LiquidPhase(
+        str(database_path),
+        moles=10.0,  # [mol]
+        mole_frac=holdup_mole_fraction,
+        temp=298.15,  # [K]
+        pres=101325.0,  # [Pa]
+    )
     extractor.Inlet = {
-        "feed": _InitializationStream(1000.0),  # [mol/L]
-        "solvent": _InitializationStream(900.0),  # [mol/L]
+        "feed": LiquidStream(
+            str(database_path),
+            mole_flow=5.0,  # [mol/s]
+            mole_frac=feed_mole_fraction,
+            temp=298.15,  # [K]
+            pres=101325.0,  # [Pa]
+        ),
+        "solvent": LiquidStream(
+            str(database_path),
+            mole_flow=3.0,  # [mol/s]
+            mole_frac=solvent_mole_fraction,
+            temp=298.15,  # [K]
+            pres=101325.0,  # [Pa]
+        ),
     }
 
-    extractor.initialize_model()
+    initial_states = extractor.initialize_model()
 
-    expected_y_residuals = np.array([
-        [-0.09, 0.26, 0.0],
-        [-0.13, 0.12, 0.0],
-        [-0.13, 0.12, 0.0],
-    ])  # [-]
+    x_light = initial_states["x_i"]  # [-]
+    x_heavy = initial_states["y_i"]  # [-]
+    k_stage = np.broadcast_to(
+        _initialization_distribution(x_light, x_heavy, initial_states["temp"]),
+        x_light.shape,
+    )  # [-]
+    equilibrium_residuals = np.zeros_like(x_heavy)  # [-]
+    equilibrium_residuals[0] = (
+        k_stage[0] / extractor.eff * x_light[0] - x_heavy[0]
+    )  # [-]
+    equilibrium_residuals[1:] = (
+        k_stage[1:] / extractor.eff
+        * (x_light[1:] - x_light[:-1] * (1 - extractor.eff))
+        - x_heavy[1:]
+    )  # [-]
+    equilibrium_residuals[:, -1] = x_heavy.sum(axis=1) - 1  # [-]
+    component_moles = np.tile(
+        extractor.Liquid_1.moles * holdup_mole_fraction,
+        (extractor.num_stages, 1),
+    )  # [mol]
 
-    np.testing.assert_allclose(captured["y_residuals"],
-                               expected_y_residuals)
+    assert extractor.target_states["light_phase"] == "solvent"
+    assert extractor.target_states["heavy_phase"] == "feed"
+    assert np.all(x_light > 0.0)
+    assert np.all(x_heavy > 0.0)
+    np.testing.assert_allclose(x_light.sum(axis=1), 1.0, atol=1e-12)
+    np.testing.assert_allclose(x_heavy.sum(axis=1), 1.0, atol=1e-12)
+    np.testing.assert_allclose(equilibrium_residuals, 0.0, atol=1e-12)
+    np.testing.assert_allclose(
+        extractor.fixed_vals["H_R"] * x_light
+        + extractor.fixed_vals["H_E"] * x_heavy,
+        component_moles,
+        atol=1e-12,
+    )

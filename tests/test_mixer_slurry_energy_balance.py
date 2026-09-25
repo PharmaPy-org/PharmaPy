@@ -5,13 +5,11 @@ the expected outlet temperature from phase enthalpies, and validate dispatch
 for unsupported solids-bearing collaborators.
 """
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 from scipy.optimize import brentq
 
-from PharmaPy.Containers import Mixer
+from PharmaPy.Containers import DynamicCollector, Mixer
 from PharmaPy.MixedPhases import Slurry, SlurryStream
 from PharmaPy.Phases import LiquidPhase, SolidPhase
 from PharmaPy.Streams import LiquidStream, SolidStream
@@ -231,30 +229,40 @@ def _build_stream_mixer(thermo_path, temp_first, temp_second):
     second_inlet = _make_slurry_stream_inlet(
         thermo_path, temp_second, VOL_FLOW_SLURRY_INLET_TWO
     )
+    metadata_inlet = LiquidStream(
+        thermo_path,
+        temp=temp_first,  # [K]
+        mass_flow=0.0,  # [kg/s], physical zero-flow boundary stream
+        mass_frac=LIQUID_MASS_FRAC,  # [-]
+        verbose=False,
+    )
 
     mixer = Mixer()
     # ``Mixer.Inlets`` reads ``name_species`` from its first collaborator,
-    # which ``SlurryStream`` does not expose. Use the real first slurry's
-    # liquid phase while the public setter establishes metadata, then restore
-    # the real mixed-phase collaborator for the energy-balance dispatch.
-    mixer.Inlets = [first_inlet.Liquid_1, second_inlet]
-    mixer.Inlets[0] = first_inlet
+    # which ``SlurryStream`` does not expose. A real zero-flow liquid stream
+    # supplies that metadata without affecting the physical balance.
+    mixer.Inlets = [metadata_inlet, first_inlet, second_inlet]
 
     mass_liquid = np.array([
+        metadata_inlet.mass_flow,
         first_inlet.Liquid_1.mass_flow, second_inlet.Liquid_1.mass_flow
     ])  # [kg/s]
     mass_solid = np.array([
+        0.0,
         first_inlet.Solid_1.mass_flow, second_inlet.Solid_1.mass_flow
     ])  # [kg/s]
     massfrac_liquid = np.array([
+        metadata_inlet.mass_frac,
         first_inlet.Liquid_1.mass_frac, second_inlet.Liquid_1.mass_frac
     ])  # [-]
     temps = np.array([
+        metadata_inlet.temp,
         first_inlet.Liquid_1.temp, second_inlet.Liquid_1.temp
     ])  # [K]
     # Slurry enthalpy dispatch does not consume the cake-only distribution
     # field. Preserve the mapping shape on the continuous number-rate basis.
     num_distrib = np.vstack((
+        np.zeros_like(first_inlet.Solid_1.distrib),
         first_inlet.Solid_1.distrib, second_inlet.Solid_1.distrib
     ))  # [#/um/s]
 
@@ -457,11 +465,26 @@ def test_mixer_energy_balance_rejects_unknown_solids_inlet(thermo_path):
     mixer, u_inputs, _ = _build_mixer(
         thermo_path, temp_common, temp_common
     )
-    mixer.Inlets[1] = SimpleNamespace(Solid_1=object())
+    unsupported_inlet = DynamicCollector()
+    unsupported_inlet.Phases = [
+        LiquidPhase(
+            thermo_path,
+            mass=1.0,  # [kg]
+            mass_frac=LIQUID_MASS_FRAC,  # [-]
+        ),
+        SolidPhase(
+            thermo_path,
+            mass=0.1,  # [kg]
+            mass_frac=SOLID_MASS_FRAC,  # [-]
+            kv=KV,
+        ),
+    ]
+    test_mixer = Mixer()
+    test_mixer.Inlets = [mixer.Inlets[0], unsupported_inlet]
 
     message = (
         r'^Mixer\.energy_balance supports Slurry and Cake solids-bearing '
-        r'inlets; got SimpleNamespace\.$'
+        r'inlets; got DynamicCollector\.$'
     )
     with pytest.raises(TypeError, match=message):
-        mixer.energy_balance(u_inputs)
+        test_mixer.energy_balance(u_inputs)

@@ -98,6 +98,32 @@ def test_high_resolution_fvm_van_leer_flux_matches_hand_calculation():
     np.testing.assert_allclose(fluxes, [0.0, 1.5, 8.0 / 3.0, 5.0])
 
 
+def test_high_resolution_fvm_supports_one_physical_cell():
+    """Use a zero-gradient outlet ghost value for one physical cell."""
+    cell_temperature = np.array([300.0])  # [K]
+
+    face_temperature = high_resolution_fvm(
+        cell_temperature, boundary_cond=295.0)  # [K]
+
+    np.testing.assert_allclose(face_temperature, [295.0, 300.0])
+
+
+def test_high_resolution_fvm_rejects_unknown_limiter():
+    """Reject an unsupported finite-volume limiter explicitly."""
+    with pytest.raises(ValueError, match="supports only the 'Van Leer'"):
+        high_resolution_fvm(
+            np.array([1.0, 2.0]),  # [-]
+            boundary_cond=0.0,
+            limiter_type="unknown",
+        )
+
+
+def test_high_resolution_fvm_rejects_empty_grid():
+    """Reject a finite-volume call with no physical cells."""
+    with pytest.raises(ValueError, match="requires at least one cell"):
+        high_resolution_fvm(np.empty(0), boundary_cond=0.0)
+
+
 def test_upwind_fvm_returns_neighbor_differences_from_boundary():
     state = np.array([1.0, 2.0, 4.0])
 

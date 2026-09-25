@@ -1,204 +1,246 @@
-"""Test crystallizer energy balance regressions.
-
-This module covers unit-basis and utility-jacket paths for crystallizer energy
-balances.
-"""
-
-import sys
-import types
+"""Crystallizer energy regressions through production model contracts."""
 
 import numpy as np
 import pytest
 
-_MISSING = object()
-_ASSIMULO_STUBS = {}
-
-try:
-    from assimulo.problem import Explicit_Problem  # noqa: F401
-    from assimulo.solvers import CVode  # noqa: F401
-except ImportError:
-    for module_name in ("assimulo", "assimulo.problem", "assimulo.solvers"):
-        _ASSIMULO_STUBS[module_name] = sys.modules.get(module_name, _MISSING)
-        sys.modules[module_name] = types.ModuleType(module_name)
-
-    sys.modules["assimulo"].problem = sys.modules["assimulo.problem"]
-    sys.modules["assimulo"].solvers = sys.modules["assimulo.solvers"]
-    sys.modules["assimulo.problem"].Explicit_Problem = object
-    sys.modules["assimulo.solvers"].CVode = object
-
-try:
-    from PharmaPy.Crystallizers import MSMPR, SemibatchCryst
-finally:
-    for module_name, previous in reversed(_ASSIMULO_STUBS.items()):
-        if previous is _MISSING:
-            sys.modules.pop(module_name, None)
-        else:
-            sys.modules[module_name] = previous
-
+from PharmaPy.Crystallizers import MSMPR, SemibatchCryst
+from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.MixedPhases import Slurry
+from PharmaPy.Phases import LiquidPhase, SolidPhase
+from PharmaPy.Streams import LiquidStream
+from PharmaPy.Utilities import CoolingWater
 
 
-class StubPhase:
-    kv = 0.5  # [-]
+pytestmark = pytest.mark.unit
 
-    def updatePhase(self, **kwargs):
-        pass
-
-    def getCp(self, temp=None, basis="mass"):
-        cp_mass = 4000.0  # [J/kg/K]
-        return cp_mass
-
-    def getDensity(self, temp=None):
-        density = 1000.0  # [kg/m**3]
-        return density
-
-    def getEnthalpy(self, temp=None, basis="mass"):
-        h_mass = 1.0e5  # [J/kg]
-        return h_mass
+SLURRY_VOLUME = 1.0e-3  # [m**3]
+TEMPERATURE = 300.0  # [K]
+SPECIFIC_MOMENTS = np.array([1.0e8, 1.0e4, 1.0, 0.05])  # [m**n/m**3]
 
 
-class StubSlurry:
-    vol = 1.0e-3  # [m**3]
-    temp_ht = None
+def _build_crystallizer(data_path, crystallizer_type=MSMPR, *, adiabatic=True):
+    """Build a production crystallizer with real phases and kinetics.
 
-    def getDensity(self, temp=None):
-        density = np.array([1000.0, 2000.0])  # [kg/m**3]
-        return density
+    Parameters
+    ----------
+    data_path : dict
+        Paths to repository test-data directories.
+    crystallizer_type : type, optional
+        Production crystallizer class to configure.
+    adiabatic : bool, optional
+        Whether the vessel excludes utility heat transfer [-].
 
-    def getEnthalpy(self, temp, volfracs, density):
-        h_vol = 2.0e8  # [J/m**3]
-        return h_vol
-
-    def getCp(self, temp, volfracs, density, times_vliq=False):
-        cp_vol = 3.0e6  # [J/m**3/K]
-        return cp_vol
-
-
-class StubUtility:
-    cp = 3500.0  # [J/kg/K]
-    rho = 800.0  # [kg/m**3]
-
-    def get_inputs(self, time):
-        temp_in = 285.0  # [K]
-        vol_flow = 2.0e-5  # [m**3/s]
-        return {"temp_in": temp_in, "vol_flow": vol_flow}
-
-
-class LiquidInlet:
-    def getDensity(self, temp=None):
-        rho_liq = 950.0  # [kg/m**3]
-        return rho_liq
-
-    def getEnthalpy(self, temp=None):
-        h_mass = 123.0  # [J/kg]
-        return h_mass
-
-
-def _common_energy_attrs(cryst):
-    cryst.Solid_1 = StubPhase()
-    cryst.Slurry = StubSlurry()
-    cryst.controls = {}
-
-    cryst.diam_tank = 0.1  # [m]
-    cryst.area_base = 0.01  # [m**2]
-    cryst.u_ht = 500.0  # [J/s/m**2/K]
-    cryst.vol_tank = 1.0e-3  # [m**3]
-
-
-COMMON_ENERGY_KW = {
-    "time": 0.0,  # [s]
-    "params": {},
-    "cryst_rate": 0.0,  # [kg/s]
-    "u_inputs": {"Inlet": {"vol_flow": 1.0e-6}},  # [m**3/s]
-    "rhos": [np.array([1000.0, 2000.0]), np.array([1000.0, None])],  # [kg/m**3]
-    "distrib": None,
-    "mass_conc": None,
-    "temp": 300.0,  # [K]
-    "vol": 1.0e-3,  # [m**3]
-    "h_in": 1.0e5,  # [J/m**3]
-}
-
-
-def test_msmpr_adiabatic_energy_balance_has_no_jacket_equation():
-    cryst = MSMPR.__new__(MSMPR)
-    _common_energy_attrs(cryst)
-    cryst.adiabatic = True
-    cryst.states_uo = ["distrib", "mass_conc", "vol", "temp"]
-
-    dtemp_dt = cryst.energy_balances(  # [K/s]
-        mu_n=np.zeros(4), temp_ht=None, **COMMON_ENERGY_KW
+    Returns
+    -------
+    MSMPR or SemibatchCryst
+        Configured crystallizer with a liquid feed and, when needed, a real
+        cooling-water utility.
+    """
+    thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
+    liquid = LiquidPhase(
+        thermo_path,
+        temp=TEMPERATURE,
+        vol=SLURRY_VOLUME,  # [m**3]
+        mass_frac=[0.55, 0.25, 0.10, 0.10],  # [-]
+        verbose=False,
     )
-
-    assert np.ndim(dtemp_dt) == 0
-
-
-def test_semibatch_jacket_uses_utility_inputs():
-    cryst = SemibatchCryst.__new__(SemibatchCryst)
-    _common_energy_attrs(cryst)
-    cryst.adiabatic = False
-    cryst._Utility = StubUtility()
-
-    temp_ht = 290.0  # [K]
-    dtemp_dt, dtht_dt = cryst.energy_balances(  # [K/s]
-        mu_n=np.zeros(4), temp_ht=temp_ht, **COMMON_ENERGY_KW
+    solid = SolidPhase(
+        thermo_path,
+        temp=TEMPERATURE,
+        moments=SPECIFIC_MOMENTS * SLURRY_VOLUME,  # [m**n]
+        mass_frac=[1.0, 0.0, 0.0, 0.0],  # [-]
+        kv=0.5,  # [-]
     )
+    slurry = Slurry(vol=SLURRY_VOLUME, moments=SPECIFIC_MOMENTS)
+    slurry.Phases = [liquid, solid]
 
-    assert np.isfinite(dtemp_dt)
-    assert np.isfinite(dtht_dt)
+    crystallizer = crystallizer_type(
+        "A",
+        method="moments",
+        vol_tank=SLURRY_VOLUME,  # [m**3]
+        adiabatic=adiabatic,
+    )
+    crystallizer.Phases = slurry
+    crystallizer.num_species = liquid.num_species  # [-]
+    crystallizer.Kinetics = CrystKinetics(
+        coeff_solub=[0.0],  # [kg/m**3]
+        growth=[1.0e-3, 0.0, 1.0],  # [um/s], [J/mol], [-]
+        sup_sat_type="absolute",
+    )
+    crystallizer.Kinetics.target_idx = crystallizer.target_ind
+
+    inlet = LiquidStream(
+        thermo_path,
+        temp=305.0,  # [K]
+        vol_flow=2.0e-6,  # [m**3/s]
+        mass_frac=[0.60, 0.20, 0.10, 0.10],  # [-]
+        verbose=False,
+    )
+    crystallizer.Inlet = inlet
+
+    # These geometry values are the production initialization performed by
+    # ``solve_unit`` before evaluating energy balances.
+    crystallizer.diam_tank = (
+        4.0 / np.pi * crystallizer.vol_tank
+    ) ** (1.0 / 3.0)  # [m]
+    crystallizer.area_base = (
+        np.pi / 4.0 * crystallizer.diam_tank**2
+    )  # [m**2]
+    crystallizer.vol_tank /= crystallizer.vol_offset  # [m**3]
+
+    if not adiabatic:
+        crystallizer.Utility = CoolingWater(
+            vol_flow=2.0e-5,  # [m**3/s]
+            temp_in=285.0,  # [K]
+        )
+
+    return crystallizer
 
 
-def test_liquid_feed_enthalpy_passed_to_energy_balance_is_volumetric():
-    cryst = MSMPR.__new__(MSMPR)
-    cryst.dim_states = [4, 1, 1]
-    cryst.name_states = ["mu_n", "mass_conc", "temp"]
-    cryst.method = "moments"
-    cryst.states_di = {"mu_n": {"dim": 4}}
-    cryst.scale = 1.0  # [-]
-    cryst.controls = {}
-    cryst.Slurry = StubSlurry()
-    cryst.Liquid_1 = StubPhase()
-    cryst.Solid_1 = StubPhase()
-    cryst._Inlet = LiquidInlet()
+def _energy_arguments(crystallizer):
+    """Assemble direct energy-balance inputs from production collaborators.
 
-    inlet_temp = 305.0  # [K]
-    inlet_vol_flow = 2.0e-6  # [m**3/s]
-    cryst.get_inputs = lambda time: {
-        "Inlet": {"temp": inlet_temp, "vol_flow": inlet_vol_flow}
+    Parameters
+    ----------
+    crystallizer : MSMPR or SemibatchCryst
+        Configured production crystallizer.
+
+    Returns
+    -------
+    dict
+        Keyword arguments using [s], [kg/s] or [kg/m**3/s], [kg/m**3],
+        [m**n], [kg/m**3], [K], [m**3], and [J/m**3] as appropriate to
+        ``energy_balances``.
+    """
+    inlet_temperature = crystallizer.Inlet.temp  # [K]
+    inlet_density = crystallizer.Inlet.getDensity(
+        temp=inlet_temperature
+    )  # [kg/m**3]
+    inlet_enthalpy = crystallizer.Inlet.getEnthalpy(
+        temp=inlet_temperature
+    ) * inlet_density  # [J/m**3]
+    suspension_density = crystallizer.Slurry.getDensity(
+        temp=TEMPERATURE
+    )  # [kg/m**3]
+    densities = [
+        suspension_density,
+        np.array([inlet_density, None], dtype=object),
+    ]
+    moments = (
+        SPECIFIC_MOMENTS
+        if type(crystallizer) is MSMPR
+        else crystallizer.Solid_1.moments
+    )  # [m**n/m**3] or [m**n]
+    return {
+        "time": 0.0,  # [s]
+        "params": None,
+        "cryst_rate": 0.0,  # [kg/m**3/s] or [kg/s]
+        "u_inputs": {"Inlet": {"vol_flow": crystallizer.Inlet.vol_flow}},
+        "rhos": densities,
+        "mu_n": moments,
+        "distrib": None,
+        "mass_conc": crystallizer.Liquid_1.mass_conc,
+        "temp": TEMPERATURE,
+        "vol": crystallizer.Liquid_1.vol,  # [m**3]
+        "h_in": inlet_enthalpy,
     }
 
-    captured = {}
 
-    def material_balances(*args, **kwargs):
-        material_rates = np.zeros(5)  # [kg/m**3/s]
-        cryst_rate = 0.0  # [kg/s]
-        return material_rates, cryst_rate
+def test_msmpr_adiabatic_energy_balance_has_no_jacket_equation(data_path):
+    """An adiabatic production MSMPR returns only the tank derivative."""
+    crystallizer = _build_crystallizer(data_path, adiabatic=True)
 
-    def energy_balances(*args, h_in, **kwargs):
-        captured["h_in"] = h_in
-        return h_in
+    temperature_rate = crystallizer.energy_balances(
+        temp_ht=None,
+        **_energy_arguments(crystallizer),
+    )  # [K/s]
 
-    cryst.material_balances = material_balances
-    cryst.energy_balances = energy_balances
-
-    moments = np.zeros(4)  # [m**n/m**3]
-    mass_conc = np.array([10.0])  # [kg/m**3]
-    temp = np.array([300.0])  # [K]
-    states = np.concatenate([moments, mass_conc, temp])
-
-    result = cryst.unit_model(0.0, states, params={}, enrgy_bce=True)  # [J/m**3]
-
-    expected_h_in = 123.0 * 950.0  # [J/kg]*[kg/m**3] -> [J/m**3]
-    assert result == pytest.approx(expected_h_in)
-    assert captured["h_in"] == pytest.approx(expected_h_in)
+    assert np.ndim(temperature_rate) == 0
+    assert np.isfinite(temperature_rate)
 
 
-def test_slurry_getcp_times_vliq_does_not_mutate_volfracs():
-    slurry = Slurry.__new__(Slurry)
-    slurry.Liquid_1 = StubPhase()
-    slurry.Solid_1 = StubPhase()
+def test_semibatch_jacket_uses_utility_inputs(data_path):
+    """A production semibatch jacket uses a real cooling-water utility."""
+    crystallizer = _build_crystallizer(
+        data_path,
+        crystallizer_type=SemibatchCryst,
+        adiabatic=False,
+    )
 
-    volfracs = [0.9, 0.1]  # [-]
-    density = np.array([1000.0, 2000.0])  # [kg/m**3]
-    slurry.getCp(300.0, volfracs, density, times_vliq=True)
+    tank_rate, jacket_rate = crystallizer.energy_balances(
+        temp_ht=290.0,  # [K]
+        **_energy_arguments(crystallizer),
+    )  # [K/s], [K/s]
 
-    assert volfracs == pytest.approx([0.9, 0.1])
+    assert np.isfinite(tank_rate)
+    assert np.isfinite(jacket_rate)
+
+
+def test_liquid_feed_enthalpy_is_volumetric_in_msmpr_flow_term(data_path):
+    """The public MSMPR path passes liquid-feed enthalpy in [J/m**3]."""
+    crystallizer = _build_crystallizer(data_path, adiabatic=True)
+    # A real upstream transfer supplies the liquid-phase concentration field;
+    # static stream attributes supply inlet temperature and volumetric flow.
+    crystallizer.Inlet.y_upstream = {"mass_conc": True}
+    crystallizer.Inlet.y_inlet = {
+        "mass_conc": crystallizer.Inlet.mass_conc.copy()
+    }  # [kg/m**3]
+    raw_moments = SPECIFIC_MOMENTS * (1.0e6) ** np.arange(4)  # [um**n/m**3]
+    states = np.concatenate((
+        raw_moments,
+        crystallizer.Liquid_1.mass_conc,  # [kg/m**3]
+        [TEMPERATURE],  # [K]
+    ))
+
+    heat_components = crystallizer.unit_model(
+        0.0,
+        states,
+        params=None,
+        enrgy_bce=True,
+    )  # [J/s]
+
+    inlet_temperature = crystallizer.Inlet.temp  # [K]
+    inlet_density = crystallizer.Inlet.getDensity(
+        temp=inlet_temperature
+    )  # [kg/m**3]
+    inlet_enthalpy_mass = crystallizer.Inlet.getEnthalpy(
+        temp=inlet_temperature
+    )  # [J/kg]
+    suspension_density = crystallizer.Slurry.getDensity(
+        temp=TEMPERATURE
+    )  # [kg/m**3]
+    liquid_volume_fraction = (
+        1.0 - crystallizer.Solid_1.kv * SPECIFIC_MOMENTS[3]
+    )  # [-]
+    suspension_enthalpy = crystallizer.Slurry.getEnthalpy(
+        TEMPERATURE,
+        [liquid_volume_fraction, 1.0 - liquid_volume_fraction],
+        suspension_density,
+    )  # [J/m**3]
+    expected_flow_term = crystallizer.Inlet.vol_flow * (
+        inlet_enthalpy_mass * inlet_density - suspension_enthalpy
+    )  # [J/s]
+    mass_only_flow_term = crystallizer.Inlet.vol_flow * (
+        inlet_enthalpy_mass - suspension_enthalpy
+    )  # [J/s], intentionally wrong basis
+
+    assert heat_components[2] == pytest.approx(expected_flow_term)
+    assert heat_components[2] != pytest.approx(mass_only_flow_term)
+
+
+def test_slurry_getcp_times_vliq_does_not_mutate_volfracs(data_path):
+    """The real slurry heat-capacity path leaves caller fractions unchanged."""
+    crystallizer = _build_crystallizer(data_path, adiabatic=True)
+    volume_fractions = [0.9, 0.1]  # [-]
+    densities = crystallizer.Slurry.getDensity(
+        temp=TEMPERATURE
+    )  # [kg/m**3]
+
+    crystallizer.Slurry.getCp(
+        TEMPERATURE,
+        volume_fractions,
+        densities,
+        times_vliq=True,
+    )  # [J/m**3/K]
+
+    assert volume_fractions == pytest.approx([0.9, 0.1])
