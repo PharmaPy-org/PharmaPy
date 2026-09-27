@@ -19,7 +19,7 @@ Vapor concentrations use the same ideal-gas basis: :code:`mole_conc = mole_frac 
 UNIQUAC data without :code:`qip` use :code:`qi` locally and emit a warning once per property object. This fallback assumes the ordinary surface parameter also describes the modified residual term; systems requiring special parameters, including relevant water/alcohol models, should provide :code:`qip` explicitly. The fallback does not create a :code:`qip` attribute, so callers can still detect missing data.
 
 Crystallizer initialization
-==========================
+===========================
 
 Call ``unit.initialize_states(runtime=duration)`` or pass an absolute
 ``time_grid`` to prepare a crystallizer without integrating it. The method
