@@ -276,6 +276,10 @@ class SimulationExec:
         ------
         RuntimeError
             DESCRIPTION.
+        ValueError
+            If ``x_data`` holds more than one unnamed experiment, because
+            modifiers and ``wrapper_kwargs`` are routed to experiments by
+            name. Pass ``x_data`` as a dictionary keyed by experiment name.
 
         Returns
         -------
@@ -294,6 +298,17 @@ class SimulationExec:
                                    "Select one using the 'pick_unit' argument")
             else:
                 pass  # remember setting reset_states to True!!
+
+        if not isinstance(x_data, dict):
+            num_experiments = (1 if isinstance(x_data, np.ndarray)
+                               else len(x_data))
+            if num_experiments > 1:
+                raise ValueError(
+                    f"x_data holds {num_experiments} unnamed experiments; "
+                    "SetParamEstimation routes phase_modifiers, "
+                    "control_modifiers and wrapper_kwargs to each experiment "
+                    "by name, so pass x_data as a dictionary keyed by "
+                    "experiment name")
 
         if phase_modifiers is None:
             if isinstance(x_data, dict):

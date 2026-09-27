@@ -2,6 +2,28 @@
 Advanced features
 ====================
 
+Parameter-estimation outputs
+============================
+
+After :code:`ParameterEstimation.optimize_fn(method='LM')` or
+:code:`SimulationExec.EstimateParams(method='LM')`, reported predictions and
+residuals describe the accepted parameters in :code:`params_convg`, including
+when the solver stops after rejecting its last trial. The estimator evaluates
+the model once more per experiment to refresh its stored outputs. This also
+restores a stateful unit-operation callback to those parameters; the unit retains
+the last experiment's trajectory when several experiments share one unit.
+This reporting step does not establish convergence. Inspect the solver's
+termination diagnostics before interpreting the fit.
+
+:code:`y_model`, :code:`y_runs`, and :code:`resid_runs` retain experiment order,
+measured-state order, and the model's state units (for example [mol/L]).
+:code:`weighted_residuals` applies the observation weighting once and follows
+experiment, state, then sample order. Repeated fits replace :code:`y_model`
+instead of appending earlier fits. The accepted LM :code:`info['x']`,
+:code:`info['fun']`, :code:`info['jac']`, and solver counters are unchanged by
+the extra reporting evaluation. Objective-history recording follows the usual
+callback behavior, including duplicate removal with :code:`store_iter=True`.
+
 Liquid heat capacity
 ====================
 
@@ -121,6 +143,8 @@ Moment-mode crystallizers accept static slurry moments and connected upstream mo
 Finite-radius FVM nucleation requires :code:`rad_zero` [um] to match the first size-grid point within floating-point roundoff. Legacy :code:`rad_zero=0` remains supported with positive-start grids. Moment-mode analytical Jacobians are restricted to prescribed-temperature Batch crystallization with zero-radius nuclei and :code:`mass_conc` kinetics. The built-in kinetic model and unit impurity factor assumptions also apply; unsupported operating modes, FVM, finite radii, and other concentration bases raise before solver construction.
 
 Sensitivity :code:`sundials_opts` take precedence over the defaults :code:`sensmethod='SIMULTANEOUS'` and :code:`suppress_sens=False`. Continuous reporting remains required to collect CVODES sensitivities. Supported short nucleating cases are checked against complete-solve finite differences for numerical and analytical Jacobians. The longer shipped cooling-case benchmark remains an acceptance requirement of `issue 222 <https://github.com/PharmaPy-org/PharmaPy/issues/222>`_; these tests do not establish convergence for every kinetic regime.
+
+Crystallizer :code:`basis` selects only the liquid composition passed to the kinetics: :code:`'mass_conc'` [kg/m**3], or :code:`'mass_frac'` [kg/kg], the mass concentration divided by the liquid density. Batch, Semibatch and MSMPR crystallizers integrate liquid mass concentration [kg/m**3] with either option, so their composition derivatives are [kg/m**3/s], as is the :code:`final_fn` residual returned by :code:`MSMPR.solve_steady_state`; its returned :code:`composition` remains in the selected basis. Earlier releases also divided the MSMPR composition derivative by the liquid density under :code:`'mass_frac'`, integrating the [kg/m**3] state with a [1/s] rate; Batch and Semibatch were unaffected. MSMPR results computed with :code:`basis='mass_frac'` therefore differ from earlier releases, and code consuming the former [1/s] derivative or residual must update its scaling.
 
 :code:`MSMPR.solve_steady_state` initializes the kinetic target species itself; a prior dynamic solve is not required. It passes the complete species composition to kinetics in the selected basis, retains non-target species, and applies the same impurity growth factor as the dynamic model. Its constant-property, solid-free-feed, and growth assumptions still apply. Convergence diagnostics work with the declared SciPy 1.9 floor as well as the locked version. Numerical root convergence does not establish the full slurry physical balance: `issue 223 <https://github.com/PharmaPy-org/PharmaPy/issues/223>`_ still depends on the population/balance work tracked in `issue 300 <https://github.com/PharmaPy-org/PharmaPy/issues/300>`_. Crystallizer reset restores independent copies of the original phase inventories and rebuilds the slurry population and volume. Parameter-estimation phase modifiers also refresh those slurry quantities before the next solve. Relative supersaturation is :math:`S-1`, where :math:`S=c/c_{sat}`; callers relying on the former extra normalization must update their kinetic interpretation.
 

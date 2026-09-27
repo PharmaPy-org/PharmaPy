@@ -1479,6 +1479,16 @@ class DynamicCollector:
             self.Phases = phases
 
         elif self.model_type == 'liquid_mixer':
+            if time_grid is not None:
+                final_time = time_grid[-1]  # [s]
+            elif runtime is not None:
+                final_time = runtime + self.elapsed_time  # [s]
+            else:
+                raise ValueError(
+                    "DynamicCollector.solve_unit requires 'runtime' [s] or "
+                    "'time_grid' [s]; neither was supplied."
+                )
+
             path = self.Inlet.path_data
 
             init_dict = self.get_inputs_new(self.elapsed_time)['Inlet']
@@ -1487,7 +1497,8 @@ class DynamicCollector:
             frac_init = init_dict['mass_frac']
             temp_init = init_dict['temp']
 
-            liquid = LiquidPhase(path, temp=temp_init, mass_frac=frac_init)
+            liquid = LiquidPhase(path, temp=temp_init, mass=mass_init,
+                                 mass_frac=frac_init)
 
             states_init = np.hstack((frac_init, mass_init, temp_init))
 
@@ -1517,16 +1528,6 @@ class DynamicCollector:
 
             if not verbose:
                 solver.verbosity = 50
-
-            if time_grid is not None:
-                final_time = time_grid[-1]  # [s]
-            elif runtime is not None:
-                final_time = runtime + self.elapsed_time  # [s]
-            else:
-                raise ValueError(
-                    "DynamicCollector.solve_unit requires 'runtime' [s] or "
-                    "'time_grid' [s]; neither was supplied."
-                )
 
             time, states = solver.simulate(final_time, ncp_list=time_grid)
 
@@ -1589,12 +1590,36 @@ class DynamicCollector:
 
     def plot_profiles(self, fig_size=None, time_div=1, pick_comp=None,
                       kwargs=None):
-        if kwargs is None:
-            kwargs = {}
+        """Plot profiles using the model selected by the assigned inlet.
+
+        Parameters
+        ----------
+        fig_size : tuple of float, optional
+            Matplotlib figure size [in].
+        time_div : float, optional
+            Liquid-mixer time-axis divisor [s per displayed time unit]. This
+            option is ignored for crystallizer plots, which always use their
+            stored time axis directly.
+        pick_comp : sequence of int, optional
+            Liquid-mixer component indices to plot [-].
+        kwargs : dict, optional
+            Additional Matplotlib subplot keyword arguments for a delegated
+            crystallizer plot. The mapping is copied before use. An explicit
+            ``kwargs['figsize']`` takes precedence over ``fig_size``.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Generated profile figure.
+        numpy.ndarray
+            Matplotlib axes returned by the active model plotter.
+        """
+        plot_kwargs = {} if kwargs is None else dict(kwargs)
 
         if self.is_cryst:
-            fig, axes, ax_right = self.CrystInst.plot_profiles(
-                fig_size, time_div=time_div, **kwargs)
+            if fig_size is not None:
+                plot_kwargs.setdefault('figsize', fig_size)
+            fig, axes = self.CrystInst.plot_profiles(**plot_kwargs)
         else:
             fig, axes = self.plot_local(fig_size, time_div, pick_comp)
 

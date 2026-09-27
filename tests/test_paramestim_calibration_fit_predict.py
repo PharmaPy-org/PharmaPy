@@ -1,8 +1,17 @@
 """Regression tests for issue #78 fit and prediction paths.
 
 Dimensional fixture names carry units, and comments call out dimensionless
-intermediates as [-] where normalization or projection removes units.
+intermediates as [-] where normalization or projection removes units. The
+missing-cyipopt case blocks cyipopt imports inside an isolated child process,
+so it runs whether or not cyipopt is installed; the core CI lane separately
+asserts that cyipopt is genuinely absent.
 """
+
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
 
 import numpy as np
 import pytest
@@ -13,15 +22,133 @@ from PharmaPy.Calibration import PCR_calibration
 
 pytestmark = pytest.mark.unit
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
-def test_parameter_estimation_ipopt_result_assembly_uses_base_keyword(
-        monkeypatch):
-    """Exercise IPOPT post-solve assembly while stubbing only the solver.
+_CYIPOPT_IMPORT_BLOCKER = textwrap.dedent('''
+    import sys
 
-    The optional cyipopt/IPOPT dependency is replaced with a deterministic
-    boundary fake, but the ParameterEstimation objective, gradient, residual,
-    y_model, and covariance assembly paths remain real. Time is [s],
-    concentration is [mol/L], and the fitted rate is [mol/L/s].
+    class _BlockCyipopt:
+        """Reject cyipopt imports in this child process only."""
+
+        @staticmethod
+        def find_spec(fullname, path=None, target=None):
+            """Reject module specifications for the cyipopt package.
+
+            Parameters
+            ----------
+            fullname : str
+                Fully qualified name of the requested module.
+            path : sequence of str or None, optional
+                Parent package search path supplied by the import system.
+            target : module or None, optional
+                Existing module supplied when resolving a reload.
+
+            Returns
+            -------
+            None
+                Signal that unrelated modules should use later finders.
+
+            Raises
+            ------
+            ModuleNotFoundError
+                If cyipopt or one of its submodules is requested.
+            """
+            if fullname == "cyipopt" or fullname.startswith("cyipopt."):
+                raise ModuleNotFoundError(
+                    f"No module named {fullname!r}", name=fullname
+                )
+            return None
+
+    sys.meta_path.insert(0, _BlockCyipopt())
+
+    try:
+        import cyipopt
+    except ModuleNotFoundError as exc:
+        if exc.name != "cyipopt":
+            raise AssertionError(f"unexpected blocked module: {exc.name}") from exc
+    else:
+        raise AssertionError("cyipopt import blocker did not reject the backend")
+    ''')
+
+
+def _run_with_cyipopt_blocked(script, tmp_path):
+    """Run Python source with cyipopt blocked in the child process.
+
+    Parameters
+    ----------
+    script : str
+        Python source to execute in the child process.
+    tmp_path : pathlib.Path
+        Temporary directory used for the Matplotlib configuration cache.
+
+    Returns
+    -------
+    subprocess.CompletedProcess
+        Completed child-process result with captured text output.
+
+    Notes
+    -----
+    ``PharmaPy.ParamEstim`` sets ``have_cyipopt`` once, at import time. The
+    child installs the blocker before that import, so the module takes its
+    missing-cyipopt branch without altering the parent interpreter.
+    """
+    environment = os.environ.copy()
+    environment["MPLCONFIGDIR"] = str(tmp_path)
+    blocked_script = f"{_CYIPOPT_IMPORT_BLOCKER}\n{script}"
+    return subprocess.run(
+        [sys.executable, "-c", blocked_script],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_parameter_estimation_reports_missing_cyipopt(tmp_path):
+    """IPOPT selection without cyipopt reports how to enable IPOPT fitting."""
+    script = textwrap.dedent('''
+        import numpy as np
+
+        from PharmaPy import ParamEstim
+
+        if ParamEstim.have_cyipopt is not False:
+            raise AssertionError("blocked cyipopt was reported as available")
+
+        time_s = np.array([0.0, 1.0])  # [s]
+        observed_concentration_mol_l = np.array([0.0, 1.0])  # [mol/L]
+
+        def linear_model(params, x_data_s):
+            """Return concentration [mol/L] from rate [mol/L/s], time [s]."""
+            return params[0] * x_data_s
+
+        estimator = ParamEstim.ParameterEstimation(
+            linear_model,
+            param_seed=np.array([1.0]),  # [mol/L/s]
+            x_data=time_s,
+            y_data=observed_concentration_mol_l,
+            name_params=["rate_mol_l_s"],
+        )
+
+        try:
+            estimator.optimize_fn(method="IPOPT", verbose=False)
+        except ImportError as exc:
+            if "cyipopt is an optional import" not in str(exc):
+                raise AssertionError(str(exc)) from exc
+        else:
+            raise AssertionError("IPOPT selection unexpectedly succeeded")
+        ''')
+    result = _run_with_cyipopt_blocked(script, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_parameter_estimation_assembles_ipopt_result_info():
+    """Exercise the solver-independent IPOPT post-solve result contract.
+
+    The test calls the real objective, gradient, and covariance methods in the
+    same order as the IPOPT result path. Time is [s], concentration is [mol/L],
+    and the fitted rate is [mol/L/s].
     """
     time_s = np.array([0.0, 1.0, 2.0])
     rate_seed_mol_l_s = 1.0
@@ -47,24 +174,15 @@ def test_parameter_estimation_ipopt_result_assembly_uses_base_keyword(
         jac_fun=linear_jacobian,
     )
 
-    def fake_minimize_ipopt(objective, params_var, jac=None, bounds=None,
-                            options=None, kwargs=None):
-        """Mimic IPOPT returning the solved rate [mol/L/s]."""
-        optimum_mol_l_s = np.array([rate_mol_l_s])
-        # Match IPOPT's solved-state callback: residuals have units of the
-        # measured response before weighting, here [mol/L].
-        objective(optimum_mol_l_s, **(kwargs or {}))
-        return {"x": optimum_mol_l_s}
-
-    # cyipopt/IPOPT is an optional external solver stack absent from the core
-    # test lane. Patch only that boundary; objective, gradient, and covariance
-    # assembly stay on the real ParameterEstimation methods.
-    monkeypatch.setattr(ParamEstim, "have_cyipopt", True)
-    monkeypatch.setattr(ParamEstim, "minimize_ipopt", fake_minimize_ipopt,
-                        raising=False)
-
-    opt_par_mol_l_s, covar_rate, info = estimator.optimize_fn(
-        method="IPOPT", verbose=False)
+    opt_par_mol_l_s = np.array([rate_mol_l_s])  # [mol/L/s]
+    # Match the real IPOPT callback followed by the production,
+    # solver-independent result assembly. Issue #78 used the invalid ``base``
+    # keyword inside this helper's objective call.
+    estimator.get_objective(opt_par_mol_l_s)
+    info = estimator.assemble_solver_info(opt_par_mol_l_s)
+    estimator.info_opt = info
+    covar_rate = estimator.get_covariance()
+    y_model_mol_l_actual = estimator.resid_runs[0] + estimator.y_data[0]
 
     # The default identity weight matrix leaves the [mol/L] residual and [s]
     # sensitivity values numerically unchanged after sigma_inv weighting.
@@ -74,9 +192,62 @@ def test_parameter_estimation_ipopt_result_assembly_uses_base_keyword(
     np.testing.assert_allclose(opt_par_mol_l_s, [rate_mol_l_s])
     np.testing.assert_allclose(info["fun"], expected_weighted_residuals)
     np.testing.assert_allclose(info["jac"], expected_weighted_jacobian_s)
-    np.testing.assert_allclose(estimator.y_model[0].ravel(), y_model_mol_l)
+    np.testing.assert_allclose(y_model_mol_l_actual.ravel(), y_model_mol_l)
     # Covariance entries correspond to rate variance units [(mol/L/s)^2].
     assert covar_rate.shape == (1, 1)
+
+
+def test_assemble_solver_info_scales_by_measurement_standard_deviation():
+    """Variance weights make the assembled residuals dimensionless.
+
+    ``weight_matrix`` holds the concentration measurement variance
+    [(mol/L)**2], so ``sigma_inv`` is the reciprocal standard deviation
+    [L/mol]. The assembled residuals become [-] and the Jacobian takes the
+    reciprocal rate unit [L*s/mol], unlike the identity-weighted [mol/L]
+    residuals and [s] Jacobian checked in the previous test.
+    """
+    time_s = np.array([0.0, 1.0, 2.0])  # [s]
+    rate_mol_l_s = 2.0  # [mol/L/s]
+    residual_offset_mol_l = np.array([0.10, -0.05, 0.20])  # [mol/L]
+    y_obs_mol_l = rate_mol_l_s * time_s + residual_offset_mol_l  # [mol/L]
+    # Synthetic measurement standard deviation; any value other than 1
+    # distinguishes variance weighting from the identity default.
+    concentration_std_mol_l = 0.05  # [mol/L]
+    # [(mol/L)**2]
+    concentration_variance = np.array([[concentration_std_mol_l**2]])
+
+    def linear_model(params, x_data_s):
+        """Return concentration [mol/L] from rate [mol/L/s] and time [s]."""
+        return params[0] * x_data_s
+
+    def linear_jacobian(params, x_data_s):
+        """Return d(concentration)/d(rate) sensitivities with units [s]."""
+        return x_data_s[np.newaxis, :]
+
+    estimator = ParamEstim.ParameterEstimation(
+        linear_model,
+        param_seed=[1.0],  # [mol/L/s]
+        x_data=time_s,
+        y_data=y_obs_mol_l,
+        name_params=["rate_mol_l_s"],
+        jac_fun=linear_jacobian,
+        weight_matrix=concentration_variance,
+    )
+
+    opt_par_mol_l_s = np.array([rate_mol_l_s])  # [mol/L/s]
+    estimator.get_objective(opt_par_mol_l_s)
+    info = estimator.assemble_solver_info(opt_par_mol_l_s)
+
+    # Model minus data, divided by the standard deviation [-].
+    expected_residuals = -residual_offset_mol_l / concentration_std_mol_l
+    # d(residual)/d(rate) is time [s]; dividing by the standard deviation
+    # [mol/L] gives the reciprocal rate unit.
+    expected_jacobian_l_s_mol = (
+        time_s / concentration_std_mol_l
+    )[np.newaxis, :]  # [L*s/mol]
+
+    np.testing.assert_allclose(info["fun"], expected_residuals)
+    np.testing.assert_allclose(info["jac"], expected_jacobian_l_s_mol)
 
 
 def test_pcr_predict_uses_training_centering_for_single_new_spectrum():
