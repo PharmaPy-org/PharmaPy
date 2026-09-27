@@ -903,9 +903,9 @@ class _BaseCryst:
             Packed state vector, shape (num_states,). Population states use
             [um**n] or scaled [#/um] for Batch/Semibatch and the corresponding
             slurry-volume-specific basis for MSMPR. Remaining states are
-            liquid composition on the configured basis ([kg/m**3] for
-            mass_conc or [kg/kg] for mass_frac), liquid volume [m**3] when
-            applicable, and tank then jacket temperatures [K] when integrated.
+            liquid mass concentration [kg/m**3] on both kinetics-input
+            bases, liquid volume [m**3] when applicable, and tank then
+            jacket temperatures [K] when integrated.
         params : array-like or None, optional
             Active kinetic parameters in the kinetics model's native units;
             None retains the configured values.
@@ -1612,20 +1612,19 @@ class _BaseCryst:
         return out
 
     def plot_profiles(self, **fig_kwargs):
-        """
+        """Plot crystallizer moments, temperature, and concentration profiles.
 
         Parameters
         ----------
         fig_kwargs : keyword arguments
-            keyword arguments to be passed to the plot.subplots() method
+            Keyword arguments passed to :func:`matplotlib.pyplot.subplots`.
 
         Returns
         -------
-        fig : TYPE
-            DESCRIPTION.
-        ax : TYPE
-            DESCRIPTION.
-
+        matplotlib.figure.Figure
+            Generated profile figure.
+        numpy.ndarray
+            Profile subplot axes.
         """
 
         def get_mu_labels(mu_idx, msmpr=False):
@@ -1664,7 +1663,9 @@ class _BaseCryst:
                                 nrows=3, ncols=2, ylabels=ylabels,
                                 **fig_kwargs)
 
-        ax[0, 0].legend().remove()
+        first_legend = ax[0, 0].get_legend()
+        if first_legend is not None:
+            first_legend.remove()
 
         time = self.result.time
         moms = self.result.mu_n

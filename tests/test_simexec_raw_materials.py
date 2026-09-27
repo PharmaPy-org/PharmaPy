@@ -1,334 +1,348 @@
-"""Regression tests for raw-material accounting in ``SimulationExec``."""
+"""Raw-material accounting through production flowsheet collaborators."""
 
 import numpy as np
 import pytest
 
+from PharmaPy.Containers import DynamicCollector
+from PharmaPy.Commons import trapezoidal_rule
+from PharmaPy.MixedPhases import SlurryStream
+from PharmaPy.Phases import LiquidPhase
+from PharmaPy.ProcessControl import DynamicInput
+from PharmaPy.Results import DynamicResult
 from PharmaPy.SimExec import SimulationExec
+from PharmaPy.Streams import LiquidStream, SolidStream
 
 
 pytestmark = pytest.mark.unit
 
 
-class _Result:
-    """Minimal solved-result test double."""
-
-    def __init__(self, time):
-        """Create a minimal result object.
-
-        Parameters
-        ----------
-        time : array_like
-            Simulation time grid [s].
-        """
-        self.time = np.asarray(time, dtype=float)  # [s]
-
-
-class _DynamicInput:
-    """Deterministic dynamic-input profile test double."""
-
-    def __init__(self, **profiles):
-        """Create a deterministic dynamic-input test double.
-
-        Parameters
-        ----------
-        **profiles
-            Dynamic profile values. Flow entries are [kg/s], [mol/s], or
-            [m**3/s] according to key; temperature values are [K] and pressure
-            values are [Pa].
-        """
-        self.profiles = profiles
-
-    def evaluate_inputs(self, time):
-        """Return dynamic raw-inlet profiles on the requested time grid.
-
-        Parameters
-        ----------
-        time : ndarray
-            Simulation time grid [s].
-
-        Returns
-        -------
-        dict
-            Flow profiles [kg/s], [mol/s], or [m**3/s] according to key;
-            temperature profiles are [K] and pressure profiles are [Pa].
-        """
-        out = {}
-        for key, value in self.profiles.items():
-            if np.ndim(value) == 0:
-                out[key] = np.ones_like(time, dtype=float) * value
-            else:
-                out[key] = np.asarray(value, dtype=float)
-        return out
-
-
-class _RawPhase:
-    """Single-phase raw inlet test double."""
-
-    __module__ = "PharmaPy.Phases"
-
-    def __init__(
-            self, mass_flow=0.0, mole_flow=0.0,
-            mass=0.0, moles=0.0,
-            mass_frac=(1.0, 0.0), mole_frac=(1.0, 0.0),
-            density_mass=1000.0, density_mole=40.0):
-        """Create a single-phase raw inlet.
-
-        Parameters
-        ----------
-        mass_flow : float, optional
-            Static mass flow [kg/s].
-        mole_flow : float, optional
-            Static molar flow [mol/s].
-        mass : float, optional
-            Batch mass or initial holdup mass [kg].
-        moles : float, optional
-            Batch molar amount or initial holdup amount [mol].
-        mass_frac : tuple of float, optional
-            Component mass fractions [-].
-        mole_frac : tuple of float, optional
-            Component mole fractions [-].
-        density_mass : float, optional
-            Mass density [kg/m**3].
-        density_mole : float, optional
-            Molar density [mol/L].
-        """
-        self.y_upstream = None
-        self.DynamicInlet = None
-        self.mass_flow = mass_flow  # [kg/s]
-        self.mole_flow = mole_flow  # [mol/s]
-        self.mass = mass  # [kg]
-        self.moles = moles  # [mol]
-        self.mass_frac = np.asarray(mass_frac, dtype=float)  # [-]
-        self.mole_frac = np.asarray(mole_frac, dtype=float)  # [-]
-        self.vol_flow = mass_flow / density_mass  # [m**3/s]
-        self.vol = mass / density_mass if density_mass else 0.0  # [m**3]
-        self.temp = 300.0  # [K]
-        self.pres = 101325.0  # [Pa]
-        self.mw_av = 50.0  # [g/mol]
-        self.transferred_from_uo = False
-        self._density_mass = density_mass  # [kg/m**3]
-        self._density_mole = density_mole  # [mol/L]
-
-    def getDensity(self, basis="mass", **kwargs):
-        """Return the test density on the requested accounting basis.
-
-        Parameters
-        ----------
-        basis : {'mass', 'mole'}, optional
-            Density basis.
-        **kwargs
-            Ignored compatibility arguments.
-
-        Returns
-        -------
-        float
-            Mass density [kg/m**3] or molar density [mol/L].
-        """
-        if basis == "mass":
-            return self._density_mass
-        return self._density_mole
-
-
-class _MixedRawInlet:
-    """Mixed-phase raw inlet test double."""
-
-    __module__ = "PharmaPy.MixedPhases"
-
-    def __init__(self, phases):
-        """Create a mixed inlet from phase test doubles.
-
-        Parameters
-        ----------
-        phases : sequence of _RawPhase
-            Component phases with flows [kg/s] and [mol/s].
-        """
-        self.Phases = list(phases)
-        self.y_upstream = None
-        self.DynamicInlet = None
-        self.mass_flow = sum(phase.mass_flow for phase in phases)  # [kg/s]
-        self.mole_flow = sum(phase.mole_flow for phase in phases)  # [mol/s]
-        self.mass_frac = np.array([0.5, 0.5], dtype=float)  # [-]
-        self.mole_frac = np.array([0.5, 0.5], dtype=float)  # [-]
-        self.vol_flow = sum(phase.vol_flow for phase in phases)  # [m**3/s]
-        self.temp = 300.0  # [K]
-        self.pres = 101325.0  # [Pa]
-        self.mw_av = 50.0  # [g/mol]
-        self.transferred_from_uo = False
-
-    def getDensity(self, basis="mass", **kwargs):
-        """Return the aggregate density for compatibility.
-
-        Parameters
-        ----------
-        basis : {'mass', 'mole'}, optional
-            Density basis.
-        **kwargs
-            Ignored compatibility arguments.
-
-        Returns
-        -------
-        float
-            Mass density [kg/m**3] or molar density [mol/L].
-        """
-        return 1000.0 if basis == "mass" else 40.0
-
-
-class _UnitOperation:
-    """Minimal unit-operation test double."""
-
-    __module__ = "PharmaPy.Containers"
-
-    def __init__(self, inlet=None, time=(0.0, 10.0)):
-        """Create a minimal solved unit operation.
-
-        Parameters
-        ----------
-        inlet : object, optional
-            Raw inlet or mixed inlet used by raw-material accounting.
-        time : tuple of float, optional
-            Simulated start and end times [s].
-        """
-        self.Inlet = inlet
-        self.oper_mode = "Continuous"
-        self.result = _Result(time)
-        self.heat_duty = np.array([0.0, 0.0])  # [J]
-        self.duty_type = np.array([0, 0], dtype=int)  # [-]
-        self.outputs = {}
-
-
-def _sim_with_unit(unit):
-    """Build a ``SimulationExec`` instance around one unit operation.
+def _thermo_path(data_path):
+    """Return the production thermodynamic database used by these tests.
 
     Parameters
     ----------
-    unit : object
-        Unit operation test double.
+    data_path : dict
+        Paths to repository test-data directories.
+
+    Returns
+    -------
+    str
+        Path to a four-species thermodynamic JSON database.
+    """
+    return str(data_path["integration"] / "pfr_test_pure_comp.json")
+
+
+def _liquid_stream(data_path, *, mass_flow=0.0, mole_flow=0.0,
+                   mass_frac=None, mole_frac=None):
+    """Create a production liquid stream for raw-material accounting.
+
+    Parameters
+    ----------
+    data_path : dict
+        Paths to repository test-data directories.
+    mass_flow : float, optional
+        Liquid mass flow [kg/s].
+    mole_flow : float, optional
+        Liquid molar flow [mol/s].
+    mass_frac : array_like, optional
+        Four-species mass fractions [-].
+    mole_frac : array_like, optional
+        Four-species mole fractions [-].
+
+    Returns
+    -------
+    LiquidStream
+        Production liquid stream at 300 [K] and 101325 [Pa].
+    """
+    return LiquidStream(
+        _thermo_path(data_path),
+        temp=300.0,  # [K]
+        pres=101325.0,  # [Pa]
+        mass_flow=mass_flow,  # [kg/s]
+        mole_flow=mole_flow,  # [mol/s]
+        mass_frac=mass_frac,
+        mole_frac=mole_frac,
+        verbose=False,
+    )
+
+
+def _liquid_phase(data_path, *, mass, mass_frac):
+    """Create a production liquid phase for batch or holdup accounting.
+
+    Parameters
+    ----------
+    data_path : dict
+        Paths to repository test-data directories.
+    mass : float
+        Liquid mass [kg].
+    mass_frac : array_like
+        Four-species mass fractions [-].
+
+    Returns
+    -------
+    LiquidPhase
+        Production liquid phase at 300 [K] and 101325 [Pa].
+    """
+    return LiquidPhase(
+        _thermo_path(data_path),
+        temp=300.0,  # [K]
+        pres=101325.0,  # [Pa]
+        mass=mass,  # [kg]
+        mass_frac=mass_frac,
+        verbose=False,
+    )
+
+
+def _collector_with_inlet(inlet, time=(0.0, 10.0)):
+    """Attach a real inlet and solved result to a production collector.
+
+    Parameters
+    ----------
+    inlet : LiquidStream, LiquidPhase, or SlurryStream
+        Production raw-material inlet.
+    time : tuple of float, optional
+        Simulated start and end times [s].
+
+    Returns
+    -------
+    DynamicCollector
+        Production collector with a real ``DynamicResult`` time vector.
+    """
+    collector = DynamicCollector()
+    collector.Inlet = inlet
+    collector.oper_mode = (
+        "Continuous" if hasattr(inlet, "mass_flow") else "Batch"
+    )
+    collector.result = DynamicResult(
+        {}, time=np.asarray(time, dtype=float)
+    )  # [s]
+    collector.heat_duty = np.zeros(2)  # [J]
+    collector.duty_type = np.zeros(2, dtype=int)  # [-]
+    collector.outputs = {}
+    return collector
+
+
+def _sim_with_units(data_path, units):
+    """Build a production simulation executor around solved unit operations.
+
+    Parameters
+    ----------
+    data_path : dict
+        Paths to repository test-data directories.
+    units : dict
+        Unit-operation instances keyed by flowsheet identifier.
 
     Returns
     -------
     SimulationExec
-        Simulation executor with species names [-] and one unit operation.
+        Production executor configured with the real species database.
     """
-    sim = object.__new__(SimulationExec)
-    sim.NamesSpecies = ["A", "B"]
-    sim.uos_instances = {"U01": unit}
-    return sim
+    graph = {name: [] for name in units}
+    simulation = SimulationExec(_thermo_path(data_path), graph)
+    simulation.uos_instances = units
+    return simulation
 
 
-def test_get_opex_passes_raw_material_keywords_and_holdup_flag():
+def _sim_with_inlet(data_path, inlet, time=(0.0, 10.0)):
+    """Build a one-mixer production simulation for a raw inlet.
+
+    Parameters
+    ----------
+    data_path : dict
+        Paths to repository test-data directories.
+    inlet : LiquidStream, LiquidPhase, or SlurryStream
+        Production raw-material inlet.
+    time : tuple of float, optional
+        Simulated start and end times [s].
+
+    Returns
+    -------
+    SimulationExec
+        Production executor containing one dynamic collector.
+    """
+    unit = _collector_with_inlet(inlet, time=time)
+    return _sim_with_units(data_path, {"U01": unit})
+
+
+def _slurry_stream(data_path):
+    """Create a production slurry stream with unequal phase flow rates.
+
+    Parameters
+    ----------
+    data_path : dict
+        Paths to repository test-data directories.
+
+    Returns
+    -------
+    SlurryStream
+        Liquid/solid stream with phase mass flows of 1 and 3 [kg/s].
+    """
+    liquid = _liquid_stream(
+        data_path,
+        mass_flow=1.0,  # [kg/s]
+        mass_frac=[0.8, 0.2, 0.0, 0.0],  # [-]
+    )
+    particle_size = np.array([1.0, 2.0, 3.0, 4.0])  # [um]
+    distribution_shape = np.array([1.0, 2.0, 2.0, 1.0])  # [-]
+    unscaled_third_moment = trapezoidal_rule(
+        particle_size,
+        distribution_shape * particle_size**3,
+    ) * (1.0e-6)**3  # [m**3]
+    target_solid_volume_fraction = 0.25  # [-]
+    distribution = (
+        distribution_shape
+        * target_solid_volume_fraction
+        / unscaled_third_moment
+    )  # [#/m**3/um]
+    solid = SolidStream(
+        _thermo_path(data_path),
+        temp=300.0,  # [K]
+        pres=101325.0,  # [Pa]
+        mass_flow=3.0,  # [kg/s]
+        mass_frac=[0.1, 0.9, 0.0, 0.0],  # [-]
+        x_distrib=particle_size,
+        distrib=distribution,
+    )
+    slurry = SlurryStream(
+        vol_flow=liquid.vol + solid.vol,  # [m**3/s]
+        x_distrib=particle_size,
+        distrib=distribution,
+    )
+    slurry.Phases = [liquid, solid]
+    return slurry
+
+
+def test_get_opex_passes_raw_material_keywords_and_holdup_flag(data_path):
     """Top-level raw-material flags take precedence in OPEX accounting."""
-    inlet = _RawPhase(mass_flow=2.0, mass_frac=(0.25, 0.75))
-    initial_holdup = _RawPhase(mass=5.0, mass_frac=(0.4, 0.6))
-    unit = _UnitOperation(inlet)
-    unit.__original_phase__ = initial_holdup
-    sim = _sim_with_unit(unit)
+    inlet = _liquid_stream(
+        data_path,
+        mass_flow=2.0,  # [kg/s]
+        mass_frac=[0.25, 0.75, 0.0, 0.0],  # [-]
+    )
+    unit = _collector_with_inlet(inlet)
+    unit.__original_phase__ = _liquid_phase(
+        data_path,
+        mass=5.0,  # [kg]
+        mass_frac=[0.4, 0.6, 0.0, 0.0],  # [-]
+    )
+    simulation = _sim_with_units(data_path, {"U01": unit})
 
-    _, raw_cost, _ = sim.GetOPEX(
+    _, raw_cost, _ = simulation.GetOPEX(
         1.0,  # [USD/kg]
         include_holdups=False,
         kwargs_items={"raw_materials": {"basis": "mass"}},
     )
 
-    expected_cost = [20.0, 5.0, 15.0]  # [USD], 2 kg/s over 10 s.
-
+    expected_cost = [20.0, 5.0, 15.0, 0.0, 0.0]  # [USD]
     assert "Initial_holdup" not in raw_cost.index.get_level_values(1)
-    assert list(raw_cost.columns) == ["mass", "mass_A", "mass_B"]
-    np.testing.assert_allclose(
-        raw_cost.iloc[0][["mass", "mass_A", "mass_B"]],
-        expected_cost,
-    )
+    assert list(raw_cost.columns) == [
+        "mass", "mass_A", "mass_B", "mass_C", "mass_solv"
+    ]
+    np.testing.assert_allclose(raw_cost.iloc[0], expected_cost)
 
 
-def test_get_opex_includes_initial_holdup_by_default():
+def test_get_opex_includes_initial_holdup_by_default(data_path):
     """OPEX includes initial holdup raw material unless disabled."""
-    inlet = _RawPhase(mass_flow=2.0, mass_frac=(0.25, 0.75))
-    initial_holdup = _RawPhase(mass=5.0, mass_frac=(0.4, 0.6))
-    unit = _UnitOperation(inlet)
-    unit.__original_phase__ = initial_holdup
-    sim = _sim_with_unit(unit)
+    inlet = _liquid_stream(
+        data_path,
+        mass_flow=2.0,  # [kg/s]
+        mass_frac=[0.25, 0.75, 0.0, 0.0],  # [-]
+    )
+    unit = _collector_with_inlet(inlet)
+    unit.__original_phase__ = _liquid_phase(
+        data_path,
+        mass=5.0,  # [kg]
+        mass_frac=[0.4, 0.6, 0.0, 0.0],  # [-]
+    )
+    simulation = _sim_with_units(data_path, {"U01": unit})
 
-    _, raw_cost, _ = sim.GetOPEX(
+    _, raw_cost, _ = simulation.GetOPEX(
         1.0,  # [USD/kg]
         kwargs_items={"raw_materials": {"basis": "mass"}},
     )
 
     holdup_cost = raw_cost.xs("Initial_holdup", level=1)
-    expected_holdup_cost = [5.0, 2.0, 3.0]  # [USD], 5 kg at 0.4/0.6.
-
+    expected_holdup_cost = [5.0, 2.0, 3.0, 0.0, 0.0]  # [USD]
     assert len(holdup_cost) == 1
-    np.testing.assert_allclose(
-        holdup_cost.iloc[0][["mass", "mass_A", "mass_B"]],
-        expected_holdup_cost,
-    )
+    np.testing.assert_allclose(holdup_cost.iloc[0], expected_holdup_cost)
 
 
-def test_get_opex_maps_duty_codes_to_heat_exchange_costs():
+def test_get_opex_maps_duty_codes_to_heat_exchange_costs(data_path):
     """OPEX maps duty codes directly to their heat-exchange costs."""
     duty_types = np.array([[-3, -2], [-1, 0], [1, 2], [3, 0]], dtype=int)
     units = {}
-    for num, duty_type in enumerate(duty_types):
-        unit = _UnitOperation(_RawPhase())
-        unit.heat_duty = np.array([1e9, 1e9])  # [J]
+    for number, duty_type in enumerate(duty_types):
+        inlet = _liquid_stream(
+            data_path,
+            mass_flow=1.0,  # [kg/s]
+            mass_frac=[1.0, 0.0, 0.0, 0.0],  # [-]
+        )
+        unit = _collector_with_inlet(inlet)
+        unit.heat_duty = np.array([1.0e9, 1.0e9])  # [J]
         unit.duty_type = duty_type  # [-]
-        units["U%02d" % num] = unit
+        units[f"U{number:02d}"] = unit
+    simulation = _sim_with_units(data_path, units)
 
-    sim = object.__new__(SimulationExec)
-    sim.NamesSpecies = ["A", "B"]
-    sim.uos_instances = units
-
-    duty_cost, _, _ = sim.GetOPEX(0.0, include_holdups=False)
+    duty_cost, _, _ = simulation.GetOPEX(0.0, include_holdups=False)
 
     expected_cost = np.array([
         [14.12, 8.49],
         [4.77, 0.378],
         [4.54, 4.77],
         [5.66, 0.378],
-    ])  # [USD], one GJ per duty entry.
-
+    ])  # [USD], one [GJ] per duty entry
     np.testing.assert_allclose(duty_cost.to_numpy(), expected_cost)
 
 
-def test_mole_basis_totals_use_canonical_singular_basis():
+def test_mole_basis_totals_use_canonical_singular_basis(data_path):
     """Mole-basis totals use the singular ``basis='mole'`` path."""
-    inlet = _RawPhase(mole_flow=4.0, mole_frac=(0.25, 0.75))
-    sim = _sim_with_unit(_UnitOperation(inlet))
+    inlet = _liquid_stream(
+        data_path,
+        mole_flow=4.0,  # [mol/s]
+        mole_frac=[0.25, 0.75, 0.0, 0.0],  # [-]
+    )
+    simulation = _sim_with_inlet(data_path, inlet)
 
-    raw_materials = sim.GetRawMaterials(basis="mole")
-    expected_moles = [40.0, 10.0, 30.0]  # [mol], 4 mol/s over 10 s.
+    raw_materials = simulation.GetRawMaterials(basis="mole")
 
-    assert list(raw_materials.columns) == ["moles", "moles_A", "moles_B"]
+    assert list(raw_materials.columns) == [
+        "moles", "moles_A", "moles_B", "moles_C", "moles_solv"
+    ]
     np.testing.assert_allclose(
-        raw_materials.iloc[0][["moles", "moles_A", "moles_B"]],
-        expected_moles,
+        raw_materials.iloc[0],
+        [40.0, 10.0, 30.0, 0.0, 0.0],  # [mol]
     )
 
 
-def test_batch_raw_inlet_records_total_before_aggregation():
+def test_batch_raw_inlet_records_total_before_aggregation(data_path):
     """Batch raw inlets record total material before species aggregation."""
-    inlet = _RawPhase(mass=6.0, mass_frac=(0.2, 0.8))
-    unit = _UnitOperation(inlet)
-    unit.oper_mode = "Batch"
-    sim = _sim_with_unit(unit)
+    inlet = _liquid_phase(
+        data_path,
+        mass=6.0,  # [kg]
+        mass_frac=[0.2, 0.8, 0.0, 0.0],  # [-]
+    )
+    simulation = _sim_with_inlet(data_path, inlet)
 
-    raw_materials = sim.GetRawMaterials(basis="mass")
-    expected_mass = [6.0, 1.2, 4.8]  # [kg], 6 kg at 0.2/0.8.
+    raw_materials = simulation.GetRawMaterials(basis="mass")
 
-    assert list(raw_materials.columns) == ["mass", "mass_A", "mass_B"]
+    assert list(raw_materials.columns) == [
+        "mass", "mass_A", "mass_B", "mass_C", "mass_solv"
+    ]
     np.testing.assert_allclose(
-        raw_materials.iloc[0][["mass", "mass_A", "mass_B"]],
-        expected_mass,
+        raw_materials.iloc[0],
+        [6.0, 1.2, 4.8, 0.0, 0.0],  # [kg]
     )
 
 
-def test_mixed_phase_raw_inlet_is_decomposed_by_phase():
-    """Static mixed raw inlets account each phase once."""
-    liquid = _RawPhase(mass_flow=1.0, mass_frac=(0.8, 0.2))
-    solid = _RawPhase(mass_flow=3.0, mass_frac=(0.1, 0.9))
-    mixed = _MixedRawInlet([liquid, solid])
-    sim = _sim_with_unit(_UnitOperation(mixed))
+def test_mixed_phase_raw_inlet_is_decomposed_by_phase(data_path):
+    """Static mixed raw inlets account each production phase once."""
+    slurry = _slurry_stream(data_path)
+    expected_phase_mass = np.sort([
+        phase.mass_flow * 10.0 for phase in slurry.Phases  # [kg]
+    ])
+    simulation = _sim_with_inlet(data_path, slurry)
 
-    raw_materials = sim.GetRawMaterials(basis="mass", totals=False)
-    expected_phase_mass = [10.0, 30.0]  # [kg], phase flows over 10 s.
+    raw_materials = simulation.GetRawMaterials(basis="mass", totals=False)
 
     assert len(raw_materials) == 2
     np.testing.assert_allclose(
@@ -337,17 +351,23 @@ def test_mixed_phase_raw_inlet_is_decomposed_by_phase():
     )
 
 
-def test_dynamic_mixed_phase_raw_inlet_splits_total_flow_by_phase():
-    """Dynamic mixed raw inlets do not integrate the total flow per phase."""
-    liquid = _RawPhase(mass_flow=1.0, mass_frac=(0.8, 0.2))
-    solid = _RawPhase(mass_flow=3.0, mass_frac=(0.1, 0.9))
-    mixed = _MixedRawInlet([liquid, solid])
-    mixed.DynamicInlet = _DynamicInput(mass_flow=4.0)  # [kg/s]
-    sim = _sim_with_unit(_UnitOperation(mixed))
+def test_dynamic_mixed_phase_raw_inlet_splits_total_flow_by_phase(data_path):
+    """Dynamic mixed inlets split rather than duplicate their total flow."""
+    slurry = _slurry_stream(data_path)
+    phase_fractions = np.array([
+        phase.mass_flow / slurry.mass_flow for phase in slurry.Phases
+    ])  # [-]
+    dynamic_inlet = DynamicInput()
+    dynamic_inlet.add_variable(
+        "mass_flow",
+        lambda time: np.full_like(time, 4.0, dtype=float),  # [kg/s]
+    )
+    slurry.DynamicInlet = dynamic_inlet
+    simulation = _sim_with_inlet(data_path, slurry)
 
-    raw_materials = sim.GetRawMaterials(basis="mass", totals=False)
-    expected_phase_mass = [10.0, 30.0]  # [kg], 4 kg/s split 0.25/0.75.
+    raw_materials = simulation.GetRawMaterials(basis="mass", totals=False)
 
+    expected_phase_mass = np.sort(4.0 * 10.0 * phase_fractions)  # [kg]
     assert len(raw_materials) == 2
     np.testing.assert_allclose(
         np.sort(raw_materials["mass"].to_numpy()),
@@ -355,32 +375,38 @@ def test_dynamic_mixed_phase_raw_inlet_splits_total_flow_by_phase():
     )
 
 
-def test_get_opex_applies_nonunity_raw_cost_vector():
+def test_get_opex_applies_nonunity_raw_cost_vector(data_path):
     """Vector raw costs price total and species columns explicitly."""
-    inlet = _RawPhase(mass_flow=2.0, mass_frac=(0.25, 0.75))
-    sim = _sim_with_unit(_UnitOperation(inlet))
+    inlet = _liquid_stream(
+        data_path,
+        mass_flow=2.0,  # [kg/s]
+        mass_frac=[0.25, 0.75, 0.0, 0.0],  # [-]
+    )
+    simulation = _sim_with_inlet(data_path, inlet)
 
-    _, raw_cost, _ = sim.GetOPEX(
-        np.array([0.0, 2.0, 3.0]),  # [USD/kg]
+    _, raw_cost, _ = simulation.GetOPEX(
+        np.array([0.0, 2.0, 3.0, 0.0, 0.0]),  # [USD/kg]
         include_holdups=False,
         kwargs_items={"raw_materials": {"basis": "mass"}},
     )
 
-    expected_cost = [0.0, 10.0, 45.0]  # [USD], zero total-price column.
-
     np.testing.assert_allclose(
-        raw_cost.iloc[0][["mass", "mass_A", "mass_B"]],
-        expected_cost,
+        raw_cost.iloc[0],
+        [0.0, 10.0, 45.0, 0.0, 0.0],  # [USD]
     )
 
 
-def test_get_opex_rejects_raw_cost_vector_with_wrong_width():
+def test_get_opex_rejects_raw_cost_vector_with_wrong_width(data_path):
     """Raw cost vectors must match the raw-material table width."""
-    inlet = _RawPhase(mass_flow=2.0, mass_frac=(0.25, 0.75))
-    sim = _sim_with_unit(_UnitOperation(inlet))
+    inlet = _liquid_stream(
+        data_path,
+        mass_flow=2.0,  # [kg/s]
+        mass_frac=[0.25, 0.75, 0.0, 0.0],  # [-]
+    )
+    simulation = _sim_with_inlet(data_path, inlet)
 
     with pytest.raises(ValueError, match="one entry per raw-material column"):
-        sim.GetOPEX(
+        simulation.GetOPEX(
             np.array([1.0, 2.0]),  # [USD/kg]
             include_holdups=False,
             kwargs_items={"raw_materials": {"basis": "mass"}},

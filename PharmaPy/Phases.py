@@ -144,6 +144,12 @@ class LiquidPhase(ThermoPhysicalManager):
         index of solvent components in the liquid phase. It must be
         only specified if 'mass_frac' or 'mole_frac' are not given.
     """
+    # Frames between the zero-amount warning and the code that constructed
+    # the phase: ``__init__`` sits one frame below its caller. Subclasses
+    # whose ``__init__`` delegates here add one frame each so Python's
+    # per-location ``default`` filter reports every constructing line.
+    _zero_amount_stacklevel = 2
+
     def __init__(self, path_thermo=None, temp: float = 298.15, pres=101325,
                  mass=0, vol=0, moles=0,
                  mass_frac: Optional[ArrayLike] = None,
@@ -180,7 +186,8 @@ class LiquidPhase(ThermoPhysicalManager):
             Print diagnostics for fractions summing below the legacy 0.99
             threshold [-]. Defaults to True.
         check_input : bool, optional
-            Warn if all amounts are zero. Defaults to True.
+            Warn if all amounts are zero, subject to the caller's warning
+            filters. Defaults to True.
 
         Raises
         ------
@@ -189,8 +196,18 @@ class LiquidPhase(ThermoPhysicalManager):
         RuntimeWarning
             If more than one composition measure is supplied.
 
+        Warnings
+        --------
+        RuntimeWarning
+            If all amounts are zero and check_input is True. The caller's
+            warning policy determines whether this is shown, ignored, or raised.
+            The warning is attributed to the line that constructed the phase,
+            so a per-location policy such as ``default`` reports each
+            constructing line once.
+
         Notes
         -----
+        Warning filters are left unchanged.
         Exactly one composition measure is required. Constructor composition
         inputs are copied before conversion. Derived concentrations retain
         the liquid volume basis. No physical basis changes during coercion.
@@ -296,12 +313,10 @@ class LiquidPhase(ThermoPhysicalManager):
 
         if (mass + vol + moles) == 0:
             if check_input:
-                warnings.simplefilter("always")
                 warnings.warn("'mass', 'moles' and 'vol' are all set to zero. "
                               "Model may not perform as intended.",
-                              RuntimeWarning)
-
-                warnings.simplefilter("ignore")
+                              RuntimeWarning,
+                              stacklevel=self._zero_amount_stacklevel)
 
         self.y_upstream = None
 
