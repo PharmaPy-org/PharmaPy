@@ -423,23 +423,63 @@ def handle_events(solver, event_info, state_event_list, any_event=True) -> None:
             raise TerminateSimulation
 
 
-def high_resolution_fvm(y, boundary_cond, limiter_type='Van Leer',
-                        both=False):
+def high_resolution_fvm(
+        values: np.ndarray, boundary_cond,
+        limiter_type: str = 'Van Leer') -> np.ndarray:
+    """Calculate limited finite-volume face values.
 
-    # Ghost cells -1, 0 and N + 1 (see LeVeque 2002, Chapter 9)
-    y_extrap = 2*y[-1] - y[-2]
-    y_aug = np.concatenate(([boundary_cond]*2, y, [y_extrap]))
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Cell-centered scalar or vector values. Units follow the transported
+        state.
+    boundary_cond : float or numpy.ndarray
+        Inlet ghost-cell value in the same units and trailing shape as
+        ``values``.
+    limiter_type : {'Van Leer'}, optional
+        Total-variation-diminishing flux limiter.
 
-    y_diff = np.diff(y_aug, axis=0)
+    Returns
+    -------
+    numpy.ndarray
+        Limited face values with one more axial entry than ``values``. Units
+        follow ``values``.
 
-    theta = (y_diff[:-1]) / (y_diff[1:] + eps)
+    Raises
+    ------
+    ValueError
+        If no cells are supplied or the limiter is unsupported.
+
+    Notes
+    -----
+    Ghost cells follow LeVeque (2002), Chapter 9. With one physical cell there
+    is no outlet slope to extrapolate, so the outlet ghost cell uses the
+    zero-gradient value of that cell.
+    """
+    values = np.asarray(values)
+    if values.shape[0] == 0:
+        raise ValueError("high_resolution_fvm requires at least one cell")
+
+    if values.shape[0] == 1:
+        outlet_value = values[-1]
+    else:
+        outlet_value = 2 * values[-1] - values[-2]
+    augmented_values = np.concatenate(
+        ([boundary_cond] * 2, values, [outlet_value]))
+
+    differences = np.diff(augmented_values, axis=0)
+    theta = differences[:-1] / (differences[1:] + eps)
 
     if limiter_type == 'Van Leer':
         limiter = (np.abs(theta) + theta) / (1 + np.abs(theta))
-    else:  # TODO: include more limiters
-        pass
+    else:
+        raise ValueError(
+            "high_resolution_fvm supports only the 'Van Leer' limiter; "
+            f"got {limiter_type!r}"
+        )
 
-    fluxes = y_aug[1:-1] + 0.5 * y_diff[1:] * limiter
+    fluxes = (
+        augmented_values[1:-1] + 0.5 * differences[1:] * limiter)
 
     return fluxes
 

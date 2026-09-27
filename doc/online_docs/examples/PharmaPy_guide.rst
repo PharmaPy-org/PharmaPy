@@ -15,39 +15,39 @@ Chemical selection
 
 1.	Specify the chemical properties of the involved compounds in a JSON file. Be sure to define the file path for the program to access the properties. Each entry for the species should be in the following template:
    
-.. code-block:: json
+.. code-block:: text
 
 	{
-	“Species_Name”:
+	"Species_Name":
 		{
 		
-		“mw”: molecular weight of the species in units of [g/mol],
+		"mw": molecular weight of the species in units of [g/mol],
 		
-		“t_crit”: critical temperature of the species in units of [K],
+		"t_crit": critical temperature of the species in units of [K],
 		
-		“p_crit”: critical pressure of the species in units of [Pa],
+		"p_crit": critical pressure of the species in units of [Pa],
 
-		“cp_liq”: [coefficients for the polynomial form of the liquid specific heat of the species in units of [J/K/mol]], # cP(T) = A + BT + CT**2 + DT**3 + ET**4
+		"cp_liq": [coefficients for the polynomial form of the liquid specific heat of the species in units of [J/K/mol]], # cP(T) = A + BT + CT**2 + DT**3 + ET**4
 		
-		“cp_solid”: [coefficients for the polynomial form of the solid specific heat of the species in units of [J/K/mol]],
+		"cp_solid": [coefficients for the polynomial form of the solid specific heat of the species in units of [J/K/mol]],
 
-		“rho_liq”: density of the species in liquid form in units of [kg/m^3],
+		"rho_liq": density of the species in liquid form in units of [kg/m^3],
 
-		“rho_solid”: density of the species in solid form in units of [kg/m^3],
+		"rho_solid": density of the species in solid form in units of [kg/m^3],
 
-		“visc_liq”: [coefficients for the fourth power exponential form for viscosity of the species in units of [kg/m/s]], # mu(T) = A * exp(B/T + CT + DT**2
+		"visc_liq": [coefficients for the fourth power exponential form for viscosity of the species in units of [kg/m/s]], # mu(T) = A * exp(B/T + CT + DT**2
 
-		“p_vap”: [coefficients for the Antoine equation for vapor pressure of the species in units of [Pa]], # log P = A - B/(C - T)
+		"p_vap": [coefficients for the Antoine equation for vapor pressure of the species in units of [Pa]], # log P = A - B/(C - T)
 
-		“mol_vol”: molar volume of the species in units of [m^3/mol],
+		"mol_vol": molar volume of the species in units of [m^3/mol],
 
-		“delta_hvap”: enthalpy of vaporization of the species in units of [J/mol],
+		"delta_hvap": enthalpy of vaporization of the species in units of [J/mol],
 
-		“tref_hvap”: enthalpy of vaporization of the species from a reference temperature in units of [J/mol],
+		"tref_hvap": reference temperature for the enthalpy of vaporization in units of [K],
 
-		“surf_tension”: surface tension value of the species in units of [N/m],
+		"surf_tension": surface tension value of the species in units of [N/m],
 
-		“source”: source for the chemical properties listed above
+		"source": source for the chemical properties listed above
 		}
 	}
 
@@ -75,7 +75,7 @@ The variable ‘path_phys’ is the string for the file path for the chemical pr
 
 .. testcode::
 
-	rxns = [‘A + B --> C’, ‘A + C --> D’]
+	rxns = ['A + B --> C', 'A + C --> D']
 
 In the example above, it is noted that chemical A reacts with chemical B to create chemical C. Additionally, chemical A also reacts with chemical C to create chemical D.
 
