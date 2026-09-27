@@ -1,354 +1,222 @@
-"""Shortcut distillation design regressions for issue #72."""
+"""Shortcut distillation regressions through production column contracts."""
 
 import numpy as np
 import pytest
+from scipy.optimize import brentq
 
 import PharmaPy.Distillation as distillation
+from PharmaPy.ProcessControl import DynamicInput
+from PharmaPy.Streams import LiquidStream
 
 
 pytestmark = pytest.mark.unit
 
 
-def test_positive_reflux_below_minimum_uses_configured_shortcut_ratio():
-    """Specified reflux below ``Rmin`` uses the configured multiplier."""
+def _real_column(data_path, column_type=distillation.DistillationColumn,
+                 **kwargs):
+    """Build a production column with a representative liquid feed.
 
-    z_feed = np.array([0.40, 0.60])  # [-], feed mole fractions
+    Parameters
+    ----------
+    data_path : dict
+        Paths to the repository test-data directories.
+    column_type : type, optional
+        Production distillation-column class to instantiate.
+    **kwargs
+        Column constructor overrides. Pressure is in [Pa], feed quality is
+        [-], recoveries are [%], reflux is [-], and plate numbers are [-].
 
-    x_dist = np.array([0.90, 0.10])  # [-], distillate mole fractions
-    x_bottom = np.array([0.10, 0.90])  # [-], bottoms mole fractions
-    dist_flowrate = 10.0  # [mol/s]
-    bot_flowrate = 15.0  # [mol/s]
-    min_reflux = 2.0  # [-], Lmin/D
-    num_min = 4.0  # [-], minimum equilibrium-stage count
-
-    class ShortcutColumn(distillation.DistillationColumn):
-        """Shortcut-design double with deterministic correlations."""
-
-        def global_material_bce(self, received_z_feed=None):
-            """Return deterministic shortcut material-balance values.
-
-            Parameters
-            ----------
-            received_z_feed : ndarray, optional
-                Feed mole fractions passed by shortcut design [-].
-
-            Returns
-            -------
-            tuple
-                Distillate and bottoms mole fractions [-], distillate flow
-                [mol/s], and bottoms flow [mol/s].
-            """
-            np.testing.assert_allclose(received_z_feed, z_feed)
-            return x_dist, x_bottom, dist_flowrate, bot_flowrate
-
-        def calc_underwood_min_reflux(self, *args):
-            """Return a deterministic minimum reflux ratio.
-
-            Parameters
-            ----------
-            *args
-                Shortcut-design arguments ignored by this test double.
-
-            Returns
-            -------
-            float
-                Minimum reflux ratio [-].
-            """
-            return min_reflux
-
-        def calc_num_min(self, received_x_dist, received_x_bottom):
-            """Return a deterministic minimum stage count.
-
-            Parameters
-            ----------
-            received_x_dist : ndarray
-                Distillate mole fractions [-].
-            received_x_bottom : ndarray
-                Bottoms mole fractions [-].
-
-            Returns
-            -------
-            float
-                Minimum equilibrium-stage count [-].
-            """
-            np.testing.assert_allclose(received_x_dist, x_dist)
-            np.testing.assert_allclose(received_x_bottom, x_bottom)
-            return num_min
-
-    column = ShortcutColumn(
-        pres=101325.0,  # [Pa]
-        q_feed=1.0,  # [-], saturated liquid feed
-        LK="light",
-        HK="heavy",
-        perc_LK=95.0,  # [%]
-        perc_HK=5.0,  # [%]
-        reflux=1.0,  # [-], below the computed minimum
-        num_plates=8,  # [-], equilibrium-stage count
-        num_feed=4,  # [-], tray count from the top
-        reflux_to_minimum_ratio=1.8,  # [-], operating reflux/Rmin
+    Returns
+    -------
+    PharmaPy.Distillation._BaseDistillation
+        Configured production column with a feed of 25 [mol/s].
+    """
+    thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
+    feed = LiquidStream(
+        thermo_path,
+        temp=350.0,  # [K]
+        mole_flow=25.0,  # [mol/s]
+        mole_frac=[0.4, 0.6, 0.0, 0.0],  # [-]
+        verbose=False,
     )
-    column.z_feed = z_feed
+    settings = {
+        "pres": 101325.0,  # [Pa]
+        "q_feed": 1.0,  # [-], saturated liquid feed
+        "LK": "A",
+        "HK": "B",
+        "perc_LK": 95.0,  # [%]
+        "perc_HK": 5.0,  # [%]
+        "num_plates": 8,  # [-], equilibrium-stage count
+        "num_feed": 4,  # [-], tray count from the top
+    }
+    settings.update(kwargs)
+    column = column_type(**settings)
+    column.Inlet = feed
+    return column
+
+
+def test_positive_reflux_below_minimum_uses_configured_shortcut_ratio(
+        data_path):
+    """A subminimum specified reflux uses the configured multiplier."""
+    configured_ratio = 1.8  # [-], operating reflux/Rmin
+    column = _real_column(
+        data_path,
+        reflux=0.1,  # [-], below the production-calculated minimum
+        reflux_to_minimum_ratio=configured_ratio,
+    )
 
     result = column.calculate_shortcut_design()
 
-    assert result["min_reflux"] == pytest.approx(min_reflux)
-    assert result["reflux"] == pytest.approx(3.6)  # 1.8 [-] * Rmin 2.0 [-]
-
-
-def test_default_shortcut_reflux_ratio_is_pinned():
-    """The documented default multiplier remains 1.5 [-]."""
-
-    z_feed = np.array([0.40, 0.60])  # [-], feed mole fractions
-    x_dist = np.array([0.90, 0.10])  # [-], distillate mole fractions
-    x_bottom = np.array([0.10, 0.90])  # [-], bottoms mole fractions
-
-    class ShortcutColumn(distillation.DistillationColumn):
-        """Shortcut-design double with deterministic minimum reflux."""
-
-        def global_material_bce(self, received_z_feed=None):
-            """Return deterministic material-balance values.
-
-            Parameters
-            ----------
-            received_z_feed : ndarray, optional
-                Feed mole fractions passed by shortcut design [-].
-
-            Returns
-            -------
-            tuple
-                Distillate and bottoms mole fractions [-], distillate flow
-                [mol/s], and bottoms flow [mol/s].
-            """
-            np.testing.assert_allclose(received_z_feed, z_feed)
-            dist_flowrate = 10.0  # [mol/s]
-            bot_flowrate = 15.0  # [mol/s]
-            return x_dist, x_bottom, dist_flowrate, bot_flowrate
-
-        def calc_underwood_min_reflux(self, *args):
-            """Return the pinned default-case minimum reflux ratio.
-
-            Parameters
-            ----------
-            *args
-                Shortcut-design arguments ignored by this test double.
-
-            Returns
-            -------
-            float
-                Minimum reflux ratio [-].
-            """
-            return 2.0  # [-]
-
-        def calc_num_min(self, received_x_dist, received_x_bottom):
-            """Return the pinned default-case minimum stage count.
-
-            Parameters
-            ----------
-            received_x_dist : ndarray
-                Distillate mole fractions [-].
-            received_x_bottom : ndarray
-                Bottoms mole fractions [-].
-
-            Returns
-            -------
-            float
-                Minimum equilibrium-stage count [-].
-            """
-            np.testing.assert_allclose(received_x_dist, x_dist)
-            np.testing.assert_allclose(received_x_bottom, x_bottom)
-            return 4.0  # [-]
-
-    column = ShortcutColumn(
-        pres=101325.0,  # [Pa]
-        q_feed=1.0,  # [-]
-        LK="light",
-        HK="heavy",
-        perc_LK=95.0,  # [%]
-        perc_HK=5.0,  # [%]
-        num_plates=8,  # [-]
-        num_feed=4,  # [-]
+    assert result["min_reflux"] > 0.1
+    assert result["reflux"] == pytest.approx(
+        configured_ratio * result["min_reflux"]
     )
-    column.z_feed = z_feed
+
+
+def test_default_shortcut_reflux_ratio_is_pinned(data_path):
+    """The documented default multiplier remains 1.5 [-]."""
+    column = _real_column(data_path)
 
     result = column.calculate_shortcut_design()
 
     assert distillation.DEFAULT_REFLUX_TO_MINIMUM_RATIO == pytest.approx(1.5)
-    assert result["reflux"] == pytest.approx(3.0)  # 1.5 [-] * Rmin 2.0 [-]
-
-
-def test_backward_compatible_shortcut_aliases():
-    """Deprecated shortcut-design aliases delegate to canonical methods."""
-
-    expected = {
-        "material_balances": {},  # flows [mol/s], fractions [-]
-        "min_reflux": 1.2,  # [-]
-        "num_min": 4.0,  # [-], equilibrium-stage count
-        "reflux": 1.8,  # [-]
-        "num_plates": 7.0,  # [-], equilibrium-stage count
-        "num_feed": 4.0,  # [-], tray count from the top
-    }
-
-    class AliasColumn(distillation.DistillationColumn):
-        """Shortcut alias double with deterministic delegate methods."""
-
-        def calculate_shortcut_design(self, time=None):
-            """Return the expected shortcut-design result.
-
-            Parameters
-            ----------
-            time : float, optional
-                Shortcut-design time [s].
-
-            Returns
-            -------
-            dict
-                Shortcut-design result. Mole fractions are [-], molar flows are
-                [mol/s], reflux is [-], and stage counts are [-].
-            """
-            assert time is None
-            return expected
-
-        def calc_underwood_min_reflux(self, *args):
-            """Return the expected minimum reflux ratio.
-
-            Parameters
-            ----------
-            *args
-                Underwood calculation arguments ignored by this test double.
-
-            Returns
-            -------
-            float
-                Minimum reflux ratio [-].
-            """
-            return 0.7  # [-]
-
-    column = AliasColumn(
-        pres=101325.0,  # [Pa]
-        q_feed=1.0,  # [-], saturated liquid feed
-        LK="light",
-        HK="heavy",
-        perc_LK=95.0,  # [%]
-        perc_HK=5.0,  # [%]
+    assert result["reflux"] == pytest.approx(
+        distillation.DEFAULT_REFLUX_TO_MINIMUM_RATIO * result["min_reflux"]
     )
+
+
+def test_backward_compatible_shortcut_aliases(data_path):
+    """Deprecated aliases return the production methods' real results."""
+    column = _real_column(data_path)
+    canonical_design = column.calculate_shortcut_design()
 
     with pytest.warns(
             DeprecationWarning,
             match="calculate_heuristics is deprecated"):
-        assert column.calculate_heuristics() is expected
+        alias_design = column.calculate_heuristics()
 
-    with pytest.warns(
-            DeprecationWarning,
-            match="calc_min_reflux is deprecated"):
-        assert column.calc_min_reflux(None, None, None, None) == pytest.approx(
-            0.7)
-
-
-def test_underwood_min_reflux_includes_feed_quality_in_target():
-    """Underwood minimum reflux includes feed quality in the root target."""
-
-    alpha = np.array([4.0, 1.0])  # [-], relative volatility to HK
-    z_feed = np.array([0.40, 0.60])  # [-], feed mole fractions
-    x_dist = np.array([0.90, 0.10])  # [-], distillate mole fractions
-    x_bottom = np.array([0.05, 0.95])  # [-], bottoms mole fractions
-    dist_flowrate = 10.0  # [mol/s]
-    bot_flowrate = 15.0  # [mol/s]
-
-    class UnderwoodColumn(distillation.DistillationColumn):
-        """Underwood numeric double with deterministic relative volatility."""
-
-        def get_alpha(self, pres, x_frac):
-            """Return the fixture relative-volatility vector.
-
-            Parameters
-            ----------
-            pres : float
-                Column pressure [Pa].
-            x_frac : ndarray
-                Feed mole fractions [-].
-
-            Returns
-            -------
-            ndarray
-                Relative volatilities referenced to the heavy key [-].
-            """
-            np.testing.assert_allclose(pres, 101325.0)
-            np.testing.assert_allclose(x_frac, z_feed)
-            return alpha
-
-    column = UnderwoodColumn(
-        pres=101325.0,  # [Pa]
-        q_feed=0.8,  # [-], molar liquid fraction in the feed
-        LK="light",
-        HK="heavy",
-        perc_LK=95.0,  # [%]
-        perc_HK=5.0,  # [%]
+    assert alias_design.keys() == canonical_design.keys()
+    np.testing.assert_allclose(
+        alias_design["material_balances"]["x_dist"],
+        canonical_design["material_balances"]["x_dist"],
     )
-    column.LK_index = 0  # [-]
-    column.HK_index = 1  # [-]
+    np.testing.assert_allclose(
+        alias_design["material_balances"]["x_bottom"],
+        canonical_design["material_balances"]["x_bottom"],
+    )
+    for name in ("min_reflux", "num_min", "reflux", "num_plates",
+                 "num_feed"):
+        assert alias_design[name] == pytest.approx(canonical_design[name])
 
-    min_reflux = column.calc_underwood_min_reflux(
-        x_dist=x_dist,
-        x_bot=x_bottom,
-        dist_flowrate=dist_flowrate,
-        bot_flowrate=bot_flowrate,
-        z_feed=z_feed,
+    material = canonical_design["material_balances"]
+    canonical_minimum = column.calc_underwood_min_reflux(
+        material["x_dist"],
+        material["x_bottom"],
+        material["dist_flow"],
+        material["bottom_flow"],
+    )
+    with pytest.warns(DeprecationWarning, match="calc_min_reflux is deprecated"):
+        alias_minimum = column.calc_min_reflux(
+            material["x_dist"],
+            material["x_bottom"],
+            material["dist_flow"],
+            material["bottom_flow"],
+        )
+    assert alias_minimum == pytest.approx(canonical_minimum)
+
+
+def test_underwood_min_reflux_includes_feed_quality_in_target(data_path):
+    """Underwood minimum reflux uses the real feed-quality root target."""
+    column = _real_column(data_path, q_feed=0.8)  # [-], liquid feed fraction
+    x_dist, x_bottom, dist_flow, bottom_flow = column.global_material_bce()
+    alpha = column.get_alpha(column.pres, column.z_feed)  # [-]
+    underwood_target = 1.0 - column.q_feed  # [-]
+
+    def underwood_residual(phi):
+        """Evaluate the independently stated first Underwood equation.
+
+        Parameters
+        ----------
+        phi : float
+            Candidate Underwood root [-].
+
+        Returns
+        -------
+        float
+            Residual of the first Underwood equation [-].
+        """
+        return (
+            np.sum(alpha * column.z_feed / (alpha - phi))
+            - underwood_target
+        )
+
+    root_margin = 1.0e-10  # [-], excludes volatility singularities
+    phi = brentq(
+        underwood_residual,
+        alpha[column.HK_index] + root_margin,
+        alpha[column.LK_index] - root_margin,
+    )  # [-]
+    minimum_vapor_flow = np.sum(
+        alpha * dist_flow * x_dist / (alpha - phi)
+    )  # [mol/s]
+    expected_minimum = (minimum_vapor_flow - dist_flow) / dist_flow  # [-]
+
+    actual_minimum = column.calc_underwood_min_reflux(
+        x_dist,
+        x_bottom,
+        dist_flow,
+        bottom_flow,
     )
 
-    # With q_feed = 0.8 [-], the first Underwood target is 1-q = 0.2 [-].
-    # For this fixture phi = 2.0 [-], Vmin = 17.0 [mol/s], and Rmin = 0.7 [-].
-    assert min_reflux == pytest.approx(0.7)
+    assert underwood_residual(phi) == pytest.approx(0.0, abs=1.0e-9)
+    assert actual_minimum == pytest.approx(expected_minimum, rel=1.0e-6)
 
 
-def test_column_startup_accepts_deprecated_time_heuristics_keyword():
-    """The old startup keyword remains available with a deprecation warning."""
-
-
-    class StartupColumn(distillation.DynamicDistillation):
-        """Dynamic column double with deterministic shortcut design."""
-
-        def calculate_shortcut_design(self, time=None):
-            """Return deterministic startup shortcut-design values.
-
-            Parameters
-            ----------
-            time : float, optional
-                Shortcut-design time [s].
-
-            Returns
-            -------
-            dict
-                Shortcut-design result. Mole fractions are [-], molar flows are
-                [mol/s], reflux is [-], and stage counts are [-].
-            """
-            self.received_time = time  # [s]
-            return {
-                "material_balances": {
-                    "bottom_flow": 4.0,  # [mol/s]
-                    "dist_flow": 6.0,  # [mol/s]
-                    "x_dist": np.array([0.9, 0.1]),  # [-]
-                    "x_bottom": np.array([0.2, 0.8]),  # [-]
-                },
-                "min_reflux": 0.7,  # [-]
-                "num_min": 3.5,  # [-]
-                "reflux": 1.05,  # [-]
-                "num_plates": 8.0,  # [-]
-                "num_feed": 4.0,  # [-]
-            }
-
-    column = StartupColumn(
-        pres=101325.0,  # [Pa]
-        q_feed=1.0,  # [-]
-        LK="light",
-        HK="heavy",
-        perc_LK=95.0,  # [%]
-        perc_HK=5.0,  # [%]
+def test_column_startup_accepts_deprecated_time_heuristics_keyword(data_path):
+    """The old startup keyword initializes a production dynamic column."""
+    column = _real_column(
+        data_path,
+        column_type=distillation.DynamicDistillation,
     )
+    dynamic_inlet = DynamicInput()
+
+    def mole_fraction_at_time(time_s):
+        """Return a time-varying binary feed composition [-].
+
+        Parameters
+        ----------
+        time_s : float
+            Shortcut-design evaluation time [s].
+
+        Returns
+        -------
+        numpy.ndarray
+            Four-species feed mole fractions [-].
+        """
+        light_key_fraction = 0.40 - 0.01 * time_s  # [-]
+        heavy_key_fraction = 1.0 - light_key_fraction  # [-]
+        return np.array(
+            [light_key_fraction, heavy_key_fraction, 0.0, 0.0]
+        )  # [-]
+
+    dynamic_inlet.add_variable("mole_frac", mole_fraction_at_time)
+    column.Inlet.DynamicInlet = dynamic_inlet
+    expected_at_12_s = column.calculate_shortcut_design(12.0)
+    static_design = column.calculate_shortcut_design()
 
     with pytest.warns(DeprecationWarning, match="time_heuristics is deprecated"):
-        column.column_startup(time_heuristics=12.0)
+        column.column_startup(time_heuristics=12.0)  # [s]
 
-    assert column.received_time == pytest.approx(12.0)
-    assert column.num_plates == 8
-    assert column.num_feed == 4
-    assert column.reflux == pytest.approx(1.05)
+    shortcut = column.shortcut_design
+    assert column.heuristics is shortcut
+    assert column.num_plates == int(shortcut["num_plates"])
+    assert column.num_feed == int(shortcut["num_feed"])
+    assert column.reflux == pytest.approx(shortcut["reflux"])
+    np.testing.assert_allclose(
+        shortcut["material_balances"]["x_dist"],
+        expected_at_12_s["material_balances"]["x_dist"],
+    )
+    assert not np.allclose(
+        shortcut["material_balances"]["x_dist"],
+        static_design["material_balances"]["x_dist"],
+    )

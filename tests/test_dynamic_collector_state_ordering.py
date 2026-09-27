@@ -1,22 +1,20 @@
 """Regression tests for DynamicCollector result bookkeeping (issue #75).
 
 The liquid tests drive the real ``DynamicCollector.solve_unit`` public path
-with real inlet objects and real thermodynamic data, and stub only the optional
-Assimulo integration boundary so the checks stay in the core lane.
-
-The liquid-mixer test stubs the Assimulo integrator with a single explicit-Euler
-step taken from the model's own right-hand side and initial state, so the
-returned trajectory carries the production state layout rather than an assumed
-one. The crystallizer tests attach a recording sub-model directly to
-``CrystInst`` and exercise the collector's real result-retrieval and plotting
-dispatch methods without replacing the production ``SemibatchCryst`` class.
+with real inlet objects and thermodynamic data. Solver-backed liquid and
+crystallizer paths run against the installed Assimulo backend; pre-solver input
+validation remains in the core lane.
 """
 
+import warnings
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 
-import PharmaPy.Containers as containers
 from PharmaPy.Containers import DynamicCollector
+from PharmaPy.Crystallizers import SemibatchCryst
+from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.MixedPhases import SlurryStream
 from PharmaPy.Streams import LiquidStream, SolidStream
 
@@ -31,72 +29,13 @@ INLET_TEMP = 320.0  # [K]
 RUNTIME = 5.0  # [s]
 
 
-class _RecordedProblem:
-    """Stand-in for ``assimulo.problem.Explicit_Problem``.
-
-    Records the right-hand side and initial state that ``solve_unit`` builds,
-    without interpreting their layout.
-    """
-
-    def __init__(self, rhs, y0, t0=0.0):
-        self.rhs = rhs
-        self.y0 = np.asarray(y0, dtype=float)  # states_init, model layout
-        self.t0 = t0  # [s]
-
-
-class _EulerSolver:
-    """Stand-in for ``assimulo.solvers.CVode`` taking one explicit-Euler step.
-
-    The integrator is the only stubbed boundary; the derivative comes from the
-    unit's own ``unit_model``, so the returned states keep whatever ordering
-    the production code uses.
-    """
-
-    def __init__(self, problem):
-        self.problem = problem
-        self.verbosity = 0
-
-    def simulate(self, final_time, ncp_list=None):
-        """Return the two-point trajectory ``[y0, y0 + h * f(t0, y0)]``.
-
-        Parameters
-        ----------
-        final_time : float
-            End of the integration interval [s].
-        ncp_list : array_like, optional
-            Ignored; present for signature compatibility.
-
-        Returns
-        -------
-        tuple of numpy.ndarray
-            Times [s] with shape ``(2,)`` and states with shape ``(2, n)``.
-        """
-        y0 = self.problem.y0
-        step = final_time - self.problem.t0  # [s]
-        derivative = np.asarray(self.problem.rhs(self.problem.t0, y0),
-                                dtype=float)
-        states = np.vstack((y0, y0 + step * derivative))
-        time = np.array([self.problem.t0, final_time])  # [s]
-
-        return time, states
-
-
-@pytest.fixture
-def euler_backend(monkeypatch):
-    """Replace the optional Assimulo constructors used by Containers.py."""
-    monkeypatch.setattr(containers, "Explicit_Problem", _RecordedProblem)
-    monkeypatch.setattr(containers, "CVode", _EulerSolver)
-
-
-def test_liquid_mixer_requires_an_integration_end(data_path, euler_backend):
+def test_liquid_mixer_requires_an_integration_end(data_path):
     """Reject a liquid solve with neither runtime nor requested times.
 
     Parameters
     ----------
     data_path : dict of pathlib.Path
         Repository test-data directories.
-    euler_backend : None
-        Fixture replacing the optional Assimulo integration boundary.
     """
     path = str(data_path["integration"] / "pfr_test_pure_comp.json")
     inlet = LiquidStream(path, temp=INLET_TEMP, mass_flow=INLET_MASS_FLOW,
@@ -110,15 +49,25 @@ def test_liquid_mixer_requires_an_integration_end(data_path, euler_backend):
         collector.solve_unit()
 
 
-def test_liquid_mixer_result_labels_match_state_vector(data_path,
-                                                       euler_backend):
+@pytest.mark.assimulo
+def test_liquid_mixer_result_labels_match_state_vector(data_path):
     """``result`` must label holdup mass [kg] and composition [-] correctly.
 
+    Parameters
+    ----------
+    data_path : dict of pathlib.Path
+        Repository test-data directories.
+
+    Notes
+    -----
     The holdup is created from the inlet stream, so its initial composition is
     the inlet composition and its temperature is the inlet temperature. With a
     constant inlet the only balance that moves is the total mass, whose exact
-    solution over one step is ``mass_flow * step`` [kg].
+    solution over the integration interval is ``mass_flow * elapsed_time``
+    [kg]. The zero-amount warning is an error because the real liquid phase
+    must receive the positive initial mass used by the ODE state.
     """
+    pytest.importorskip("assimulo")
     path = str(data_path["integration"] / "pfr_test_pure_comp.json")
 
     inlet = LiquidStream(path, temp=INLET_TEMP, mass_flow=INLET_MASS_FLOW,
@@ -127,26 +76,34 @@ def test_liquid_mixer_result_labels_match_state_vector(data_path,
     collector = DynamicCollector()
     collector.Inlet = inlet
 
-    time, _ = collector.solve_unit(runtime=RUNTIME)
+    # Record warnings instead of erroring on RuntimeWarning alone: the
+    # assertion then rejects a warning of any category and lists its message.
+    with warnings.catch_warnings(record=True) as initialization_warnings:
+        time, _ = collector.solve_unit(runtime=RUNTIME, verbose=False)
+    assert not initialization_warnings, [
+        str(warning.message) for warning in initialization_warnings]
     step = time[-1] - time[0]  # [s]
 
     result = collector.result
 
     # Composition is a mass fraction vector over the four species.
-    assert result.mass_frac.shape == (2, len(INLET_MASS_FRAC))
+    num_times = len(time)  # [-]
+    assert result.mass_frac.shape == (num_times, len(INLET_MASS_FRAC))
     np.testing.assert_allclose(result.mass_frac[0], INLET_MASS_FRAC,
                                rtol=1e-10)
-    np.testing.assert_allclose(result.mass_frac.sum(axis=1), np.ones(2),
-                               rtol=1e-10)
+    np.testing.assert_allclose(
+        result.mass_frac.sum(axis=1), np.ones(num_times), rtol=1e-8
+    )
 
     # Holdup mass accumulates the inlet mass flow: d(mass)/dt = mass_flow.
-    assert result.mass.shape == (2,)
-    assert result.mass[1] - result.mass[0] == pytest.approx(
-        INLET_MASS_FLOW * step, rel=1e-10)
+    assert result.mass.shape == (num_times,)
+    assert result.mass[-1] - result.mass[0] == pytest.approx(
+        INLET_MASS_FLOW * step, rel=1e-8)
 
     # Temperature is unchanged because inlet and holdup enthalpies coincide.
-    np.testing.assert_allclose(result.temp, np.full(2, INLET_TEMP),
-                               rtol=1e-10)
+    np.testing.assert_allclose(
+        result.temp, np.full(num_times, INLET_TEMP), rtol=1e-8
+    )
 
     # `outputs` is the same labeled mapping handed downstream.
     np.testing.assert_allclose(collector.outputs["mass"], result.mass,
@@ -165,72 +122,50 @@ def test_liquid_mixer_result_labels_match_state_vector(data_path,
 
 SLURRY_VOL_FLOW = 1e-4  # [m**3/s]
 SOLID_MASS_FRAC = np.array([0.0, 0.0, 1.0, 0.0])  # [-], solid is species C
-CRYST_RUNTIME = 10.0  # [s]
+CRYST_RUNTIME = 0.01  # [s], short real-backend integration interval
 NUM_CRYST_BINS = 15  # [-]
 
 
-class _RecordingSemibatchCryst:
-    """Stand-in for the delegated ``SemibatchCryst`` sub-model.
+def _configured_crystallizing_collector(slurry_inlet):
+    """Build a collector with real crystallization kinetics and inlet.
 
-    Records the plotting delegation the collector is expected to perform and
-    returns a state array shaped like a crystallizer solve, whose leading
-    columns are crystal-size-distribution bins rather than liquid states.
+    Parameters
+    ----------
+    slurry_inlet : SlurryStream
+        Real crystallizing inlet with composition [-], flow [m**3/s],
+        temperature [K], and distribution [#/m**3/um] states.
+
+    Returns
+    -------
+    DynamicCollector
+        Production collector configured for a short Assimulo solve.
+
+    Notes
+    -----
+    The crystallization constants and ``scale`` reproduce the established
+    ``test_PFR_HOLD_BC_FILT`` integration case in
+    ``tests/Flowsheet/flowsheet_tests.py``. The shorter runtime is sufficient
+    to exercise construction, retrieval, and plotting without changing that
+    case's physical parameterization.
     """
-
-    #: Sentinels returned by :meth:`plot_profiles`.
-    fig = object()
-    axes = object()
-    ax_right = object()
-
-    def __init__(self, method=None, adiabatic=None, **kwargs):
-        self.method = method
-        self.adiabatic = adiabatic
-        self.kwargs = kwargs
-
-        self.elapsed_time = 0.0  # [s]
-        self.states_di = {'distrib': {'dim': NUM_CRYST_BINS, 'type': 'diff'}}
-        self.plot_calls = 0
-
-        self.Outlet = _CrystOutlet()
-        self.outputs = {}
-        self.result = object()
-
-    def solve_unit(self, runtime=None, time_grid=None, verbose=True):
-        """Return a two-point CSD-leading trajectory without integrating.
-
-        Parameters
-        ----------
-        runtime : float, optional
-            Requested integration span [s].
-        time_grid : array_like, optional
-            Ignored.
-        verbose : bool, optional
-            Ignored.
-
-        Returns
-        -------
-        tuple of numpy.ndarray
-            Times [s] with shape ``(2,)`` and states with shape
-            ``(2, NUM_CRYST_BINS + 5)``.
-        """
-        time = np.array([self.elapsed_time,
-                         self.elapsed_time + runtime])  # [s]
-        num_columns = NUM_CRYST_BINS + len(SOLID_MASS_FRAC) + 1
-        states = np.tile(np.arange(num_columns, dtype=float), (2, 1))
-
-        return time, states
-
-    def plot_profiles(self, fig_size=None, time_div=1, **kwargs):
-        """Record the delegated call and return sentinel figure handles."""
-        self.plot_calls += 1
-
-        return self.fig, self.axes, self.ax_right
-
-
-class _CrystOutlet:
-    """Minimal outlet exposing the volume the collector reads back."""
-
-    vol = 1e-3  # [m**3]
+    solubility_coefficients = np.array([2.269e2, -1.88, 3.89e-3])
+    # [kg/m**3], [kg/m**3/K], [kg/m**3/K**2], empirical test correlation
+    kinetics = CrystKinetics(
+        solubility_coefficients,
+        nucl_prim=(3e8, 0.0, 3.0),  # [#/m**3/s], [J/mol], [-]
+        nucl_sec=(4.46e10, 0.0, 2.0, 1e-5),  # [#/m**3/s], [J/mol], [-], [-]
+        growth=(5.0, 0.0, 1.32),  # [um/s], [J/mol], [-]
+        dissolution=(1.0, 0.0, 1.0),  # [um/s], [J/mol], [-]
+    )
+    collector = DynamicCollector()
+    collector.Inlet = slurry_inlet
+    collector.KinCryst = kinetics
+    collector.kwargs_cryst = {
+        "target_ind": 2,  # species C index [-]
+        "target_comp": ["C"],
+        "scale": 1e-9,  # [-], stabilizes the FVM distribution state
+    }
+    return collector
 
 
 @pytest.fixture
@@ -295,6 +230,7 @@ def test_inlet_assignment_sets_collector_model_mode(data_path, slurry_inlet):
     assert collector.is_cryst is False
 
 
+@pytest.mark.assimulo
 def test_crystallizer_collector_delegates_plotting(slurry_inlet):
     """A crystallizing collector must plot through its crystallizer sub-model.
 
@@ -303,9 +239,8 @@ def test_crystallizer_collector_delegates_plotting(slurry_inlet):
     solve, ``plot_profiles`` must therefore delegate to the sub-model's own
     plotter instead.
     """
-    collector = DynamicCollector()
-    collector.Inlet = slurry_inlet
-    collector.CrystInst = _RecordingSemibatchCryst()
+    pytest.importorskip("assimulo")
+    collector = _configured_crystallizing_collector(slurry_inlet)
     # Plausible stale liquid profiles ensure a wrong local-plot branch reaches
     # the delegation assertions instead of failing on a missing attribute.
     collector.timeProf = np.array([0.0, CRYST_RUNTIME])  # [s]
@@ -313,15 +248,68 @@ def test_crystallizer_collector_delegates_plotting(slurry_inlet):
     collector.massProf = np.array([1.0, 2.0])  # [kg]
     collector.tempProf = np.array([310.0, 311.0])  # [K]
 
+    collector.solve_unit(
+        runtime=CRYST_RUNTIME,
+        time_grid=np.array([0.0, CRYST_RUNTIME]),  # [s]
+        verbose=False,
+    )
+
     assert collector.model_type == 'crystallizer'
+    assert isinstance(collector.CrystInst, SemibatchCryst)
 
-    fig, axes = collector.plot_profiles()
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "error",
+            message="No artists with labels found to put in legend",
+            category=UserWarning,
+        )
+        fig, axes = collector.plot_profiles()
 
-    assert collector.CrystInst.plot_calls == 1
-    assert fig is _RecordingSemibatchCryst.fig
-    assert axes is _RecordingSemibatchCryst.axes
+    assert fig is not None
+    assert np.asarray(axes).shape == (3, 2)
+    plt.close(fig)
 
 
+@pytest.mark.assimulo
+def test_crystallizer_plot_forwards_figure_size(slurry_inlet):
+    """Delegated crystallizer plots honour the collector figure size [in].
+
+    Parameters
+    ----------
+    slurry_inlet : SlurryStream
+        Real crystallizing inlet with composition [-], flow [m**3/s],
+        temperature [K], and distribution [#/m**3/um] states.
+    """
+    pytest.importorskip("assimulo")
+    collector = _configured_crystallizing_collector(slurry_inlet)
+    collector.solve_unit(
+        runtime=CRYST_RUNTIME,
+        time_grid=np.array([0.0, CRYST_RUNTIME]),  # [s]
+        verbose=False,
+    )
+
+    requested_figure_size = (9.0, 7.0)  # [in]
+    plot_kwargs = {}
+    fig, _ = collector.plot_profiles(
+        fig_size=requested_figure_size, kwargs=plot_kwargs
+    )
+
+    np.testing.assert_allclose(fig.get_size_inches(), requested_figure_size)
+    assert plot_kwargs == {}
+    plt.close(fig)
+
+    explicit_figure_size = (8.0, 6.0)  # [in]
+    explicit_kwargs = {"figsize": explicit_figure_size}
+    fig, _ = collector.plot_profiles(
+        fig_size=requested_figure_size, kwargs=explicit_kwargs
+    )
+
+    np.testing.assert_allclose(fig.get_size_inches(), explicit_figure_size)
+    assert explicit_kwargs == {"figsize": explicit_figure_size}
+    plt.close(fig)
+
+
+@pytest.mark.assimulo
 def test_crystallizer_results_skip_liquid_profile_slicing(slurry_inlet):
     """Crystallizer retrieval must not overwrite liquid-profile attributes.
 
@@ -331,17 +319,23 @@ def test_crystallizer_results_skip_liquid_profile_slicing(slurry_inlet):
         Real crystallizing inlet with composition [-], flow [m**3/s],
         temperature [K], and distribution [#/m**3/um] states.
     """
-    collector = DynamicCollector()
-    collector.Inlet = slurry_inlet
-    collector.CrystInst = _RecordingSemibatchCryst()
-    liquid_profile_sentinel = object()
-    collector.wConcProf = liquid_profile_sentinel
-    collector.massProf = liquid_profile_sentinel
-    collector.tempProf = liquid_profile_sentinel
+    pytest.importorskip("assimulo")
+    collector = _configured_crystallizing_collector(slurry_inlet)
+    stale_mass_fractions = np.tile(SOLID_MASS_FRAC, (2, 1))  # [-]
+    stale_masses = np.array([1.0, 2.0])  # [kg]
+    stale_temperatures = np.array([310.0, 311.0])  # [K]
+    collector.wConcProf = stale_mass_fractions.copy()
+    collector.massProf = stale_masses.copy()
+    collector.tempProf = stale_temperatures.copy()
 
-    time, states = collector.CrystInst.solve_unit(runtime=CRYST_RUNTIME)
-    collector.retrieve_results(time, states)
+    time, states = collector.solve_unit(
+        runtime=CRYST_RUNTIME,
+        time_grid=np.array([0.0, CRYST_RUNTIME]),  # [s]
+        verbose=False,
+    )
 
-    assert collector.wConcProf is liquid_profile_sentinel
-    assert collector.massProf is liquid_profile_sentinel
-    assert collector.tempProf is liquid_profile_sentinel
+    assert np.shape(states)[0] == len(time)
+    assert collector.result is collector.CrystInst.result
+    np.testing.assert_array_equal(collector.wConcProf, stale_mass_fractions)
+    np.testing.assert_array_equal(collector.massProf, stale_masses)
+    np.testing.assert_array_equal(collector.tempProf, stale_temperatures)
