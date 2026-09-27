@@ -8,7 +8,7 @@ Liquid heat capacity
 :code:`LiquidPhase.getCp` now defaults to the mass basis [J/kg/K], like its siblings; callers needing [J/mol/K] must pass :code:`basis='mole'`.
 
 Continuous holdup accuracy
-=========================
+==========================
 
 :code:`ContinuousHoldup.solve_unit` accepts :code:`sundials_opts`, like the
 dynamic collector. Use :code:`{'rtol': relative_error, 'atol': absolute_error}`
