@@ -1,9 +1,9 @@
 """regressions using real phases and no optional solver backend.
 
-The shipped five-species database supplies unequal phase properties. These
-tests intercept solver initialization at the ODE boundary. Moment-mode solves
-and inventory retrieval are covered in test_crystallizer_moment_basis.py and
-test_crystallizer_moment_inventory.py.
+The shipped five-species database supplies unequal phase properties.
+Crystallizer tests prepare initial states without constructing a solver.
+Moment-mode solves and inventory retrieval are covered in
+test_crystallizer_moment_basis.py and test_crystallizer_moment_inventory.py.
 
 
 Related issue scope:
@@ -14,8 +14,6 @@ https://github.com/PharmaPy-org/PharmaPy/issues/246
 https://github.com/PharmaPy-org/PharmaPy/issues/247
 https://github.com/PharmaPy-org/PharmaPy/issues/248
 """
-
-from unittest.mock import PropertyMock, patch
 
 import numpy as np
 import pytest
@@ -433,17 +431,14 @@ def test_porosity_matches_independent_two_bin_model(thermo_path):
                                rtol=4*np.finfo(float).eps, atol=0)
 
 
-def test_filter_reads_phase_shape_factor(thermo_path):
+def test_filter_alpha_matches_phase_resistance(thermo_path):
     solid = make_solid(thermo_path)
     liquid = LiquidPhase(thermo_path, mass_frac=LIQUID_COMPOSITION, vol=1.0)
     filter_unit = Filter(station_diam=1.0)  # [m], existing packing default
-    # Isolate the ownership assertion to the helper; other slurry/packing
-    # consumers also legitimately read kv when Filter.Phases attaches phases.
+    # kv cancels from get_alpha's normalized volume weights, so counting reads
+    # of the phase attribute would test an implementation detail (#200).
     porosity = solid.getPorosity()  # [-]
-    with patch.object(SolidPhase, 'kv', new_callable=PropertyMock,
-                      create=True, return_value=KV) as factor:
-        expected = get_alpha(solid, porosity, 1.0, solid.getDensity())  # [m/kg]
-    factor.assert_called_once_with()
+    expected = get_alpha(solid, porosity, 1.0, solid.getDensity())  # [m/kg]
     filter_unit.Phases = [liquid, solid]
     assert filter_unit.alpha == pytest.approx(expected, rel=RTOL, abs=0)
 
