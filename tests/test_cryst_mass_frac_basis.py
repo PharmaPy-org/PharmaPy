@@ -352,6 +352,11 @@ def test_batch_mass_frac_state_jacobian_matches_finite_difference(thermo_paths):
     analytical = unit.jac_states(0.0, states, params=None, return_only=False)
     np.testing.assert_allclose(analytical, finite_difference,
                                rtol=JAC_RTOL, atol=JAC_ATOL)
+    # Raw d(dV/dt)/d(mu_2) is ~1e-18: a mixed-unit absolute tolerance can
+    # conceal its deletion or a missing density divisor. Since transfer is
+    # linear in mu_2, its inventory-scaled sensitivity equals dV/dt itself.
+    volume_response = analytical[-1, 2] * states[2]  # [m**3/s]
+    assert volume_response == pytest.approx(BATCH_DVOL_DT, rel=RATE_RTOL, abs=0)
 
 
 def test_batch_mass_frac_parameter_jacobian_matches_finite_difference(thermo_paths):
