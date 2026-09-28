@@ -171,6 +171,16 @@ Displacement washing uses the attached cake's packing porosity for flow, adsorpt
 Deliquoring checks inferred removal against initial and retained species inventories. Only arithmetic-scale negative roundoff is clipped. A larger negative removal emits a warning, preserves signed :code:`liquid_removed_species` and removal history, sets :code:`removal_diagnostics_valid=False`, and returns NaN removal composition. The transport-conservation defect tracked in `issue 29 <https://github.com/PharmaPy-org/PharmaPy/issues/29>`_ is not repaired by those diagnostics; invalid removal data must not be used as a physical effluent stream.
 
 
+Dynamic distillation initialization
+===================================
+
+After configuring the column with ``column_startup()``, use ``init_unit()`` to
+inspect the initial DAE state and material rates without Assimulo. Rows run from
+the top stage to the reboiler; the first state column is temperature [K] and the
+remaining columns are species mole fractions [-]. Every stage starts at the
+attached liquid composition and its configured activity-model bubble point.
+``solve_unit`` calls the same preparation after calculating the shortcut design.
+
 Interpolators
 ===============
 
@@ -222,4 +232,3 @@ Piecewise linear interpolators can also be used. In this case, the passed known 
    interpolator = PiecewiseLagrange(time_hor, temperatures, order=2)
 
 Note that the values on the second column always match the value of the first column in the next raw, for continuity purposes. Higher orders will follow the same structure, where each row will represent a subinterval and the number of columns will dictate the interpolation order, which must be passed using the :code:`order` argument.
-
