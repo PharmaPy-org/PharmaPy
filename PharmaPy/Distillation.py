@@ -1287,6 +1287,45 @@ class DynamicDistillation(_BaseDistillation):
         pass
         return
 
+    def init_unit(self) -> tuple[np.ndarray, np.ndarray]:
+        """Prepare equilibrium plate states and initial material rates.
+
+        Returns
+        -------
+        init_states : numpy.ndarray
+            Shape ``(num_plates + 1, num_species + 1)`` in top-to-bottom stage
+            order. Column zero is temperature [K]; remaining columns are
+            liquid mole fractions [-] in ``name_species`` order.
+        init_derivative : numpy.ndarray
+            Same shape. Column zero is the equilibrium residual [-], initially
+            zero to bubble-point accuracy; other columns are composition rates
+            [1/s]. ``solve_unit`` supplies these as IDA derivative seeds.
+
+        Notes
+        -----
+        Requires attached liquid/feed phases and configured stage count, feed
+        stage, reflux, and product flows. Call ``column_startup`` to obtain that
+        design first; ``solve_unit`` does so automatically. All stages start at
+        the attached liquid composition and its configured-model bubble point.
+        The method updates the state-vector width but does not integrate or
+        publish a result.
+        """
+        self.len_states = len(self.name_species) + 1
+
+        x_init = self.Liquid_1.mole_frac.copy()  # [-]
+        temp_init = self.Liquid_1.getBubblePoint(
+            pres=self.pres, mole_frac=x_init,
+            thermo_method=self.gamma_model)  # [K]
+
+        init_states = np.tile(np.hstack((temp_init, x_init)),
+                              (self.num_plates + 1, 1))  # [K], [-]
+
+        init_derivative = self.material_balances(time=self.elapsed_time,
+                                                 x_liq=init_states[:, 1:],
+                                                 temp=init_states[:, 0])  # [-], [1/s]
+
+        return init_states, init_derivative
+
     def solve_unit(self, runtime=None, time_grid=None,
                    sundials_opts=None, verbose=True, any_event=True):
         """Integrate the dynamic distillation-column model.
@@ -1331,19 +1370,8 @@ class DynamicDistillation(_BaseDistillation):
         # design estimates, i.e. as close to steady-state as possible.
         self.column_startup(final_time)
 
-        self.len_states = len(self.name_species) + 1
-
-        x_init = self.Liquid_1.mole_frac.copy()  # [-]
-        temp_init = self.Liquid_1.getBubblePoint(
-            pres=self.pres, mole_frac=x_init,
-            thermo_method=self.gamma_model)  # [K]
-
-        init_states = np.tile(np.hstack((temp_init, x_init)),
-                              (self.num_plates + 1, 1))  # [K], [-]
-
-        init_derivative = self.material_balances(time=self.elapsed_time,
-                                                 x_liq=init_states[:, 1:],
-                                                 temp=init_states[:, 0])  # [-], [1/s]
+        init_states, init_derivative = self.init_unit()
+        # State rows [K], [-]; balance rows [-], [1/s].
 
         if len(self.state_event_list) > 0:
             def new_handle(solver, info):
