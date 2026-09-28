@@ -1,7 +1,8 @@
-"""Liquid inventory and slurry flow contracts for #217, without solver backends.
+"""Liquid inventory and slurry flow contracts for #217.
 
 Synthetic species have unequal densities and molar masses. Expected inventories
 come from adding species volumes and mole amounts, independently of phase APIs.
+Only the estimation-wrapper cases require the real optional Assimulo backend.
 
 
 Related issue scope:
@@ -394,42 +395,46 @@ def test_washing_profile_keeps_scalar_inventory(thermo_path):
         assert getattr(phase, name) is amount
 
 
+@pytest.mark.assimulo
+@pytest.mark.integration
 @pytest.mark.parametrize("unit_type", [BatchReactor, BatchCryst])
 @pytest.mark.parametrize("amount", [None, "vol", "mass", "moles"])
-def test_paramest_modifier_preserves_charged_volume(thermo_path, monkeypatch,
+def test_paramest_modifier_preserves_charged_volume(thermo_path,
                                                    unit_type, amount):
-    """Exercise real wrapper reset and phase modification up to the solver call.
+    """Exercise wrapper reset and phase modification through native integration.
 
     Parameters
     ----------
     thermo_path : str
         Path to the synthetic thermophysical database.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only the expensive solve boundary; no backend is imported.
     unit_type : type
         Batch reactor or crystallizer whose estimation wrapper is exercised.
     amount : str or None
         Explicit volume [m**3], mass [kg], or moles [mol]; None requests only
         composition and must preserve the original charged volume [m**3].
     """
+    pytest.importorskip('assimulo')
     liquid = LiquidPhase(thermo_path, mass_frac=INITIAL_FRACTIONS,
                          mass=INITIAL_MASS)
     if unit_type is BatchReactor:
         unit = BatchReactor(return_sens=False)
         unit.Phases = liquid
-        # Synthetic mass-balanced A -> 2 B; kinetics are set but never evaluated.
-        parameters = {"k_params": [1.0], "ea_params": [0.0]}  # [1/s], [J/mol]
+        # Mass-balanced A -> 2 B, frozen to isolate charge-inventory changes.
+        parameters = {"k_params": [0.0], "ea_params": [0.0]}  # [1/s], [J/mol]
         unit.Kinetics = RxnKinetics(thermo_path, **parameters,
                                    stoich_matrix=[[-1, 2]],
                                    partic_species=["A", "B"])
     else:
-        unit = BatchCryst(target_comp="A")
+        unit = BatchCryst(target_comp="A", controls={
+            "temp": lambda time: np.full_like(time, liquid.temp, dtype=float)})
         solid = SolidPhase(thermo_path, mass_frac=[1.0, 0.0],
                            x_distrib=[10.0, 20.0, 30.0, 40.0],  # [um]
                            distrib=[0.0, 2.0, 1.0, 0.0])  # [#/um]
         unit.Phases = [liquid, solid]
-        unit.Kinetics = CrystKinetics()
-        parameters = {}  # Default inactive mechanisms; no kinetics evaluated.
+        # Above every component concentration: the density upper bound [kg/m**3]
+        # makes the frozen, zero-rate fixture nonsingular in supersaturation.
+        unit.Kinetics = CrystKinetics(coeff_solub=[max(liquid.rho_liq)])
+        parameters = {}  # Native default mechanisms have zero rates.
 
     modifier = {"mass_frac": UPDATED_FRACTIONS}  # [-]
     expected_volume = INITIAL_VOLUME  # [m**3], retain the charged volume
@@ -441,30 +446,24 @@ def test_paramest_modifier_preserves_charged_volume(thermo_path, monkeypatch,
                            else UPDATED_VOLUME)  # [m**3]
     supplied_keys = set(modifier)
     modifications = modifier if unit_type is BatchReactor else {"Liquid": modifier}
-    solve_calls = []
-
-    def stop_before_solve(**kwargs):
-        """Record the actual handoff and stop before optional solver execution.
-
-        Parameters
-        ----------
-        **kwargs : dict
-            Solver options, including the requested time grid [s].
-
-        Raises
-        ------
-        RuntimeError
-            Always, with a sentinel identifying the reached solver boundary.
-        """
-        solve_calls.append(kwargs)
-        raise RuntimeError("liquid inventory probe stopped at solve boundary")
-
-    monkeypatch.setattr(unit, "solve_unit", stop_before_solve)
-    time_grid = np.array([0.0, 1.0])  # [s], dummy start and end; never integrated
-    with pytest.raises(RuntimeError, match="liquid inventory probe stopped at solve boundary"):
-        unit.paramest_wrapper(parameters, time_grid, modify_phase=modifications)
-    assert len(solve_calls) == 1
-    assert solve_calls[0]["time_grid"] is time_grid
+    time_grid = np.array([0.0, 1.0])  # [s], frozen charge over one second
+    returned = unit.paramest_wrapper(parameters, time_grid, modify_phase=modifications)
+    # Reactor concentrations [mol/L]; crystallizer CSD [#/um], [kg/m**3], [m**3].
+    np.testing.assert_array_equal(unit.result.time, time_grid)
+    assert returned.shape[0] == len(time_grid)
+    expected_mass_conc = np.array(UPDATED_FRACTIONS) * INITIAL_MASS / UPDATED_VOLUME
+    # [kg/m**3], independently summed mixture mass and component volumes
+    if unit_type is BatchReactor:
+        expected_conc = expected_mass_conc / np.array([100.0, 50.0])
+        # [mol/L], fixture molar masses [g/mol]; kg/m**3 equals g/L
+        concentration_rows = returned  # [mol/L]
+    else:
+        expected_conc = expected_mass_conc  # [kg/m**3]
+        concentration_rows = returned[:, unit.num_distr:-1]  # [kg/m**3]
+        np.testing.assert_allclose(returned[:, -1], expected_volume, rtol=RTOL)
+    np.testing.assert_allclose(concentration_rows,
+                               np.tile(expected_conc, (len(time_grid), 1)),
+                               rtol=RTOL, atol=0)
     assert unit.Liquid_1.vol == pytest.approx(expected_volume, rel=RTOL)
     assert unit.Liquid_1.mass == pytest.approx(
         expected_volume * INITIAL_MASS / UPDATED_VOLUME, rel=RTOL)
