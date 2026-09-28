@@ -573,7 +573,9 @@ def test_population_closure_is_checked_after_solver(data_path):
     assert info.converged
     assert root == pytest.approx(100.0, rel=0, abs=2 * resolution)
     assert abs(independent_residual(root)) > 1.0  # [kg/m**3/s], jump is 37.7 or 98.3
-    with pytest.raises(ValueError, match='No accepted steady root.*population closure'):
+    with pytest.raises(
+            ValueError,
+            match='No accepted steady root.*rejected by population closure gate'):
         unit.solve_steady_state(150.0, TEMPERATURE)  # [kg/m**3], [K]
 
 

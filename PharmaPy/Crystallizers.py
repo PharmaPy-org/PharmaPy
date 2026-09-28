@@ -107,8 +107,8 @@ def _finite_steady_residual(concentration: float,
 
     Notes
     -----
-    Used both during scalar solving and to validate the returned root, since
-    SciPy versions can differ in handling invalid callback values.
+    Used during scalar solving so invalid callback values raise consistently
+    across supported SciPy versions.
     """
     if not np.isfinite(concentration):
         raise ValueError("Steady-state scalar solve returned a nonfinite concentration")
@@ -2898,15 +2898,8 @@ class MSMPR(_BaseCryst):
                     # this bracket, not roots resolved in other brackets.
                     skipped_brackets += 1
                     continue
-                try:
-                    residual = finite_composition_residual(concentration)  # [kg/m**3/s]
-                except ValueError:
-                    skipped_brackets += 1
-                    if np.isfinite(concentration):
-                        rejected.append((concentration / concentration_scale,
-                                         'finite residual', np.inf))
-                        # [basis unit], gate name, unavailable relative closure error [-]
-                    continue
+                # Brent returns an iterate already checked by the finite callback.
+                residual = composition_residual(concentration)  # [kg/m**3/s]
                 composition = concentration / concentration_scale  # [basis unit]
                 _, growth, factors, _, coefficient = population_data(composition)
                 # [#/m**3/s], [um/s], [m**n*um], [kg*um/s], [kg*um/s]
