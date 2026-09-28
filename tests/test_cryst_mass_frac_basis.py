@@ -290,7 +290,10 @@ def test_composition_basis_preserves_concentration_rates(
     np.testing.assert_allclose(derivatives[concentration_slice], expected_conc_rate,
                                rtol=RATE_RTOL, atol=RATE_ATOL)
     if expected_volume_rate is not None:
-        assert derivatives[-1] == pytest.approx(expected_volume_rate, rel=RATE_RTOL)
+        # Keep relative-only checks for small rates; pytest's default absolute
+        # tolerance would dominate the intended allowance in [m**3/s].
+        assert derivatives[-1] == pytest.approx(
+            expected_volume_rate, rel=RATE_RTOL, abs=RATE_ATOL)
 
 
 def test_batch_unit_model_updates_real_phase_before_mass_frac_kinetics(thermo_paths):
@@ -318,7 +321,8 @@ def test_batch_unit_model_updates_real_phase_before_mass_frac_kinetics(thermo_pa
     np.testing.assert_allclose(derivatives[concentration_slice],
                                expected_concentration_rate,
                                rtol=RATE_RTOL, atol=RATE_ATOL)
-    assert derivatives[-1] == pytest.approx(expected_volume_rate, rel=RATE_RTOL)
+    assert derivatives[-1] == pytest.approx(
+        expected_volume_rate, rel=RATE_RTOL, abs=RATE_ATOL)
 
 
 def test_batch_mass_frac_state_jacobian_matches_finite_difference(thermo_paths):
