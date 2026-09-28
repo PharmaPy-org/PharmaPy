@@ -2877,18 +2877,36 @@ class MultiPhaseVessel():
             time,
             completed_state
         ):
-        """Computes enthalpy effects"""
+        """Computes enthalpy effects.
+
+        The balance is written for dT/dt, so -- like the inlet term -- each
+        outlet enters relative to the vessel phase it is drawn from:
+        -F_out * (h_out - h_vessel). A stream leaving at the vessel's own
+        state carries no net heat; only a change of phase or temperature on
+        the way out does. Subtracting the absolute F_out * h_out on top of
+        the relative inlet term counted the outflow twice and pulled a
+        continuous vessel towards temp_ref.
+        """
         for outlet in aux:
             phase = outlet.stream_phase
-            temp= phase.temp
             h_out = phase.getEnthalpy(
-                temp,
+                phase.temp,
                 temp_ref=self.temp_ref,
                 total_h=True,
                 basis='mass'
             )
 
-            contributions["outlet"] -= (outlet.species_flow * h_out).sum()
+            vessel_phase = outlet.vessel_phase
+            h_vessel = vessel_phase.getEnthalpy(
+                vessel_phase.temp,
+                temp_ref=self.temp_ref,
+                total_h=True,
+                basis='mass'
+            )
+
+            contributions["outlet"] -= (
+                outlet.species_flow * (h_out - h_vessel)
+            ).sum()
 
     def get_heat_transfer_temperature(self):
         """The temperature to use to determine heat transfer from the vessel. The default assumption is to use the temperature of the first liquid phase"""

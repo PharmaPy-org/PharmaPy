@@ -374,7 +374,7 @@ class ReactionMechanism(Mechanism):
         species_massPerVol_rates = np.zeros(phase.num_species)
         species_massPerVol_rates[mask] = species_rates
         species_massPerVol_rates *= phase.mw
-        species_mass_rates = species_massPerVol_rates* phase.vol#*mole_adjust
+        species_mass_rates = species_massPerVol_rates* phase.vol   # kmol/(m3 s) * kg/kmol * m3 = kg/s
         state_rates = {StateKey('mass_j',process.phaseref):species_mass_rates}
         aux = {
                 "phase": phase,
@@ -385,7 +385,6 @@ class ReactionMechanism(Mechanism):
         return result
     
     def get_heat_generation(self, aux, completed_state, time):
-        # mole_adjust = 1000 if self.molarity_in_L else 1
         phase = aux['phase']
         temp = phase.temp
         rk = self.kinetics
@@ -402,7 +401,10 @@ class ReactionMechanism(Mechanism):
                 rk.delta_hrxn,
                 rk.tref_hrxn
             ))
-        q =  -(deltah_rxn * aux["rxn_rates"]).sum()* phase.vol #*mole_adjust # molarity here is mol/L, but J/kg is expected for internal consistency
+        # Rates are in kmol/(m3 s) (mole_conc is kmol/m3 = mol/L) and the
+        # volume in m3, so rate*vol is kmol/s. deltah_rxn is J/mol, hence the
+        # 1000 mol/kmol to get W. Negative deltah_rxn (exothermic) heats.
+        q = -(deltah_rxn * aux["rxn_rates"]).sum() * phase.vol * 1000
         return q
     
     
