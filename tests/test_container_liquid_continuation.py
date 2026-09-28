@@ -18,7 +18,6 @@ from numpy.polynomial import Polynomial
 from scipy.integrate import solve_ivp
 from scipy.optimize import brentq
 
-import PharmaPy.Containers as containers
 from PharmaPy.Connections import Connection
 from PharmaPy.Containers import ContinuousHoldup, Mixer
 from PharmaPy.Phases import LiquidPhase
@@ -333,37 +332,20 @@ def integrate_core(unit, duration):
     pytest.param('core', marks=pytest.mark.unit),
     pytest.param('assimulo', marks=[pytest.mark.assimulo, pytest.mark.integration]),
 ])
-def test_holdup_segmented_dynamics_match_uninterrupted(thermo_path, backend, monkeypatch):
+def test_holdup_segmented_dynamics_match_uninterrupted(thermo_path, backend):
+    """Compare segmented and continuous holdup solves with matched accuracy.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Real thermodynamic database path.
+    backend : str
+        SciPy core reference or native Assimulo integration.
+    """
     if backend == 'assimulo':
         pytest.importorskip('assimulo')
-        from assimulo.solvers import CVode
-
-        def configured_solver(problem):
-            """Set explicit tolerances on the real optional solver boundary.
-
-            Parameters
-            ----------
-            problem : assimulo.problem.Explicit_Problem
-                Production holdup problem: fractions [-], temperature [K],
-                and absolute time [s].
-
-            Returns
-            -------
-            assimulo.solvers.CVode
-                Real integrator with the core reference's local error limits.
-
-            Notes
-            -----
-            ContinuousHoldup exposes no solver options. Its backend defaults
-            permit segment-dependent integration error larger than the test's
-            comparison tolerance, so configure accuracy at construction only.
-            """
-            solver = CVode(problem)
-            solver.rtol = CORE_RTOL  # [-]
-            solver.atol = CORE_ATOL  # [-] for fractions, [K] for temperature
-            return solver
-
-        monkeypatch.setattr(containers, 'CVode', configured_solver)
+    options = {'rtol': CORE_RTOL, 'atol': CORE_ATOL}
+    # Relative [-] and absolute [-, K] error limits match the core reference.
     segmented = make_holdup(thermo_path)
     whole = make_holdup(thermo_path)
     for unit in (segmented, whole):
@@ -374,9 +356,11 @@ def test_holdup_segmented_dynamics_match_uninterrupted(thermo_path, backend, mon
         second_time, second = integrate_core(segmented, second_duration)
         whole_time, uninterrupted = integrate_core(whole, first_duration + second_duration)
     else:
-        first_time, first = segmented.solve_unit(first_duration, verbose=False)
-        second_time, second = segmented.solve_unit(second_duration, verbose=False)
-        whole_time, uninterrupted = whole.solve_unit(first_duration + second_duration, verbose=False)
+        first_time, first = segmented.solve_unit(first_duration, verbose=False, sundials_opts=options)
+        second_time, second = segmented.solve_unit(second_duration, verbose=False, sundials_opts=options)
+        whole_time, uninterrupted = whole.solve_unit(first_duration + second_duration, verbose=False, sundials_opts=options)
+        np.testing.assert_array_equal(options['atol'], CORE_ATOL)
+        assert options['rtol'] == CORE_RTOL
     np.testing.assert_allclose(second[0], first[-1], rtol=RTOL)
     assert second_time[0] == pytest.approx(first_time[-1], rel=RTOL)
     assert second_time[-1] == pytest.approx(PROFILE_TIME[-1], rel=RTOL)
