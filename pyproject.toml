@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# "PharmaPy" is taken on PyPI by an unrelated project, so the distribution is
+# published as pharmapy-org. The import name is unchanged: `import PharmaPy`.
+name = "pharmapy-org"
+version = "0.1.0"
+description = "A Pythonic framework for the digital analysis of pharmaceutical manufacturing processes."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "BSD-3-Clause"
+license-files = ["LICENSE.md"]
+authors = [
+    { name = "Daniel Casas-Orozco", email = "dcasasor@purdue.edu" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+# scipy is the only integrator PharmaPy needs. Assimulo (AssimuloBackend,
+# AssimuloDAEBackend and the legacy unit operations) is optional and comes
+# from conda-forge, since the PyPI assimulo package is outdated and has no
+# wheels; see README.md.
+dependencies = [
+    "numpy",
+    "scipy",
+    "matplotlib",
+    "pandas",
+]
+
+[project.optional-dependencies]
+# DiffeqpyBackend. After installing, run
+# python -c "import diffeqpy; diffeqpy.install()" once to fetch Julia.
+julia = ["diffeqpy>=2.6; python_version>='3.10'"]
+test = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/PharmaPy-org/PharmaPy"
+Repository = "https://github.com/PharmaPy-org/PharmaPy"
+
+[tool.setuptools]
+packages = ["PharmaPy"]
+# Ship only the files named in package-data below. The implicit scan would
+# also flag PharmaPy/data and its folders as unlisted subpackages.
+include-package-data = false
+
+[tool.setuptools.package-data]
+PharmaPy = ["data/*.json", "data/**/*.json", "data/**/*.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "unit: fast, self-contained unit tests",
+]

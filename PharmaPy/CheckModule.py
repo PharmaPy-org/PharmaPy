@@ -12,11 +12,11 @@ from PharmaPy.Errors import PharmaPySpecificationError
 import warnings
 
 
-root = str(pathlib.Path(__file__).parents[1])
+root = pathlib.Path(__file__).parent / 'data'
 
 
 def check_modeling_objects(uo, instance_name=None):
-    with open(root + '/data/minimum_modeling_objects.json') as fi:
+    with open(root / 'minimum_modeling_objects.json') as fi:
         checks = json.load(fi)
 
     class_name = uo.__class__.__name__

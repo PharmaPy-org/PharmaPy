@@ -9,6 +9,7 @@ from PharmaPy.Phases_Refactored import BasePhase
 from PharmaPy.MixedPhases_Refactored import MixedPhase, MixedStream
 
 from PharmaPy.ProcessControl_Refactored import Controller
+from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Results import DynamicResult
 from PharmaPy.Connections import interpolate_inputs
 
@@ -94,6 +95,11 @@ class MultiPhaseVessel():
         self._outlet_connections = []
 
         #Integrator
+        # scipy is the only solver PharmaPy requires, so it is the default;
+        # Assimulo and diffeqpy backends are opt-in. Built per vessel, like
+        # the controller above, because a backend holds compiled solver state.
+        if integrator is None:
+            integrator = ScipyBackend()
         self.integrator = integrator
 
         # Window over which depletion is anticipated, in seconds.

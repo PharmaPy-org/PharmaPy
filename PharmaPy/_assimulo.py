@@ -10,14 +10,17 @@ imports without loading Assimulo.
 from importlib import import_module
 from typing import Any
 
-# Source: the supported backend pin documented in DEPENDENCIES.md and
-# environment.yml. Keep all user-facing solver diagnostics synchronized here.
+# Assimulo is optional: pip installs PharmaPy with scipy only. The PyPI
+# "assimulo" package stopped at 3.0 and ships no wheels, so conda-forge is the
+# only practical source. Keep all user-facing solver diagnostics synchronized
+# here.
 _SUPPORTED_ASSIMULO_VERSION = "3.4.3"
 _INSTALL_MESSAGE = (
-    "Assimulo is required for solver-backed PharmaPy simulations. "
-    f"Install Assimulo {_SUPPORTED_ASSIMULO_VERSION} from conda-forge using "
-    "environment.yml or "
-    "provide a compatible local installation."
+    "Assimulo is required for solver-backed PharmaPy simulations that use "
+    "AssimuloBackend, AssimuloDAEBackend, or a legacy (non-refactored) unit "
+    "operation. Install it with 'conda install -c conda-forge "
+    f"assimulo={_SUPPORTED_ASSIMULO_VERSION}' (the PyPI package is outdated "
+    "and has no wheels), or use ScipyBackend, which needs only scipy."
 )
 _BROKEN_INSTALL_MESSAGE = (
     "Assimulo is installed but could not be imported. Verify that Assimulo "

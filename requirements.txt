@@ -1,7 +1,9 @@
+# Full conda development environment, used by InstallOnWindows.bat and
+# InstallOnMac.sh (conda create --file requirements.txt -c conda-forge).
+# pip dependencies live in pyproject.toml, where assimulo is optional.
 numpy
-cython 
 scipy
 matplotlib
 pandas
-autograd
 assimulo
+pytest

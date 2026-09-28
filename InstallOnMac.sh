@@ -16,4 +16,4 @@ conda activate $env_name
 echo ----------------------
 echo Installing PharmaPy...
 echo ----------------------
-python setup.py develop
+python -m pip install -e .

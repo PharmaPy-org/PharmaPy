@@ -2,35 +2,35 @@
 Installation
 ============
 
-..  There are two ways to install PharmaPy. The first way is for casual users, intending to use the software and not edit or add modules to the software package. The second way is for developers or advanced users who intend to create and incorporate their own models into their work.
+There are two ways to install PharmaPy. The first is for users who want to run the software without editing it. The second is for developers or advanced users who want to create their own models and add them to PharmaPy.
 
-        Standard Installation
-        =====================
+Standard Installation
+=====================
 
-        We recommend using python or anaconda virtual environments to control python packages effectively, including PharmaPy and its dependencies. PharmaPy can be installed in two different ways. For those who want to just use the software in the latest stable version, use the following command:
+We recommend installing PharmaPy and its dependencies in a Python or conda virtual environment. PharmaPy is published on PyPI as ``pharmapy-org``, and you import it as ``PharmaPy``:
 
-        .. testcode::
+.. code-block:: bash
 
-           pip install pharmapy
+   pip install pharmapy-org
 
-        This will download and install PharmaPy to the current python environment. To edit and run code, it is recommended to also install an IDE, or use jupyer notebooks. To install jupyter notebooks and its dependencies, run the following command:
+This installs PharmaPy with scipy as its only integrator. Unit operations built on ``MultiPhaseVessel`` (the ``*_Refactored`` modules) use ``ScipyBackend`` by default. Two other solver backends are optional:
 
-        .. testcode::
+* **Assimulo** (SUNDIALS CVode/IDA) is used by ``AssimuloBackend`` and ``AssimuloDAEBackend``, and by the legacy unit operations that have not been refactored yet. Install it from conda-forge, because the PyPI package is outdated and has no wheels: ``conda install -c conda-forge assimulo``.
+* **Julia** (DifferentialEquations.jl) is used by ``DiffeqpyBackend``: run ``pip install "pharmapy-org[julia]"`` and then ``python -c "import diffeqpy; diffeqpy.install()"``.
 
-           pip install jupyterlab
+To edit and run code, we recommend also installing an IDE or JupyterLab (``pip install jupyterlab``).
 
-..
-        Developer Installation
-        ======================
+Developer Installation
+======================
 
-For installation, we recommend the use of conda environments to control packages dependencies and PharmaPy. A lighweight version of conda (`miniconda`_) is probably a good option for new users of the management system.
+For development, we recommend using conda environments to manage PharmaPy and its dependencies. `miniconda`_, a lightweight version of conda, is a good option for new users.
 
-For PharmaPy installation, you must use the source code, which is available in our `Github repository`_. Once the source code is downloaded to the desired location, navigate (:code:`cd`) to the directory which contains the setup.py file. Then, follow the instructions on the :code:`installation_guide.txt`, to setup fresh conda environment and install PharmaPy and its dependencies.
+Download the source code from our `Github repository`_ and navigate (:code:`cd`) to the directory that contains :code:`pyproject.toml`. Then follow the instructions in :code:`install_instructions.txt`. They set up a fresh conda environment that includes Assimulo and install PharmaPy in editable mode:
 
-..
-        make sure your conda environment is appropriately installed and activated, then input the following commands for PharmaPy installation:
-        1. conda install --file requirements.txt -c conda-forge
-        2. python setup.py develop
+.. code-block:: bash
+
+   conda install --file requirements.txt -c conda-forge
+   python -m pip install -e .
 
 .. _Github repository: https://github.com/CryPTSys/PharmaPy/tree/develop
 .. _miniconda: https://github.com/CryPTSys/PharmaPy/

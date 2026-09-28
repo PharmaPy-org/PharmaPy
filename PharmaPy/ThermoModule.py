@@ -762,7 +762,7 @@ class ThermoPhysicalManager:
         group_idx = np.array(self.unifac_groups)
 
         # Import data
-        root = str(pathlib.Path(__file__).parents[1]) + '/data/thermodynamics/'
+        root = str(pathlib.Path(__file__).parent / 'data' / 'thermodynamics') + '/'
         interac_path = root + 'unifac_interaction_params.csv'
 
         interac_data = pd.read_csv(interac_path, index_col=(0, 1))

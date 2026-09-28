@@ -11,5 +11,5 @@ call conda activate %env_name%
 echo ----------------------
 echo Installing PharmaPy...
 echo ----------------------
-call python setup.py develop
+call python -m pip install -e .
 echo Done!

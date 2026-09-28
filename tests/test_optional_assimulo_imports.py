@@ -179,6 +179,55 @@ def test_terminate_simulation_is_shared_across_modules(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
+def test_refactored_vessel_solves_on_default_scipy_backend(tmp_path):
+    """A vessel built without an integrator solves with scipy alone.
+
+    This is the path a plain ``pip install`` user takes: no Assimulo, no
+    ``integrator=`` argument. Asserting the backend type as well as a finished
+    solve pins the default itself, not merely that some backend ran.
+    """
+    script = textwrap.dedent("""
+        import os
+
+        import numpy as np
+
+        from PharmaPy.IntegratorBackends import ScipyBackend
+        from PharmaPy.Kinetics import RxnKinetics
+        from PharmaPy.Phases_Refactored import LiquidPhase
+        from PharmaPy.Reactors_Refactored import BatchReactor
+        from PharmaPy.Utilities import CoolingWater
+
+        path = os.path.join("tests", "Flowsheet", "data",
+                            "compound_database.json")
+
+        vessel = BatchReactor(h_conv=1e4, diam=0.01)
+        vessel.Phases = LiquidPhase(path, mass=1.0,
+                                    mass_frac=[0.4, 0.6, 0.0, 0.0, 0.0])
+        vessel.Utility = CoolingWater(mass_flow=100.0, temp_in=273.55)
+        vessel.RxnKinetics = RxnKinetics(
+            path=path,
+            rxn_list=["A + B --> C", "C + A --> D"],
+            k_params=np.array([1e-2, 1e-2]),
+            ea_params=np.array([1e2, 1e2]),
+        )
+
+        if not isinstance(vessel.integrator, ScipyBackend):
+            raise AssertionError(
+                f"default integrator is {type(vessel.integrator).__name__}"
+            )
+
+        time, states = vessel.solve_unit(runtime=10.0)
+
+        if not np.isclose(time[-1], 10.0):
+            raise AssertionError(f"solve stopped at t={time[-1]}")
+        if not np.all(np.isfinite(states)):
+            raise AssertionError("solve returned non-finite states")
+        """)
+    result = _run_without_assimulo(script, tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize("symbol_name", LAZY_CONSTRUCTORS)
 def test_solver_construction_reports_missing_assimulo(symbol_name, tmp_path):
     """Lazy solver construction gives an actionable dependency error."""

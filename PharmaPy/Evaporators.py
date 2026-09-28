@@ -526,8 +526,8 @@ class Evaporator:
     @Phases.setter
     def Phases(self, phase):
         path_comp = phase.path_data
-        path_inert = '/data/evaporator/props_nitrogen.json'
-        path_inert = str(Path(__file__).parents[1]) + path_inert
+        path_inert = str(
+            Path(__file__).parent / 'data' / 'evaporator' / 'props_nitrogen.json')
         paths = [path_comp, path_inert]
         self.paths = paths
 
