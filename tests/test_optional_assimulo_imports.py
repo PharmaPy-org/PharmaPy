@@ -1,11 +1,16 @@
-"""Import-boundary regressions for the optional Assimulo solver stack."""
+"""Import-boundary regressions for the optional Assimulo solver stack.
+
+Absent-backend cases block Assimulo imports inside isolated child processes so
+they run in every development environment. The core CI lane also asserts that
+Assimulo is genuinely absent, while Assimulo-marked cases exercise the
+installed backend's malformed-module and missing-symbol paths.
+"""
 
 import os
 from pathlib import Path
 import subprocess
 import sys
 import textwrap
-from types import ModuleType
 
 import pytest
 
@@ -32,38 +37,60 @@ LAZY_CONSTRUCTORS = (
     "Implicit_Problem",
 )
 
-# Block Assimulo through a sys.meta_path finder rather than by patching
-# builtins.__import__. importlib.import_module, which PharmaPy._assimulo uses to
-# load the backend, resolves through importlib._bootstrap._gcd_import and never
-# consults builtins.__import__, so a builtins patch lets the real Assimulo load
-# whenever it is installed. A meta-path finder participates in that resolution
-# and so blocks both statement imports and importlib.import_module.
-#
-# ModuleNotFoundError carries name="assimulo" because _load_assimulo_symbol
-# distinguishes a missing install from a broken one on exactly that attribute.
-IMPORT_BLOCKER = textwrap.dedent("""
+_ASSIMULO_IMPORT_BLOCKER = textwrap.dedent('''
     import sys
 
-    class _AssimuloBlocker:
-        def find_spec(self, name, path=None, target=None):
-            if name == "assimulo" or name.startswith("assimulo."):
+    class _BlockAssimulo:
+        """Reject Assimulo imports in this child process only."""
+
+        @staticmethod
+        def find_spec(fullname, path=None, target=None):
+            """Reject module specifications for the Assimulo package.
+
+            Parameters
+            ----------
+            fullname : str
+                Fully qualified name of the requested module.
+            path : sequence of str or None, optional
+                Parent package search path supplied by the import system.
+            target : module or None, optional
+                Existing module supplied when resolving a reload.
+
+            Returns
+            -------
+            None
+                Signal that unrelated modules should use later finders.
+
+            Raises
+            ------
+            ModuleNotFoundError
+                If Assimulo or one of its submodules is requested.
+            """
+            if fullname == "assimulo" or fullname.startswith("assimulo."):
                 raise ModuleNotFoundError(
-                    "Assimulo import blocked by regression test",
-                    name="assimulo",
+                    f"No module named {fullname!r}", name=fullname
                 )
             return None
 
-    sys.meta_path.insert(0, _AssimuloBlocker())
-    """)
+    sys.meta_path.insert(0, _BlockAssimulo())
+
+    try:
+        import assimulo
+    except ModuleNotFoundError as exc:
+        if exc.name != "assimulo":
+            raise AssertionError(f"unexpected blocked module: {exc.name}") from exc
+    else:
+        raise AssertionError("Assimulo import blocker did not reject the backend")
+    ''')
 
 
-def _run_without_assimulo(script, tmp_path):
-    """Run Python source while rejecting imports of Assimulo.
+def _run_with_assimulo_blocked(script, tmp_path):
+    """Run Python source with Assimulo blocked in the child process.
 
     Parameters
     ----------
     script : str
-        Python source to execute after installing the import blocker.
+        Python source to execute in the child process.
     tmp_path : pathlib.Path
         Temporary directory used for the Matplotlib configuration cache.
 
@@ -71,11 +98,18 @@ def _run_without_assimulo(script, tmp_path):
     -------
     subprocess.CompletedProcess
         Completed child-process result with captured text output.
+
+    Notes
+    -----
+    The process-local import blocker leaves the parent interpreter unchanged,
+    so absent-backend regressions run whether or not Assimulo is installed.
+    The locked core CI lane separately verifies behavior under genuine absence.
     """
     environment = os.environ.copy()
     environment["MPLCONFIGDIR"] = str(tmp_path)
+    blocked_script = f"{_ASSIMULO_IMPORT_BLOCKER}\n{script}"
     return subprocess.run(
-        [sys.executable, "-c", f"{IMPORT_BLOCKER}\n{script}"],
+        [sys.executable, "-c", blocked_script],
         cwd=REPO_ROOT,
         env=environment,
         capture_output=True,
@@ -92,7 +126,7 @@ def test_model_modules_import_without_assimulo(tmp_path):
         for module_name in {AFFECTED_MODULES!r}:
             importlib.import_module(module_name)
         """)
-    result = _run_without_assimulo(script, tmp_path)
+    result = _run_with_assimulo_blocked(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
 
@@ -127,44 +161,41 @@ def test_solver_construction_reports_missing_assimulo(symbol_name, tmp_path):
                 "{symbol_name} construction unexpectedly succeeded"
             )
         """)
-    result = _run_without_assimulo(script, tmp_path)
+    result = _run_with_assimulo_blocked(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
 
 
-def test_missing_assimulo_symbol_reports_qualified_name(monkeypatch):
-    """An incompatible install identifies the missing constructor."""
-    stub_module = ModuleType("assimulo.solvers")
-
-    def load_stub(module_name):
-        assert module_name == "assimulo.solvers"
-        return stub_module
-
-    monkeypatch.setattr(assimulo_backend, "import_module", load_stub)
+@pytest.mark.assimulo
+def test_missing_assimulo_symbol_reports_qualified_name():
+    """The real backend identifies a requested constructor it lacks."""
+    pytest.importorskip("assimulo.solvers")
+    missing_symbol = "ConstructorThatAssimuloMustNotProvide"
 
     with pytest.raises(
         ImportError,
-        match=r"assimulo\.solvers\.CVode",
+        match=rf"assimulo\.solvers\.{missing_symbol}",
     ) as exc_info:
-        assimulo_backend.CVode()
+        assimulo_backend._construct_assimulo_object(
+            "assimulo.solvers", missing_symbol
+        )
 
     assert isinstance(exc_info.value.__cause__, AttributeError)
 
 
-def test_broken_assimulo_install_has_distinct_error(monkeypatch):
-    """A backend loader failure is not misreported as a missing install."""
-    loader_error = "SUNDIALS shared library could not be loaded"
-
-    def fail_import(module_name):
-        assert module_name == "assimulo.solvers"
-        raise ImportError(loader_error)
-
-    monkeypatch.setattr(assimulo_backend, "import_module", fail_import)
+@pytest.mark.assimulo
+def test_broken_assimulo_install_has_distinct_error():
+    """Loader failures classify as broken rather than missing installs."""
+    pytest.importorskip("assimulo.solvers")
+    missing_module = "assimulo.solvers.no_such_submodule"
 
     with pytest.raises(
         ImportError,
         match="Assimulo is installed but could not be imported",
     ) as exc_info:
-        assimulo_backend.CVode()
+        assimulo_backend._load_assimulo_symbol(
+            missing_module, "CVode"
+        )
 
-    assert loader_error in str(exc_info.value.__cause__)
+    assert missing_module in str(exc_info.value)
+    assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)

@@ -1,8 +1,8 @@
 """Core reactor contracts for #34, #54, #169 and #245.
 
 Real thermodynamics and elementary A + B -> C kinetics use the shipped PFR
-property data. Only the optional solver problem boundary is replaced. The
-Assimulo case additionally checks complete steady-to-dynamic reuse.
+property data. Solver-boundary checks run native CVode and inspect initial
+result rows, physical derivatives, and complete steady-to-dynamic reuse.
 
 Refs:
 https://github.com/PharmaPy-org/PharmaPy/issues/34
@@ -13,7 +13,6 @@ https://github.com/PharmaPy-org/PharmaPy/issues/245
 
 from pathlib import Path
 import json
-from unittest.mock import Mock
 
 import numpy as np
 import pytest
@@ -89,10 +88,6 @@ def _configured_reactor(reactor, equilibrium=False):
     return reactor
 
 
-class _ProblemCaptured(Exception):
-    """Stop exactly at the optional Assimulo problem constructor."""
-
-
 @pytest.mark.unit
 def test_cstr_equilibrium_rate_through_unit_model():
     """#34: real heat and keyword handoff determine the species-rate values."""
@@ -131,17 +126,25 @@ def test_cstr_equilibrium_rate_through_unit_model():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("reactor_cls", [
-    Reactors.BatchReactor, Reactors.CSTR, Reactors.SemibatchReactor,
-    Reactors.PlugFlowReactor,
+@pytest.mark.parametrize("reactor_cls,controlled", [
+    pytest.param(cls, controlled, marks=([] if cls is Reactors.PlugFlowReactor and controlled
+                                        else [pytest.mark.assimulo, pytest.mark.integration]))
+    for cls in [Reactors.BatchReactor, Reactors.CSTR, Reactors.SemibatchReactor,
+                Reactors.PlugFlowReactor]
+    for controlled in [False, True]
 ])
 @pytest.mark.parametrize("ht_mode", ["bath", "jacket"])
-@pytest.mark.parametrize("controlled", [False, True])
-def test_tank_initial_state_metadata(monkeypatch, reactor_cls, ht_mode, controlled):
-    """#54: metadata and unpacking match the actual solve_unit initial vector.
+def test_tank_initial_state_metadata(reactor_cls, ht_mode, controlled):
+    """Check named state packing against native solver initial rows and heat.
 
-    Tank controls are checked through problem construction. PFR controls
-    explicitly reject construction until the distributed contract is supported.
+    Parameters
+    ----------
+    reactor_cls : type
+        Batch, continuous, semibatch, or plug-flow reactor.
+    ht_mode : str
+        Bath or jacket heat-transfer mode.
+    controlled : bool
+        Prescribe reactor temperature; unsupported PFR controls stay in core.
     """
     controls = {"temp": lambda time: TEMPERATURE} if controlled else None
     kwargs = {}
@@ -153,14 +156,11 @@ def test_tank_initial_state_metadata(monkeypatch, reactor_cls, ht_mode, controll
         with pytest.raises(NotImplementedError, match='PlugFlowReactor controls'):
             reactor_cls(isothermal=False, ht_mode=ht_mode, controls=controls, **kwargs)
         return
+    pytest.importorskip('assimulo')
     reactor = _configured_reactor(reactor_cls(
         isothermal=False, ht_mode=ht_mode, controls=controls, **kwargs))
-    problem = Mock(side_effect=_ProblemCaptured)
-    monkeypatch.setattr(Reactors, "Explicit_Problem", problem)
-    with pytest.raises(_ProblemCaptured):
-        reactor.solve_unit(runtime=RUNTIME, verbose=False)
-    problem.assert_called_once()
-    initial = problem.call_args.args[1]  # [mol/L], then optional [K] states
+    _, states = reactor.solve_unit(time_grid=[0.0, RUNTIME], verbose=False)
+    initial = states[0]  # [mol/L], optional volume [m**3] and temperatures [K]
     is_pfr = reactor_cls is Reactors.PlugFlowReactor
     cell_initial = initial.reshape(NUM_CELLS, -1)[0] if is_pfr else initial
     assert sum(reactor.dim_states) == len(cell_initial)
@@ -188,53 +188,38 @@ def test_tank_initial_state_metadata(monkeypatch, reactor_cls, ht_mode, controll
         cell_initial)
     if controlled:
         return  # Full controlled tank balances are covered in the #232 regressions.
-    if reactor_cls is Reactors.BatchReactor:
-        # Batch computes this geometry after problem construction. Complete that
-        # setup here: the model assumes a cylinder with height equal to diameter.
-        tank_volume = REACTOR_VOLUME / reactor.vol_offset  # [m**3]
-        reactor.diam = (4 * tank_volume / np.pi)**(1 / 3)  # [m]
-        reactor.area_base = np.pi * reactor.diam**2 / 4  # [m**2]
     derivative = reactor.unit_model(0.0, initial)  # concentrations [mol/L/s], [K/s], [m**3/s]
     assert derivative.shape == initial.shape
     assert np.all(np.isfinite(derivative))
     if is_pfr:
         return  # PFR has its own tube area model and no jacket temperature state.
-    heat_function = reactor.heat_transfer
-    heat_terms = []  # [W]
-
-    def capture_heat(temp, temp_ht, vol):
-        """Record real heat-transfer output while retaining the full RHS.
-
-        Parameters
-        ----------
-        temp, temp_ht : float or numpy.ndarray
-            Reactor and utility temperatures [K].
-        vol : float
-            Wetted liquid volume [m**3].
-
-        Returns
-        -------
-        float or numpy.ndarray
-            Reactor-to-utility heat flow [W].
-        """
-        heat = heat_function(temp, temp_ht, vol)  # [W]
-        heat_terms.append(heat)
-        return heat
-
-    monkeypatch.setattr(reactor, "heat_transfer", capture_heat)
     # A real dynamic utility distinguishes current time from a cached inlet.
     utility_input = DynamicInput()
     utility_input.add_variable("temp_in", lambda time: UTILITY_TEMPERATURE + UTILITY_RAMP * time)
     reactor.Utility.DynamicInlet = utility_input
-    reactor.unit_model(RUNTIME, initial)
-    assert len(heat_terms) == 1
+    derivative = reactor.unit_model(RUNTIME, initial)  # [state units/s]
     utility_temp = (UTILITY_TEMPERATURE + UTILITY_RAMP * RUNTIME
                     if ht_mode == "bath" else UTILITY_TEMPERATURE)  # [K]
     # Cylinder lateral wetted area = perimeter * (liquid volume / base area).
     area = (np.pi * reactor.diam * REACTOR_VOLUME / reactor.area_base
             + reactor.area_base)  # [m**2]
     expected_heat = reactor.u_ht * area * (TEMPERATURE - utility_temp)  # [W]
-    np.testing.assert_allclose(heat_terms[0], expected_heat, rtol=ALGEBRA_RTOL, atol=0)
+    with open(THERMO_PATH) as stream:
+        properties = json.load(stream)
+    cp = np.array([np.polynomial.Polynomial(item['cp_liq'])(TEMPERATURE)
+                   for item in properties.values()])  # [J/mol/K]
+    enthalpy = np.array([
+        np.polynomial.Polynomial(item['cp_liq']).integ()(TEMPERATURE)
+        - np.polynomial.Polynomial(item['cp_liq']).integ()(HEAT_REFERENCE_TEMPERATURE)
+        for item in properties.values()])  # [J/mol]
+    reaction_heat = REACTION_HEAT + enthalpy[2] - enthalpy[0] - enthalpy[1]  # [J/mol]
+    source = -reaction_heat * RATE_CONSTANT * CONCENTRATIONS[0] * CONCENTRATIONS[1] * REACTOR_VOLUME * 1000
+    # [W], exact m**3-to-L conversion; inlet and tank temperatures match
+    capacitance = REACTOR_VOLUME * 1000 * np.dot(CONCENTRATIONS, cp)  # [J/K]
+    temperature_rate = unpack_states(derivative, reactor.dim_states, reactor.name_states)['temp']
+    # [K/s], actual full RHS handoff, with zero inlet sensible-heat contribution
+    removed_heat = source - capacitance * temperature_rate  # [W]
+    np.testing.assert_allclose(removed_heat, expected_heat, rtol=ALGEBRA_RTOL, atol=0)
 
 
 REACTOR_CONSTRUCTORS = [
@@ -269,11 +254,21 @@ def test_coil_defensive_heat_transfer_check():
         reactor.heat_transfer(TEMPERATURE, UTILITY_TEMPERATURE, REACTOR_VOLUME)
 
 
-@pytest.mark.unit
+@pytest.mark.assimulo
+@pytest.mark.integration
 @pytest.mark.parametrize("isothermal", [False, True])
 @pytest.mark.parametrize("adiabatic", [False, True])
-def test_pfr_steady_bookkeeping_preserves_dynamic_initial_state(monkeypatch, isothermal, adiabatic):
-    """#245: exercise both public setups and the steady RHS without Assimulo."""
+def test_pfr_steady_bookkeeping_preserves_dynamic_initial_state(isothermal, adiabatic):
+    """Restore temporary steady modes after a real solver argument rejection.
+
+    Parameters
+    ----------
+    isothermal : bool
+        Persistent dynamic temperature mode.
+    adiabatic : bool
+        Temporary steady heat-transfer mode to restore after failure.
+    """
+    pytest.importorskip('assimulo')
     reused = _configured_reactor(Reactors.PlugFlowReactor(
         diam_in=TUBE_DIAMETER, num_discr=NUM_CELLS, isothermal=isothermal,
         adiabatic=not adiabatic))
@@ -282,68 +277,27 @@ def test_pfr_steady_bookkeeping_preserves_dynamic_initial_state(monkeypatch, iso
         adiabatic=not adiabatic))
     phase = reused.Liquid_1
     original_states = reused.states_uo
-    captured = []
-
-    def capture_steady(rhs, initial, t0):
-        """Evaluate the steady RHS before its temporary settings are restored.
-
-        Parameters
-        ----------
-        rhs : callable
-            Steady balance callback, returning concentration and temperature
-            derivatives per reactor volume [mol/L/m**3] and [K/m**3].
-        initial : numpy.ndarray
-            Participating concentrations [mol/L] and optional temperature [K].
-        t0 : float
-            Initial volume coordinate [m**3].
-
-        Raises
-        ------
-        _ProblemCaptured
-            Always, after recording the real initial derivative and modes.
-        """
-        captured.append((initial.copy(), rhs(t0, initial), list(reused.states_uo),
-                         list(reused.name_states), reused.isothermal, reused.adiabatic))
-        raise _ProblemCaptured
-
-    problem = Mock(side_effect=capture_steady)
-    monkeypatch.setattr(Reactors, "Explicit_Problem", problem)
-    # Repeated calls must neither append duplicate temperatures nor retain modes.
     for _ in range(2):
-        with pytest.raises(_ProblemCaptured):
-            reused.solve_steady(REACTOR_VOLUME, adiabatic=adiabatic)
+        # CVode rejects a nonnumeric endpoint after solve_steady installs its
+        # temporary modes and metadata, exercising its actual finally block.
+        with pytest.raises(TypeError, match='must be real number, not str'):
+            reused.solve_steady('invalid volume', adiabatic=adiabatic)
         assert reused.states_uo is original_states
         assert reused.states_uo == fresh.states_uo
         assert reused.isothermal == fresh.isothermal
         assert reused.adiabatic == fresh.adiabatic
-    assert problem.call_count == 2
     assert reused.num_species == len(CONCENTRATIONS)
     assert reused.num_species_steady == len(reused.Kinetics.partic_species)
-    for initial, derivative, names, metadata_names, steady_isothermal, steady_adiabatic in captured:
-        has_temperature = adiabatic or not isothermal
-        assert names == (["mole_conc", "temp"] if has_temperature else ["mole_conc"])
-        assert metadata_names == names
-        assert steady_isothermal == (not has_temperature)
-        assert steady_adiabatic == adiabatic
-        np.testing.assert_array_equal(initial[:3], CONCENTRATIONS[:3])
-        np.testing.assert_array_equal(reused.c_inert, CONCENTRATIONS[3:])
-        expected_material = RATE_CONSTANT * CONCENTRATIONS[0] * CONCENTRATIONS[1] \
-            / reused.Inlet.vol_flow * np.array([-1.0, -1.0, 1.0])  # [mol/L/m**3]
-        np.testing.assert_allclose(derivative[:3], expected_material,
-                                   rtol=ALGEBRA_RTOL, atol=0)
-        assert len(derivative) == len(initial) == 3 + has_temperature
-        if has_temperature:
-            assert initial[-1] == TEMPERATURE
-            assert np.isfinite(derivative[-1])
-    problem.side_effect = _ProblemCaptured
-    problem.reset_mock()
-    for reactor in (reused, fresh):
-        with pytest.raises(_ProblemCaptured):
-            reactor.solve_unit(runtime=RUNTIME, verbose=False)
-    assert problem.call_count == 2
-    reused_initial, fresh_initial = [call.args[1] for call in problem.call_args_list]
-    np.testing.assert_array_equal(reused_initial, fresh_initial)
-    cells = reused_initial.reshape(NUM_CELLS, -1)  # [mol/L], optional [K]
+    np.testing.assert_array_equal(reused.c_inert, CONCENTRATIONS[3:])
+    expected_material = RATE_CONSTANT * CONCENTRATIONS[0] * CONCENTRATIONS[1] \
+        / reused.Inlet.vol_flow * np.array([-1.0, -1.0, 1.0])  # [mol/L/m**3]
+    np.testing.assert_allclose(reused.material_steady(CONCENTRATIONS[:3], TEMPERATURE),
+                               expected_material, rtol=ALGEBRA_RTOL, atol=0)
+    grid = np.array([0.0, RUNTIME])  # [s], common dynamic reporting points
+    _, reused_states = reused.solve_unit(time_grid=grid, verbose=False)
+    _, fresh_states = fresh.solve_unit(time_grid=grid, verbose=False)
+    np.testing.assert_array_equal(reused_states[0], fresh_states[0])
+    cells = reused_states[0].reshape(NUM_CELLS, -1)  # [mol/L], optional [K]
     np.testing.assert_array_equal(cells[:, :4], np.tile(CONCENTRATIONS, (NUM_CELLS, 1)))
     assert reused.Liquid_1 is phase
     assert reused.name_species == fresh.name_species
@@ -358,7 +312,15 @@ def test_pfr_steady_bookkeeping_preserves_dynamic_initial_state(monkeypatch, iso
 @pytest.mark.parametrize("isothermal", [False, True])
 @pytest.mark.parametrize("adiabatic", [False, True])
 def test_pfr_complete_steady_to_dynamic_reuse(isothermal, adiabatic):
-    """#245: real steady solve, result slicing, and subsequent dynamic solve."""
+    """Check steady initial values, result slicing, and subsequent dynamics.
+
+    Parameters
+    ----------
+    isothermal : bool
+        Persistent dynamic temperature mode.
+    adiabatic : bool
+        Temporary steady heat-transfer mode.
+    """
     pytest.importorskip("assimulo")
     reused = _configured_reactor(Reactors.PlugFlowReactor(
         diam_in=TUBE_DIAMETER, num_discr=NUM_CELLS, isothermal=isothermal,
@@ -375,6 +337,11 @@ def test_pfr_complete_steady_to_dynamic_reuse(isothermal, adiabatic):
         assert reused.states_uo == fresh.states_uo
         assert reused.isothermal == fresh.isothermal
         assert reused.adiabatic == fresh.adiabatic
+        has_temperature = adiabatic or not isothermal
+        assert steady.shape[1] == 3 + has_temperature
+        np.testing.assert_array_equal(steady[0, :3], CONCENTRATIONS[:3])
+        if has_temperature:
+            assert steady[0, -1] == pytest.approx(TEMPERATURE, rel=ALGEBRA_RTOL)
     assert reused.num_species == len(CONCENTRATIONS)
     np.testing.assert_array_equal(reused.concProfSteady, steady[:, :3])
     np.testing.assert_allclose(reused.tempProfSteady,

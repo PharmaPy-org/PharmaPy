@@ -1,7 +1,7 @@
 """Contracts for #232–#234 using real liquid/kinetic collaborators.
 
-Core cases drive the RHS and retrieval directly; only solver construction is
-intercepted for callback registration. Marked cases use the real CVode backend.
+Core cases drive the RHS, metadata, and retrieval directly. Solver handoffs
+and event-registration behavior use the real optional CVode backend.
 Synthetic ramps and profiles test balances, not calibrated process predictions.
 
 Refs:
@@ -10,7 +10,6 @@ https://github.com/PharmaPy-org/PharmaPy/issues/233
 https://github.com/PharmaPy-org/PharmaPy/issues/234
 """
 
-from types import SimpleNamespace
 import json
 import math
 
@@ -226,61 +225,32 @@ def test_retrieval_commits_terminal_state_time_and_integrated_duty(cls):
     np.testing.assert_allclose(segmented.Liquid_1.mole_conc, reactor.Liquid_1.mole_conc, rtol=ALGEBRA_RTOL)
 
 
-@pytest.mark.unit
+@pytest.mark.assimulo
+@pytest.mark.integration
 @pytest.mark.parametrize('cls', TANKS)
 @pytest.mark.parametrize('any_event', [True, False])
-def test_solve_registers_shared_event_callbacks(monkeypatch, cls, any_event):
-    event = {'state_name': 'mole_conc', 'state_idx': 0, 'value': CONCENTRATIONS[0] / 2}
+def test_solve_registers_shared_event_callbacks(cls, any_event):
+    """Native event callbacks honor any/all semantics on distinct root times.
+
+    Parameters
+    ----------
+    cls : type
+        CSTR or SemibatchReactor.
+    any_event : bool
+        Terminate on one crossing or require simultaneous crossings.
+    """
+    pytest.importorskip('assimulo')
+    # Distinct crossings cannot satisfy all conditions in one notification.
+    event = {'callable': lambda time, states, sdot: np.array([TIMES[1], TIMES[-1]]) - time,
+             'num_conditions': 2, 'event_name': 'distinct crossings'}  # roots [s]
     reactor = configured(cls, state_events=[event])
-    captured = {}
-    class StopBeforeSolver(Exception):
-        """Stop after the production problem is completely configured."""
-    def capture_problem(*args, **kwargs):
-        """Capture the optional problem constructor.
-
-        Parameters
-        ----------
-        *args : tuple
-            RHS and initial states [mol/L], optionally volume [m**3].
-        **kwargs : dict
-            Start time [s] and event switches.
-
-        Returns
-        -------
-        SimpleNamespace
-            Attribute shell for callback registration at the optional boundary.
-        """
-        captured['problem'] = SimpleNamespace()
-        captured['kwargs'] = kwargs
-        return captured['problem']
-    def stop_solver(problem):
-        """Stop before integration.
-
-        Parameters
-        ----------
-        problem : object
-            Configured solver problem.
-
-        Raises
-        ------
-        StopBeforeSolver
-            Always, so the core test does not load Assimulo.
-        """
-        raise StopBeforeSolver
-    monkeypatch.setattr(Reactors, 'Explicit_Problem', capture_problem)
-    monkeypatch.setattr(Reactors, 'CVode', stop_solver)
-    with pytest.raises(StopBeforeSolver):
-        reactor.solve_unit(runtime=TIMES[-1], any_event=any_event, verbose=False)
-    problem = captured['problem']
-    assert problem.state_events == reactor._eval_state_events
+    duration = TIMES[-1] + TIMES[1]  # [s], beyond both nonsimultaneous events
+    time, states = reactor.solve_unit(runtime=duration, any_event=any_event, verbose=False)
+    expected_end = TIMES[1] if any_event else duration  # [s]
+    assert time[-1] == pytest.approx(expected_end, rel=ALGEBRA_RTOL)
     np.testing.assert_allclose(
-        problem.state_events(TIMES[0], profile(reactor)[0], [True]),
-        [event['value'] - CONCENTRATIONS[0]], rtol=ALGEBRA_RTOL)
-    assert problem.handle_event.func is handle_events
-    assert problem.handle_event.keywords['any_event'] is any_event
-    assert problem.handle_event.keywords['state_event_list'] is reactor.state_event_list
-    assert captured['kwargs']['sw0'] == [True]
-    assert reactor.derivatives.shape == profile(reactor)[0].shape
+        reactor._eval_state_events(0.0, states[0], [True]), TIMES[1:], rtol=ALGEBRA_RTOL)
+    assert reactor.derivatives.shape == states[0].shape
 
 
 @pytest.mark.integration
@@ -391,34 +361,24 @@ def test_solver_continuation_matches_uninterrupted_dynamic_inputs(cls, ht_mode):
     assert segmented.elapsed_time == uninterrupted.elapsed_time
 
 
-@pytest.mark.unit
+@pytest.mark.assimulo
+@pytest.mark.integration
 @pytest.mark.parametrize('cls', ALL_TANKS)
-def test_initial_jacket_uses_nominal_utility_charge(monkeypatch, cls):
+def test_initial_jacket_uses_nominal_utility_charge(cls):
+    """Read the nominal jacket charge from a real solver's first state row.
+
+    Parameters
+    ----------
+    cls : type
+        Batch, continuous, or semibatch tank reactor.
+    """
+    pytest.importorskip('assimulo')
     reactor = configured(cls, isothermal=False)
     utility = DynamicInput()
     utility.add_variable('temp_in', lambda time: TEMPERATURE + RAMP * time)
     reactor.Utility.DynamicInlet = utility
-    captured = {}
-    class ProblemCaptured(Exception):
-        """Stop at the optional problem constructor, before integration."""
-    def capture_problem(rhs, initial, **kwargs):
-        """Capture a packed initial state then stop construction.
-
-        Parameters
-        ----------
-        rhs : callable
-            Production reactor RHS.
-        initial : numpy.ndarray
-            Concentrations [mol/L], optional volume [m**3], temperatures [K].
-        **kwargs : dict
-            Problem settings including start time [s].
-        """
-        captured['initial'] = initial.copy()
-        raise ProblemCaptured
-    monkeypatch.setattr(Reactors, 'Explicit_Problem', capture_problem)
-    with pytest.raises(ProblemCaptured):
-        reactor.solve_unit(runtime=TIMES[-1], verbose=False)
-    assert captured['initial'][-1] == UTILITY_TEMPERATURE
+    _, states = reactor.solve_unit(time_grid=TIMES, verbose=False)
+    assert states[0, -1] == pytest.approx(UTILITY_TEMPERATURE, rel=ALGEBRA_RTOL)
     assert reactor.Utility.get_inputs(TIMES[0])['temp_in'] == TEMPERATURE
 
 
@@ -571,14 +531,18 @@ def test_retrieval_preserves_segment_inlet_history(cls):
 
 
 @pytest.mark.unit
-def test_semibatch_metadata_follows_named_packing(monkeypatch):
+def test_semibatch_metadata_follows_named_packing():
+    """Preserve values when metadata insertion and packed block orders differ."""
     reactor = configured(Reactors.SemibatchReactor, isothermal=False)
-    # Content-preserving permutation keeps material states before temperatures
-    # but places scalar volume before the four-component concentration state.
-    monkeypatch.setattr(Reactors, 'order_state_names',
-                        lambda names: ['vol', 'mole_conc', 'temp', 'temp_ht'])
-    reactor.set_names()
-    packed = np.r_[REACTOR_VOLUME, CONCENTRATIONS, TEMPERATURE, UTILITY_TEMPERATURE]  # [m**3], [mol/L], [K], [K]
+    # Reorder real metadata without changing any name, dimension, or unit.
+    # The production layout groups volume/concentrations before temperatures.
+    reactor.states_di = {name: reactor.states_di[name]
+                         for name in ['temp', 'vol', 'mole_conc', 'temp_ht']}
+    reactor.name_states, reactor.dim_states = Reactors._ordered_state_layout(reactor.states_di)
+    assert reactor.name_states == ['vol', 'mole_conc', 'temp', 'temp_ht']
+    assert reactor.dim_states == [1, len(CONCENTRATIONS), 1, 1]
+    packed = np.r_[REACTOR_VOLUME, CONCENTRATIONS, TEMPERATURE, UTILITY_TEMPERATURE]
+    # [m**3], [mol/L], [K], [K]; unequal blocks expose a name/dimension mismatch
     actual = unpack_states(packed, reactor.dim_states, reactor.name_states)
     assert list(actual) == reactor.name_states
     np.testing.assert_array_equal(actual['mole_conc'], CONCENTRATIONS)
@@ -803,7 +767,17 @@ def test_prescribed_solver_segments_share_rates_and_duties(cls, kind):
 @pytest.mark.unit
 @pytest.mark.parametrize('cls', ALL_TANKS)
 @pytest.mark.parametrize('duration', [0., 32.])
-def test_single_reported_point_rejects_unavailable_control_derivative(monkeypatch, cls, duration):
+def test_single_reported_point_rejects_unavailable_control_derivative(cls, duration):
+    """A one-row completed profile cannot borrow an uncompleted requested span.
+
+    Parameters
+    ----------
+    cls : type
+        Batch, continuous, or semibatch reactor.
+    duration : float
+        Requested duration [s] before an immediate stop at the initial time.
+    """
+    curvature = RAMP / TIMES[1]  # [K/s**2], existing quadratic at a 1 s reference
     evaluations = []  # Each entry is a scalar or vector of times [s].
     def control(time):
         """Record evaluations of a smooth control defined only after run start.
@@ -820,47 +794,13 @@ def test_single_reported_point_rejects_unavailable_control_derivative(monkeypatc
         """
         evaluations.append(np.asarray(time).copy())  # [s]
         assert np.all(np.asarray(time) >= 0)
-        return TEMPERATURE + RAMP * time**2
+        return TEMPERATURE + curvature * time**2
     reactor = configured(cls, controls={'temp': control})
-    def problem(rhs, initial, t0, **kwargs):
-        """Capture the optional problem's physical initial state.
-
-        Parameters
-        ----------
-        rhs : callable
-            Reactor right-hand side.
-        initial : numpy.ndarray
-            Packed concentrations [mol/L], optional volume [m**3].
-        t0 : float
-            Absolute start time [s].
-        **kwargs : dict
-            Backend switches and parameters.
-
-        Returns
-        -------
-        SimpleNamespace
-            Initial state and time for an immediate-stop solver result.
-        """
-        return SimpleNamespace(initial=initial, time=t0)
-    def solver(problem):
-        """Represent a solver stopping immediately with one reported point.
-
-        Parameters
-        ----------
-        problem : SimpleNamespace
-            Initial concentrations [mol/L], volume [m**3] and time [s].
-
-        Returns
-        -------
-        SimpleNamespace
-            Optional solver boundary returning only the initial profile row.
-        """
-        return SimpleNamespace(simulate=lambda final_time, ncp_list: (
-            np.array([problem.time]), np.atleast_2d(problem.initial)))
-    monkeypatch.setattr(Reactors, 'Explicit_Problem', problem)
-    monkeypatch.setattr(Reactors, 'CVode', solver)
+    reactor._run_start = 0.0  # [s], immediate-stop result fixture
+    reactor._run_duration = duration  # [s], requested but uncompleted interval
+    initial = profile(reactor, time=TIMES[:1])  # [mol/L], optional [m**3]
     with pytest.raises(ValueError, match='at least two finite increasing'):
-        reactor.solve_unit(runtime=duration, verbose=False)
+        reactor.retrieve_results(TIMES[:1], initial)
     # A stopped run supplies no interval on which a derivative can be obtained.
     # In particular, reconstruction must not call controls beyond that interval.
     assert max(float(np.max(value)) for value in evaluations) == 0
@@ -1038,3 +978,20 @@ def test_scalar_temperature_control_completes_solver_retrieval():
                                rtol=ALGEBRA_RTOL)
     np.testing.assert_allclose(reactor.Liquid_1.mole_conc, states[-1], rtol=ALGEBRA_RTOL)
     assert np.all(np.isfinite(reactor.result.q_ht))
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+@pytest.mark.parametrize('cls', ALL_TANKS)
+def test_zero_duration_native_solve_rejects_control_derivative(cls):
+    """Reject the unavailable derivative through a native zero-duration solve.
+
+    Parameters
+    ----------
+    cls : type
+        Batch, continuous, or semibatch tank reactor.
+    """
+    pytest.importorskip('assimulo')
+    reactor = configured(cls, controls={'temp': lambda time: TEMPERATURE + RAMP * time})
+    with pytest.raises(ValueError, match='at least two finite increasing'):
+        reactor.solve_unit(runtime=0.0, verbose=False)  # [s], no completed interval
