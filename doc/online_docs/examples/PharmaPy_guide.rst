@@ -4,7 +4,75 @@ PharmaPy Step-by-step Guide
 
 Introduction
 ============
-This section has been written for the purpose of further assisting the user experience with PharmaPy code. Thus, this section should be used as an instructional manual that is to be used in conjunction with the "Process optimization with PharmaPy" notebook.
+This guide constructs the nominal four-unit simulation from
+`Process optimization with PharmaPy <PFR_Batch_solved.html>`_. Run the Python
+blocks in order from a repository checkout using the Assimulo environment
+described in :doc:`../installation`. The values below are the worked notebook's
+teaching assumptions, not a validated manufacturing design.
+
+Imports and nominal inputs
+--------------------------
+
+The example uses the bundled Case study 3 property database. Its ordered species
+are A, B, C, D, and solvent. The path lookup supports both the repository root and
+this guide's directory.
+
+.. testcode::
+
+   from pathlib import Path
+
+   import numpy as np
+   from PharmaPy.Reactors import PlugFlowReactor
+   from PharmaPy.Containers import DynamicCollector
+   from PharmaPy.Crystallizers import BatchCryst
+   from PharmaPy.SolidLiquidSep import Filter
+   from PharmaPy.Phases import LiquidPhase, SolidPhase
+   from PharmaPy.Streams import LiquidStream
+   from PharmaPy.Kinetics import RxnKinetics, CrystKinetics
+   from PharmaPy.Utilities import CoolingWater
+   from PharmaPy.Interpolation import PiecewiseLagrange
+   from PharmaPy.SimExec import SimulationExec
+
+   for repository_root in (Path.cwd(), *Path.cwd().parents):
+       data_dir = repository_root / "workshop_data" / "Case_study_3"
+       if (data_dir / "compound_database.json").is_file():
+           break
+   else:
+       raise FileNotFoundError("Run this guide inside the PharmaPy checkout.")
+   path_phys = str(data_dir / "compound_database.json")
+
+The nominal inputs reproduce the notebook's initial simulation. Residence time
+sets the feed flow; the two-hour campaign determines how much material reaches
+the holding tank. The crystallizer then follows the prescribed four-hour cooling
+program.
+
+.. testcode::
+
+   vol_liq = 0.010  # [m**3], nominal reactor volume
+   tau_R01 = 1800.0  # [s], nominal reactor residence time
+   vol_flow = vol_liq / tau_R01  # [m**3/s]
+   init_temp = 313.15  # [K], initial liquid temperature
+   temp_in = 313.15  # [K], feed temperature
+   temp_set_R01 = 313.15  # [K], utility inlet temperature
+   mass_flow = 0.1  # [kg/s], utility flow
+   diam_in = 0.5 * 0.0254  # [m], half-inch tube; exact inch-to-metre conversion
+   runtime_reactor = 2 * 3600.0  # [s], two-hour teaching campaign
+   runtime_cryst = 2 * runtime_reactor  # [s], four-hour cooling program
+
+   prim = (3e8, 0, 3)  # [#/m**3/s], [J/mol], [-]; primary nucleation
+   sec = (4.46e10, 0, 2, 1e-5)  # [#/m**3/s], [J/mol], [-], [-]; secondary
+   growth = (5, 0, 1.32)  # [um/s], [J/mol], [-]
+   dissol = (1, 0, 1)  # [um/s], [J/mol], [-]
+   solub_cts = np.array([2.269e2, -1.88, 3.89e-3])
+   # [kg/m**3], [kg/m**3/K], [kg/m**3/K**2]; nominal solubility polynomial
+   temp_program = np.array([[313.15, 303.15],
+                            [303.15, 295.15],
+                            [295.15, 278.15]])  # [K], segment endpoints
+   alpha = 1e11  # [m/kg], nominal specific cake resistance
+   Rm = 1e10  # [1/m], nominal filter-medium resistance
+   filt_area = 200e-4  # [m**2], nominal 200 cm**2; 1 cm**2 = 1e-4 m**2
+   diam = np.sqrt(4 * filt_area / np.pi)  # [m], circular filter diameter
+
 
 Preprocess
 ==========
@@ -35,9 +103,9 @@ Chemical selection
 
 		"rho_solid": density of the species in solid form in units of [kg/m^3],
 
-		"visc_liq": [coefficients for the fourth power exponential form for viscosity of the species in units of [kg/m/s]], # mu(T) = A * exp(B/T + CT + DT**2
+		"visc_liq": [coefficients for the liquid-viscosity coefficients A [-], B [K], C [1/K], D [1/K**2]], # log10(mu/[mPa*s]) = A + B/T + C*T + D*T**2, T [K]
 
-		"p_vap": [coefficients for the Antoine equation for vapor pressure of the species in units of [Pa]], # log P = A - B/(C - T)
+		"p_vap": [Antoine coefficients A [-], B [K], C [K]], # log10(P/[Pa]) = A - B/(T + C), T [K]
 
 		"mol_vol": molar volume of the species in units of [m^3/mol],
 
@@ -59,7 +127,7 @@ The other properties, :code:`t_crit`, :code:`cp_liq`, :code:`cp_solid`, :code:`p
 
 .. testcode::
 
-	('R01 --> HOLD01 --> CR01 --> F01')
+	graph = 'R01 --> HOLD01 --> CR01 --> F01'
 
 In the above example, the system process is defined as starting from a reactor (:code:`R01`) to a holding tank (:code:`HOLD01`), then going to a crystallizer (:code:`CR01`) and finally going to a filtration unit (:code:`F01`).
 
@@ -67,9 +135,9 @@ In the above example, the system process is defined as starting from a reactor (
 
 .. testcode::
 
-	sim = SimulationExec(path_phys, flowsheet=graph).
+	sim = SimulationExec(path_phys, flowsheet=graph)
 
-The variable ‘path_phys’ is the string for the file path for the chemical properties (i.e. 'C:\user\Documents\..).
+The variable ``path_phys`` is the bundled property-file path defined above.
 
 4. Define the chemical reactions that occur with the species in the process. The reactions that can be specified are noted with strings.
 
@@ -85,9 +153,10 @@ In the example above, it is noted that chemical A reacts with chemical B to crea
 	
 		.. testcode::
 		
-			k_vals = np.array([2.654e4, 5.3e2])
+			k_vals = np.array([2.654e4, 5.3e2])  # [L/mol/s], nominal second-order prefactors
 	
-	   In the above example, writing k-values using numpy array function guarantees the parameters are in the correct format. Additionally, it should be noted that the k-values dictates the nucleation rates for the products in accordance with the formulation of
+	   These nominal second-order prefactors define the reaction rate constants:
+
 	
 	.. math::
 	
@@ -97,9 +166,10 @@ In the example above, it is noted that chemical A reacts with chemical B to crea
 	
 		.. testcode::
 		
-			ea_vals = np.array([4.0e4, 3.0e4])
+			ea_vals = np.array([4.0e4, 3.0e4])  # [J/mol], nominal activation energies
 
-	   In the above example, writing ea-values using numpy array function guarantees the parameters are in the correct format. Additionally, it should be noted that the :code:`ea-vals` values dicates the nucleation rates for the products in accordance with the formulation of:
+	   The activation energies enter the same Arrhenius expression:
+
 	
 	.. math::
 	
@@ -126,7 +196,7 @@ Reactor Setup
 	
 	.. testcode::
 	
-		w_init = np.array([0,0,0,0,1])
+		w_init = np.array([0, 0, 0, 0, 1])  # [-], mass fractions; pure solvent
 
 The example shows that 100% of the composition in the reactor is the solvent, which is represented in the last column.
 
@@ -161,7 +231,7 @@ Main Reactor
 
 .. testcode::
 	
-	c_in = np.arrary([0.33, 0.33, 0, 0, 0])
+	c_in = np.array([0.33, 0.33, 0, 0, 0])  # [mol/L], solvent is inferred
 	
 In the above example, the initial concentration is defined as an array. For this example, the chemical species in the "compound_database" JSON file are ordered as species A, B, C, D, and the solvent. Thus, in the example, the in example, the initial concentration has a molar concentration of 0.33 for species A and 0.33 for species B, and none for the other chemicals components.
 
@@ -171,7 +241,8 @@ In the above example, the initial concentration is defined as an array. For this
 
 .. testcode::
 
-	LiquidStream(path_phys, temp_in, mole_conc=c_in, vol_flow=vol_flow, name_solv='solvent')
+	liquid_in = LiquidStream(path_phys, temp_in, mole_conc=c_in,
+	                         vol_flow=vol_flow, name_solv='solvent')
 
 In the above example, the first input denotes the file path for the chemical properties. The second input denotes the temperature at which the chemical components are introduced. The third input denotes the molar concentrations of the introduced chemicals. The fourth input denotes the rate of flow into the reactor. The final input denotes the string name of the solvent in the JSON file of chemical properties.
 
@@ -249,7 +320,8 @@ The solubility is calculated in units of [kg/m^3]
 
 .. testcode::
 
-	x_gr = np.geomspace(1, 1500, num=35)
+	x_gr = np.geomspace(1, 1500, num=35)  # [um], notebook's logarithmic size grid
+	distrib_init = np.zeros_like(x_gr)  # [#/um], initially unseeded batch
 
 The above code gives a list of 35 entries where the values are logarithmically spaced from 1 to 1500.
 
@@ -279,7 +351,10 @@ In the above example, the first input denotes the file path for the JSON file wi
 
 	sim.CR01 = BatchCryst(target_comp='C', method='1D-FVM', scale=1e-9,controls={'temp': lagrange_fn.evaluate_poly})
 
-In the above example, the first input denotes the string name of the chemical that we are tracking in the crystallizer. In this example, we are tracking the vaguely named chemical C. The second input denotes the method used to solve the system. In this example, we are using the 1D Finite Volume Element method. The third input denotes the scale with which everything is calculated. Thus, it applies a 1e-9 multiplier to the inputs. The fourth input denotes what temperature profile, or in other cases, antisolvent addition method for the crystallizer.
+The target is species C, using a one-dimensional finite-volume discretization.
+The ``scale`` argument rescales the discretized crystal population for numerical
+integration; it does not convert the units of every input. The ``temp`` control
+prescribes the cooling profile defined above.
 
 10. Assign the CrystKinetics function to the SimulationExec object’s CR01.Kinetics value.
 
@@ -293,7 +368,7 @@ In the above example, the first input denotes the solubility constants of the pr
 
 .. testcode::
 
-	sim. CR01.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
+	sim.CR01.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
 
 In the above example, the first input denotes the rate of flow for the temperature regulation of the crystallizer. The second input denotes the temperature at which the flowing water is at.
 
@@ -329,13 +404,13 @@ Solving the Flowsheet
 
 	runargs_R01 = {'runtime': runtime_reactor}
 	
-	sundials = {'maxh': 60}
+	sundials = {'maxh': 60}  # [s], notebook's maximum cooling integration step
 
 	runargs_hold = {'runtime': runtime_reactor}
 
 	runargs_CR01 = {'runtime': runtime_cryst, 'sundials_opts': sundials}
 
-	runargs_F01 = {'runtime': None}
+	runargs_F01 = {'runtime': None, 'deltaP': 1e5}  # [Pa], Filter's default pressure drop
 	
 	run_kwargs = {'R01': runargs_R01, 'HOLD01': runargs_hold, 'CR01':
 	
@@ -356,3 +431,18 @@ In the above example, the runtime for the Reactor, Holding Tank, Crystallizer, a
 	sim.CR01.plot_profiles()
 
 In the example above, the command will plot the moments :math:`\mu_{i}` where :math:`i = 0,1,2,3`, the temperature profile, and the concentration/solubility/supersaturation curves.
+
+Verification
+============
+
+The regression executes the printed code from both supported directories and
+checks the campaign durations, cooling endpoint, feed composition and recovery
+of crystallizer solids in the dry filter cake. It also compiles every printed
+block in the core lane, without requiring Assimulo.
+
+.. code-block:: console
+
+   pixi run --locked -e assimulo python -m pytest tests/test_teaching_guide.py -v
+
+The assertions check this nominal teaching calculation; they do not certify the
+property database or the process as an industrial design.
