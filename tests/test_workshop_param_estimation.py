@@ -12,6 +12,9 @@ import numpy as np
 import pytest
 
 pytest.importorskip("assimulo")
+pytest.importorskip("nbformat")
+pytest.importorskip("nbclient")
+pytest.importorskip("jupyter_client")
 
 import nbformat
 from jupyter_client import KernelManager

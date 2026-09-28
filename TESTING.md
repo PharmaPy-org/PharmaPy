@@ -55,6 +55,12 @@ working directories (repository root and notebook directory):
 pixi run --locked -e assimulo python -m pytest tests/test_workshop_param_estimation.py -v
 ```
 
+The notebook module skips during collection if Assimulo or any imported notebook
+tool (`nbformat`, `nbclient`, or `jupyter_client`) is unavailable. This keeps core
+tests runnable in older manual solver environments without the workshop tools.
+The locked Assimulo environment supplies the tools for notebook execution;
+`tests/test_workshop_collection.py` checks each missing-tool path in isolation.
+
 The test executes every cell, including sensitivity analysis, parameter fits,
 confidence intervals, and plots. It takes about 20 seconds for both launches and
 also runs in the existing informational Assimulo CI lane on every push and PR.
