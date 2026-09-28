@@ -371,7 +371,16 @@ def test_segment_duties_use_local_states_and_accumulate(thermo_path, unit_class)
 @pytest.mark.integration
 @pytest.mark.assimulo
 @pytest.mark.parametrize('nitrogen', [False, True])
-def test_batch_continuation_matches_uninterrupted_run(thermo_path, nitrogen, monkeypatch):
+def test_batch_continuation_matches_uninterrupted_run(thermo_path, nitrogen):
+    """Compare native IDA trajectories at explicit absolute reporting times.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic thermodynamic database path.
+    nitrogen : bool
+        Include trace nitrogen in the vapor holdup.
+    """
     pytest.importorskip('assimulo')
     segment_duration = 50.0  # [s], long enough to expose re-flash energy discontinuity
     solver_rtol = 1e-8  # [-], requested relative integration accuracy
@@ -381,37 +390,16 @@ def test_batch_continuation_matches_uninterrupted_run(thermo_path, nitrogen, mon
     options = {'rtol': solver_rtol, 'atol': 1e-10}  # [-], [native state units]
     whole = make_unit(thermo_path, include_nitrogen=nitrogen)
     split = make_unit(thermo_path, include_nitrogen=nitrogen)
-    # Request exact communication points from the real IDA solver; the unit
-    # API otherwise returns only adaptive steps, not the shared endpoint.
-    from assimulo.solvers import IDA
-    class EndpointIDA(IDA):
-        """Real IDA solver returning the comparison endpoint explicitly."""
-
-        def simulate(self, final_time):
-            """Run IDA with the reference midpoint included in its returned profile.
-
-            Parameters
-            ----------
-            final_time : float
-                Absolute final time [s].
-
-            Returns
-            -------
-            tuple
-                IDA times [s], states, and derivatives in evaporator state units.
-            """
-            assert final_time == 2 * segment_duration
-            return super().simulate(final_time,
-                            ncp_list=[segment_duration, final_time])
-    with monkeypatch.context() as patch:
-        patch.setattr('PharmaPy.Evaporators.IDA', EndpointIDA)
-        whole_time, whole_states = whole.solve_unit(2 * segment_duration, verbose=False,
-                                                   sundials_opts=options)
+    whole_time, whole_states = whole.solve_unit(
+        2 * segment_duration, verbose=False, sundials_opts=options,
+        time_grid=[segment_duration, 2 * segment_duration])  # [s], midpoint/end
     first_time, first_states = split.solve_unit(segment_duration, verbose=False,
                                                sundials_opts=options)
     terminal = first_states[-1].copy()  # units and order in states_di
-    second_time, second_states = split.solve_unit(segment_duration, verbose=False,
-                                                 sundials_opts=options)
+    second_time, second_states = split.solve_unit(
+        segment_duration, verbose=False, sundials_opts=options,
+        time_grid=[segment_duration, 2 * segment_duration])  # [s], absolute times
+    np.testing.assert_array_equal(second_time, [segment_duration, 2 * segment_duration])
     # Continuation must copy all terminal states without re-flashing.
     np.testing.assert_allclose(second_states[0], terminal, rtol=solver_rtol)
     # Independent adaptive meshes have accumulated local errors; allow ten
@@ -750,46 +738,53 @@ def test_continuous_new_charge_clears_run_and_matches_fresh_duties(thermo_path, 
 @pytest.mark.parametrize('activity_model', ['ideal', 'UNIQUAC'])
 @pytest.mark.parametrize('site', ['batch_reporting', 'continuous_energy', 'continuous_reporting'])
 def test_condensate_temperature_uses_configured_activity_model(
-        thermo_path, monkeypatch, activity_model, site):
+        thermo_path, activity_model, site):
+    """Verify configured bubble-point enthalpy in each actual condenser duty.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic thermodynamic database path.
+    activity_model : str
+        Ideal or UNIQUAC activity model.
+    site : str
+        Batch reporting, continuous energy balance, or continuous reporting.
+    """
     unit_class = Evaporator if site == 'batch_reporting' else ContinuousEvaporator
-    options = {} if unit_class is Evaporator else {'reflux_ratio': 0.3}  # [-], active reflux
+    options = {} if unit_class is Evaporator else {
+        'reflux_ratio': 0.3, 'adiabatic': True}  # [-], isolate active condenser
     unit = make_unit(thermo_path, unit_class, activity_model=activity_model, **options)
-    seed, _ = unit.init_unit()
+    seed, _ = unit.init_unit()  # packed units in states_di
     seed[-3] = 2 * PRESSURE  # [Pa], positive vapor discharge
     values = unpack_states(seed, unit.dim_states, unit.name_states)
     composition = values['x_liq' if unit_class is Evaporator else 'y_vap']  # [-]
-    bubble_point = unit.Liquid_1.getBubblePoint
-    expected = bubble_point(pres=values['pres'], mole_frac=composition,
-                            thermo_method=activity_model)  # [K]
-    ideal = bubble_point(pres=values['pres'], mole_frac=composition)  # [K]
+    expected_temperature = unit.Liquid_1.getBubblePoint(
+        pres=values['pres'], mole_frac=composition,
+        thermo_method=activity_model)  # [K]
+    ideal_temperature = unit.Liquid_1.getBubblePoint(
+        pres=values['pres'], mole_frac=composition)  # [K]
     if activity_model == 'UNIQUAC':
-        assert not np.isclose(expected, ideal, rtol=RTOL)
-    temperatures = []  # [K], real bubble-point outputs consumed by the model
-
-    def record_bubble_point(*args, **kwargs):
-        """Record the real condensate temperature without replacing thermodynamics.
-
-        Parameters
-        ----------
-        *args, **kwargs
-            LiquidPhase.getBubblePoint inputs, including pressure [Pa].
-
-        Returns
-        -------
-        float
-            Bubble-point temperature [K].
-        """
-        temperature = bubble_point(*args, **kwargs)  # [K]
-        temperatures.append(temperature)
-        return temperature
-
-    monkeypatch.setattr(unit.Liquid_1, 'getBubblePoint', record_bubble_point)
+        assert not np.isclose(expected_temperature, ideal_temperature, rtol=RTOL)
+    molar_density = values['pres'] / (GAS_CONSTANT * values['temp'])  # [mol/m**3]
+    mass_density = molar_density * np.dot(unit.Vapor_1.mw, values['y_vap']) / 1000
+    # [kg/m**3], exact g-to-kg molecular-weight conversion
+    velocity = np.sqrt(2 * PRESSURE / mass_density)  # [m/s], Bernoulli discharge
+    vapor_flow = molar_density * unit.area_out * velocity * unit.cv_gas * unit.k_vap
+    # [mol/s], same physical valve fixture checked by the flow-contract tests
+    liquid_enthalpy = unit.Liquid_1.getEnthalpy(
+        temp=expected_temperature, mole_frac=composition, basis='mole')  # [J/mol]
+    vapor_enthalpy = unit.Vapor_1.getEnthalpy(
+        temp=values['temp'], mole_frac=values['y_vap'], basis='mole')  # [J/mol]
+    condensation_power = vapor_flow * (liquid_enthalpy - vapor_enthalpy)  # [W]
+    assert vapor_flow > 0 and condensation_power != 0
     if site == 'continuous_energy':
-        unit.unit_model(0, seed, states_dot=None, sw=None, enrgy_bce=True)
+        _, energy = unit.unit_model(0, seed, states_dot=None, sw=None, enrgy_bce=True)
+        # Energy tuple: flow enthalpy [W], positive heat removal [W].
+        assert energy[1] == pytest.approx(-condensation_power, rel=RTOL, abs=ATOL)
     else:
         unit.get_heat_duty(np.array([0, DURATION]), np.tile(seed, (2, 1)))
-    assert temperatures
-    np.testing.assert_allclose(temperatures, expected, rtol=RTOL)
+        np.testing.assert_allclose(unit.heat_profile[:, 1], condensation_power,
+                                   rtol=RTOL, atol=ATOL)
 
 
 @pytest.mark.integration
@@ -964,3 +959,40 @@ def test_steady_reflux_property_failure_has_solver_context(thermo_path):
     # fixture supplies no Henry data. Keep the original diagnostic as its cause.
     assert isinstance(error.value.__cause__, AttributeError)
     assert 'henry_constant' in str(error.value.__cause__)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('time_grid', [[], [[0.0, 1.0]], [0.0, np.nan],
+                                      [0.0, np.inf], [1.0, 1.0], [-1.0, 1.0],
+                                      [0.0, 3.0]])
+def test_batch_reporting_grid_rejects_invalid_times(thermo_path, time_grid):
+    """Reject invalid reporting grids before optional solver construction.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic thermodynamic database path.
+    time_grid : array-like
+        Invalid absolute time samples [s] for a two-second initial segment.
+    """
+    unit = make_unit(thermo_path)
+    with pytest.raises(ValueError, match='time_grid.*finite, strictly increasing'):
+        unit.solve_unit(runtime=2.0, time_grid=time_grid)  # [s]
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_batch_reporting_grid_keeps_runtime_endpoint(thermo_path):
+    """An interior reporting point must not shorten the requested duration.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic thermodynamic database path.
+    """
+    pytest.importorskip('assimulo')
+    unit = make_unit(thermo_path)
+    midpoint = DURATION / 2  # [s], interior point of the requested segment
+    time, _ = unit.solve_unit(DURATION, verbose=False, time_grid=[midpoint])
+    np.testing.assert_array_equal(time, [0.0, midpoint, DURATION])
+    assert unit.elapsed_time == pytest.approx(DURATION)
