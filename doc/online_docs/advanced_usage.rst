@@ -154,6 +154,16 @@ A batch evaporator using :code:`stop_at_maxvol=True` rejects an initial or reuse
 
 Continuous steady evaporation accepts :code:`fsolve_opts` for state scaling and solver controls. There is no universal scaling or trust-region factor: the regression suite covers both zero reflux and active reflux with fixture-specific :code:`diag`, :code:`xtol`, and :code:`factor`. Property failures during a trial preserve their original exception as the cause and identify thermophysical data and :code:`fsolve_opts` as diagnostic inputs. Successful solver termination should still be checked against physically meaningful balance residuals.
 
+Evaporator reporting times
+==========================
+
+``Evaporator.solve_unit(runtime, time_grid=times)`` accepts absolute reporting
+points [s] within the current segment. They must be finite and strictly
+increasing; the solver also reports the segment start. ``runtime`` remains the
+segment duration [s], including on continuation. Omitting ``time_grid`` retains
+adaptive reporting. This supports comparisons at shared times without changing
+the native IDA solver or interpolating the returned trajectory.
+
 Solid distributions and filtration
 ===================================
 
