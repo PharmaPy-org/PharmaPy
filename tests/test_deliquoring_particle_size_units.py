@@ -1,97 +1,31 @@
-"""Particle-size unit regressions for deliquoring and drying setup.
+"""Particle-size unit regressions for real deliquoring and drying setup.
 
-``SolidPhase.x_distrib`` stores crystal sizes in micrometers, while the
-capillary and threshold-pressure correlations consume particle diameters in
-meters. These tests stop both units at the solver boundary so the assertions
-exercise the real setup calculations without running an Assimulo transient.
+``SolidPhase.x_distrib`` stores crystal sizes in micrometers, while capillary
+and threshold-pressure correlations consume particle diameters in meters.
+Solver-backed cases use real phases, cakes, solver problems, and CVode.
 """
-
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
-from PharmaPy.SolidLiquidSep import DeliquoringStep
 from PharmaPy import SolidLiquidSep as solid_liquid_sep
-from PharmaPy import Drying_Model as drying_model
+from PharmaPy.SolidLiquidSep import DeliquoringStep
 
 
 pytestmark = pytest.mark.unit
 
-
 SIZE_GRID_UM = np.array([50.0, 100.0, 150.0])  # [um]
-CSD_NUMBER = np.array([1.0, 2.0, 1.0])  # [#/m**3/um]
+CSD_NUMBER = np.array([1.0, 2.0, 1.0])  # [#/um], total basis
 MICRONIZED_SIZE_GRID_UM = np.linspace(0.5, 1.5, 5)  # [um]
-MICRONIZED_CSD_NUMBER = np.ones_like(MICRONIZED_SIZE_GRID_UM)  # [#/m**3/um]
+MICRONIZED_CSD_NUMBER = np.ones_like(MICRONIZED_SIZE_GRID_UM)  # [#/um]
 POROSITY = 0.45  # [-]
-SURFACE_TENSION = np.array([0.065, 0.067])  # [N/m]
-
-
-class StopAfterSetup(Exception):
-    """Stop a setup-only solve before time integration begins."""
-
-
-class DummyExplicitProblem:
-    """Minimal ``Explicit_Problem`` replacement for setup-only tests."""
-
-    def __init__(self, rhs, y0, t0, **kwargs):
-        """Store solver problem inputs without constructing Assimulo objects.
-
-        Parameters
-        ----------
-        rhs : callable
-            Right-hand-side function that would be integrated [-].
-        y0 : ndarray
-            Initial flattened state passed to the solver [-].
-        t0 : float
-            Initial integration time [-].
-        **kwargs : dict
-            Additional problem options, such as event switches [-].
-        """
-        self.rhs = rhs
-        self.y0 = y0
-        self.t0 = t0
-        self.kwargs = kwargs
-        self.name = None
-
-
-class StopSolver:
-    """Minimal ``CVode`` replacement that stops at ``simulate``."""
-
-    def __init__(self, problem):
-        """Store the explicit problem supplied by ``solve_unit``.
-
-        Parameters
-        ----------
-        problem : DummyExplicitProblem
-            Problem object constructed after setup calculations complete [-].
-        """
-        self.problem = problem
-        self.linear_solver = None
-        self.verbosity = None
-
-    def simulate(self, *args, **kwargs):
-        """Stop before numerical integration.
-
-        Parameters
-        ----------
-        *args : tuple
-            Positional solver arguments that would include final time [-].
-        **kwargs : dict
-            Keyword solver arguments [-].
-
-        Raises
-        ------
-        StopAfterSetup
-            Always raised to keep the test focused on setup calculations.
-        """
-        raise StopAfterSetup
+DEFAULT_UNIT_DIAMETER = 0.01  # [m]
+SINGULAR_CASE_CAKE_HEIGHT = 0.02  # [m]
 
 
 def _zeroth_moment(
-    size_grid_um=SIZE_GRID_UM,
-    csd_number=CSD_NUMBER,
-) -> float:
+        size_grid_um=SIZE_GRID_UM,
+        csd_number=CSD_NUMBER) -> float:
     """Return the number-based CSD zeroth moment.
 
     Parameters
@@ -99,176 +33,158 @@ def _zeroth_moment(
     size_grid_um : ndarray, optional
         Particle-size grid stored by ``SolidPhase`` [um].
     csd_number : ndarray, optional
-        Crystal-size distribution on ``size_grid_um`` [#/m**3/um].
+        Total-population number distribution [#/um].
 
     Returns
     -------
     float
-        Integral of ``csd_number`` [#/m**3/um] over ``size_grid_um`` [um],
-        giving the total crystal count per suspension volume [#/m**3].
+        Total crystal count [-].
     """
     return solid_liquid_sep.trapezoidal_rule(size_grid_um, csd_number)
 
 
 def _make_deliquoring_unit(
-    size_grid_um=SIZE_GRID_UM,
-    csd_number=CSD_NUMBER,
-    saturation=0.8,
-):
-    """Build a minimal deliquoring unit for setup-path tests.
+        drying_cake_factory,
+        size_grid_um=SIZE_GRID_UM,
+        csd_number=CSD_NUMBER,
+        saturation=0.8):
+    """Build a deliquoring unit with a real packed cake.
 
     Parameters
     ----------
+    drying_cake_factory : callable
+        Factory for real liquid, solid, and cake collaborators.
     size_grid_um : ndarray, optional
-        Particle-size grid stored by ``SolidPhase`` [um].
+        Particle-size grid [um].
     csd_number : ndarray, optional
-        Crystal-size distribution on ``size_grid_um`` [#/m**3/um].
+        Total-population number distribution [#/um].
     saturation : float, optional
         Initial cake saturation [-].
 
     Returns
     -------
     DeliquoringStep
-        Unit with enough phase attributes to execute ``solve_unit`` setup.
+        Configured production unit.
     """
-    size_grid_um = np.asarray(size_grid_um)  # [um]
-    csd_number = np.asarray(csd_number)  # [#/m**3/um]
-
+    cake = drying_cake_factory(
+        size_grid_um=size_grid_um,
+        csd_number=csd_number,
+        saturation=saturation,
+    )
     unit = DeliquoringStep(num_nodes=2)
-    unit.cake_height = 0.02  # [m]
-    unit.z_centers = np.array([0.25, 0.75])  # [-]
-    unit.delta_z = np.array([0.5, 0.5])  # [-]
-    unit.Solid_1 = SimpleNamespace(
-        distrib=csd_number,
-        x_distrib=size_grid_um,
-        moments=np.array([_zeroth_moment(size_grid_um, csd_number)]),  # [#/m**3]
-        getPorosity=lambda: POROSITY,
-        getDensity=lambda: 1500.0,  # [kg/m**3]
-    )
-    unit.Liquid_1 = SimpleNamespace(
-        num_species=2,
-        name_species=["solute_a", "solute_b"],
-        getDensity=lambda: np.array([950.0, 970.0]),  # [kg/m**3]
-        getViscosity=lambda: np.array([1.0e-3, 1.2e-3]),  # [Pa*s]
-        getSurfTension=lambda: SURFACE_TENSION,
-        getDensityPure=lambda: np.array([1000.0, 1100.0]),  # [kg/m**3]
-    )
-    unit.CakePhase = SimpleNamespace(
-        alpha=2.0e10,  # [m/kg]
-        saturation=np.array([saturation]),  # [-]
-        Liquid_1=SimpleNamespace(mass_conc=np.array([1.0, 2.0])),  # [kg/m**3]
-        z_external=np.array([0.0, unit.cake_height]),  # [m]
-    )
-
+    unit.Phases = cake
+    unit.CakePhase.z_external = np.array(
+        [0.0, unit.cake_height]
+    )  # [m]
     return unit
 
 
+def _distribution_for_cake_height(
+        drying_cake_factory,
+        size_grid_um,
+        csd_number,
+        target_height=SINGULAR_CASE_CAKE_HEIGHT):
+    """Scale a real cake's number distribution to a target height.
+
+    Parameters
+    ----------
+    drying_cake_factory : callable
+        Factory for real liquid, solid, and cake collaborators.
+    size_grid_um : ndarray
+        Particle-size grid [um].
+    csd_number : ndarray
+        Relative total-population number distribution [#/um].
+    target_height : float, optional
+        Required packed-cake height [m].
+
+    Returns
+    -------
+    ndarray
+        Total-population number distribution producing ``target_height``
+        [#/um].
+
+    Notes
+    -----
+    ``Cake.cake_vol`` is linear in the total number distribution. Scaling its
+    magnitude changes cake inventory and height without changing normalized
+    particle-size weights or calculated porosity.
+    """
+    reference_cake = drying_cake_factory(
+        size_grid_um=size_grid_um,
+        csd_number=csd_number,
+    )
+    cross_section = np.pi * DEFAULT_UNIT_DIAMETER**2 / 4.0  # [m**2]
+    reference_height = reference_cake.cake_vol / cross_section  # [m]
+    return np.asarray(csd_number) * target_height / reference_height
+
+
+@pytest.mark.assimulo
 def test_deliquoring_setup_converts_micrometer_grid_to_meter_diameters(
-    monkeypatch,
-):
-    """Deliquoring capillary quantities use meter diameters from ``x_distrib``."""
-    captured = {}  # [-]
-    size_grid_m = SIZE_GRID_UM * 1e-6  # [m]
+        drying_cake_factory):
+    """Real deliquoring setup uses meter diameters in capillary quantities."""
+    pytest.importorskip("assimulo")
+    unit = _make_deliquoring_unit(drying_cake_factory)
 
-    def capture_sat_inf(x_vec, csd, deltaP, porosity, height, mu_zero, props):
-        """Capture the diameter grid supplied to ``get_sat_inf``.
+    unit.solve_unit(deltaP=5.0e4, runtime=1.0e-3, verbose=False)  # [Pa], [s]
 
-        Parameters
-        ----------
-        x_vec : ndarray
-            Particle diameter grid supplied to the capillary correlation [m].
-        csd : ndarray
-            Crystal-size distribution on the stored grid [#/m**3/um].
-        deltaP : float
-            Pressure drop supplied to the saturation correlation [Pa].
-        porosity : float
-            Cake porosity [-].
-        height : float
-            Cake height [m].
-        mu_zero : float
-            Zeroth distribution moment [#/m**3].
-        props : tuple
-            Surface tension [N/m] and liquid density [kg/m**3].
+    delta_p = 5.0e4  # [Pa]
+    correlation_inputs = (
+        unit.Solid_1.distrib,
+        delta_p,
+        unit.Solid_1.getPorosity(),
+        unit.cake_height,
+        unit.Solid_1.moments[0],
+        (
+            np.mean(unit.Liquid_1.getSurfTension()),
+            np.mean(unit.Liquid_1.getDensity()),
+        ),
+    )
+    expected_saturation = solid_liquid_sep.get_sat_inf(
+        SIZE_GRID_UM * 1e-6, *correlation_inputs)  # [-]
+    micrometer_basis = solid_liquid_sep.get_sat_inf(
+        SIZE_GRID_UM, *correlation_inputs)  # [-]
 
-        Returns
-        -------
-        float
-            Synthetic irreducible saturation [-].
-        """
-        captured["x_vec"] = x_vec.copy()  # [m]
-        return 0.25  # [-]
-
-    monkeypatch.setattr(solid_liquid_sep, "get_sat_inf", capture_sat_inf)
-    monkeypatch.setattr(solid_liquid_sep, "Explicit_Problem", DummyExplicitProblem)
-    monkeypatch.setattr(solid_liquid_sep, "CVode", StopSolver)
-
-    unit = _make_deliquoring_unit()
-
-    with pytest.raises(StopAfterSetup):
-        unit.solve_unit(deltaP=5.0e4, runtime=10.0)  # [Pa], [s]
-
-    np.testing.assert_allclose(captured["x_vec"], size_grid_m)
+    np.testing.assert_allclose(unit.Solid_1.x_distrib, SIZE_GRID_UM)
+    assert unit.sat_inf == pytest.approx(expected_saturation, rel=1e-12)
+    assert unit.sat_inf != pytest.approx(micrometer_basis, rel=1e-10)
 
 
-def test_deliquoring_threshold_pressure_uses_expected_size_basis(monkeypatch):
+@pytest.mark.assimulo
+def test_deliquoring_threshold_pressure_uses_expected_size_basis(
+        drying_cake_factory):
     """Threshold pressure uses meter diameters and micrometer CSD weights."""
+    pytest.importorskip("assimulo")
+    unit = _make_deliquoring_unit(drying_cake_factory)
 
-    def fixed_sat_inf(x_vec, csd, deltaP, porosity, height, mu_zero, props):
-        """Return a safe saturation while the threshold pressure is tested.
+    unit.solve_unit(deltaP=5.0e4, runtime=1.0e-3, verbose=False)  # [Pa], [s]
 
-        Parameters
-        ----------
-        x_vec : ndarray
-            Particle diameter grid supplied to the capillary correlation [m].
-        csd : ndarray
-            Crystal-size distribution on the stored grid [#/m**3/um].
-        deltaP : float
-            Pressure drop supplied to the saturation correlation [Pa].
-        porosity : float
-            Cake porosity [-].
-        height : float
-            Cake height [m].
-        mu_zero : float
-            Zeroth distribution moment [#/m**3].
-        props : tuple
-            Surface tension [N/m] and liquid density [kg/m**3].
+    porosity = unit.Solid_1.getPorosity()  # [-]
+    surface_tension = np.mean(unit.Liquid_1.getSurfTension())  # [N/m]
+    diameter_m = SIZE_GRID_UM * 1.0e-6  # [m]
+    pressure_by_size = (
+        4.6 * (1.0 - porosity) * surface_tension
+        / (porosity * diameter_m)
+    )  # [Pa], Destro et al. (2021), Eq. 16
+    expected_threshold = (
+        solid_liquid_sep.trapezoidal_rule(
+            SIZE_GRID_UM, pressure_by_size * CSD_NUMBER
+        )
+        / _zeroth_moment()
+    )  # [Pa]
 
-        Returns
-        -------
-        float
-            Synthetic irreducible saturation [-].
-        """
-        return 0.25  # [-]
-
-    monkeypatch.setattr(solid_liquid_sep, "get_sat_inf", fixed_sat_inf)
-    monkeypatch.setattr(solid_liquid_sep, "Explicit_Problem", DummyExplicitProblem)
-    monkeypatch.setattr(solid_liquid_sep, "CVode", StopSolver)
-
-    unit = _make_deliquoring_unit()
-
-    with pytest.raises(StopAfterSetup):
-        unit.solve_unit(deltaP=5.0e4, runtime=10.0)  # [Pa], [s]
-
-    # Destro et al. (2021), Eq. 16 gives p_i = 4.6*(1-eps)*sigma/(eps*d_i).
-    # For d_i = [50, 100, 150] um and mean sigma = 0.066 N/m, p_i is
-    # [7421.3333, 3710.6667, 2473.7778] Pa. Weighting p_i*CSD over the
-    # stored [50, 100, 150] um grid gives 618444.444 Pa*#/m**3, and dividing
-    # by mom_zero = trapz([1, 2, 1]) = 150 #/m**3 gives 4122.96296 Pa.
-    expected_threshold = 4122.96296296  # [Pa]
-
-    assert unit.p_thresh == pytest.approx(expected_threshold, rel=1e-9)
+    assert unit.p_thresh == pytest.approx(expected_threshold, rel=1e-12)
 
 
 def test_get_sat_inf_returns_per_node_values_for_array_properties():
     """Array-valued liquid properties return one saturation per property node."""
     size_grid_um = np.array([50.0, 100.0, 150.0, 200.0])  # [um]
     size_grid_m = size_grid_um * 1e-6  # [m]
-    csd_number = np.array([1.0, 2.0, 1.0, 0.5])  # [#/m**3/um]
+    csd_number = np.array([1.0, 2.0, 1.0, 0.5])  # [#/um]
     delta_p = 5.0e4  # [Pa]
     cake_height = 0.02  # [m]
     surf_tens = np.array([0.065, 0.067, 0.066])  # [N/m]
     rho_liq = np.array([950.0, 960.0, 970.0])  # [kg/m**3]
-    mu_zero = _zeroth_moment(size_grid_um, csd_number)  # [#/m**3]
+    mu_zero = _zeroth_moment(size_grid_um, csd_number)  # [-]
 
     sat_inf = solid_liquid_sep.get_sat_inf(
         size_grid_m,
@@ -280,12 +196,9 @@ def test_get_sat_inf_returns_per_node_values_for_array_properties():
         (surf_tens, rho_liq),
     )
 
-    # Literals are independently frozen from the array-property case so a
-    # scalar reduction, flat sum, or node-ordering mutation cannot drift with
-    # the production expression.
     expected_sat_inf = np.array(
         [0.1650323056996773, 0.1651821984011924, 0.1651072525989054]
-    )  # [-]
+    )  # [-], frozen asymmetric array-property case
 
     assert sat_inf.shape == expected_sat_inf.shape
     np.testing.assert_allclose(sat_inf, expected_sat_inf, rtol=1e-12)
@@ -299,15 +212,12 @@ def test_get_sat_inf_clips_micronized_aggregate_roundoff():
     size_grid_m = size_grid_um * 1e-6  # [m]
     csd_number = np.array(
         [1.6568408995106283e-7, 4.5172148784017079, 2.1064206650858339e-10]
-    )  # [#/m**3/um]
+    )  # [#/um]
     delta_p = 1.0e3  # [Pa]
     cake_height = 0.02  # [m]
     surf_tens = 0.066  # [N/m]
     rho_liq = 950.0  # [kg/m**3]
-    mu_zero = _zeroth_moment(
-        size_grid_um,
-        csd_number,
-    )  # [#/m**3]
+    mu_zero = _zeroth_moment(size_grid_um, csd_number)  # [-]
 
     sat_inf = solid_liquid_sep.get_sat_inf(
         size_grid_m,
@@ -319,180 +229,90 @@ def test_get_sat_inf_clips_micronized_aggregate_roundoff():
         (surf_tens, rho_liq),
     )
 
-    # These searched values are a numerical guard, not a physical cake. They
-    # make all bin saturations hit the upper bound; before aggregate clipping,
-    # volume-fraction roundoff sums the weighted saturation to
-    # 1.0000000000000002 [-].
     assert sat_inf <= 1.0
 
 
-def test_deliquoring_rejects_singular_micronized_irreducible_saturation():
-    """Deliquoring rejects micronized cakes with undefined reduced saturation."""
+def test_deliquoring_rejects_singular_micronized_irreducible_saturation(
+        drying_cake_factory):
+    """Real deliquoring setup rejects an undefined reduced saturation."""
+    scaled_csd = _distribution_for_cake_height(
+        drying_cake_factory,
+        MICRONIZED_SIZE_GRID_UM,
+        MICRONIZED_CSD_NUMBER,
+    )  # [#/um]
     unit = _make_deliquoring_unit(
+        drying_cake_factory,
         size_grid_um=MICRONIZED_SIZE_GRID_UM,
-        csd_number=MICRONIZED_CSD_NUMBER,
+        csd_number=scaled_csd,
     )
 
     with pytest.raises(ValueError, match="s_inf=.*deltaP=.*particle size grid"):
         unit.solve_unit(deltaP=5.0e4, runtime=10.0)  # [Pa], [s]
 
 
-def _make_drying_unit(
-    size_grid_um=SIZE_GRID_UM,
-    csd_number=CSD_NUMBER,
-):
-    """Build a minimal drying unit for setup-path tests.
+@pytest.mark.assimulo
+def test_drying_setup_converts_micrometer_grid_before_saturation(
+        drying_unit_factory):
+    """Real drying setup passes meter diameters to the shared correlation.
 
     Parameters
     ----------
-    size_grid_um : ndarray, optional
-        Particle-size grid stored by ``SolidPhase`` [um].
-    csd_number : ndarray, optional
-        Crystal-size distribution on ``size_grid_um`` [#/m**3/um].
+    drying_unit_factory : callable
+        Construct a drying unit with real phases and the synthetic size grid.
 
-    Returns
-    -------
-    Drying
-        Unit with enough phase attributes to execute ``solve_unit`` setup.
+    Notes
+    -----
+    Recompute the correlation on an explicit metre grid using the initial
+    volatile-liquid composition. This preserves the conversion assertion
+    across the phase-composition normalization introduced by PR #263.
     """
-    size_grid_um = np.asarray(size_grid_um)  # [um]
-    csd_number = np.asarray(csd_number)  # [#/m**3/um]
+    pytest.importorskip("assimulo")
+    dryer = drying_unit_factory(number_nodes=2)
+    liquid_fraction = dryer.CakePhase.Liquid_1.mass_frac.copy()  # [-]
+    liquid_fraction[dryer.idx_supercrit] = 0.0  # [-], liquid volatile subset
+    initial_temperature = dryer.Solid_1.temp  # [K]
+    liquid_density = dryer.Liquid_1.getDensity(
+        temp=initial_temperature, mass_frac=liquid_fraction,
+        basis='mass')  # [kg/m**3]
+    surface_tension = dryer.Liquid_1.getSurfTension(
+        temp=initial_temperature, mass_frac=liquid_fraction)  # [N/m]
 
-    dryer = drying_model.Drying(number_nodes=2, supercrit_names=["nitrogen"])
-    dryer.names_states_in = ["temp", "mass_frac"]
-    dryer.idx_supercrit = np.array([1])  # component indices [-]
-    dryer.cake_height = 0.02  # [m]
-    dryer.elapsed_time = 0.0  # [s]
-    dryer.Liquid_1 = SimpleNamespace(
-        num_species=3,
-        getDensity=lambda temp, mass_frac, basis: np.array([930.0, 940.0]),  # [kg/m**3]
-        getSurfTension=lambda temp, mass_frac: np.array([0.068, 0.070]),  # [N/m]
-    )
-    solid = SimpleNamespace(
-        temp=302.0,  # [K]
-        x_distrib=size_grid_um,
-        distrib=csd_number,
-        moments=np.array([_zeroth_moment(size_grid_um, csd_number)]),  # [#/m**3]
-        getDensity=lambda: 1500.0,  # [kg/m**3]
-        getCp=lambda: 700.0,  # [J/kg/K]
-        getMoments=lambda mom_num: np.array([1.0, 1.0e-4, 1.0e-8, 1.0e-12, 0.0]),
-    )
-    dryer.Solid_1 = solid
-    dryer.Vapor_1 = SimpleNamespace(
-        mass_frac=np.array([0.01, 0.98, 0.01]),  # [-]
-        temp=300.0,  # [K]
-    )
-    dryer.CakePhase = SimpleNamespace(
-        Liquid_1=SimpleNamespace(mass_frac=np.array([0.20, 0.10, 0.70])),  # [-]
-        Solid_1=solid,
-        saturation=np.array([0.55]),  # [-]
-        z_external=np.array([0.0, dryer.cake_height]),  # [m]
-        alpha=2.0e10,  # [m/kg]
-        porosity=POROSITY,  # [-]
+    time, states = dryer.solve_unit(
+        deltaP=5.0e4,
+        runtime=1.0e-8,  # [s], one short real-backend integration
+        verbose=False,
     )
 
-    return dryer
-
-
-def test_drying_setup_converts_micrometer_grid_before_irreducible_saturation(
-    monkeypatch,
-):
-    """Drying passes meter diameters to the shared saturation correlation."""
-    captured = {}  # [-]
-
-    def capture_sat_inf(x_vec, csd, deltaP, porosity, height, mu_zero, props):
-        """Capture the diameter grid supplied by ``Drying.solve_unit``.
-
-        Parameters
-        ----------
-        x_vec : ndarray
-            Particle diameter grid supplied to the capillary correlation [m].
-        csd : ndarray
-            Crystal-size distribution on the stored grid [#/m**3/um].
-        deltaP : float
-            Pressure drop after medium resistance is removed [Pa].
-        porosity : float
-            Cake porosity [-].
-        height : float
-            Cake height [m].
-        mu_zero : float
-            Zeroth distribution moment [#/m**3].
-        props : tuple
-            Mean surface tension [N/m] and liquid density [kg/m**3].
-
-        Returns
-        -------
-        float
-            Synthetic irreducible saturation [-].
-        """
-        captured["x_vec"] = x_vec.copy()  # [m]
-        return 0.25  # [-]
-
-    monkeypatch.setattr(drying_model, "get_sat_inf", capture_sat_inf)
-    monkeypatch.setattr(drying_model, "Explicit_Problem", DummyExplicitProblem)
-    monkeypatch.setattr(drying_model, "CVode", StopSolver)
-
-    dryer = _make_drying_unit()
-
-    def stop_at_rhs(time, states, sw=None):
-        """Stop the drying setup at the RHS evaluation boundary.
-
-        Parameters
-        ----------
-        time : float
-            Initial solve time [s].
-        states : ndarray
-            Flattened initial drying state [-] and [K].
-        sw : list, optional
-            Assimulo event switches [-].
-
-        Raises
-        ------
-        StopAfterSetup
-            Always raised to keep the test focused on setup calculations.
-        """
-        raise StopAfterSetup
-
-    monkeypatch.setattr(dryer, "unit_model", stop_at_rhs)
-
-    with pytest.raises(StopAfterSetup):
-        dryer.solve_unit(deltaP=5.0e4, runtime=10.0)  # [Pa], [s]
-
-    np.testing.assert_allclose(captured["x_vec"], SIZE_GRID_UM * 1e-6)
+    correlation_inputs = (
+        dryer.Solid_1.distrib, dryer.deltaP, dryer.CakePhase.porosity,
+        dryer.cake_height, dryer.Solid_1.moments[0],
+        (np.mean(surface_tension), liquid_density),
+    )  # [#/um], [Pa], [-], [m], [#], ([N/m], [kg/m**3])
+    expected_irreducible_saturation = solid_liquid_sep.get_sat_inf(
+        SIZE_GRID_UM * 1e-6, *correlation_inputs)  # [-], diameters [m]
+    micrometer_basis = solid_liquid_sep.get_sat_inf(
+        SIZE_GRID_UM, *correlation_inputs)  # [-], deliberately wrong size basis
+    assert len(time) == np.shape(states)[0]
+    np.testing.assert_allclose(dryer.Solid_1.x_distrib, SIZE_GRID_UM)
+    assert dryer.s_inf == pytest.approx(
+        expected_irreducible_saturation, rel=1e-10
+    )
+    assert dryer.s_inf != pytest.approx(micrometer_basis, rel=1e-10)
 
 
 def test_drying_rejects_singular_micronized_irreducible_saturation(
-    monkeypatch,
-):
-    """Drying rejects micronized cakes with undefined reduced saturation."""
-    monkeypatch.setattr(drying_model, "Explicit_Problem", DummyExplicitProblem)
-    monkeypatch.setattr(drying_model, "CVode", StopSolver)
-
-    dryer = _make_drying_unit(
+        drying_unit_factory, drying_cake_factory):
+    """Real drying setup rejects an undefined reduced saturation."""
+    scaled_csd = _distribution_for_cake_height(
+        drying_cake_factory,
+        MICRONIZED_SIZE_GRID_UM,
+        MICRONIZED_CSD_NUMBER,
+    )  # [#/um]
+    dryer = drying_unit_factory(
+        number_nodes=2,
         size_grid_um=MICRONIZED_SIZE_GRID_UM,
-        csd_number=MICRONIZED_CSD_NUMBER,
+        csd_number=scaled_csd,
     )
-
-    def stop_at_rhs(time, states, sw=None):
-        """Stop if drying reaches the RHS without rejecting ``s_inf``.
-
-        Parameters
-        ----------
-        time : float
-            Initial solve time [s].
-        states : ndarray
-            Flattened initial drying state [-] and [K].
-        sw : list, optional
-            Assimulo event switches [-].
-
-        Raises
-        ------
-        StopAfterSetup
-            Always raised when the validation guard is bypassed.
-        """
-        raise StopAfterSetup
-
-    monkeypatch.setattr(dryer, "unit_model", stop_at_rhs)
 
     with pytest.raises(ValueError, match="s_inf=.*deltaP=.*particle size grid"):
         dryer.solve_unit(deltaP=5.0e4, runtime=10.0)  # [Pa], [s]
