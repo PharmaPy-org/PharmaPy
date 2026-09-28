@@ -221,11 +221,37 @@ class MixedPhase:
         return BasePhase.from_legacy(legacy_phase, **mechanism_kwargs)
 
     @staticmethod
+    def legacy_slurry_volume(members):
+        """
+        Slurry volume of a set of old phases, for the basis conversion.
+
+        An old SolidPhase carries an absolute distribution while this stack
+        stores a number density per m3 of slurry, and the factor between them
+        is this volume. It can only be worked out here, from all the phases
+        together -- a solid on its own does not have one -- which is why it is
+        computed at the container level and handed down to the mechanism.
+        """
+
+        total = 0.0
+
+        for member in members:
+            volume = getattr(member, 'vol', None)
+
+            if volume:
+                total += float(volume)
+
+        return total
+
+
+    @staticmethod
     def from_legacy(legacy_matter, **mechanism_kwargs):
         """An old Slurry, or a bare old phase, into this stack."""
         phases = getattr(legacy_matter, 'Phases', None)
         members = phases if isinstance(phases, (list, tuple)) \
             else [legacy_matter]
+
+        mechanism_kwargs.setdefault(
+            'vol_slurry', MixedPhase.legacy_slurry_volume(members))
 
         return MixedPhase([MixedPhase.phase_from_legacy(m, **mechanism_kwargs)
                            for m in members])

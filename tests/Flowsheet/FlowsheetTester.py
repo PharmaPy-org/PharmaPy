@@ -56,8 +56,11 @@ from PharmaPy.Kinetics import RxnKinetics, CrystKinetics
 from PharmaPy.Utilities import CoolingWater
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PATH = os.path.join(os.path.dirname(HERE), 'tests', 'Flowsheet', 'data',
-                    'compound_database.json')
+# Relative to this file, which now lives in tests/Flowsheet alongside the data.
+# The previous form walked up one level and back down through tests/Flowsheet,
+# which was right while this script sat in PharmaPy/ and resolves to
+# tests/tests/Flowsheet from here.
+PATH = os.path.join(HERE, 'data', 'compound_database.json')
 
 # Which integrator the new-stack vessels are built with. Assimulo stays the
 # default so an unqualified run reproduces every number this script has ever

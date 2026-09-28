@@ -5,6 +5,9 @@
 # from autograd import numpy as np
 import numpy as np
 from PharmaPy.ThermoModule import ThermoPhysicalManager
+from PharmaPy.Distributions import (mass_fraction_to_number,
+                                    number_to_volume_fraction,
+                                    volume_fraction_to_number)
 from PharmaPy.Commons import trapezoidal_rule
 from scipy.optimize import newton
 
@@ -983,18 +986,17 @@ class SolidPhase(ThermoPhysicalManager):
             raise ValueError("Specify either 'num_distr' or 'vol_distr', "
                              "not both")
         elif num_distr is not None:  # convert to vol perc
-            mom_three = self.getMoments(distrib=num_distr, mom_num=3)
-            mom_three[mom_three == 0] = eps
-
-            distrib_out = num_distr * self.dx * x_distrib**3 * self.kv / \
-                mom_three / 1e18
+            distrib_out = number_to_volume_fraction(
+                x_distrib, self.dx, num_distr,
+                self.getMoments(distrib=num_distr, mom_num=3),
+                kv=self.kv)
         elif vol_distr is not None:
             if mass == 0:
                 raise ValueError("'vol_perc' given, mass must be greater "
                                  "than zero.")
-            dens = self.getDensity()
-            distrib_out = (mass / dens) * vol_distr / self.kv / \
-                x_distrib**3 / self.dx * 1e18  # number/um
+            distrib_out = volume_fraction_to_number(
+                x_distrib, self.dx, vol_distr, mass, self.getDensity(),
+                kv=self.kv)  # number/um
 
         return distrib_out
 
@@ -1026,7 +1028,8 @@ class SolidPhase(ThermoPhysicalManager):
                 distr = self.convert_distribution(vol_distr=distrib,
                                                   mass=self.mass)
             elif self.distrib_type == 'mass_perc':
-                distr = self.mass*distrib / x_distrib**3 / self.kv * 1e18
+                distr = mass_fraction_to_number(x_distrib, distrib,
+                                               self.mass, kv=self.kv)
 
         else:
             distr = distrib

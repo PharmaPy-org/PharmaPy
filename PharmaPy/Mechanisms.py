@@ -1,6 +1,9 @@
 import warnings
 import numpy as np
 import copy
+from PharmaPy.Distributions import (mass_fraction_to_number,
+                                    to_extensive, to_intensive,
+                                    volume_fraction_to_number)
 from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   PhaseRef,PhaseStateCollection,PhaseStateVariable,
                                   StateKey,StateCollection,StreamConnection,IntraPhaseProcess,
@@ -911,6 +914,55 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         return vol_slurry
 
+    # ---------------- extensive <-> intensive ----------------
+    #
+    # Intensive is what this stack stores: the population state is a number
+    # density per m3 of slurry. Extensive -- an absolute count for the whole
+    # phase -- is an input and output format, and these two methods are the
+    # only sanctioned way across that boundary.
+
+    def to_intensive(self, distrib, vol_slurry=None):
+        """
+        Absolute counts to this stack's per-m3-of-slurry number density.
+
+        ``vol_slurry`` defaults to the mechanism's own, which exists once it
+        is attached to a phase inside a vessel. A solid on its own has no
+        slurry volume - that is why its mass reads zero - so pass the value
+        explicitly in that case rather than getting a silent factor wrong.
+        """
+
+        return to_intensive(distrib, self._resolve_slurry_volume(vol_slurry))
+
+    def to_extensive(self, distrib=None, vol_slurry=None):
+        """
+        The stored number density back to absolute counts, for a consumer
+        that wants an extensive distribution.
+        """
+
+        if distrib is None:
+            distrib = getattr(self, self.solver_states[0].name)
+
+        return to_extensive(distrib, self._resolve_slurry_volume(vol_slurry))
+
+    def _resolve_slurry_volume(self, vol_slurry=None):
+        """The conversion factor, from the argument or from the phase."""
+
+        if vol_slurry is not None:
+            return float(vol_slurry)
+
+        volume = self._slurry_volume()
+
+        if not volume:
+            raise ValueError(
+                "No slurry volume is available for an extensive/intensive "
+                "conversion. The slurry volume is the liquid's, divided by "
+                "(1 - solid volume fraction), so a solid that is not yet "
+                "part of a vessel does not have one. Pass vol_slurry "
+                "explicitly."
+            )
+
+        return float(volume)
+
     def _slurry_volume(self, true_state=None):
         """Slurry volume for the inventory accessors.
 
@@ -1078,9 +1130,33 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         distribution_state_name="distrib",
         scale=None,
         rad=None,
+        distrib_basis="intensive",
+        vol_slurry=None,
+        basis_mass=None,
     ):
         """
         Assumes an x_grid of constant dx
+
+        Parameters
+        ----------
+        distrib_basis : str, optional
+            What ``distrib_init`` is expressed in. ``'intensive'``, the
+            default and this stack's storage convention, is a number density
+            per m3 of slurry. The other three are input formats, converted on
+            the way in so that what is stored is always intensive:
+
+            - ``'extensive'``   absolute counts; needs ``vol_slurry``
+            - ``'vol_perc'``    a volume-fraction shape, the legacy
+              ``SolidPhase`` default; needs ``basis_mass`` and ``vol_slurry``
+            - ``'mass_perc'``   a mass-fraction shape; same requirements
+
+        vol_slurry : float, optional
+            Slurry volume the extensive form refers to [m3]. Required for
+            every basis but ``'intensive'``, because the conversion is a
+            division by it and a solid on its own does not have one.
+        basis_mass : float, optional
+            Solid mass the fraction shape refers to [kg]. Required for
+            ``'vol_perc'`` and ``'mass_perc'``, which carry only a shape.
         """
         super().__init__(
             owning_phase=owning_phase,
@@ -1117,6 +1193,10 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self.rad = self.x_grid[0] if rad is None else rad
         self.distribution_state_name = distribution_state_name
         assert len(distrib_init)==len(x_grid), "x_grid and distrib must be the same length"
+
+        distrib_init = self._as_intensive_distribution(
+            distrib_init, distrib_basis, vol_slurry, basis_mass)
+
         setattr(self,distribution_state_name,distrib_init)
         # self.x_grid is in microns and distrib is counts per micron-bin per m3
         self.solver_states = (
@@ -1133,7 +1213,110 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self._reject_scale(scale)
         self.scale = 1
         self._update_exposed_attributes()
-        self.expose('x_grid')
+
+        # x_grid and distrib are this mechanism's own names. The other three
+        # are the names the crystal size distribution has always had on a
+        # SolidPhase, and the cake correlations, SolidPhase.getPorosity and
+        # Slurry.getSolidsConcentr are all written against them. Exposing
+        # them lets a refactored solid answer the same questions a legacy one
+        # does, so none of that shared physics has to be rewritten or
+        # duplicated -- and so its numbers cannot drift from the original's.
+        self.expose('x_grid', 'x_distrib', 'moments', 'getMoments', 'kv')
+
+    # ---------------- crystal size distribution, under its legacy names ----
+
+    @property
+    def x_distrib(self):
+        """The size grid, in microns, under the name a SolidPhase uses."""
+        return self.x_grid
+
+    @property
+    def moments(self):
+        """The first four moments of the current distribution, in m**n."""
+        return self.compute_moments(self.distrib, self.x_grid)
+
+    def getMoments(self, x_distrib=None, distrib=None, mom_num=None):
+        """
+        Moments in m**n, matching SolidPhase.getMoments term for term.
+
+        The scaling is the same on both sides -- compute_moments applies
+        MOMENT_UNIT_FACTOR**n with the factor at 1e-6, and the legacy method
+        applies (1e-6)**mom_ind -- so a caller gets identical numbers from a
+        refactored solid and a legacy one. The argument shape follows the
+        legacy signature, including returning a bare float for a single
+        requested moment.
+        """
+
+        if x_distrib is None:
+            x_distrib = self.x_grid
+
+        if distrib is None:
+            distrib = self.distrib
+
+        moments = self.compute_moments(np.asarray(distrib, dtype=float),
+                                       np.asarray(x_distrib, dtype=float))
+
+        if mom_num is None:
+            return moments
+
+        if isinstance(mom_num, (int, np.integer)):
+            return float(moments[mom_num])
+
+        return np.array([moments[n] for n in mom_num])
+
+    # ---------------- basis of the supplied distribution ----------------
+
+    def _as_intensive_distribution(self, distrib, basis, vol_slurry,
+                                   basis_mass):
+        """
+        Whatever the caller supplied, as an intensive number density.
+
+        The two fraction bases carry only a shape, so they are first given a
+        magnitude the way the legacy SolidPhase does -- which produces an
+        ABSOLUTE number density -- and then divided by the slurry volume like
+        any other extensive input. Doing it in that order keeps one copy of
+        each conversion rather than a combined formula per basis.
+        """
+
+        distrib = np.asarray(distrib, dtype=float)
+
+        if basis == "intensive":
+            return distrib
+
+        known = ("intensive", "extensive", "vol_perc", "mass_perc")
+
+        if basis not in known:
+            raise ValueError(
+                f"Unknown distrib_basis {basis!r}. Choose one of {known}.")
+
+        if basis in ("vol_perc", "mass_perc"):
+
+            if basis_mass is None:
+                raise ValueError(
+                    f"distrib_basis={basis!r} gives only the shape of the "
+                    "distribution, so basis_mass is needed to give it a "
+                    "magnitude.")
+
+            # Normalized the way SolidPhase.getDistribution normalizes it.
+            shape = distrib / distrib.sum()
+
+            if basis == "vol_perc":
+
+                if self.density is None:
+                    raise ValueError(
+                        "distrib_basis='vol_perc' converts through the solid "
+                        "density, which this mechanism does not know. Pass "
+                        "density, or attach the mechanism to a phase first.")
+
+                distrib = volume_fraction_to_number(
+                    self.x_grid, self.dx, shape, basis_mass, self.density,
+                    kv=self.kv)
+            else:
+                distrib = mass_fraction_to_number(
+                    self.x_grid, shape, basis_mass, kv=self.kv)
+
+        return self.to_intensive(distrib, vol_slurry)
+
 
     # ---------------- legacy conversion ----------------
 
@@ -1163,10 +1346,28 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         if not cls.claims_legacy_phase(legacy_phase):
             return None
 
+        # legacy_phase.distrib is an ABSOLUTE count -- SolidPhase stores the
+        # extensive distribution -- and distrib_init is read as a number
+        # density per m3 of slurry. Handing one straight to the other, as
+        # this did, inflated the population by the slurry volume: a factor of
+        # several hundred on a typical charge. The slurry volume comes from
+        # the caller because a solid on its own does not have one.
+        vol_slurry = kwargs.pop('vol_slurry', None)
+
+        if vol_slurry is None:
+            raise ValueError(
+                "Converting an old SolidPhase needs the slurry volume it "
+                "belonged to: its distribution is an absolute count and this "
+                "stack stores a number density per m3 of slurry. Pass "
+                "vol_slurry. MixedPhase.from_legacy works it out from the "
+                "phases it is given.")
+
         return cls(
             owning_phase=owning_phase,
             x_grid=np.asarray(legacy_phase.x_distrib),
             distrib_init=np.asarray(legacy_phase.distrib),
+            distrib_basis='extensive',
+            vol_slurry=vol_slurry,
             kv=getattr(legacy_phase, 'kv', 1),
             **kwargs,
         )
@@ -1564,9 +1765,24 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         if not cls.claims_legacy_phase(legacy_phase):
             return None
 
+        # Same basis change as the resolved-distribution bridge above: the
+        # legacy moments are absolute, this stack's are per m3 of slurry, and
+        # every moment scales with the distribution so one division does all
+        # four.
+        vol_slurry = kwargs.pop('vol_slurry', None)
+
+        if vol_slurry is None:
+            raise ValueError(
+                "Converting an old SolidPhase needs the slurry volume it "
+                "belonged to: its moments are absolute and this stack stores "
+                "them per m3 of slurry. Pass vol_slurry. "
+                "MixedPhase.from_legacy works it out from the phases it is "
+                "given.")
+
         return cls(
             owning_phase=owning_phase,
-            moments_init=np.asarray(legacy_phase.moments),
+            moments_init=to_intensive(np.asarray(legacy_phase.moments),
+                                      vol_slurry),
             kv=getattr(legacy_phase, 'kv', 1),
             **kwargs,
         )

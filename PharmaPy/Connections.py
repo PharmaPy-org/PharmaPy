@@ -473,6 +473,13 @@ class Connection:
         phases = getattr(matter, 'Phases', None)
         members = phases if isinstance(phases, (list, tuple)) else [matter]
 
+        # The population basis changes across this boundary: an old
+        # solid's distribution is an absolute count, the refactored one a
+        # number density per m3 of slurry. The factor is the slurry
+        # volume, which only the whole set of phases knows.
+        kwargs.setdefault('vol_slurry',
+                          MixedPhase.legacy_slurry_volume(members))
+
         converted = [MixedPhase.phase_from_legacy(member, **kwargs)
                      for member in members]
 

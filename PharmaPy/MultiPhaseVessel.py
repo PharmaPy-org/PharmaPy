@@ -1123,7 +1123,7 @@ class MultiPhaseVessel():
         for mechanism in getattr(self, "_workspace_mechanisms", ()):
             mechanism.update_state(completed_state, unit=self)
 
-    def pack_state_rates(self, material_rates, global_rates=None,
+    def pack_state_rates(self, material_rates=None, global_rates=None,
                          algebraic_residuals=None):
         """
         Pack one vector the solver can consume.
