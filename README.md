@@ -33,4 +33,4 @@ support, and verification commands.
 See the [contributing guide](https://github.com/PharmaPy-org/PharmaPy/blob/master/CONTRIBUTING.md)
 for the development workflow and integration contract.
 
-Read our [documentation](https://pharmapy.readthedocs.io/en/latest/) or chat with the [PharmaPy Simulation Assistant](https://chatgpt.com/g/g-679bb3b5c5188191b26680b147a4f4a2-pharmapy-simulation-assistant) for more information on how to install and how to use PharmaPy.
+Read our [documentation](https://pharmapy-org.readthedocs.io/en/latest/) or chat with the [PharmaPy Simulation Assistant](https://chatgpt.com/g/g-679bb3b5c5188191b26680b147a4f4a2-pharmapy-simulation-assistant) for more information on how to install and how to use PharmaPy.
