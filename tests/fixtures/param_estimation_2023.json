@@ -1,0 +1,38 @@
+{
+  "source_commit": "f5b75c7dfaa1b1a5d2ef9c0c17bba665809ef301",
+  "source_notebook": "doc/online_docs/examples/param_estimation_solved.ipynb",
+  "source_cell": 41,
+  "description": "Original 2023 saved output, preserved before execution with the current solver stack.",
+  "reactions": [
+    "A --> B",
+    "A --> C",
+    "B --> C",
+    "B --> D"
+  ],
+  "columns": [
+    "ln(A_optim)",
+    "ea_optim/R"
+  ],
+  "units": [
+    "dimensionless: ln(A / (1/s))",
+    "K"
+  ],
+  "fit": [
+    [
+      23.097013,
+      18160.898475
+    ],
+    [
+      18.960181,
+      16116.934841
+    ],
+    [
+      22.041934,
+      17492.374021
+    ],
+    [
+      19.885501,
+      16041.054422
+    ]
+  ]
+}
