@@ -4,20 +4,22 @@ Tests check the dynamic MSMPR balance under the helper's documented constant
 property and growth assumptions, not stream mass conservation. Exponential
 moments satisfy mu_j = j! B G**j tau**(j+1). Independent Simpson integration
 of the returned distribution checks the dynamic moment and solute equations.
+The #202 migration uses real streams, kinetics callbacks, and SciPy roots;
+private finite-residual and phase-restoration boundaries cover exceptional
+cases directly without replacing production methods or solvers.
 
 Refs:
 https://github.com/PharmaPy-org/PharmaPy/issues/223
 """
 
-from types import SimpleNamespace
 from decimal import Decimal, localcontext
-import copy
 
 import numpy as np
 import pytest
 from scipy.integrate import simpson
+from scipy.optimize import brentq
 
-from PharmaPy.Crystallizers import MSMPR
+from PharmaPy.Crystallizers import MSMPR, _finite_steady_residual
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Phases import LiquidPhase, SolidPhase
 from PharmaPy.MixedPhases import SlurryStream
@@ -35,7 +37,8 @@ POPULATION_CLOSURE_RTOL = 1e-5  # [-], prescribed relative population gate
 # tolerance separates them by more than a decade on either side.
 
 
-def make_unit(data_path, basis='mass_frac', secondary=False, num_mom=4):
+def make_unit(data_path, basis='mass_frac', secondary=False, num_mom=4,
+              solub_fn=None):
     """Construct a constant-property MSMPR with a solid-free inlet.
 
     Parameters
@@ -48,6 +51,9 @@ def make_unit(data_path, basis='mass_frac', secondary=False, num_mom=4):
         Enable concentration-dependent secondary nucleation.
     num_mom : int, optional
         Number of population moments, including order zero.
+    solub_fn : callable or None, optional
+        Public kinetic solubility callback: temperature [K] and composition in
+        the selected basis produce solubility in that same basis.
 
     Returns
     -------
@@ -68,10 +74,18 @@ def make_unit(data_path, basis='mass_frac', secondary=False, num_mom=4):
                        mass_frac=[1, 0, 0, 0, 0])  # [-], pure A crystals
     solid.rho_solid[:] = 2000.0  # [kg/m**3], twice the liquid density
     unit.Phases = (liquid, solid)
-    unit._Inlet = SimpleNamespace(vol_flow=2.0, Liquid_1=copy.deepcopy(liquid))
-    # [m**3/s], two cubic metres of slurry give D=1/s.
+    inlet_liquid = LiquidStream(path, temp=TEMPERATURE, mass_frac=liquid.mass_frac,
+                                vol_flow=2.0)  # [m**3/s], D=1/s for a 2 m**3 tank
+    inlet_liquid.rho_liq[:] = DENSITY  # [kg/m**3], same constant property contract
+    inlet_liquid.updatePhase(mass_frac=inlet_liquid.mass_frac, vol_flow=2.0)  # [m**3/s]
+    inlet = SlurryStream(vol_flow=2.0, moments=np.zeros(num_mom))  # [m**3/s], [m**n/m**3]
+    inlet.Phases = (inlet_liquid, SolidStream(
+        path, temp=TEMPERATURE, kv=0.5, mass_frac=[1, 0, 0, 0, 0]))
+    # [K], [-], [-]; real solid-free stream, with the fixture's shape factor
+    unit.Inlet = inlet
     basis_scale = DENSITY if basis == 'mass_conc' else 1.0  # [kg/m**3] or [-]
     unit.Kinetics = CrystKinetics(
+        solub_fn=solub_fn,
         coeff_solub=[0.01 * basis_scale],  # [basis unit], same physical solubility
         nucl_prim=(1e8 if secondary else 1e10, 0.0, 0.0),
         # [#/m**3/s], [J/mol], [-], constant primary rate
@@ -203,8 +217,8 @@ def test_zero_transfer_keeps_inlet_composition(data_path, case):
     else:
         # rho_s*(1-w)-rho_l*w=0 at w=rho_s/(rho_s+rho_l)=2/3.
         expected_fraction = 2 / 3  # [kg/kg], exact cancellation in this model
-        unit.Inlet.Liquid_1.updatePhase(mass_frac=[2 / 3, 1 / 3, 0, 0, 0], vol=2.0)
-        # [-], [m**3], synthetic binary inlet with the cancellation composition
+        unit.Inlet.Liquid_1.updatePhase(mass_frac=[2 / 3, 1 / 3, 0, 0, 0], vol_flow=2.0)
+        # [-], [m**3/s], synthetic binary inlet with the cancellation composition
         with pytest.raises(ValueError, match=r'Unsupported feed concentration.*c\*.*different feed'):
             unit.solve_steady_state(expected_fraction, TEMPERATURE)
         return
@@ -398,7 +412,7 @@ def test_inlet_density_uses_stream_concentration(data_path, basis, inlet_density
     inlet = unit.Inlet.Liquid_1
     assert inlet is not unit.Liquid_1
     inlet.rho_liq[:] = inlet_density  # [kg/m**3]
-    inlet.updatePhase(mass_frac=inlet.mass_frac, vol=2.0)  # [m**3]
+    inlet.updatePhase(mass_frac=inlet.mass_frac, vol_flow=2.0)  # [m**3/s]
     scale = DENSITY if basis == 'mass_conc' else 1.0  # [kg/m**3] or [-]
     _, distribution, composition, _, _ = unit.solve_steady_state(0.15 * scale, TEMPERATURE)
     # Constant B/G gives q=.03; balance c_in/rho_l-w+.03*(3*w-2)=0.
@@ -482,8 +496,8 @@ def test_inlet_error_identifies_inlet(data_path, feed_fraction):
     """
     unit = make_unit(data_path)
     unit.Inlet.Liquid_1.updatePhase(
-        mass_frac=[feed_fraction, 1 - feed_fraction, 0, 0, 0], vol=2.0)
-    # [-], [m**3], solid-free binary feed at the requested composition
+        mass_frac=[feed_fraction, 1 - feed_fraction, 0, 0, 0], vol_flow=2.0)
+    # [-], [m**3/s], solid-free binary feed at the requested composition
     message = ('Inlet target mass concentration' if feed_fraction == 0
                else 'scanned tank concentration domain.*Washout')
     with pytest.raises(ValueError, match=message):
@@ -519,52 +533,50 @@ def test_zero_transfer_rejects_zero_population(data_path):
         unit.solve_steady_state(0.15, TEMPERATURE)
 
 
-def test_population_closure_is_checked_after_solver(data_path, monkeypatch):
-    """Reject a premature solver return using independently evaluated kinetics.
+def test_population_closure_is_checked_after_solver(data_path):
+    """Reject a native converged root at a discontinuous solubility jump.
 
     Parameters
     ----------
     data_path : dict
-        Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Replace only the external scalar root solver with a premature return.
+        Repository thermodynamic database paths.
     """
-    unit = make_unit(data_path)
-    brackets = []
+    # Reverse the existing step-solubility fixture: below c=100 the physical
+    # root lies above the jump, and above it the physical root lies below it.
+    # Brent therefore converges at a discontinuity with no closed population.
+    unit = make_unit(data_path, basis='mass_conc', solub_fn=lambda temp, conc:
+                     90.0 if np.asarray(conc).flat[0] < 100.0 else 10.0)
+    # [kg/m**3], synthetic solubility and jump location
+    unit.Kinetics.params['nucl_prim'] = [3e9, 0, 1]  # [#/m**3/s], [J/mol], [-]
 
-    def premature_root(function, lower, upper, full_output, xtol):
-        """Emulate a solver claiming convergence at the bracket midpoint.
+    def independent_residual(concentration):
+        """Evaluate the fixture's eliminated solute balance.
 
         Parameters
         ----------
-        function : callable
-            Scalar rescaled residual [kg/m**3/s].
-        lower, upper : float
-            Admissible concentration bounds [kg/m**3].
-        full_output : bool
-            Request the solver convergence record.
-
-        xtol : float
-            Requested absolute concentration resolution [kg/m**3].
+        concentration : float
+            Target mass concentration [kg/m**3].
 
         Returns
         -------
-        tuple
-            Incorrect root [kg/m**3] and a successful convergence record.
+        float
+            D*(c_in-c)+q*(3*c-2*rho_l) [kg/m**3/s], with D=1/s and
+            q=kv*6*B*G**3*tau**4=.009*(c/csat-1) for this fixture.
         """
-        assert full_output
-        assert xtol == 4 * np.finfo(float).eps * 200  # [kg/m**3], feed-scaled resolution
-        assert function(lower) > 0
-        assert function(upper) < 0
-        brackets.append((lower, upper))
-        return (lower + upper) / 2, SimpleNamespace(converged=True)
+        solubility = 90.0 if concentration < 100.0 else 10.0  # [kg/m**3]
+        solid_fraction = 0.009 * (concentration / solubility - 1)  # [-]
+        return 200.0 - concentration + solid_fraction * (3 * concentration - 2000.0)
 
-    monkeypatch.setattr('PharmaPy.Crystallizers.brentq', premature_root)
-    with pytest.raises(ValueError, match='No accepted steady root.*scanned'):
-        unit.solve_steady_state(0.15, TEMPERATURE)
-    assert len(brackets) == 1
-    assert 10 < brackets[0][0] < 2000 / 13 < brackets[0][1] < 200
-    # [kg/m**3], bracket surrounds the independently known 2000/13 root
+    resolution = 4 * np.finfo(float).eps * 200.0  # [kg/m**3], production feed scale
+    root, info = brentq(independent_residual, 99.0, 101.0,
+                        full_output=True, xtol=resolution)  # [kg/m**3], jump bracket
+    assert info.converged
+    assert root == pytest.approx(100.0, rel=0, abs=2 * resolution)
+    assert abs(independent_residual(root)) > 1.0  # [kg/m**3/s], jump is 37.7 or 98.3
+    with pytest.raises(
+            ValueError,
+            match='No accepted steady root.*rejected by population closure gate'):
+        unit.solve_steady_state(150.0, TEMPERATURE)  # [kg/m**3], [K]
 
 
 @pytest.mark.parametrize('exponent,seed,expected,boundary', [
@@ -621,8 +633,8 @@ def test_feed_above_amplitude_pole(data_path):
         Repository database paths.
     """
     unit = make_unit(data_path)
-    unit.Inlet.Liquid_1.updatePhase(mass_frac=[0.8, 0.2, 0, 0, 0], vol=2.0)
-    # [kg/kg], [m**3], feed above c*/rho_l=2/3
+    unit.Inlet.Liquid_1.updatePhase(mass_frac=[0.8, 0.2, 0, 0, 0], vol_flow=2.0)
+    # [kg/kg], [m**3/s], feed above c*/rho_l=2/3
     unit.Kinetics.params['nucl_prim'] = [2e11, 0, 0]  # [#/m**3/s], [J/mol], [-]
     _, distribution, composition, _, _ = unit.solve_steady_state(0.7, TEMPERATURE)
     # q=.6 gives .8-w+.6*(3*w-2)=0, hence w=.5.
@@ -642,8 +654,8 @@ def test_composition_dependent_solubility_domain(data_path, seed):
     seed : float
         Root-selection hint [kg/kg].
     """
-    unit = make_unit(data_path)
-    unit.Kinetics.get_solubility = lambda temp, conc: 0.05 + 0.5 * np.asarray(conc).flat[0]
+    unit = make_unit(data_path, solub_fn=lambda temp, conc:
+                     0.05 + 0.5 * np.asarray(conc).flat[0])
     # [kg/kg], synthetic solubility; positive growth starts at w=.1.
     _, distribution, composition, _, _ = unit.solve_steady_state(seed, TEMPERATURE)
     assert composition == pytest.approx(2 / 13, rel=ROUND_OFF, abs=0)
@@ -661,7 +673,6 @@ def test_solubility_scan_preserves_non_target_species(data_path, basis):
     basis : str
         Kinetic composition basis, [kg/kg] or [kg/m**3].
     """
-    unit = make_unit(data_path, basis=basis)
     basis_scale = DENSITY if basis == 'mass_conc' else 1.0  # [kg/m**3] or [-]
 
     def solvent_solubility(temp, conc):
@@ -683,7 +694,7 @@ def test_solubility_scan_preserves_non_target_species(data_path, basis):
         assert conc[4] == pytest.approx(0.2 * basis_scale)
         return conc[4] / 20
 
-    unit.Kinetics.get_solubility = solvent_solubility
+    unit = make_unit(data_path, basis=basis, solub_fn=solvent_solubility)
     _, distribution, composition, _, residual = unit.solve_steady_state(
         0.15 * basis_scale, TEMPERATURE)
     assert composition / basis_scale == pytest.approx(2 / 13, rel=ROUND_OFF)
@@ -730,49 +741,36 @@ def test_absolute_fraction_low_conversion(data_path):
 
 @pytest.mark.parametrize('method', ['moments', '1D-FVM'])
 @pytest.mark.parametrize('raises', [False, True])
-def test_steady_helper_preserves_phase_state(data_path, monkeypatch, method, raises):
-    """Preserve phase temperatures and moments even if residual evaluation fails.
+def test_steady_helper_preserves_phase_state(data_path, method, raises):
+    """Restore real phase data after successful and exceptional diagnostics.
 
     Parameters
     ----------
     data_path : dict
         Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Inject a failure after the real material balance has run.
     method : str
         Population discretization.
     raises : bool
-        Exercise cleanup on the exceptional path.
+        Raise within the production state-preservation context after a real solve.
     """
     unit = make_unit(data_path)
     unit.method = method
     temperatures = (unit.Liquid_1.temp, unit.Solid_1.temp)  # [K]
     moments = unit.Solid_1.moments.copy()  # [m**n], phase inventory
-    material_balances = unit.material_balances
-
-    def evaluate_then_fail(*args, **kwargs):
-        """Run the real balance before injecting a residual-evaluation failure.
-
-        Parameters
-        ----------
-        *args, **kwargs
-            Arguments passed unchanged to MSMPR.material_balances, with its
-            documented population, concentration, time, and temperature units.
-
-        Raises
-        ------
-        RuntimeError
-            Always, after the real balance updates its caches.
-        """
-        material_balances(*args, **kwargs)
-        raise RuntimeError('residual sentinel')
-
+    diagnostic_temperature = 300.0  # [K], different from the retained 310 K charge
     if raises:
-        monkeypatch.setattr(unit, 'material_balances', evaluate_then_fail)
-        with pytest.raises(RuntimeError, match='residual sentinel'):
-            unit.solve_steady_state(0.15, 300.0)  # [kg/kg], [K], different temperature
+        with pytest.raises(RuntimeError, match='diagnostic evaluation interrupted'):
+            with unit._temporary_steady_phases(diagnostic_temperature):
+                unit.solve_steady_state(0.15, diagnostic_temperature)  # [kg/kg], [K]
+                assert unit.Liquid_1.temp == diagnostic_temperature
+                assert unit.Solid_1.temp == diagnostic_temperature
+                if method == '1D-FVM':
+                    # One additional 100 um crystal gives moments size**n.
+                    unit.Solid_1.moments[:] += (100e-6)**np.arange(len(moments))
+                    # [m**n], real numeric inventory change before interruption
+                raise RuntimeError('diagnostic evaluation interrupted')
     else:
-        unit.solve_steady_state(0.15, 300.0)  # [kg/kg], [K]
+        unit.solve_steady_state(0.15, diagnostic_temperature)  # [kg/kg], [K]
     assert (unit.Liquid_1.temp, unit.Solid_1.temp) == temperatures
     np.testing.assert_array_equal(unit.Solid_1.moments, moments)
 
@@ -808,8 +806,8 @@ def test_negative_liquid_holdup_is_rejected(data_path, seed, feed_fraction):
         Feed target mass fraction [kg/kg], above or at the amplitude pole.
     """
     unit = make_unit(data_path)
-    unit.Inlet.Liquid_1.updatePhase(mass_frac=[feed_fraction, 1 - feed_fraction, 0, 0, 0], vol=2.0)
-    # [kg/kg], [m**3], feed at or above the amplitude pole
+    unit.Inlet.Liquid_1.updatePhase(mass_frac=[feed_fraction, 1 - feed_fraction, 0, 0, 0], vol_flow=2.0)
+    # [kg/kg], [m**3/s], feed at or above the amplitude pole
     unit.Kinetics.params['nucl_prim'] = [1e12, 0, 0]  # [#/m**3/s], [J/mol], [-]
     # B/G=1e10 gives kv*mu_3=.5*6e-10*1e10=3, hence phi=-2.
     message = (r'Unsupported feed concentration.*c\*' if feed_fraction == 2 / 3
@@ -818,50 +816,19 @@ def test_negative_liquid_holdup_is_rejected(data_path, seed, feed_fraction):
         unit.solve_steady_state(seed, TEMPERATURE)
 
 
-@pytest.mark.parametrize('failed_result', ['raises', 'nan', 'inf', 'growth_gap'])
-def test_gaussian_solubility_keeps_earlier_root(data_path, monkeypatch, failed_result):
-    """Keep a resolved root when a later bracket crosses an unsampled gap.
+def test_gaussian_solubility_keeps_earlier_root(data_path):
+    """Keep a resolved root when native Brent crosses an unsampled growth gap.
 
     Parameters
     ----------
     data_path : dict
         Repository database paths.
-    monkeypatch : pytest.MonkeyPatch
-        Exercise scalar-solver backends that return an unusable result.
-    failed_result : str
-        Raise on the actual growth gap, or return a nonfinite root or residual.
     """
-    unit = make_unit(data_path, basis='mass_conc')
-    unit.Kinetics.get_solubility = lambda temp, conc: (
-        10 + 60 * np.exp(-((np.asarray(conc).flat[0] - 50) / 0.8)**2))
+    unit = make_unit(data_path, basis='mass_conc', solub_fn=lambda temp, conc:
+                     10 + 60 * np.exp(-((np.asarray(conc).flat[0] - 50) / 0.8)**2))
     # [kg/m**3], Gaussian solubility peak at 50 with width .8 kg/m**3
     unit.Kinetics.params['nucl_prim'] = [1.5e10, 0, 1]
     # [#/m**3/s], [J/mol], [-], rate linear in relative supersaturation
-    if failed_result != 'raises':
-        from scipy.optimize import brentq
-
-        def return_failed_result(*args, **kwargs):
-            """Preserve real roots but emulate a backend returning on failure.
-
-            Parameters
-            ----------
-            *args, **kwargs
-                Passed unchanged to brentq; root and xtol are [kg/m**3].
-
-            Returns
-            -------
-            tuple
-                Root [kg/m**3] and convergence information. For the actual
-                growth-gap failure only, return an unusable result.
-            """
-            try:
-                return brentq(*args, **kwargs)
-            except ValueError:
-                result = {'nan': np.nan, 'inf': np.inf, 'growth_gap': 50.0}
-                # [kg/m**3], 50 lies inside the known inadmissible growth gap
-                return result[failed_result], SimpleNamespace(converged=True)
-
-        monkeypatch.setattr('PharmaPy.Crystallizers.brentq', return_failed_result)
     with pytest.warns(UserWarning, match='skipped brackets: 1.*num_scan') as records:
         _, distribution, composition, info, _ = unit.solve_steady_state(30.0, TEMPERATURE)
     user_warnings = [record for record in records
@@ -888,9 +855,8 @@ def test_solubility_island_reports_skipped_bracket(data_path, width):
     width : float
         Width of the solubility peak [kg/m**3].
     """
-    unit = make_unit(data_path, basis='mass_conc')
-    unit.Kinetics.get_solubility = lambda temp, conc: (
-        10 + 200 * np.exp(-((np.asarray(conc).flat[0] - 2000 / 13) / width)**2))
+    unit = make_unit(data_path, basis='mass_conc', solub_fn=lambda temp, conc:
+                     10 + 200 * np.exp(-((np.asarray(conc).flat[0] - 2000 / 13) / width)**2))
     # [kg/m**3], peak excludes the otherwise unique c=2000/13 root.
     # The narrow case leaves the bracket midpoint admissible but makes
     # brentq evaluate a nonpositive-growth point in its interior.
@@ -935,9 +901,8 @@ def test_step_solubility_rejects_jump_and_selects_closed_root(data_path, seed):
     seed : float
         Root-selection hint [kg/m**3], close to the discontinuity.
     """
-    unit = make_unit(data_path, basis='mass_conc')
-    unit.Kinetics.get_solubility = lambda temp, conc: (
-        10.0 if np.asarray(conc).flat[0] < 100.0 else 90.0)
+    unit = make_unit(data_path, basis='mass_conc', solub_fn=lambda temp, conc:
+                     10.0 if np.asarray(conc).flat[0] < 100.0 else 90.0)
     # [kg/m**3], synthetic solubility step at c=100
     unit.Kinetics.params['nucl_prim'] = [3e9, 0, 1]  # [#/m**3/s], [J/mol], [-]
     _, distribution, composition, _, _ = unit.solve_steady_state(seed, TEMPERATURE)
@@ -988,8 +953,8 @@ def test_cancellation_feed_rejects_secondary_boundary_solve(data_path, primary, 
         prefactor multiplies (kv*mu_2)**0.5 [m**(-0.5)] to give [#/m**3/s].
     """
     unit = make_unit(data_path, basis='mass_conc')
-    unit.Inlet.Liquid_1.updatePhase(mass_frac=[2 / 3, 1 / 3, 0, 0, 0], vol=2.0)
-    # [kg/kg], [m**3], c_in=c*=2000/3 kg/m**3
+    unit.Inlet.Liquid_1.updatePhase(mass_frac=[2 / 3, 1 / 3, 0, 0, 0], vol_flow=2.0)
+    # [kg/kg], [m**3/s], c_in=c*=2000/3 kg/m**3
     unit.Kinetics = CrystKinetics(
         coeff_solub=[10], nucl_prim=(primary, 0, 0), growth=(100, 0, 0),
         nucl_sec=secondary, mu_sec_nucl='area')
@@ -1123,3 +1088,42 @@ def test_steady_solution_matches_long_time_dynamic_solve(data_path, basis):
     assert unit.result.mass_conc[-1, unit.target_ind] == pytest.approx(
         expected_concentration, rel=comparison_rtol, abs=0)
     assert composition / scale == pytest.approx(2 / 13, rel=ROUND_OFF, abs=0)
+
+
+@pytest.mark.parametrize('candidate', [np.nan, np.inf, 0.5, 1.0])
+def test_scalar_root_boundary_rejects_nonfinite_values(candidate):
+    """Guard unusable roots and residuals without substituting a root solver.
+
+    Parameters
+    ----------
+    candidate : float
+        Nonfinite root or point at/below the logarithmic domain [kg/m**3].
+    """
+    def logarithmic_residual(concentration):
+        """Evaluate a real logarithmic root problem with a finite domain.
+
+        Parameters
+        ----------
+        concentration : float
+            Concentration [kg/m**3]; the domain begins at 1 kg/m**3.
+
+        Returns
+        -------
+        float
+            Residual [kg/m**3/s] with a root at 2 kg/m**3. The concentration
+            reference and residual scale are unity in their respective units.
+        """
+        reference_concentration = 1.0  # [kg/m**3], numerical test's unit reference
+        residual_scale = 1.0  # [kg/m**3/s], numerical test's unit residual
+        return residual_scale * np.log(concentration / reference_concentration - 1)
+
+    assert _finite_steady_residual(2.0, logarithmic_residual) == 0.0  # exact log(1)
+    if np.isfinite(candidate):
+        warning = ('divide by zero encountered in log' if candidate == 1.0
+                   else 'invalid value encountered in log')
+        with pytest.warns(RuntimeWarning, match=warning):
+            with pytest.raises(ValueError, match='inadmissible growth gap'):
+                _finite_steady_residual(candidate, logarithmic_residual)
+    else:
+        with pytest.raises(ValueError, match='nonfinite concentration'):
+            _finite_steady_residual(candidate, logarithmic_residual)

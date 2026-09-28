@@ -28,10 +28,11 @@ from matplotlib.colors import LightSource
 from scipy.optimize import brentq, RootResults
 
 import copy
+from contextlib import contextmanager
 import inspect
 import string
 import warnings
-from typing import Optional, Sequence
+from typing import Callable, Iterator, Optional, Sequence
 
 import numpy as np
 
@@ -81,6 +82,40 @@ def _caller_stacklevel() -> int:
         frame = frame.f_back
 
     return 1
+
+
+def _finite_steady_residual(concentration: float,
+                            residual_fn: Callable[[float], float]) -> float:
+    """Require finite concentration and residual at the scalar-root boundary.
+
+    Parameters
+    ----------
+    concentration : float
+        Candidate target concentration [kg/m**3].
+    residual_fn : callable
+        Rescaled population-closure residual [kg/m**3/s] at that concentration.
+
+    Returns
+    -------
+    float
+        Finite rescaled residual [kg/m**3/s].
+
+    Raises
+    ------
+    ValueError
+        If the candidate is nonfinite or its residual crosses a growth gap.
+
+    Notes
+    -----
+    Used during scalar solving so invalid callback values raise consistently
+    across supported SciPy versions.
+    """
+    if not np.isfinite(concentration):
+        raise ValueError("Steady-state scalar solve returned a nonfinite concentration")
+    value = residual_fn(concentration)  # [kg/m**3/s]
+    if not np.isfinite(value):
+        raise ValueError("Steady-state scalar solve crossed an inadmissible growth gap")
+    return value
 
 
 class _BaseCryst:
@@ -2531,6 +2566,39 @@ class MSMPR(_BaseCryst):
         self.tau = tau
         return tau
 
+    @contextmanager
+    def _temporary_steady_phases(self, temp: float) -> Iterator[None]:
+        """Restore phase temperatures and FVM moment caches after evaluation.
+
+        Parameters
+        ----------
+        temp : float
+            Temporary common liquid/solid temperature [K].
+
+        Yields
+        ------
+        None
+            Evaluate the dynamic balance inside this context.
+
+        Notes
+        -----
+        The steady-state helper reports a diagnostic dynamic residual without
+        committing phase temperature or FVM solid-moment changes. Restoration
+        applies on success and exceptions. Moment-mode balances do not modify
+        solid phase moments, so that mode requires no moment snapshot.
+        """
+        liquid_temp, solid_temp = self.Liquid_1.temp, self.Solid_1.temp  # [K]
+        if self.method != 'moments':
+            solid_moments = self.Solid_1.moments.copy()  # [m**n], phase inventory
+        try:
+            self.Liquid_1.temp = temp  # [K], match dynamic density evaluation
+            self.Solid_1.temp = temp  # [K]
+            yield
+        finally:
+            self.Liquid_1.temp, self.Solid_1.temp = liquid_temp, solid_temp  # [K]
+            if self.method != 'moments':
+                self.Solid_1.moments[:] = solid_moments  # [m**n], preserve inventory
+
     def solve_steady_state(self, frac_seed: float, temp: float, *,
                            num_scan: int = 64) -> tuple:
         """Solve the MSMPR moment and target-composition steady balances.
@@ -2788,10 +2856,7 @@ class MSMPR(_BaseCryst):
                 not reject NaN callback values themselves, so this check is
                 required independently of the installed brentq version.
             """
-            value = composition_residual(concentration)  # [kg/m**3/s]
-            if not np.isfinite(value):
-                raise ValueError("Steady-state scalar solve crossed an inadmissible growth gap")
-            return value
+            return _finite_steady_residual(concentration, composition_residual)
 
         if population_data(frac_seed) is None:
             raise ValueError(
@@ -2874,16 +2939,8 @@ class MSMPR(_BaseCryst):
                     # this bracket, not roots resolved in other brackets.
                     skipped_brackets += 1
                     continue
-                if not np.isfinite(concentration):
-                    skipped_brackets += 1
-                    continue
+                # Brent returns an iterate already checked by the finite callback.
                 residual = composition_residual(concentration)  # [kg/m**3/s]
-                if not np.isfinite(residual):
-                    skipped_brackets += 1
-                    rejected.append((concentration / concentration_scale,
-                                     'finite residual', np.inf))
-                    # [basis unit], gate name, unavailable relative closure error [-]
-                    continue
                 composition = concentration / concentration_scale  # [basis unit]
                 _, growth, factors, _, coefficient = population_data(composition)
                 # [#/m**3/s], [um/s], [m**n*um], [kg*um/s], [kg*um/s]
@@ -2959,21 +3016,12 @@ class MSMPR(_BaseCryst):
             inputs['Inlet']['distrib'] = np.zeros_like(f_convg)  # [#/m**3/um]
             self.dx = self.Slurry.dx  # [um], same FVM initialization as solve_unit
         rho_inlet = self.Inlet.Liquid_1.getDensity(temp=temp)  # [kg/m**3]
-        liquid_temp, solid_temp = self.Liquid_1.temp, self.Solid_1.temp  # [K]
-        if self.method != 'moments':
-            solid_moments = self.Solid_1.moments.copy()  # [m**n], phase inventory
-        try:
-            self.Liquid_1.temp = temp  # [K], match the dynamic density evaluation
-            self.Solid_1.temp = temp  # [K]
+        with self._temporary_steady_phases(temp):
             derivative, _ = self.material_balances(
                 0.0, None, inputs, [[rho_liquid, rho_solid], [rho_inlet, None]],
                 moments_si, population_state, concentrations, temp, None,
                 self.vol_slurry, [1.0, 0.0])
             # [population unit/s], [kg/m**3/s], actual dynamic balance
-        finally:
-            self.Liquid_1.temp, self.Solid_1.temp = liquid_temp, solid_temp  # [K]
-            if self.method != 'moments':
-                self.Solid_1.moments[:] = solid_moments  # [m**n], preserve inventory
         final_fn = derivative[len(population_state) + self.target_ind]
         # [kg/m**3/s], actual dynamic target derivative on both kinetic bases
         return x_vec, f_convg, composition, info, final_fn
