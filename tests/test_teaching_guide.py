@@ -6,6 +6,7 @@ code with real Assimulo collaborators and the guide's nominal teaching inputs.
 
 from collections.abc import Iterator
 from pathlib import Path
+import os
 import re
 import textwrap
 
@@ -41,6 +42,12 @@ BLOCKS = tuple(_code_blocks())
 
 
 @pytest.mark.unit
+def test_guide_has_executable_blocks() -> None:
+    """Keep empty extraction from silently skipping the core syntax checks."""
+    assert BLOCKS, "No executable guide blocks were extracted"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("source", BLOCKS, ids=[f"block-{i}" for i in range(len(BLOCKS))])
 def test_guide_code_compiles(source: str) -> None:
     """Require every printed block to be valid Python.
@@ -58,25 +65,21 @@ def test_guide_code_compiles(source: str) -> None:
 @pytest.mark.integration
 @pytest.mark.slow
 @pytest.mark.parametrize("working_directory", [ROOT, GUIDE.parent], ids=["root", "guide"])
-def test_guide_runs_complete_flowsheet(
-        monkeypatch: pytest.MonkeyPatch, working_directory: Path) -> None:
+def test_guide_runs_complete_flowsheet(working_directory: Path) -> None:
     """Execute the printed code and check the nominal process endpoints.
 
     Parameters
     ----------
-    monkeypatch : pytest.MonkeyPatch
-        Run the example from its documentation directory without changing
-        the calling process's working directory after the test.
     working_directory : pathlib.Path
         Supported starting directory within the checkout.
     """
     pytest.importorskip("assimulo")
     import matplotlib.pyplot as plt
 
-    monkeypatch.chdir(working_directory)
+    original_directory = Path.cwd()
     namespace = {"__name__": "__teaching_guide__"}
-    assert BLOCKS
     try:
+        os.chdir(working_directory)
         for source in BLOCKS:
             exec(compile(source, f"{GUIDE.name}:testcode", "exec"), namespace)
         sim = namespace["sim"]
@@ -102,4 +105,5 @@ def test_guide_runs_complete_flowsheet(
             rtol=roundoff, atol=0)  # [mol/L], named A, B, C, D feed
         assert sim.R01.name_species == ["A", "B", "C", "D", "solvent"]
     finally:
+        os.chdir(original_directory)
         plt.close("all")
