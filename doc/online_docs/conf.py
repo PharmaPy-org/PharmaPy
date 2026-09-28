@@ -111,11 +111,15 @@ html_logo = 'images/PharmaPy_logo.jpeg'
 # so a file named "default.css" will overwrite the builtin "default.css".
 html_static_path = ['images']
 html_context = {
+    "display_github": True,
+    "github_user": "PharmaPy-org",
+    "github_repo": "PharmaPy",
+    "github_version": "master",
+    "conf_py_path": "/doc/online_docs/",
     "footer_logos": {
         "row1": [
             {
                 "alt": "Purdue University Logo",
-                # "src": "Purdue_footer_logo.png",
                 "src": "purdue_logo.png",
                 "href": "https://www.purdue.edu/",
             },

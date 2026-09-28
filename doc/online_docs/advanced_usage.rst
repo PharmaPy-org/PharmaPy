@@ -29,6 +29,16 @@ Liquid heat capacity
 
 :code:`LiquidPhase.getCp` now defaults to the mass basis [J/kg/K], like its siblings; callers needing [J/mol/K] must pass :code:`basis='mole'`.
 
+Continuous holdup accuracy
+==========================
+
+:code:`ContinuousHoldup.solve_unit` accepts :code:`sundials_opts`, like the
+dynamic collector. Use :code:`{'rtol': relative_error, 'atol': absolute_error}`
+to set CVode accuracy when comparing segmented and uninterrupted runs.
+Relative error is dimensionless; absolute error follows the state order:
+species mass fractions [-], then liquid temperature [K]. Omitted options keep
+CVode's defaults, and the supplied mapping is not modified.
+
 Vapor density
 =============
 
@@ -39,6 +49,21 @@ The positional arguments remain pressure [Pa], temperature [K], phase, and basis
 Vapor concentrations use the same ideal-gas basis: :code:`mole_conc = mole_frac * pres / (R * temp) / 1000` [mol/L] and :code:`mass_conc = mole_conc * mw` [kg/m**3], with molecular weights [g/mol]. The last array axis is species; pressure and temperature profiles broadcast over preceding axes. Concentration inputs specify composition, while the equation of state fixes total concentration. A zero-amount vapor retains these intensive properties.
 
 UNIQUAC data without :code:`qip` use :code:`qi` locally and emit a warning once per property object. This fallback assumes the ordinary surface parameter also describes the modified residual term; systems requiring special parameters, including relevant water/alcohol models, should provide :code:`qip` explicitly. The fallback does not create a :code:`qip` attribute, so callers can still detect missing data.
+
+Crystallizer initialization
+===========================
+
+Call ``unit.initialize_states(runtime=duration)`` or pass an absolute
+``time_grid`` to prepare a crystallizer without integrating it. The method
+returns the initial solver vector and absolute endpoint [s]; the final grid
+entry takes precedence over a duration. It applies ``reset_states``, refreshes
+state dimensions, and prepares vessel geometry exactly as ``solve_unit`` does.
+An unset working volume is inferred from the charge or semibatch feed.
+
+The vector follows ``name_states`` order. Crystal moments use micrometer
+lengths internally; FVM populations include the configured numerical scale.
+MSMPR crystal populations are per slurry volume. Batch and semibatch volume
+states are liquid volume [m**3]. Reported ``result.mu_n`` retains its SI basis.
 
 State events
 ============
@@ -154,6 +179,16 @@ A batch evaporator using :code:`stop_at_maxvol=True` rejects an initial or reuse
 
 Continuous steady evaporation accepts :code:`fsolve_opts` for state scaling and solver controls. There is no universal scaling or trust-region factor: the regression suite covers both zero reflux and active reflux with fixture-specific :code:`diag`, :code:`xtol`, and :code:`factor`. Property failures during a trial preserve their original exception as the cause and identify thermophysical data and :code:`fsolve_opts` as diagnostic inputs. Successful solver termination should still be checked against physically meaningful balance residuals.
 
+Evaporator reporting times
+==========================
+
+``Evaporator.solve_unit(runtime, time_grid=times)`` accepts absolute reporting
+points [s] within the current segment. They must be finite and strictly
+increasing; the solver also reports the segment start. ``runtime`` remains the
+segment duration [s], including on continuation. Omitting ``time_grid`` retains
+adaptive reporting. This supports comparisons at shared times without changing
+the native IDA solver or interpolating the returned trajectory.
+
 Solid distributions and filtration
 ===================================
 
@@ -170,6 +205,16 @@ Displacement washing uses the attached cake's packing porosity for flow, adsorpt
 
 Deliquoring checks inferred removal against initial and retained species inventories. Only arithmetic-scale negative roundoff is clipped. A larger negative removal emits a warning, preserves signed :code:`liquid_removed_species` and removal history, sets :code:`removal_diagnostics_valid=False`, and returns NaN removal composition. The transport-conservation defect tracked in `issue 29 <https://github.com/PharmaPy-org/PharmaPy/issues/29>`_ is not repaired by those diagnostics; invalid removal data must not be used as a physical effluent stream.
 
+
+Dynamic distillation initialization
+===================================
+
+After configuring the column with ``column_startup()``, use ``init_unit()`` to
+inspect the initial DAE state and material rates without Assimulo. Rows run from
+the top stage to the reboiler; the first state column is temperature [K] and the
+remaining columns are species mole fractions [-]. Every stage starts at the
+attached liquid composition and its configured activity-model bubble point.
+``solve_unit`` calls the same preparation after calculating the shortcut design.
 
 Interpolators
 ===============
@@ -222,4 +267,3 @@ Piecewise linear interpolators can also be used. In this case, the passed known 
    interpolator = PiecewiseLagrange(time_hor, temperatures, order=2)
 
 Note that the values on the second column always match the value of the first column in the next raw, for continuity purposes. Higher orders will follow the same structure, where each row will represent a subinterval and the number of columns will dictate the interpolation order, which must be passed using the :code:`order` argument.
-

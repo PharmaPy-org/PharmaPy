@@ -7,6 +7,8 @@ phases at 360 K and atmospheric pressure. No optional ODE backend is used.
 import numpy as np
 import pytest
 
+from scipy.optimize import fsolve
+
 from PharmaPy import Evaporators
 from PharmaPy.Phases import LiquidPhase
 from PharmaPy.Streams import LiquidStream
@@ -41,40 +43,61 @@ def test_flash_publishes_physical_phase_boundary(data_path, flash_class, stream,
 
 
 @pytest.mark.parametrize('failure', ['unconverged', 'negative_phase', 'nonfinite'])
-def test_flash_rejects_invalid_solver_output(data_path, monkeypatch, failure):
+def test_flash_rejects_invalid_solver_output(data_path, failure):
+    """Validate rejected candidates directly using the production result gate.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    failure : str
+        Candidate convergence, phase-bound, or finiteness violation.
+    """
     unit = Evaporators.IsothermalFlash(pres_drum=PRESSURE)
     unit.Inlet = LiquidPhase(str(data_path['flowsheet'] / 'compound_database.json'),
                             mole_frac=FRACTIONS, temp=340.0, moles=1.0)  # [K], [mol]
-    original = Evaporators.fsolve
+    seed = np.concatenate(([0.5], FRACTIONS, FRACTIONS, [0.5]))  # [-], equal split
+    solution, _, status, message = fsolve(unit.unit_model, seed, full_output=True)
+    assert status == 1, message
+    if failure == 'negative_phase':
+        solution[-1] = -0.1  # [-], materially invalid, not roundoff
+        expected_error = r'Flash returned phase fractions outside \[0, 1\]'
+    elif failure == 'nonfinite':
+        solution[-1] = np.nan  # [-], invalid phase amount
+        expected_error = 'Flash failed to converge'
+    else:
+        status = 5  # MINPACK code: iteration made insufficient progress
+        expected_error = 'Flash failed to converge'
+    with pytest.raises(RuntimeError, match=expected_error):
+        Evaporators._validate_flash_solution(
+            unit.unit_model, solution, status, message, -1, BALANCE_TOLERANCE)
 
-    def invalid_solution(function, initial, **kwargs):
-        """Corrupt the native solver result at its optional numerical boundary.
 
-        Parameters
-        ----------
-        function : callable
-            Flash residual, dimensionless after energy scaling.
-        initial : ndarray
-            Phase fractions and compositions [-].
-        **kwargs : dict
-            Forwarded SciPy options.
+@pytest.mark.parametrize('flash_class', [Evaporators.IsothermalFlash, Evaporators.AdiabaticFlash])
+def test_flash_public_solve_rejects_unclosed_result(data_path, flash_class):
+    """The public solve must validate native residuals before publishing phases.
 
-        Returns
-        -------
-        tuple or ndarray
-            Native result with one deliberately invalid convergence condition.
-        """
-        result = original(function, initial, **kwargs)
-        solution = result[0] if isinstance(result, tuple) else result
-        if failure == 'negative_phase':
-            solution[-1] = -0.1  # [-], materially invalid, not roundoff
-        elif failure == 'nonfinite':
-            solution[-1] = np.nan  # [-]
-        elif isinstance(result, tuple):
-            result = (solution, result[1], 5, 'synthetic lack of convergence')
-        return result
-
-    monkeypatch.setattr(Evaporators, 'fsolve', invalid_solution)
-    with pytest.raises(RuntimeError, match='Flash'):
-        unit.solve_unit()
+    Parameters
+    ----------
+    data_path : dict
+        Repository thermodynamic database paths.
+    flash_class : type
+        Isothermal or adiabatic public flash API.
+    """
+    unit = flash_class(pres_drum=PRESSURE)
+    unit.Inlet = LiquidPhase(str(data_path['flowsheet'] / 'compound_database.json'),
+                            mole_frac=FRACTIONS, temp=360.0, moles=1.0)  # [K], [mol]
+    vapor_placeholder = getattr(unit, 'VaporOut', None)
+    # Deliberately demand exact floating-point closure; this real nonlinear
+    # mixture has nonzero roundoff residuals after MINPACK converges.
+    impossible_tolerance = np.finfo(float).tiny  # [-], much below roundoff
+    with pytest.raises(RuntimeError, match='Flash scaled residual exceeds'):
+        unit.solve_unit(residual_tolerance=impossible_tolerance)
     assert not hasattr(unit, 'LiquidOut')
+    if vapor_placeholder is None:
+        assert not hasattr(unit, 'VaporOut')
+    else:
+        # AdiabaticFlash attaches a zero-flow vapor property holder to evaluate
+        # energy residuals. A rejected solve must not publish a phase amount.
+        assert unit.VaporOut is vapor_placeholder
+        assert unit.VaporOut.mole_flow == pytest.approx(0.0)

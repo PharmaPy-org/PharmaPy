@@ -105,6 +105,10 @@ MIN_TEMP_SEPARATION = 1.0  # [K]
 MIN_RESIDUAL_SEPARATION = 0.1  # [-]
 MIN_VAPOR_FRAC_SEPARATION = 0.05  # [-]
 
+# Retain the original startup regression's 1e-8 relative temperature budget,
+# slightly tighter than MINPACK's default sqrt(float64 epsilon) step tolerance.
+STARTUP_RTOL = 1e-8  # [-], same independent bubble-point oracle before/after migration
+
 # Three-species extension of the fixture above, used only by the shortcut
 # flow-split test. ``global_material_bce`` builds the bottoms flow from four
 # index sets -- the two declared keys, the species ranked above the light key,
@@ -716,165 +720,64 @@ def test_dynamic_vapor_profiles_use_configured_activity_model(tmp_path):
     assert np.max(np.abs(ideal_y - expected_y)) > MIN_VAPOR_FRAC_SEPARATION
 
 
-def test_dynamic_startup_temperature_uses_configured_activity_model(
-        tmp_path, monkeypatch):
-    """Initial plate temperatures use the configured activity model.
+def test_dynamic_startup_temperature_uses_configured_activity_model(tmp_path):
+    """Prepare non-ideal equilibrium states through the solver's shared API.
 
-    ``solve_unit`` seeds every plate at the bubble point of the initial liquid
-    holdup. Seeding a non-ideal column at its ideal bubble point starts the DAE
-    off the equilibrium manifold its own algebraic residuals enforce, so this is
-    a consistent-initialization failure rather than a small offset.
-
-    ``PharmaPy._assimulo`` exports lazy factories, so importing ``Distillation``
-    no longer imports Assimulo. ``solve_unit`` still calls ``Implicit_Problem``
-    and ``IDA``, though, and each call imports it, so patching those two names
-    is what keeps this test in the Assimulo-free core lane. The doubles also
-    capture the initial state handed to the DAE, which is the quantity under
-    test and is not recoverable from a completed solve. This is the same seam
-    ``tests/test_deliquoring_particle_size_units.py`` patches.
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Directory for the synthetic two-species database.
     """
-    thermo_path = _thermo_file(tmp_path)
-
-    captured = {}
-
-    class FakeProblem:
-        """Implicit-problem double that records the initial state."""
-
-        def __init__(self, residual, y0, yd0, t0=0.0, sw0=None):
-            """Record the initial state handed to the DAE problem.
-
-            Parameters
-            ----------
-            residual : callable
-                Residual function of the DAE.
-            y0 : ndarray
-                Flattened initial state; temperatures are [K] and mole
-                fractions are [-].
-            yd0 : ndarray
-                Flattened initial state derivative, [K/s] and [1/s].
-            t0 : float, optional
-                Initial time [s].
-            sw0 : list of bool, optional
-                Initial state-event switches.
-            """
-            captured['y0'] = np.asarray(y0)
-
-    class FakeSolver:
-        """Solver double that replays the initial state instead of solving."""
-
-        def __init__(self, problem):
-            """Store the problem handed to the solver.
-
-            Parameters
-            ----------
-            problem : FakeProblem
-                Implicit-problem double carrying the initial state.
-            """
-            self.problem = problem
-
-        def make_consistent(self, mode):
-            """Accept the consistency mode without solving.
-
-            Parameters
-            ----------
-            mode : str
-                Assimulo initialization mode name.
-
-            Returns
-            -------
-            None
-            """
-
-        def simulate(self, final_time, ncp_list=None):
-            """Return the recorded initial state as two stored time points.
-
-            Parameters
-            ----------
-            final_time : float
-                Final integration time [s].
-            ncp_list : array_like, optional
-                Requested output times [s].
-
-            Returns
-            -------
-            tuple
-                Times [s], states, and state derivatives, [K/s] and [1/s].
-            """
-            states = np.vstack([captured['y0'], captured['y0']])
-
-            return (np.array([0.0, final_time]), states,
-                    np.zeros_like(states))
-
-    class StartupColumn(distillation.DynamicDistillation):
-        """Dynamic column double with a deterministic shortcut design."""
-
-        def calculate_shortcut_design(self, time=None):
-            """Return a fixed shortcut design for the fixture feed.
-
-            Parameters
-            ----------
-            time : float, optional
-                Shortcut-design time [s].
-
-            Returns
-            -------
-            dict
-                Shortcut-design result. Mole fractions are [-], molar flows are
-                [mol/s], reflux is [-], and stage counts are [-].
-            """
-            return {
-                "material_balances": {
-                    "bottom_flow": FEED_MOLE_FLOW - 1.0,  # [mol/s]
-                    "dist_flow": 1.0,  # [mol/s]
-                    "x_dist": np.array([0.95, 0.05]),  # [-]
-                    "x_bottom": np.array([0.65, 0.35]),  # [-]
-                },
-                "min_reflux": 1.2,  # [-]
-                "num_min": 3.0,  # [-]
-                "reflux": 2.0,  # [-]
-                "num_plates": 4.0,  # [-]
-                "num_feed": 2.0,  # [-]
-            }
-
-        def retrieve_results(self, time, states):
-            """Skip result retrieval, which this test does not exercise.
-
-            Parameters
-            ----------
-            time : array_like
-                Simulated time points [s].
-            states : ndarray
-                Flattened state history.
-
-            Returns
-            -------
-            None
-            """
-
-    column = StartupColumn(
-        pres=COLUMN_PRESSURE,  # [Pa]
-        q_feed=1.0,  # [-], saturated-liquid feed
-        LK="light",
-        HK="heavy",
-        perc_LK=95.0,  # [%]
-        perc_HK=5.0,  # [%]
-        gamma_model=ACTIVITY_MODEL,
-    )
-    column.Inlet = _feed_stream(thermo_path)
-    column.Phases = _holdup_phase(thermo_path)
-
-    monkeypatch.setattr(distillation, 'Implicit_Problem', FakeProblem)
-    monkeypatch.setattr(distillation, 'IDA', FakeSolver)
-
-    column.solve_unit(runtime=10.0)  # [s]
-
-    holdup_frac = column.Liquid_1.mole_frac  # [-]
+    column = _dynamic_column(_thermo_file(tmp_path), ACTIVITY_MODEL)
+    holdup_frac = column.Liquid_1.mole_frac.copy()  # [-]
     expected_temp = _expected_bubble_temp(column.Liquid_1, holdup_frac)  # [K]
     ideal_temp = _expected_bubble_temp(
         column.Liquid_1, holdup_frac, model='ideal')  # [K]
-
-    init_states = captured['y0'].reshape(-1, column.len_states)
-    temp_init = init_states[:, 0]  # [K]
-
-    np.testing.assert_allclose(temp_init, expected_temp, rtol=1e-8)
+    initial, derivatives = column.init_unit()  # [K], [-]; [-], [1/s]
+    np.testing.assert_allclose(initial[:, 0], expected_temp, rtol=STARTUP_RTOL)
+    np.testing.assert_array_equal(
+        initial[:, 1:], np.tile(holdup_frac, (column.num_plates + 1, 1)))
     assert abs(expected_temp - ideal_temp) > MIN_TEMP_SEPARATION  # [K]
+    # A consistent seed closes the actual DAE, including composition rates.
+    residual = column.unit_model(0.0, initial.ravel(), derivatives.ravel())
+    # [-], [1/s]; bubble-point closure uses fsolve's sqrt(epsilon) accuracy.
+    np.testing.assert_allclose(residual, 0, rtol=0, atol=np.sqrt(np.finfo(float).eps))
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_dynamic_startup_integrates_real_nonideal_column(tmp_path):
+    """Exercise real shortcut design, IDA initialization, and result retrieval.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Directory for the synthetic two-species database.
+    """
+    pytest.importorskip('assimulo')
+    thermo_path = _thermo_file(tmp_path)
+    # The fixture reverses ideal volatility: heavy is the light key for UNIQUAC.
+    # Four stages and a middle feed keep this startup test small; the purpose
+    # is equilibrium initialization, not achieving the specified recoveries.
+    column = distillation.DynamicDistillation(
+        pres=COLUMN_PRESSURE, q_feed=1.0, LK='heavy', HK='light',
+        perc_LK=95.0, perc_HK=5.0, gamma_model=ACTIVITY_MODEL,
+        num_plates=4, num_feed=2)
+    # Pressure [Pa], saturated-liquid q [-], recoveries [%], stage indexes [-].
+    column.Inlet = _feed_stream(thermo_path)
+    column.Phases = _holdup_phase(thermo_path)
+    composition = column.Liquid_1.mole_frac.copy()  # [-]
+    expected_temp = _expected_bubble_temp(column.Liquid_1, composition)  # [K]
+    grid = np.array([0.0, 0.01])  # [s], short startup on the initial branch
+    time, states, _ = column.solve_unit(time_grid=grid, verbose=False)
+    # [s], flattened stage rows of [K] and mole fractions [-]
+    np.testing.assert_array_equal(time, grid)
+    initial = states[0].reshape(column.num_plates + 1, column.len_states)
+    # First column [K], remaining columns mole fractions [-].
+    np.testing.assert_allclose(initial[:, 0], expected_temp, rtol=STARTUP_RTOL)
+    np.testing.assert_allclose(initial[:, 1:], np.tile(
+        composition, (column.num_plates + 1, 1)), rtol=STARTUP_RTOL, atol=0)
+    np.testing.assert_allclose(column.result.temp[0], expected_temp, rtol=STARTUP_RTOL)
+    np.testing.assert_array_equal(column.result.time, time)
+    assert column.OutletBottom.mole_flow + column.OutletDistillate.mole_flow == pytest.approx(
+        FEED_MOLE_FLOW)
