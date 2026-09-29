@@ -73,8 +73,7 @@ from PharmaPy.Kinetics import RxnKinetics, CrystKinetics
 from PharmaPy.Utilities import CoolingWater
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PATH = os.path.join(os.path.dirname(HERE), 'tests', 'Flowsheet', 'data',
-                    'compound_database.json')
+PATH = os.path.join(HERE, 'data', 'compound_database.json')
 
 # Same chemistry and kinetics as tests/Flowsheet/flowsheet_tests.py, so any
 # difference is attributable to the unit implementations rather than the model.
