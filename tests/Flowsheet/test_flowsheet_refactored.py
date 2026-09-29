@@ -206,9 +206,20 @@ def test_stage0_filter_alone():
 
     mass_solids = vol_liq * 2.4e-2 * 1e3
     x_distr = np.arange(1, 501)
-    distrib = np.ones_like(x_distr)
-    solid = SolidPhase(PATH, mass=mass_solids, x_distrib=x_distr,
-                       distrib=distrib, mass_frac=MASSFRAC_SOLID)
+
+    # Filter requires the size distribution to integrate to the solid mass.
+    # SolidPhase(mass=...) scales bin weights by a plain sum but integrates
+    # moments with the trapezoidal rule, landing about 0.2% short here, so
+    # rescale its equal-mass-per-bin number density on the trapezoidal basis
+    # and build the phase from that density alone.
+    weighted = SolidPhase(PATH, mass=mass_solids, x_distrib=x_distr,
+                          distrib=np.ones_like(x_distr),
+                          mass_frac=MASSFRAC_SOLID)
+    mass_integrated = (weighted.kv * weighted.getMoments(mom_num=3)
+                       * weighted.getDensity())  # [kg]
+    distrib = weighted.distrib * mass_solids / mass_integrated  # [#/um]
+    solid = SolidPhase(PATH, x_distrib=x_distr, distrib=distrib,
+                       mass_frac=MASSFRAC_SOLID)
 
     slurry = Slurry()
     slurry.Phases = (solid, liquid)
