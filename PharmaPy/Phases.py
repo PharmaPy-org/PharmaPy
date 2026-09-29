@@ -1678,27 +1678,82 @@ class SolidPhase(ThermoPhysicalManager):
 
     def convert_distribution(self, x_distrib=None, num_distr=None,
                              vol_distr=None, mass=0):
-        if x_distrib is None:
-            x_distrib = self.x_distrib
+        """Convert nodal number densities and volume fractions consistently.
 
-        if num_distr is not None and vol_distr is not None:
-            raise ValueError("Specify either 'num_distr' or 'vol_distr', "
-                             "not both")
-        elif num_distr is not None:  # convert to vol perc
-            mom_three = self.getMoments(distrib=num_distr, mom_num=3)
-            mom_three[mom_three == 0] = eps
+        Parameters
+        ----------
+        x_distrib : array-like, optional
+            Strictly increasing, nonnegative sizes [um], shape (num_sizes,).
+            Defaults to the attached grid. At least two nodes are required.
+        num_distr : array-like, optional
+            Number density [#/um], shape (..., num_sizes). Rows may represent
+            total, volume-specific, or flow populations; normalization cancels
+            their common inventory basis. Signed solver undershoots are
+            preserved as diagnostics, not clipped. Mutually exclusive with
+            vol_distr.
+        vol_distr : array-like, optional
+            Nonnegative nodal volume fractions [-], shape (..., num_sizes).
+            Fractions allocate volume to trapezoidal node contributions and
+            should sum to one for a complete population.
+        mass : float, optional
+            Positive solid inventory [kg] for volume-to-number conversion.
 
-            distrib_out = num_distr * self.dx * x_distrib**3 * self.kv / \
-                mom_three / 1e18
-        elif vol_distr is not None:
-            if mass == 0:
-                raise ValueError("'vol_perc' given, mass must be greater "
-                                 "than zero.")
-            dens = self.getDensity()
-            distrib_out = (mass / dens) * vol_distr / self.kv / \
-                x_distrib**3 / self.dx * 1e18  # number/um
+        Returns
+        -------
+        numpy.ndarray
+            Volume fractions [-] for num_distr, or number density [#/um] for
+            vol_distr, preserving input shape. Empty number populations yield
+            zero fractions; their physical normalized distribution is undefined.
 
-        return distrib_out
+        Raises
+        ------
+        ValueError
+            If the grid, population shape, finite values, nonnegative volume
+            inputs, mutually exclusive inputs, or positive mass are invalid. Positive volume at
+            zero particle size cannot define a finite number population.
+
+        Notes
+        -----
+        Each interior quadrature weight is half the distance between its two
+        neighbors; endpoint weights are half the adjacent interval. These are
+        exactly the weights used by getMoments. A node's particle volume is
+        kv * size**3. The shape factor cancels between node and total volumes
+        in number-to-volume conversion, including on nonuniform grids. This
+        corrects the legacy combination of bin-width numerators and trapezoid
+        denominators; FVM grid widths themselves are not changed.
+        """
+        sizes = np.asarray(self.x_distrib if x_distrib is None else x_distrib,
+                           dtype=float)  # [um]
+        if (sizes.ndim != 1 or sizes.size < 2 or not np.isfinite(sizes).all()
+                or np.any(sizes < 0) or np.any(np.diff(sizes) <= 0)):
+            raise ValueError('x_distrib must contain at least two finite, '
+                             'nonnegative, strictly increasing sizes [um]')
+        if (num_distr is None) == (vol_distr is None):
+            raise ValueError("Specify exactly one of 'num_distr' or 'vol_distr'")
+        values = np.asarray(num_distr if num_distr is not None else vol_distr,
+                            dtype=float)  # [#/um] or [-]
+        if (values.ndim == 0 or values.shape[-1] != sizes.size
+                or not np.isfinite(values).all()
+                or (vol_distr is not None and np.any(values < 0))):
+            raise ValueError('Distribution must be finite with one entry per size '
+                             'on its last axis; volume fractions must be nonnegative')
+        intervals = np.diff(sizes)  # [um]
+        support = np.r_[intervals[0], intervals[:-1] + intervals[1:],
+                        intervals[-1]] / 2  # [um], trapezoid node weights
+        particle_volume = self.kv * (sizes * 1e-6)**3  # [m**3/particle]
+        if num_distr is not None:
+            contributions = values * support * particle_volume  # [m**3], input population basis
+            total = contributions.sum(axis=-1, keepdims=True)  # [m**3], same basis
+            return np.divide(contributions, total, out=np.zeros_like(contributions),
+                             where=total != 0)
+        if not np.isfinite(mass) or mass <= 0:
+            raise ValueError("'vol_distr' given, mass must be finite and greater than zero [kg]")
+        if np.any(values[..., sizes == 0] > 0):
+            raise ValueError('Positive volume at zero particle size is undefined')
+        solid_volume = mass / self.getDensity()  # [m**3]
+        denominator = particle_volume * support  # [m**3*um/particle]
+        return np.divide(solid_volume * values, denominator,
+                         out=np.zeros_like(values), where=denominator > 0)
 
     def _get_grid_spacing(self, x_distrib: np.ndarray) -> Union[float, np.ndarray]:
         """Calculate widths using the established crystal-grid convention.
@@ -1767,7 +1822,8 @@ class SolidPhase(ThermoPhysicalManager):
         Refreshes ``dx`` [um]. Positive-mass inputs are normalized by their
         sum. With one mixture density across bins, mass and volume fractions
         coincide. The volume conversion divides solid mass by density [kg/m**3]
-        and each bin's volume by ``kv * size**3`` and bin width to obtain [#/um].
+        and each node's volume by ``kv * size**3`` and its trapezoidal support
+        width to obtain [#/um], consistent with getMoments.
         Zero-mass inputs are returned without normalization or conversion.
         """
         self.dx = self._get_grid_spacing(x_distrib)  # [um]
