@@ -17,29 +17,32 @@ import copy
 from matplotlib.ticker import MaxNLocator, AutoMinorLocator
 
 
-def get_alg_map(states_di, nstages=1):
+def get_alg_map(states_di: dict, nstages: int = 1) -> np.ndarray:
     """Build Assimulo algebraic/differential state flags.
 
     Parameters
     ----------
     states_di : dict
-        State metadata dictionaries containing ``dim`` [-] and ``type``.
+        Insertion-ordered state metadata containing ``dim`` [-] and ``type``
+        (``'diff'`` or ``'alg'``). Each type applies to its entire field.
     nstages : int, optional
         Number of dynamic extractor stages [-].
 
     Returns
     -------
     ndarray
-        Algebraic-variable map with one flag per state entry [-].
+        One flag per state entry [-]: 1 for differential, 0 for algebraic.
+        Fields follow dictionary order within each stage; the complete stage
+        block repeats ``nstages`` times, matching stage-major state flattening.
     """
-    maps = []
+    maps = []  # [-], one flag block per field in a single stage
     for val in states_di.values():
         if val['type'] == 'diff':
-            maps.append(np.ones(val['dim'] * nstages))
+            maps.append(np.ones(val['dim']))
         elif val['type'] == 'alg':
-            maps.append(np.zeros(val['dim'] * nstages))
+            maps.append(np.zeros(val['dim']))
 
-    return np.hstack(maps)
+    return np.tile(np.hstack(maps), nstages)
 
 
 def complete_molefrac(mole_frac, mapping):
@@ -201,7 +204,7 @@ class DynamicExtractor:
                 f"shape {k_i.shape}."
             ) from err
 
-    def nomenclature(self):
+    def nomenclature(self) -> None:
         """Create dynamic extractor state metadata.
 
         Returns
@@ -220,14 +223,16 @@ class DynamicExtractor:
         normalization; in this constant-flow approximation the final
         heavy-phase entry is no longer constrained by its own component
         equilibrium relation, so results may depend on component ordering.
-        It keeps the existing dictionary-based metadata structure used by the
-        result and plotting helpers; replacing that structure is outside this
-        focused closure change.
+        The light-phase field contains differential variables, except for
+        its final dependent component. ``alg_map`` records this exception and
+        repeats the stage-major flags used by IDA: independent light-phase
+        mole fractions and energy are differential; all other states are
+        algebraic. The dictionary metadata retains its existing field layout.
         """
         num_comp = self.num_comp  # [-]
         name_species = self.name_species
         self.states_di = {
-            'x_i': {'dim': num_comp, 'type': 'alg', 'index': name_species,
+            'x_i': {'dim': num_comp, 'type': 'diff', 'index': name_species,
                     'units': '[-]'},
             'y_i': {'dim': num_comp, 'type': 'alg', 'index': name_species,
                     'units': '[-]'},
@@ -242,6 +247,9 @@ class DynamicExtractor:
         self.states_in_dict = {'Inlet': states_in_dict}
 
         self.alg_map = get_alg_map(self.states_di, self.num_stages)  # [-]
+        # The last x_i row is sum(x_i) - 1, with no time derivative. All y_i
+        # rows and temperature are already algebraic in the field metadata.
+        self.alg_map.reshape(self.num_stages, -1)[:, num_comp - 1] = 0  # [-]
 
         self.fstates_di = {}
 

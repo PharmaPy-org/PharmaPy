@@ -2,7 +2,8 @@
 
 Synthetic constant-property liquids give an independent linear energy balance.
 Core cases exercise initialization and the public DAE residual without a solver;
-the Assimulo cases compare ``solve_unit`` with its matrix-exponential solution.
+the Assimulo cases compare ``solve_unit`` with independent energy and material
+matrix-exponential solutions under default algebraic-state suppression.
 These fixtures establish a routing contract, not calibrated LLE predictions.
 """
 
@@ -12,7 +13,7 @@ import numpy as np
 import pytest
 from scipy.linalg import expm
 
-from PharmaPy.DynamicExtraction import DynamicExtractor
+from PharmaPy.DynamicExtraction import DynamicExtractor, get_alg_map
 from PharmaPy.Phases import LiquidPhase
 from PharmaPy.Streams import LiquidStream
 
@@ -177,12 +178,41 @@ def test_residual_pairs_inlet_enthalpies_with_phase_roles(
     np.testing.assert_allclose(residual[:, -1], 0.0, rtol=0, atol=BALANCE_ATOL)
 
 
-@pytest.mark.assimulo
-@pytest.mark.integration
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "state_order,expected_flags",
+    [
+        (["composition", "temperature", "energy"],
+         [1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1]),
+        (["energy", "temperature", "composition"],
+         [1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1]),
+    ],
+)
+def test_algebraic_map_preserves_stage_and_field_order(state_order, expected_flags):
+    """Use unequal field sizes and a content-preserving field permutation.
+
+    Parameters
+    ----------
+    state_order : list of str
+        Metadata insertion order used by the flattened state vector.
+    expected_flags : list of int
+        Three repeated stage blocks of differential (1) and algebraic (0)
+        flags [-], enumerated independently for each field order.
+    """
+    metadata = {
+        "composition": {"dim": 2, "type": "diff"},
+        "temperature": {"dim": 1, "type": "alg"},
+        "energy": {"dim": 1, "type": "diff"},
+    }  # dimensions and flags [-]; two composition entries distinguish widths
+    ordered = {name: metadata[name] for name in state_order}
+    np.testing.assert_array_equal(get_alg_map(ordered, nstages=3), expected_flags)
+    np.testing.assert_array_equal(get_alg_map(ordered), expected_flags[:4])
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("feed_is_heavy", [True, False])
-def test_solve_matches_independent_constant_property_energy_balance(
-        extractor_factory, feed_is_heavy):
-    """Compare IDA temperatures with the linear two-stage energy solution.
+def test_solver_flags_match_actual_residual_derivatives(extractor_factory, feed_is_heavy):
+    """Check IDA's flags against derivative dependence of the real residual.
 
     Parameters
     ----------
@@ -193,17 +223,59 @@ def test_solve_matches_independent_constant_property_energy_balance(
 
     Notes
     -----
+    Per stage, only the first two light-phase mole fractions and energy have
+    derivatives. The dependent third mole fraction, all heavy-phase entries,
+    and temperature are algebraic. A unit derivative probe must therefore
+    subtract one only in the three differential residual rows.
+    """
+    extractor, initial = extractor_factory(feed_is_heavy, 330.0, 290.0)
+    # Inlet temperatures [K] deliberately differ to retain nonzero energy rates.
+    states = np.column_stack([
+        initial[name] for name in extractor.name_states
+    ]).ravel()  # x_i/y_i [-], u_int [J], temp [K] per stage
+    expected_flags = np.array([
+        1, 1, 0, 0, 0, 0, 1, 0,
+        1, 1, 0, 0, 0, 0, 1, 0,
+    ])  # [-], stage-major order for two stages and three components
+    np.testing.assert_array_equal(extractor.alg_map, expected_flags)
+    zero_derivative = np.zeros_like(states)  # x_i/y_i [1/s], u_int [J/s], temp [K/s]
+    probe_derivative = np.ones_like(states)  # unit probes in the same state-rate units
+    baseline = extractor.unit_model(0.0, states, zero_derivative)
+    probed = extractor.unit_model(0.0, states, probe_derivative)
+    # Residual differences [1/s] or [J/s]; algebraic rows stay exactly unchanged.
+    np.testing.assert_allclose(
+        baseline - probed, expected_flags, rtol=0, atol=BALANCE_ATOL)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+@pytest.mark.parametrize("feed_is_heavy", [True, False])
+@pytest.mark.parametrize("solver_tolerance", [None, 1e-9], ids=["defaults", "refined"])
+def test_solve_matches_independent_constant_property_energy_balance(
+        extractor_factory, feed_is_heavy, solver_tolerance):
+    """Compare IDA temperatures with the linear two-stage energy solution.
+
+    Parameters
+    ----------
+    extractor_factory : callable
+        Factory for a real initialized extractor.
+    feed_is_heavy : bool
+        Select the feed density ordering.
+    solver_tolerance : float or None
+        IDA relative tolerance [-] and absolute tolerance [state units], or
+        None to use the solver defaults. The refined case tightens accuracy.
+
+    Notes
+    -----
     Both inlets already have their respective equilibrium compositions, so
     component inventories stay fixed. Each stage has heat capacity 2800 J/K.
     Its inlet/outlet heat-flow coefficients are 272 and 432 J/s/K. The exact
     solution is T(t)=T_ss+exp(-A*t/C)*(T(0)-T_ss), where A has diagonal 704
     J/s/K and countercurrent off-diagonal entries -432 and -272 J/s/K.
 
-    Include algebraic states in error control to verify temperature accuracy.
-    The pre-existing multistage alg_map layout is recorded under the audit
-    tracker https://github.com/PharmaPy-org/PharmaPy/issues/67; its default
-    suppression can omit the energy states from error control. This test
-    certifies the explicit all-state error-control setting, not that default.
+    Both cases retain the default suppression of algebraic states in error
+    control. Differential energy and independent compositions must still be
+    controlled; the algebraic temperature follows the energy constraint.
     """
     pytest.importorskip("assimulo")
     feed_temperature = 330.0  # [K], warm feed
@@ -211,11 +283,11 @@ def test_solve_matches_independent_constant_property_energy_balance(
     extractor, _ = extractor_factory(
         feed_is_heavy, feed_temperature, solvent_temperature)
     runtime = 2.0  # [s], about half the C/(272+432) thermal time scale
-    solver_rtol = 1e-9  # [-], tighter than the trajectory assertion tolerance
-    solver_atol = 1e-9  # state units, absolute IDA tolerance
+    solver_options = (None if solver_tolerance is None else
+                      {"rtol": solver_tolerance, "atol": solver_tolerance})
+    # rtol [-], atol [state units]; no override of algebraic error suppression.
     time, states = extractor.solve_unit(
-        runtime, sundials_opts={"rtol": solver_rtol, "atol": solver_atol,
-                                "suppress_alg": False},
+        runtime, sundials_opts=solver_options,
         verbose=False)  # time [s]; state columns: x_i/y_i [-], u_int [J], temp [K]
     light_temperature, heavy_temperature = (
         (solvent_temperature, feed_temperature) if feed_is_heavy
@@ -234,13 +306,88 @@ def test_solve_matches_independent_constant_property_energy_balance(
     ])  # [K]
     stage_states = states.reshape(len(time), 2, -1)
     # x_i/y_i [-], u_int [J], temp [K]; no iteration count or output-grid pin.
-    temperature_atol = 1e-5  # [K], exceeds IDA's 1e-9 relative state tolerance
+    # Allow 1 mK with default IDA tolerances, and 0.01 mK after refinement;
+    # both resolve the approximately 10 K transient without pinning its grid.
+    temperature_atol = 1e-3 if solver_tolerance is None else 1e-5  # [K]
+    composition_atol = 1e-9  # [-], roundoff allowance for invariant inventories
     np.testing.assert_allclose(
         stage_states[:, :, -1], expected_temperature,
         rtol=0, atol=temperature_atol)
     np.testing.assert_allclose(
         stage_states[:, :, :3], np.broadcast_to(LIGHT_COMPOSITION, (len(time), 2, 3)),
-        rtol=0, atol=solver_atol)
+        rtol=0, atol=composition_atol)
     np.testing.assert_allclose(
         stage_states[:, :, 3:6], np.broadcast_to(HEAVY_COMPOSITION, (len(time), 2, 3)),
-        rtol=0, atol=solver_atol)
+        rtol=0, atol=composition_atol)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+@pytest.mark.parametrize("feed_is_heavy", [True, False])
+def test_solve_integrates_independent_compositions(extractor_factory, feed_is_heavy):
+    """Check changing material states against independent linear solutions.
+
+    Parameters
+    ----------
+    extractor_factory : callable
+        Factory for a real initialized extractor.
+    feed_is_heavy : bool
+        Select the feed density ordering.
+
+    Notes
+    -----
+    For independent component i, y_i=K_i*x_i. With phase inventories 10 mol,
+    light flow 2 mol/s and heavy flow 3 mol/s, the two-stage material equation
+    has effective inventory 10*(1+K_i) mol, diagonal 2+3*K_i mol/s, upper
+    diagonal -3*K_i mol/s, and lower diagonal -2 mol/s. The two independent
+    species have K=0.5 and 2, yielding the explicit matrices below.
+
+    The last component follows phase normalization under the existing
+    constant-flow approximation (#195), not a separate equilibrium equation.
+    This test preserves that closure and does not certify the deferred MESH
+    formulation or stage-dependent equilibrium callbacks (#123).
+    """
+    pytest.importorskip("assimulo")
+    extractor, _ = extractor_factory(feed_is_heavy, 300.0, 300.0)
+    # Equal inlet temperatures [K] isolate a composition perturbation.
+    light_inlet = np.array([0.45, 0.15, 0.4])  # [-], enrich a and deplete b
+    heavy_inlet = np.array([0.25, 0.35, 0.4])  # [-], same perturbation direction
+    extractor.Inlet[extractor.target_states["light_phase"]].updatePhase(
+        mole_frac=light_inlet, mole_flow=LIGHT_FLOW)
+    extractor.Inlet[extractor.target_states["heavy_phase"]].updatePhase(
+        mole_frac=heavy_inlet, mole_flow=HEAVY_FLOW)
+    runtime = 2.0  # [s], resolves the initial composition transient
+    solver_tolerance = 1e-10  # rtol [-], atol [state units]; controls accumulated error
+    time, states = extractor.solve_unit(
+        runtime, sundials_opts={"rtol": solver_tolerance, "atol": solver_tolerance},
+        verbose=False)  # time [s], states: x_i/y_i [-], u_int [J], temp [K]
+    coefficients = [
+        (15.0, np.array([[3.5, -1.5], [-2.0, 3.5]])),
+        (30.0, np.array([[8.0, -6.0], [-2.0, 8.0]])),
+    ]  # effective inventories [mol], material-flow matrices [mol/s]
+    expected_components = []  # [-], one time/stage mole-fraction array per species
+    for component, (inventory, flow_matrix) in enumerate(coefficients):
+        # inventory [mol], flow_matrix [mol/s]
+        forcing = np.array([
+            LIGHT_FLOW * light_inlet[component],
+            HEAVY_FLOW * heavy_inlet[component],
+        ])  # [mol/s], independent inlet component flows
+        steady = np.linalg.solve(flow_matrix, forcing)  # [-]
+        expected_components.append(np.array([
+            steady + expm(-flow_matrix * instant / inventory)
+            @ (np.full(2, LIGHT_COMPOSITION[component]) - steady)
+            for instant in time
+        ]))
+    expected_light = np.stack(expected_components, axis=-1)  # [-], time/stage/species
+    stage_states = states.reshape(len(time), 2, -1)
+    # x_i/y_i [-], u_int [J], temp [K]
+    composition_atol = 1e-8  # [-], global accuracy target for both liquid compositions
+    np.testing.assert_allclose(
+        stage_states[:, :, :2], expected_light, rtol=0, atol=composition_atol)
+    np.testing.assert_allclose(
+        stage_states[:, :, 3:5], expected_light * np.array([0.5, 2.0]),
+        rtol=0, atol=composition_atol)
+    np.testing.assert_allclose(
+        stage_states[:, :, :3].sum(axis=-1), 1.0, rtol=0, atol=composition_atol)
+    np.testing.assert_allclose(
+        stage_states[:, :, 3:6].sum(axis=-1), 1.0, rtol=0, atol=composition_atol)
