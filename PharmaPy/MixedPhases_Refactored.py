@@ -200,18 +200,33 @@ class MixedPhase:
         # phase axis so per-phase arrays of any shape aggregate correctly.
         return np.tensordot(weights, values, axes=(0, 0))
     
-    def getCp(self, basis='mass'):
+    def get_total_heat_capacity(self):
+        """
+        Total heat capacity of the member phases.
 
-        total_cp = 0.0
+        Each member contributes its holdup times its mass-basis specific heat,
+        evaluated at that member's own temperature and composition.
+
+        Returns
+        -------
+        float
+            Total heat capacity [J/K].
+
+        Notes
+        -----
+        This is a total, not a specific heat, so it is deliberately not named
+        ``getCp``: member phases return [J/kg/K] or [J/mol/K] from ``getCp``,
+        and the legacy ``Slurry.getCp`` returns [J/m**3/K].
+        """
+        total_heat_capacity = 0.0  # [J/K]
 
         for phase in self:
-
-            total_cp += (
-                phase.mass
-                * phase.getCp(basis='mass')
+            total_heat_capacity += (
+                phase.mass  # [kg]
+                * phase.getCp(basis='mass')  # [J/kg/K]
             )
 
-        return total_cp
+        return total_heat_capacity
     @property
     def name_species(self):
         return self.Phases[0].name_species

@@ -173,3 +173,17 @@ def test_stream_built_by_conversion_sums_flow_rates():
     np.testing.assert_allclose(
         stream.vol_flow, liquid.vol + solid.vol, rtol=AGGREGATE_RTOL
     )
+
+
+def test_total_heat_capacity_adds_holdup_times_specific_heat():
+    """The mixture heat capacity is a total [J/K], not a specific heat."""
+    liquid, solid = _liquid(), _solid()
+    mixed = MixedPhase([liquid, solid])
+
+    expected = (
+        LIQUID_MASS * liquid.getCp(basis="mass")
+        + SOLID_MASS * solid.getCp(basis="mass")
+    )  # [J/K]
+    np.testing.assert_allclose(
+        mixed.get_total_heat_capacity(), expected, rtol=AGGREGATE_RTOL
+    )

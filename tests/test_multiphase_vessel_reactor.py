@@ -64,8 +64,17 @@ MASS_CLOSURE_ATOL = 1e-12  # [kg/s]
 # roundoff in the rate evaluation.
 RATIO_RTOL = 1e-10  # [-]
 
+# Charge masses used to probe how dT/dt scales with holdup. They are unequal
+# and not equal to one, so a missing or spurious mass factor cannot cancel.
+CHARGE_MASS_SCALING = (1.0, 2.0, 4.0)  # [kg]
+# Temperature rates are compared across separately constructed vessels, so the
+# budget covers accumulated roundoff in the property and geometry evaluations
+# rather than an exact bitwise match.
+TEMP_RATE_RTOL = 1e-9  # [-]
 
-def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False):
+
+def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False,
+                   charge_mass=CHARGE_MASS):
     """Construct a vessel charged with the standard A/B mixture.
 
     Parameters
@@ -79,6 +88,8 @@ def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False):
     with_inlet : bool, optional
         When True, attach a liquid feed at ``INLET_MASS_FLOW`` whose
         composition equals the initial charge composition.
+    charge_mass : float, optional
+        Initial liquid holdup [kg]. Defaults to ``CHARGE_MASS``.
 
     Returns
     -------
@@ -91,7 +102,7 @@ def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False):
         diam=VESSEL_DIAMETER,
     )
     vessel.Phases = LiquidPhase(
-        DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC
+        DATA_PATH, mass=charge_mass, mass_frac=CHARGE_MASS_FRAC
     )
     vessel.Utility = CoolingWater(
         mass_flow=UTILITY_MASS_FLOW, temp_in=UTILITY_TEMP_IN
@@ -336,10 +347,8 @@ def test_reaction_runs_while_the_continuous_vessel_holds_volume():
 def test_cold_jacket_removes_heat_from_the_charge():
     """A jacket below the charge temperature gives a negative dT/dt.
 
-    Only the sign is asserted. The magnitude is currently correct just for a
-    1 kg charge, because ``MultiPhaseVessel.energy_balances`` divides the heat
-    rate by the specific heat without multiplying by the total mass. The
-    mass-scaling contract is asserted separately once that is fixed.
+    Only the sign is asserted here; the magnitude is pinned by the charge-size
+    invariance test below.
     """
     vessel = _build_reactor(BatchReactor)
 
@@ -349,3 +358,23 @@ def test_cold_jacket_removes_heat_from_the_charge():
     temperature_rate = rates[-1]  # [K/s]
     assert np.isfinite(temperature_rate)
     assert temperature_rate < 0
+
+
+def test_jacket_cooling_rate_is_independent_of_charge_mass():
+    """Scaling the charge leaves dT/dt unchanged under jacket cooling.
+
+    The energy balance is m * cp * dT/dt = Q. The jacket area follows
+    ``4 * vol / diam``, so at fixed composition both Q and the total heat
+    capacity m * cp are proportional to the holdup and the temperature rate
+    is invariant. Dividing by a specific heat instead makes dT/dt grow in
+    proportion to the charge.
+    """
+    rates = []
+    for mass in CHARGE_MASS_SCALING:
+        vessel = _build_reactor(BatchReactor, charge_mass=mass)
+        states = vessel.create_solver_init_states()
+        rates.append(np.asarray(vessel.unit_model(0.0, states))[-1])  # [K/s]
+
+    assert rates[0] < 0
+    for rate in rates[1:]:
+        np.testing.assert_allclose(rate, rates[0], rtol=TEMP_RATE_RTOL)

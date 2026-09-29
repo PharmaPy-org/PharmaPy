@@ -2695,10 +2695,27 @@ class MultiPhaseVessel():
             material_buffer
         ):
         """
-        Energy contributions are accumulated in SI units (joules).
+        Rate of change of the vessel temperature from its energy balance.
 
-        Positive contributions add energy to the vessel.
-        Negative contributions remove energy from the vessel.
+        Contributions are heat rates [W]. Positive contributions add energy
+        to the vessel; negative contributions remove it.
+
+        Parameters
+        ----------
+        time : float
+            Integration time [s].
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``, as returned by
+            ``complete_state``.
+        material_buffer : MaterialContributionBuffer
+            Buffer returned by ``material_balances``, whose ``aux`` payload
+            carries the resolved inlet, outlet and transfer terms.
+
+        Returns
+        -------
+        dict
+            ``{StateKey("global_temp"): dT/dt}`` [K/s], the summed heat rate
+            divided by ``MixedPhase.get_total_heat_capacity`` [J/K].
         """
 
         aux = material_buffer.aux
@@ -2775,8 +2792,7 @@ class MultiPhaseVessel():
         qdot = sum(contributions.values())
         self._timers['sum_energy_contributions'] = self._timers.get('sum_energy_contributions',0)+perf_counter()-t0
         t0 = perf_counter()
-        basis = 'mass' if self.basis=='mass_j' else self.basis
-        heat_capacity = self.Phases.getCp(basis = basis)
+        heat_capacity = self.Phases.get_total_heat_capacity()  # [J/K]
         self._timers['get_heat_capacity'] = self._timers.get('get_heat_capacity',0)+perf_counter()-t0
         dtemp_dt = qdot / heat_capacity
         return {StateKey("global_temp"): dtemp_dt}
