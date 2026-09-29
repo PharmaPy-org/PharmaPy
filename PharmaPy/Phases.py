@@ -1676,8 +1676,10 @@ class SolidPhase(ThermoPhysicalManager):
         if distrib is not None or mass is not None:
             self._reconcile_moles_from_mass()
 
-    def convert_distribution(self, x_distrib=None, num_distr=None,
-                             vol_distr=None, mass=0):
+    def convert_distribution(self, x_distrib: Optional[ArrayLike] = None,
+                             num_distr: Optional[ArrayLike] = None,
+                             vol_distr: Optional[ArrayLike] = None,
+                             mass: float = 0) -> np.ndarray:
         """Convert nodal number densities and volume fractions consistently.
 
         Parameters
