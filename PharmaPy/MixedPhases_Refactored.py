@@ -34,11 +34,16 @@ class MixedPhase:
     ind_solv = None
     name_solv = None
 
+    # Names that __getattr__ adds across the member phases; everything else
+    # is mass-weighted. This must stay a class attribute: an instance copy
+    # would shadow MixedStream's set, and to_stream() carries instance state
+    # across when it reassigns __class__.
+    EXTENSIVE_PROPERTIES = frozenset({"mass", "vol", "moles"})
+
     def __init__(self,phases=None):
         self._Phases = []
         if phases is not None:
             self.Phases = phases
-        self.EXTENSIVE_PROPERTIES = {"mass", "vol", "moles"}
     
     @property
     def Phases(self):
@@ -266,11 +271,13 @@ class MixedPhase:
         return mixedstream
 class MixedStream(MixedPhase):
 
-    EXTENSIVE_PROPERTIES = {
+    # Extends rather than replaces the phase set: a stream's mass, vol and
+    # moles are aliases of its flow rates, so they must keep adding too.
+    EXTENSIVE_PROPERTIES = MixedPhase.EXTENSIVE_PROPERTIES | frozenset({
         "mass_flow",
         "vol_flow",
         "mole_flow",
-    }
+    })
     
     def __init__(self,Streams=None):
         super().__init__()
