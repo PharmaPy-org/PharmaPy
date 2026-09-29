@@ -18,7 +18,6 @@ import copy
 import numpy as np
 import os
 from PharmaPy.DataClasses import *
-from time import perf_counter
 
 
 
@@ -761,10 +760,6 @@ class MultiPhaseVessel():
 
         self.reset_states = reset
 
-        # Populated lazily by unit_model, but update_phases_from_state can run
-        # before the first right-hand side evaluation (reset, replay).
-        self._timers = {}
-
         self.state_variables = StateCollection()
 
         self.input_states = StateCollection()
@@ -1121,13 +1116,11 @@ class MultiPhaseVessel():
 
             if global_temp is not None and "temp" not in updates:
                 updates["temp"] = global_temp
-            t0 = perf_counter()
             phase.update_from_solver_state(
                 updates,
                 completed_state,
                 unit=self
             )
-            self._timers['update_phases_from_solver_state'] = self._timers.get('update_phases_from_solver_state',0)+perf_counter()-t0
 
         for mechanism in getattr(self, "_workspace_mechanisms", ()):
             mechanism.update_state(completed_state, unit=self)
@@ -1216,35 +1209,24 @@ class MultiPhaseVessel():
                     mat_bce=False, enrgy_bce=False,alg_bce=False, limiter_dt=None):
         if not hasattr(self, "model_call_count"):
             self.model_call_count = 0
-            self._timers={}
         self.model_call_count += 1
         limiter_dt = (
             limiter_dt if limiter_dt is not None else self.positivity_horizon
         )
-        t0=perf_counter()
         unpacked_state = self.solver_state_collection.unpack(states)
-        self._timers['unpack'] = self._timers.get('unpack',0)+perf_counter()-t0
 
-        t0=perf_counter()
         completed_state = self.complete_state(unpacked_state,time)
-        self._timers['complete_state'] = self._timers.get('complete_state',0)+perf_counter()-t0
 
-        t0=perf_counter()
         self.update_phases_from_state(completed_state)
-        self._timers['update_phases'] = self._timers.get('update_phases',0)+perf_counter()-t0
         # Balances
-        t0=perf_counter()
         material_rates, material_buffer = self.material_balances(
             time,completed_state, limiter_dt=limiter_dt)
-        self._timers['material_balances_total'] = self._timers.get('material_balances_total',0)+perf_counter()-t0
 
         if mat_bce:
             return self.pack_state_rates(material_rates)
         global_rates = {}
         if self.has_energy_balance:
-            t0 = perf_counter()
             energy_rates = self.energy_balances(time,completed_state, material_buffer)
-            self._timers['energy_balances_total'] = self._timers.get('energy_balances_total',0)+perf_counter()-t0
             global_rates.update(energy_rates)
 
         # utility_rates = self.utility_energy_balance(
@@ -1260,18 +1242,14 @@ class MultiPhaseVessel():
         algebraic_residuals = None
 
         if self.has_algebraic_balance:
-            t0 = perf_counter()
             algebraic_residuals = self.algebraic_balances(time, completed_state)
-            self._timers['algebraic_balances_total'] = self._timers.get('algebraic_balances_total',0)+perf_counter()-t0
 
             if alg_bce:
                 return algebraic_residuals
 
-        t0 = perf_counter()
         balances = self.pack_state_rates(material_rates=material_rates,
                                         global_rates=global_rates,
                                         algebraic_residuals=algebraic_residuals)
-        self._timers['pack_state_rates'] = self._timers.get('pack_state_rates',0)+perf_counter()-t0
         assert len(balances) == len(states), (
             f"Returned {len(balances)} derivatives "
             f"for {len(states)} solver states."
@@ -2491,7 +2469,6 @@ class MultiPhaseVessel():
     ):
         buffer = self._material_contributions
         buffer.reset()
-        t0 = perf_counter()
         self.add_inlet_terms(
             buffer,
             time,
@@ -2499,31 +2476,24 @@ class MultiPhaseVessel():
             resolved_inlets,
             
         )
-        self._timers['add_inlet_terms'] = self._timers.get('add_inlet_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_intraphase_terms(
             buffer,
             time,
             completed_state,
         )
-        self._timers['add_intraphase_terms'] = self._timers.get('add_intraphase_terms',0)+perf_counter()-t0
-        t0 = perf_counter()
         self.add_crossphase_terms(
             buffer,
             time,
             completed_state,
         )
-        self._timers['add_crossphase_terms'] = self._timers.get('add_crossphase_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_outlet_terms(
             buffer,
             time,
             completed_state,
             resolved_outlets,
         )
-        self._timers['add_outlet_terms'] = self._timers.get('add_outlet_terms',0)+perf_counter()-t0
         return buffer
     
     def add_inlet_terms(
@@ -2679,7 +2649,6 @@ class MultiPhaseVessel():
             if not connection.active_condition(source_phase,sink_phase):
                 continue
 
-            t0 = perf_counter()
             crossphase_result = connection.mechanism.get_solver_state_rates(
                 source_phase=source_phase,
                 sink_phase=sink_phase,
@@ -2687,9 +2656,7 @@ class MultiPhaseVessel():
                 completed_state=completed_state,
                 time=time
             )
-            self._timers['crossphase_mechanism'] = self._timers.get('crossphase_mechanism',0)+perf_counter()-t0
 
-            t0 = perf_counter()
             material_writes = []
 
             for state_key, rate in crossphase_result.state_rates.items():
@@ -2716,8 +2683,6 @@ class MultiPhaseVessel():
                     ] += rate
 
                     material_writes.append((material_slice, rate))
-
-            self._timers['crossphase_contributions'] = self._timers.get('crossphase_contributions',0)+perf_counter()-t0
 
             crossphase_result.aux["material_writes"] = material_writes
 
@@ -2763,72 +2728,54 @@ class MultiPhaseVessel():
             "mixing":0,
             "shaftwork":0
         }
-        t0 = perf_counter()
         self.add_inlet_energy_terms(
             contributions,
             aux[material_buffer.INLET],
             time,
             completed_state
         )
-        self._timers['add_inlet_energy_terms'] = self._timers.get('add_inlet_energy_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_intraphase_energy_terms(
             contributions,
             aux[material_buffer.INTRAPHASE],
             time,
             completed_state
         )
-        self._timers['add_intraphase_energy_terms'] = self._timers.get('add_intraphase_energy_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_crossphase_energy_terms(
             contributions,
             aux[material_buffer.CROSSPHASE],
             time,
             completed_state
         )
-        self._timers['add_crossphase_energy_terms'] = self._timers.get('add_crossphase_energy_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_outlet_energy_terms(
             contributions,
             aux[material_buffer.OUTLET],
             time,
             completed_state
         )
-        self._timers['add_outlet_energy_terms'] = self._timers.get('add_outlet_energy_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_utility_energy_terms(
             contributions,
             time,
             completed_state
         )
-        self._timers['add_utility_energy_terms'] = self._timers.get('add_utility_energy_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_mixing_energy_terms(
             contributions,
             time,
             completed_state
         )
-        self._timers['add_mixing_energy_terms'] = self._timers.get('add_mixing_energy_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         self.add_shaftwork_energy_terms(
             contributions,
             time,
             completed_state
         )
-        self._timers['add_shaftwork_energy_terms'] = self._timers.get('add_shaftwork_energy_terms',0)+perf_counter()-t0
 
-        t0 = perf_counter()
         qdot = sum(contributions.values())
-        self._timers['sum_energy_contributions'] = self._timers.get('sum_energy_contributions',0)+perf_counter()-t0
-        t0 = perf_counter()
         heat_capacity = self.Phases.get_total_heat_capacity()  # [J/K]
-        self._timers['get_heat_capacity'] = self._timers.get('get_heat_capacity',0)+perf_counter()-t0
         dtemp_dt = qdot / heat_capacity
         return {StateKey("global_temp"): dtemp_dt}
 

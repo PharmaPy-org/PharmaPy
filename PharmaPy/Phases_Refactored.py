@@ -10,7 +10,6 @@ if TYPE_CHECKING:
     from PharmaPy.Mechanisms import Mechanism
     from PharmaPy.DataClasses import PhaseRef,StateCollection,StateKey
 import warnings
-from time import perf_counter
 
 eps = np.finfo(float).eps
 
@@ -996,14 +995,10 @@ class BasePhase(ThermoPhysicalManager):
         )
     ##### Vessel API
     def update_from_solver_state(self,updates:dict,completed_state:dict["StateKey"],unit=None):
-        t0 = perf_counter()
         if updates:
             self.updatePhase(**updates)
-        unit._timers['updatePhase0'] = unit._timers.get('updatePhase0',0)+perf_counter()-t0
-        t0 = perf_counter()
         for mech in self.mechanisms:
             mech.update_state(completed_state,unit=unit)
-        unit._timers['updatePhaseMech'] = unit._timers.get('updatePhaseMech',0)+perf_counter()-t0
 
 class LiquidPhase(BasePhase):
     LEGACY_CLASS_NAME = 'LiquidPhase'
