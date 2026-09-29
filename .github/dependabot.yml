@@ -1,0 +1,30 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-runtime:
+        patterns:
+          - "numpy"
+          - "scipy"
+          - "matplotlib"
+          - "pandas"
+      python-test:
+        patterns:
+          - "pytest"
+    ignore:
+      - dependency-name: "assimulo"
+      - dependency-name: "cython"
+        update-types:
+          - "version-update:semver-major"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

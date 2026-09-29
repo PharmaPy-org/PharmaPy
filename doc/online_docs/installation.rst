@@ -2,41 +2,39 @@
 Installation
 ============
 
-..  There are two ways to install PharmaPy. The first way is for casual users, intending to use the software and not edit or add modules to the software package. The second way is for developers or advanced users who intend to create and incorporate their own models into their work.
+The canonical `PharmaPy installation guide`_ contains the current commands for:
 
-        Standard Installation
-        =====================
+* a core installation from source with pip
+* editable development and core tests
+* the reproducible pixi environments
+* the optional Assimulo solver backend
+* the manual conda fallback and platform limitations
 
-        We recommend using python or anaconda virtual environments to control python packages effectively, including PharmaPy and its dependencies. PharmaPy can be installed in two different ways. For those who want to just use the software in the latest stable version, use the following command:
+The planned PyPI distribution name is ``pharmapy-sim``, while the Python import
+name remains ``PharmaPy``. No PharmaPy process-simulation release is on PyPI
+yet, so install from the source repository for now. Do not run
+``pip install pharmapy``; that distribution is an unrelated project.
 
-        .. testcode::
+For the core library from an existing source checkout:
 
-           pip install pharmapy
+.. code-block:: console
 
-        This will download and install PharmaPy to the current python environment. To edit and run code, it is recommended to also install an IDE, or use jupyer notebooks. To install jupyter notebooks and its dependencies, run the following command:
+   python -m venv .venv
+   python -m pip install .
+   python -c "import PharmaPy; print(PharmaPy.__file__)"
 
-        .. testcode::
+For the locked ``linux-64`` and ``win-64`` development and Assimulo
+environments:
 
-           pip install jupyterlab
+.. code-block:: console
 
-..
-        Developer Installation
-        ======================
+   pixi install --all --locked
+   pixi run test
+   pixi run -e assimulo test-assimulo
 
-For installation, we recommend the use of conda environments to control packages dependencies and PharmaPy. A lighweight version of conda (`miniconda`_) is probably a good option for new users of the management system.
+pixi is a development and solver-environment tool, not a runtime dependency of
+the pip distribution. See the canonical guide for environment activation,
+Windows commands, installation of pixi itself, and complete verification
+instructions.
 
-For PharmaPy installation, you must use the source code, which is available in our `Github repository`_. Once the source code is downloaded to the desired location, navigate (:code:`cd`) to the directory which contains the setup.py file. Then, follow the instructions on the :code:`installation_guide.txt`, to setup fresh conda environment and install PharmaPy and its dependencies.
-
-..
-        make sure your conda environment is appropriately installed and activated, then input the following commands for PharmaPy installation:
-        1. conda install --file requirements.txt -c conda-forge
-        2. python setup.py develop
-
-.. _Github repository: https://github.com/CryPTSys/PharmaPy/tree/develop
-.. _miniconda: https://github.com/CryPTSys/PharmaPy/
-
-Once the software is installed, install and/or use your preferred IDE or text editor to construct PharmaPy flowsheets. For instance, on an active conda environment, install the `Spyder IDE`_ by doing :code:`conda -c conda-forge install spyder`, which provides a nice development environment very well suited for scientific computing. 
-
-.. _Spyder IDE: https://github.com/spyder-ide/spyder
-
-Tutorials in the format of Jupyter notebooks are available for users and developers getting started with PharmaPy. Also, on this site, documentation for all unit operations is available.
+.. _PharmaPy installation guide: https://github.com/PharmaPy-org/PharmaPy/blob/master/INSTALLATION.md

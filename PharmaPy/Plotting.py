@@ -64,6 +64,37 @@ def latexify_name(name, units=False):
     return out
 
 
+def format_unit_label(units):
+    """Return a display label for unit metadata.
+
+    Parameters
+    ----------
+    units : str or None
+        Unit metadata. Bracketed values such as ``[K]`` and ``[-]`` follow the
+        repository documentation convention.
+
+    Returns
+    -------
+    str
+        LaTeX-formatted unit label without metadata brackets. Dimensionless
+        metadata ``[-]`` and empty values return an empty string.
+    """
+    if units is None:
+        return ''
+
+    units = str(units).strip()
+    if units == '':
+        return ''
+
+    if units.startswith('[') and units.endswith(']'):
+        units = units[1:-1].strip()
+
+    if units in ('', '-'):
+        return ''
+
+    return latexify_name(units, units=True)
+
+
 def color_axis(ax, color):
     ax.spines['right'].set_color(color)
     ax.tick_params(axis='y', colors=color, which='both')
@@ -182,8 +213,8 @@ def name_yaxes(ax, states_fstates, names, ylabels, legend):
             ylabel = latexify_name(ylabels[ind])
 
         units = states_fstates[name].get('units', '')
-        if len(units) > 0:
-            unit_name = latexify_name(units, units=True)
+        unit_name = format_unit_label(units)
+        if len(unit_name) > 0:
             ylabel = ylabel + ' (' + unit_name + ')'
 
         axis.set_ylabel(ylabel)
@@ -265,9 +296,8 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
             ylabel = latexify_name(ylabels[ind])
 
         units = states_and_fstates[name].get('units', '')
-        if len(units) > 0:
-            unit_name = latexify_name(states_and_fstates[name]['units'],
-                                      units=True)
+        unit_name = format_unit_label(units)
+        if len(unit_name) > 0:
             ylabel = ylabel + ' (' + unit_name + ')'
 
         if index_y:

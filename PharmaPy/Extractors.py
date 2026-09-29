@@ -10,6 +10,8 @@ from scipy.optimize import newton
 
 from PharmaPy.Commons import mid_fn
 from PharmaPy.Phases import LiquidPhase
+from PharmaPy.ThermoModule import (
+    VALID_ACTIVITY_MODELS as VALID_GAMMA_METHODS, validate_activity_model)
 from PharmaPy.Streams import LiquidStream
 from PharmaPy.Connections import get_inputs_new
 
@@ -17,15 +19,35 @@ from PharmaPy.Results import DynamicResult
 
 
 def material_setter(instance, oper_mode):
+    """Return inlet metadata for extractor amount or flow routing.
+
+    Parameters
+    ----------
+    instance : LiquidPhase or LiquidStream
+        Material object passed to the extractor. Batch phases provide total
+        ``moles`` [mol]; continuous streams provide ``mole_flow`` [mol/s].
+    oper_mode : {'Batch', 'Continuous'}
+        Extractor operating mode. ``Continuous`` selects flow-rate semantics;
+        ``Batch`` selects amount semantics.
+
+    Returns
+    -------
+    out : dict
+        Inlet metadata with ``in_flow`` in [mol/s] for continuous operation or
+        [mol] for batch operation, ``temp`` [K], ``pres`` [Pa], component
+        count, and result-state metadata.
+    """
     name_comp = instance.name_species
     num_comp = len(name_comp)
     states_di = {
-        'x_heavy': {'dim': num_comp, 'type': 'alg', 'index': name_comp},
-        'x_light': {'dim': num_comp, 'type': 'alg', 'index': name_comp},
-        'moles_heavy': {'dim': 1, 'type': 'alg'},
-        'moles_light': {'dim': 1, 'type': 'alg'}}
+        'x_heavy': {'dim': num_comp, 'type': 'alg', 'index': name_comp,
+                    'units': '[-]'},
+        'x_light': {'dim': num_comp, 'type': 'alg', 'index': name_comp,
+                    'units': '[-]'},
+        'moles_heavy': {'dim': 1, 'type': 'alg', 'units': '[mol]'},
+        'moles_light': {'dim': 1, 'type': 'alg', 'units': '[mol]'}}
 
-    if oper_mode == 'continuous':
+    if oper_mode == 'Continuous':
         in_flow = instance.mole_flow
     else:
         in_flow = instance.moles
@@ -36,8 +58,39 @@ def material_setter(instance, oper_mode):
     return out
 
 
+def validate_gamma_method(gamma_method: str,
+                          param_name: str = 'gamma_method') -> None:
+    """Validate an activity-coefficient model selector.
+
+    Parameters
+    ----------
+    gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}
+        Activity-coefficient model selector.
+    param_name : str, optional
+        Parameter name to use in the validation error.
+
+    Raises
+    ------
+    ValueError
+        If ``gamma_method`` is not one of ``VALID_GAMMA_METHODS``.
+    """
+    validate_activity_model(gamma_method, param_name=param_name)
+
+
 class ContinuousExtractor:
     def __init__(self, k_fun=None, gamma_method='UNIQUAC'):
+        """Create a continuous extractor.
+
+        Parameters
+        ----------
+        k_fun : callable, optional
+            Equilibrium function. It must accept two liquid mole-fraction
+            vectors ``x1`` [-] and ``x2`` [-] plus temperature ``temp`` [K],
+            and return distribution coefficients ``K_i`` [-].
+        gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Activity-coefficient method used by the default ``k_fun``.
+        """
+        validate_gamma_method(gamma_method)
 
         self._Inlet = None
 
@@ -45,7 +98,7 @@ class ContinuousExtractor:
 
         self.gamma_method = gamma_method
 
-        self.oper_mode = 'Batch'
+        self.oper_mode = 'Continuous'
 
     @property
     def Inlet(self):
@@ -68,40 +121,46 @@ class ContinuousExtractor:
 
         gamma_extr = self.matter.getActivityCoeff(method=self.gamma_method,
                                                   mole_frac=x_extr,
-                                                  temp=self.temp)
+                                                  temp=self.temp)  # [-]
 
         gamma_raff = self.matter.getActivityCoeff(method=self.gamma_method,
                                                   mole_frac=x_raff,
-                                                  temp=self.temp)
+                                                  temp=self.temp)  # [-]
 
-        global_bce = 1 - extr - raff
-        comp_bces = z_i - extr*x_extr - raff*x_raff
-        equilibria = x_extr * gamma_extr - x_raff * gamma_raff
+        global_bce = 1 - extr - raff  # [-]
+        comp_bces = z_i - extr*x_extr - raff*x_raff  # [-]
+        equilibria = x_extr * gamma_extr - x_raff * gamma_raff  # [-]
 
-        diff_frac = np.sum(x_extr - x_raff)
-        args_mid = np.array([raff, diff_frac, raff - 1])
-        vap_flow = mid_fn(args_mid)
+        diff_frac = np.sum(x_extr - x_raff)  # [-]
+        args_mid = np.array([raff, diff_frac, raff - 1])  # [-]
+        vap_flow = mid_fn(args_mid)  # phase-presence residual [-]
 
         balance = np.concatenate(
             (np.array([global_bce]),
              comp_bces, equilibria,
              np.array([vap_flow]))
             )
+        # All entries are dimensionless material/equilibrium residuals [-].
 
         return balance
 
     def material_balance(self, phi_seed, x_1_seed, x_2_seed, z_i, temp):
+        """Solve dimensionless liquid split and equilibrium relations.
+
+        ``phi_seed`` is a phase fraction [-], ``x_1_seed``, ``x_2_seed``,
+        and ``z_i`` are mole fractions [-], and ``temp`` is temperature [K].
+        """
 
         def get_ki(x1, x2, temp):
             gamma_1 = self.matter.getActivityCoeff(method=self.gamma_method,
                                                    mole_frac=x1,
-                                                   temp=temp)
+                                                   temp=temp)  # [-]
 
             gamma_2 = self.matter.getActivityCoeff(method=self.gamma_method,
                                                    mole_frac=x2,
-                                                   temp=temp)
+                                                   temp=temp)  # [-]
 
-            k_i = gamma_1 / gamma_2
+            k_i = gamma_1 / gamma_2  # K_i [-]
 
             return k_i
 
@@ -111,11 +170,13 @@ class ContinuousExtractor:
             k_fun = self.k_fun
 
         def func_phi(phi, k_i):
+            # phi, z_i, and K_i are dimensionless, so f_phi is dimensionless.
             f_phi = z_i * (1 - k_i) / (1 + phi*(k_i - 1))
 
             return f_phi.sum()
 
         def deriv_phi(phi, k_i):
+            # d(f_phi)/d(phi) is dimensionless because phi is dimensionless.
             deriv = z_i * (1 - k_i)**2 / (1 + phi*(k_i - 1))**2
 
             return deriv.sum()
@@ -128,20 +189,21 @@ class ContinuousExtractor:
         count = 0
 
         while error > tol and count < max_iter:
-            k_i = k_fun(x_1_seed, x_2_seed, self.temp)
-            phi_k = newton(func_phi, phi_seed, args=(k_i, ), fprime=deriv_phi)
+            k_i = k_fun(x_1_seed, x_2_seed, self.temp)  # K_i [-]
+            phi_k = newton(func_phi, phi_seed, args=(k_i, ),
+                           fprime=deriv_phi)  # phase fraction [-]
 
-            x_1_k = z_i / (1 + phi_k*(k_i - 1))
-            x_2_k = x_1_k * k_i
+            x_1_k = z_i / (1 + phi_k*(k_i - 1))  # mole fractions [-]
+            x_2_k = x_1_k * k_i  # mole fractions [-]
 
             # Normalize x's
             x_1_k *= 1 / x_1_k.sum()
             x_2_k *= 1 / x_2_k.sum()
 
-            x_k = np.concatenate((x_1_k, x_2_k))
-            x_km1 = np.concatenate((x_1_seed, x_2_seed))
+            x_k = np.concatenate((x_1_k, x_2_k))  # mole fractions [-]
+            x_km1 = np.concatenate((x_1_seed, x_2_seed))  # [-]
 
-            error = np.linalg.norm(x_k - x_km1)
+            error = np.linalg.norm(x_k - x_km1)  # [-]
 
             # Update
             x_1_seed = x_1_k
@@ -160,20 +222,40 @@ class ContinuousExtractor:
         return phi_conv, x1_conv, x2_conv, info
 
     def energy_balance(self, liq, vap, x_i, y_i, z_i):
-        liq_flow = liq * self.in_flow  # mol/s
-        vap_flow = vap * self.in_flow  # mol/s
+        """Evaluate the continuous extractor energy residual.
 
-        tref = self.temp
+        Parameters
+        ----------
+        liq : float
+            Liquid split fraction [-].
+        vap : float
+            Extract phase split fraction [-].
+        x_i : ndarray
+            Liquid outlet mole fractions [-].
+        y_i : ndarray
+            Extract outlet mole fractions [-].
+        z_i : ndarray
+            Feed mole fractions [-].
 
-        h_liq = 0
+        Returns
+        -------
+        float
+            Heat duty for the outlet-minus-inlet enthalpy balance [J/s].
+        """
+        liq_flow = liq * self.in_flow  # [mol/s]
+        vap_flow = vap * self.in_flow  # [mol/s]
+
+        tref = self.temp  # [K]
+
+        h_liq = 0  # [J/mol]
         h_vap = self.VaporOut.getEnthalpy(self.temp, temp_ref=tref,
-                                          mole_frac=y_i, basis='mole')
+                                          mole_frac=y_i, basis='mole')  # [J/mol]
 
-        h_in = self.matter.getEnthalpy(temp_ref=tref, basis='mole')
+        h_in = self.matter.getEnthalpy(temp_ref=tref, basis='mole')  # [J/mol]
 
-        heat_duty = liq_flow * h_liq + vap_flow * h_vap - self.in_flow * h_in
+        heat_duty = liq_flow * h_liq + vap_flow * h_vap - self.in_flow * h_in  # [J/s]
 
-        return heat_duty  # W
+        return heat_duty  # [J/s]
 
     def unit_model(self, phi, x1, x2, temp, material=True):
         z_i = self.matter.mole_frac
@@ -242,7 +324,7 @@ class ContinuousExtractor:
         path = self.matter.path_data
 
         # Store in objects
-        if self.oper_mode == 'continuous':
+        if self.oper_mode == 'Continuous':
             Liquid_a = LiquidStream(path, mole_frac=xa_liq,
                                     mole_flow=liquid_a,
                                     temp=self.temp, pres=self.pres)
@@ -289,6 +371,9 @@ class BatchExtractor(ContinuousExtractor):
     def __init__(self, k_fun=None, gamma_method='UNIQUAC'):
         super().__init__(k_fun, gamma_method)
 
+        # ``super`` sets the continuous default; batch extraction must keep
+        # amount semantics [mol] for Phases and downstream result objects.
+        self.oper_mode = 'Batch'
         self._Phases = None
 
     @property

@@ -19,6 +19,7 @@ from PharmaPy.Commons import trapezoidal_rule, check_steady_state
 from PharmaPy.CheckModule import check_modeling_objects
 
 import time
+from typing import Optional, Sequence, Union
 
 
 class SimulationExec:
@@ -46,8 +47,81 @@ class SimulationExec:
             raise PharmaPyNonImplementedError(
                 "Provided flowsheet contains recycle stream(s)")
 
+    def _transfer_to_neighbors(self, name: str, connections: dict, count: int,
+                               pick_units: Optional[Sequence[str]] = None) -> int:
+        """
+        Transfer output data from a unit operation to graph successors.
+
+        Parameters
+        ----------
+        name : str
+            Name of the source unit operation in the flowsheet graph.
+        connections : dict
+            Mapping used to store generated Connection objects. The mapping is
+            updated in place.
+        count : int
+            Counter used to build connection names.
+        pick_units : sequence of str, optional
+            Unit operation names selected for execution. Successors outside
+            this sequence are skipped when provided.
+
+        Returns
+        -------
+        count : int
+            Next available connection counter after transfers are created.
+
+        """
+        for uo_next in self.graph[name]:
+            if pick_units is not None and uo_next not in pick_units:
+                continue
+
+            connection = Connection(
+                source_uo=getattr(self, name),
+                destination_uo=getattr(self, uo_next))
+
+            conn_name = 'CONN%i' % count
+            connections[conn_name] = connection
+
+            connection.transfer_data()
+
+            count += 1
+
+        return count
+
     def SolveFlowsheet(self, kwargs_run=None, pick_units=None, verbose=True,
                        steady_state_di=None, tolerances_ss=None, ss_time=0):
+        """
+        Solve unit operations and transfer stream data through the flowsheet.
+
+        The flowsheet is executed in topological order. Unit operations listed
+        in ``pick_units`` are solved before their output data are transferred
+        to selected graph successors. Units not selected in ``pick_units`` can
+        still transfer existing output data when already solved.
+
+        Parameters
+        ----------
+        kwargs_run : dict, optional
+            Keyword arguments passed to each unit operation ``solve_unit`` call,
+            keyed by unit operation name.
+        pick_units : sequence of str, optional
+            Unit operation names to solve. If omitted, all unit operations in
+            the execution order are solved.
+        verbose : bool, optional
+            If true, print progress messages for each solved unit operation.
+        steady_state_di : dict, optional
+            Steady-state event configuration keyed by unit operation name.
+        tolerances_ss : dict, optional
+            Reserved steady-state tolerance mapping.
+        ss_time : float, optional
+            Initial steady-state time horizon accumulator.
+
+        Returns
+        -------
+        None
+            Results are stored on ``time_processing``, ``result``, and
+            ``connections`` attributes.
+
+        """
 
         if kwargs_run is None:
             kwargs_run = {}
@@ -126,19 +200,8 @@ class SimulationExec:
                     print()
 
                 # Create connection object if needed
-                neighbors = self.graph[name]
-                if len(neighbors) > 0 and self.execution_names[ind + 1] in pick_units:
-                    uo_next = self.execution_names[ind + 1]
-                    connection = Connection(
-                        source_uo=getattr(self, name),
-                        destination_uo=getattr(self, uo_next))
-
-                    conn_name = 'CONN%i' % count
-                    connections[conn_name] = connection
-
-                    connection.transfer_data()
-
-                    count += 1
+                count = self._transfer_to_neighbors(
+                    name, connections, count, pick_units)
 
                 # Processing times
                 if hasattr(instance.result, 'time'):
@@ -147,17 +210,8 @@ class SimulationExec:
 
             # instance is already solved, pass data to connection
             elif isinstance(instance.outputs, dict):
-                connection = Connection(
-                    source_uo=getattr(self, name),
-                    destination_uo=getattr(self,
-                                           self.execution_names[ind + 1]))
-
-                conn_name = 'CONN%i' % count
-                connections[conn_name] = connection
-
-                connection.transfer_data()
-
-                count += 1
+                count = self._transfer_to_neighbors(
+                    name, connections, count, pick_units)
 
         self.time_processing = time_processing
 
@@ -222,6 +276,10 @@ class SimulationExec:
         ------
         RuntimeError
             DESCRIPTION.
+        ValueError
+            If ``x_data`` holds more than one unnamed experiment, because
+            modifiers and ``wrapper_kwargs`` are routed to experiments by
+            name. Pass ``x_data`` as a dictionary keyed by experiment name.
 
         Returns
         -------
@@ -240,6 +298,17 @@ class SimulationExec:
                                    "Select one using the 'pick_unit' argument")
             else:
                 pass  # remember setting reset_states to True!!
+
+        if not isinstance(x_data, dict):
+            num_experiments = (1 if isinstance(x_data, np.ndarray)
+                               else len(x_data))
+            if num_experiments > 1:
+                raise ValueError(
+                    f"x_data holds {num_experiments} unnamed experiments; "
+                    "SetParamEstimation routes phase_modifiers, "
+                    "control_modifiers and wrapper_kwargs to each experiment "
+                    "by name, so pass x_data as a dictionary keyed by "
+                    "experiment name")
 
         if phase_modifiers is None:
             if isinstance(x_data, dict):
@@ -278,7 +347,7 @@ class SimulationExec:
         if hasattr(target_unit, 'Kinetics'):
             param_seed = target_unit.Kinetics.concat_params()
         else:
-            param_seed = target_unit.params
+            param_seed = getattr(target_unit, 'param_seed', target_unit.params)
 
         name_params = inputs_paramest.get('name_params')
 
@@ -388,7 +457,7 @@ class SimulationExec:
             return cost_equip
 
     def GetLabor(self, wage=35, num_weeks=48):
-        # TODO: per/hour (per/shift) cost?
+        # TODO: clarify whether labor cost is hourly [1/h] or per shift [1/shift].
         has_solids = []
         is_batch = []
         uo_names = []
@@ -419,7 +488,7 @@ class SimulationExec:
         num_workers = has_solids * (2 + is_batch) + ~has_solids * (1 + is_batch)
 
         hr_week = 40
-        labor_cost = 1.20 * num_workers * 5 * (hr_week * num_weeks) * wage  # USD/yr
+        labor_cost = 1.20 * num_workers * 5 * (hr_week * num_weeks) * wage  # [USD/yr]
 
         labor_array = np.column_stack(
             (has_solids, is_batch, num_workers, labor_cost))
@@ -430,6 +499,22 @@ class SimulationExec:
         return labor_df
 
     def get_from_phases(self, phases, fields):
+        """Collect named attributes from one phase or a mixed phase.
+
+        Parameters
+        ----------
+        phases : object
+            PharmaPy phase or mixed-phase object.
+        fields : sequence of str
+            Attribute names to collect. Typical values include fractions [-],
+            temperature [K], pressure [Pa], amounts [kg] or [mol], and volumes
+            [m**3].
+
+        Returns
+        -------
+        dict
+            Attribute records keyed by phase object name.
+        """
         if phases.__module__ == 'PharmaPy.MixedPhases':
             phases = phases.Phases
         else:
@@ -437,16 +522,97 @@ class SimulationExec:
 
         out = {}
         for phase in phases:
-            di = {}
+            phase_data = {}
             for field in fields:
-                di[field] = getattr(phase, field)
+                phase_data[field] = getattr(phase, field)
 
             name_phase = get_name_object(phase)
-            out[name_phase] = di
+            out[name_phase] = phase_data
 
         return out
 
+    def get_dynamic_raw_inputs(self, inlet, stream, time):
+        """Evaluate dynamic raw-material inputs for one stream or phase.
+
+        Parameters
+        ----------
+        inlet : object
+            Raw inlet object. It may be a single stream or a mixed phase.
+        stream : object
+            Stream or phase currently being accounted.
+        time : ndarray
+            Simulation time grid [s].
+
+        Returns
+        -------
+        dict
+            Dynamic input profiles. Flow entries are [kg/s], [mol/s], or
+            [m**3/s] according to their key; temperature is [K] and pressure is
+            [Pa].
+
+        Notes
+        -----
+        If a mixed phase owns a single dynamic inlet profile, the total dynamic
+        flow is split by each phase's steady flow fraction [-]. This preserves
+        the total mixed feed instead of integrating the full mixed profile once
+        for every phase.
+        """
+        if getattr(stream, 'DynamicInlet', None) is not None:
+            return stream.DynamicInlet.evaluate_inputs(time)
+
+        inputs = inlet.DynamicInlet.evaluate_inputs(time)
+        if stream is inlet:
+            return inputs
+
+        scaled = {}
+        flow_fields = ('mass_flow', 'mole_flow', 'vol_flow')
+        for field in flow_fields:
+            if field not in inputs:
+                continue
+
+            inlet_flow = getattr(inlet, field, 0)
+            stream_flow = getattr(stream, field, 0)
+            if inlet_flow == 0:
+                flow_fraction = 0
+            else:
+                flow_fraction = stream_flow / inlet_flow  # [-]
+
+            scaled[field] = inputs[field] * flow_fraction
+
+        for field in ('temp', 'pres'):
+            if field in inputs:
+                scaled[field] = inputs[field]
+
+        return scaled
+
     def get_raw_inlets(self, uo, basis='mass'):
+        """Collect raw inlet data for a unit operation.
+
+        Parameters
+        ----------
+        uo : object
+            Unit operation whose upstream-free inlet streams are treated as raw
+            materials.
+        basis : {'mass', 'mole'}, optional
+            Accounting basis. Mass totals are reported in [kg] and mass-flow
+            rates in [kg/s]; molar totals are reported in [mol] and molar-flow
+            rates in [mol/s].
+
+        Returns
+        -------
+        dict
+            Raw inlet records keyed first by inlet name and then by stream or
+            phase name. Records include totals, composition fractions [-],
+            temperature [K], pressure [Pa], and volume [m**3].
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is not ``'mass'`` or ``'mole'``.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be either 'mass' or 'mole'")
+
         if hasattr(uo, 'Inlet'):
             if isinstance(uo.Inlet, dict):
                 inlets = uo.Inlet
@@ -461,7 +627,7 @@ class SimulationExec:
             inlets = {'Inlet_%i' % num: obj for num, obj in enumerate(inlets)}
 
         raws = {key: val for key, val in inlets.items()
-                if val is not None and val.y_upstream is None}
+                if val is not None and val.y_upstream is None}  # raw inlets
 
         # inlets = [inlet for inlet in inlets
         #           if inlet is not None and inlet.y_upstream is None]
@@ -469,85 +635,105 @@ class SimulationExec:
         out = {}
 
         for name, inlet in raws.items():
-            if inlet.__class__.__name__ == 'PharmaPy.MixedPhases':
+            if inlet.__module__ == 'PharmaPy.MixedPhases':
                 streams = inlet.Phases
             else:
                 streams = [inlet]
 
-            di = {}
+            stream_data = {}
             for stream in streams:
-                fields = ['temp', 'pres']
+                fields = ['temp', 'pres']  # [K], [Pa]
 
                 name_stream = get_name_object(stream)
 
-                di[name_stream] = {}
+                stream_data[name_stream] = {}
 
-                dens = stream.getDensity(basis=basis)
+                dens = stream.getDensity(basis=basis)  # [kg/m**3] or [mol/L]
 
                 if uo.oper_mode == 'Batch':
                     if basis == 'mass':
-                        total = stream.mass
+                        total = stream.mass  # [kg]
+                        stream_data[name_stream] = {'mass': total}
+                        fields += ['mass_frac']
                     elif basis == 'mole':
-                        total = stream.moles
-                elif inlet.DynamicInlet is None:
-                    time = uo.result.time[-1] - uo.result.time[0]
+                        total = stream.moles  # [mol]
+                        stream_data[name_stream] = {'moles': total}
+                        fields += ['mole_frac']
+                elif (getattr(stream, 'DynamicInlet', None) is None and
+                      getattr(inlet, 'DynamicInlet', None) is None):
+                    time = uo.result.time[-1] - uo.result.time[0]  # [s]
                     if basis == 'mass':
-                        flow = inlet.mass_flow
-                        total = flow*time
+                        flow = stream.mass_flow  # [kg/s]
+                        total = flow*time  # [kg]
 
-                        di[name_stream] = {'mass': total}
+                        stream_data[name_stream] = {'mass': total}
                         fields += ['mass_frac', 'mass_flow', 'vol_flow']
 
                     else:
-                        flow = inlet.mole_flow
-                        total = flow*time
+                        flow = stream.mole_flow  # [mol/s]
+                        total = flow*time  # [mol]
 
-                        di[name_stream] = {'moles': total}
+                        stream_data[name_stream] = {'moles': total}
                         fields += ['mole_frac', 'mole_flow', 'vol_flow']
 
                 else:
-                    time = uo.result.time
-                    inputs = uo.Inlet.DynamicInlet.evaluate_inputs(time)
+                    time = uo.result.time  # [s]
+                    inputs = self.get_dynamic_raw_inputs(inlet, stream, time)
 
                     if basis == 'mass':
                         if 'mass_flow' in inputs:
-                            flow = inputs['mass_flow']
+                            flow = inputs['mass_flow']  # [kg/s]
                         else:
-                            flow = inputs['mole_flow'] * inlet.mw_av / 1000
+                            flow = inputs['mole_flow'] * stream.mw_av / 1000  # [kg/s]
 
-                        total = trapezoidal_rule(time, flow)
+                        total = trapezoidal_rule(time, flow)  # [kg]
 
-                        di[name_stream] = {'mass': total}
+                        stream_data[name_stream] = {'mass': total}
 
                         fields += ['mass_frac']
 
                     elif basis == 'mole':
                         if 'mole_flow' in inputs:
-                            flow = inputs['mole_flow']
+                            flow = inputs['mole_flow']  # [mol/s]
                         else:
-                            flow = inputs['mass_flow'] / inlet.mw_av * 1000
+                            flow = inputs['mass_flow'] / stream.mw_av * 1000  # [mol/s]
 
-                        total = trapezoidal_rule(time, flow)
+                        total = trapezoidal_rule(time, flow)  # [mol]
 
-                        di[name_stream] = {'moles': total}
+                        stream_data[name_stream] = {'moles': total}
                         fields += ['mole_frac']
 
-                vol = total / dens
+                vol = total / dens  # [m**3] or [L]
                 if basis == 'mole':
-                    vol *= 1/1000
+                    vol *= 1/1000  # [m**3]
 
-                di[name_stream]['vol'] = vol
+                stream_data[name_stream]['vol'] = vol  # [m**3]
 
             from_inlet = self.get_from_phases(inlet, fields)
 
             for key in from_inlet:
-                di[key].update(from_inlet[key])
+                stream_data[key].update(from_inlet[key])
 
-            out[name] = di
+            out[name] = stream_data
 
         return out
 
     def get_holdup(self, uo, basis='mass'):
+        """Collect initial holdup raw-material records.
+
+        Parameters
+        ----------
+        uo : object
+            Unit operation that may retain an original phase or mixed phase.
+        basis : {'mass', 'mole'}, optional
+            Accounting basis. Mass holdups are [kg]; molar holdups are [mol].
+
+        Returns
+        -------
+        dict
+            Initial holdup records including composition fractions [-],
+            temperature [K], pressure [Pa], and volume [m**3].
+        """
         out = {}
 
         if hasattr(uo, '__original_phase__'):
@@ -566,14 +752,50 @@ class SimulationExec:
 
         return out
 
-    def GetRawMaterials(self, basis='mass', totals=True, steady_state=False):
+    def GetRawMaterials(self, basis='mass', totals=True, steady_state=False,
+                        include_holdups=True):
+        """Get raw material use for all solved unit operations.
+
+        Parameters
+        ----------
+        basis : {'mass', 'mole'}, optional
+            Accounting basis. Mass totals are reported in [kg] and molar
+            totals are reported in [mol].
+        totals : bool, optional
+            If true, aggregate each raw stream into total and per-species
+            columns on the selected basis.
+        steady_state : bool, optional
+            Reserved for future steady-state raw material accounting. It is
+            accepted for API compatibility but currently does not change the
+            returned table.
+        include_holdups : bool, optional
+            If true, include initial holdups that were not transferred from an
+            upstream unit operation.
+
+        Returns
+        -------
+        raw_df : pandas.DataFrame
+            Raw material table indexed by unit operation, raw source, and
+            stream or phase name. Total columns are [kg] or [mol], and
+            per-species columns use the same selected basis.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is not ``'mass'`` or ``'mole'``.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be either 'mass' or 'mole'")
 
         out = {}
         for name, uo in self.uos_instances.items():
             out[name] = {}
 
             raw_inlets = self.get_raw_inlets(uo, basis=basis)
-            raw_holdup = self.get_holdup(uo, basis=basis)
+            if include_holdups:
+                raw_holdup = self.get_holdup(uo, basis=basis)
+            else:
+                raw_holdup = {}
 
             for second in raw_inlets:  # flatten multidimensional states
                 for third in raw_inlets[second]:
@@ -604,10 +826,10 @@ class SimulationExec:
 
             if totals:
                 if basis == 'mass':
-                    mass_frac = raw_df.filter(regex='mass_frac').values
+                    mass_frac = raw_df.filter(regex='mass_frac').values  # [-]
 
-                    mass = raw_df['mass'].values[:, np.newaxis]
-                    mass_comp = mass_frac * mass
+                    mass = raw_df['mass'].values[:, np.newaxis]  # [kg]
+                    mass_comp = mass_frac * mass  # [kg]
 
                     cols = ['mass_%s' % comp for comp in self.NamesSpecies]
                     cols = ['mass'] + cols
@@ -615,10 +837,10 @@ class SimulationExec:
                     raw_df = pd.DataFrame(np.column_stack((mass, mass_comp)),
                                           columns=cols, index=raw_df.index)
 
-                elif basis == 'moles':
-                    mole_frac = raw_df.filter(regex='mole_frac').values
-                    moles = raw_df['moles'].values[:, np.newaxis]
-                    moles_comp = mole_frac * moles
+                elif basis == 'mole':
+                    mole_frac = raw_df.filter(regex='mole_frac').values  # [-]
+                    moles = raw_df['moles'].values[:, np.newaxis]  # [mol]
+                    moles_comp = mole_frac * moles  # [mol]
 
                     cols = ['moles_%s' % comp for comp in self.NamesSpecies]
                     cols = ['moles'] + cols
@@ -628,28 +850,44 @@ class SimulationExec:
 
         return raw_df
 
-    def GetDuties(self, full_output=False):
-        """
-        Get heat duties for all equipment that calculates an energy balance.
+    def GetDuties(self, full_output: bool = False) -> Union[pd.DataFrame, tuple]:
+        """Collect unit-reported energies without changing their time/sign basis.
 
         Parameters
         ----------
         full_output : bool, optional
-            if True, duties and duty types are returened. The default is False.
+            Return utility-type identifiers alongside the energy table.
 
         Returns
         -------
-        heat_duties : pandas dataframe
-            heat duties [J].
+        heat_duties : pandas.DataFrame
+            Unit-reported energies [J], rows in equipment order and columns
+            ``heating``, ``cooling``. These labels do not normalize signs or
+            guarantee a common accumulation interval; see Notes.
+        duties_ids : numpy.ndarray, optional
+            Utility identifiers [-], shape (num_equipment, 2), returned only
+            with full_output=True. Refrigeration uses -3, -2, -1; cooling water
+            uses 0; heating uses 1, 2, 3 (1 is low-pressure steam).
 
-        duties_ids : numpy array
-            2D array with first column containing heating type and
-            second column containing refrigeration type, according to the
-            following convention:
+        Notes
+        -----
+        BatchReactor, CSTR, and SemibatchReactor accumulate since reset in
+        column 0, positive for heat added to liquid. PFR uses the same sign
+        and column but reports only its latest run. Batch/MSMPR crystallizers
+        report the latest segment in column 1, positive for heat removed;
+        SemibatchCryst does not publish these energy diagnostics.
 
-            refrigeration: -2, -1, 0 (0 corresponding to cooling water)
-            heating: 1, 2, 3 (1 corresponding to low pressure steam)
+        Batch evaporators accumulate since reset or new Phases: column 0 is
+        signed drum heat (positive inward), column 1 signed condenser heat
+        (negative for cooling). Continuous evaporators accumulate signed
+        utility/condenser energies and then report magnitudes in their two
+        columns; utility heat is positive outward before taking the magnitude.
 
+        This collector neither integrates profiles nor sums earlier PFR or
+        crystallizer segments. Before duration-based comparisons or GetOPEX,
+        accumulate those per-run energies externally over the intended common
+        horizon. Mixing cumulative and last-segment rows otherwise undercounts
+        repeated PFR/crystallizer operation.
         """
         heat_duties = []
         equipment_ids = []
@@ -675,6 +913,45 @@ class SimulationExec:
 
     def GetOPEX(self, cost_raw, include_holdups=True, steady_raw=False,
                 lumped=False, kwargs_items=None):
+        """
+        Get operating costs from duties, raw materials, and labor.
+
+        Parameters
+        ----------
+        cost_raw : array_like
+            Raw material unit costs compatible with the raw material table.
+            On a mass basis, values are [USD/kg]; on a mole basis, values are
+            [USD/mol]. A scalar applies to every raw-material column. A vector
+            must have one entry per raw-material column: the first entry prices
+            the total column and the remaining entries price per-species columns.
+        include_holdups : bool, optional
+            If true, raw material accounting includes initial holdups.
+        steady_raw : bool, optional
+            Forwarded to ``GetRawMaterials``. It is reserved for future
+            steady-state raw accounting and currently does not change the raw
+            material table.
+        lumped : bool, optional
+            Reserved for lumped OPEX reporting.
+        kwargs_items : dict, optional
+            Per-item keyword arguments for ``duties``, ``raw_materials``, and
+            ``labor`` calculations. Top-level ``steady_raw`` and
+            ``include_holdups`` take precedence over same-named entries in
+            ``kwargs_items['raw_materials']``.
+
+        Returns
+        -------
+        duty_cost, raw_cost, labor_cost : pandas.DataFrame
+            ``duty_cost`` [USD] and ``raw_cost`` [USD] are per simulated run.
+            ``labor_cost`` is [USD/yr]. Returned when ``lumped`` is false.
+            When ``lumped`` is true, this method currently returns ``None``.
+
+        Raises
+        ------
+        ValueError
+            If ``cost_raw`` has more than one dimension or has a one-dimensional
+            width other than one or the raw-material table width.
+
+        """
 
         opex_items = ('duties', 'raw_materials', 'labor')
         if kwargs_items is None:
@@ -683,28 +960,44 @@ class SimulationExec:
         cost_raw = np.asarray(cost_raw)
 
         # ---------- Heat duties
-        # Energy cost (USD/GJ)
-        heat_exchange_cost = [14.12, 8.49, 4.77,  # refrigeration
-                              0.378,  # water
-                              4.54, 4.77, 5.66]  # steam
+        # Energy cost [USD/GJ], keyed by GetDuties duty type [-].
+        duty_cost_by_type = {
+            -3: 14.12,  # refrigeration
+            -2: 8.49,  # refrigeration
+            -1: 4.77,  # refrigeration
+            0: 0.378,  # cooling water
+            1: 4.54,  # steam
+            2: 4.77,  # steam
+            3: 5.66,  # steam
+        }
 
-        heat_exchange_cost = np.array(heat_exchange_cost)
-
-        duties, map_duties = self.GetDuties(full_output=True,
+        duties, duty_types = self.GetDuties(full_output=True,
                                             **kwargs_items.get('duties', {}))
-        map_duties += 3
+        unknown_duty_types = sorted(
+            int(duty_type) for duty_type in np.unique(duty_types)
+            if duty_type not in duty_cost_by_type)
+        if unknown_duty_types:
+            raise ValueError("Unknown duty type(s): %s" % unknown_duty_types)
 
-        duty_unit_cost = np.zeros_like(map_duties, dtype=np.float64)
-        for ind, row in enumerate(map_duties):
-            duty_unit_cost[ind] = heat_exchange_cost[row]
+        duty_unit_cost = np.zeros_like(duty_types, dtype=np.float64)  # [USD/GJ]
+        for duty_type, unit_cost in duty_cost_by_type.items():
+            duty_unit_cost[duty_types == duty_type] = unit_cost
 
-        duty_cost = np.abs(duties)*1e-9 * duty_unit_cost
+        duty_cost = np.abs(duties)*1e-9 * duty_unit_cost  # [USD]
 
         # ---------- Raw materials
-        raw_materials = self.GetRawMaterials(
-            include_holdups, steady_raw, **kwargs_items.get('raw_materials',
-                                                            {}))
-        raw_cost = cost_raw * raw_materials
+        raw_kwargs = kwargs_items.get('raw_materials', {}).copy()
+        raw_kwargs['steady_state'] = steady_raw
+        raw_kwargs['include_holdups'] = include_holdups
+
+        raw_materials = self.GetRawMaterials(**raw_kwargs)
+        if cost_raw.ndim > 1:
+            raise ValueError("cost_raw must be a scalar or a one-dimensional array")
+        if cost_raw.ndim == 1 and cost_raw.size not in (1, raw_materials.shape[1]):
+            raise ValueError(
+                "cost_raw must be scalar or have one entry per raw-material "
+                "column")
+        raw_cost = cost_raw * raw_materials  # [USD]
 
         # ---------- Labor
         labor_cost = self.GetLabor(**kwargs_items.get('labor', {}))

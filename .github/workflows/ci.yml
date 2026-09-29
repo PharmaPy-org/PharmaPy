@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: Core tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install core dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[test]"
+
+      - name: Verify optional backends are absent from the core lane
+        run: |
+          python -c "import importlib.util; present = [name for name in ('assimulo', 'cyipopt') if importlib.util.find_spec(name) is not None]; assert not present, f'{present} belong only in explicit optional-backend lanes'"
+
+      - name: Collect tests
+        run: python -m pytest --collect-only
+
+      - name: Run assimulo-free tests
+        run: python -m pytest tests/ -m "not assimulo"
+
+  pixi-lock:
+    name: Locked pixi install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Reject non-local PyPI lock entries
+        shell: bash
+        run: |
+          if grep -nE -- '- pypi:' pixi.lock | grep -vE -- '- pypi: \./$'; then
+            echo "::error file=pixi.lock::Only the local editable project may be installed from PyPI in pixi environments." >&2
+            exit 1
+          fi
+
+      - name: Set up locked pixi environments
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: v0.74.0
+          manifest-path: pyproject.toml
+          environments: >-
+            default
+            assimulo
+          locked: true
+          cache: true
+          cache-write: ${{ github.event_name == 'push' && github.ref_name == 'master' }}
+
+      - name: Verify documented locked installation
+        run: pixi install --all --locked
+
+      - name: Verify core and solver imports
+        run: |
+          pixi run python -c "import PharmaPy"
+          pixi run -e assimulo python -c "import PharmaPy, assimulo"
+
+      # Executes the `docs` task itself, not only its environment, so the
+      # locked command cannot drift away from the pip-based Sphinx docs job
+      # and Read the Docs. Linux only: it is the platform the Sphinx job and
+      # Read the Docs build on, and one run is enough to catch drift.
+      - name: Verify the locked documentation build
+        if: matrix.os == 'ubuntu-latest'
+        run: pixi run docs
+
+  integration-assimulo:
+    name: Assimulo integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up locked Assimulo environment
+        uses: prefix-dev/setup-pixi@v0.10.0
+        with:
+          pixi-version: v0.74.0
+          manifest-path: pyproject.toml
+          environments: assimulo
+          locked: true
+          cache: true
+          cache-write: false
+
+      - name: Run Assimulo-marked tests
+        run: pixi run -e assimulo test-assimulo

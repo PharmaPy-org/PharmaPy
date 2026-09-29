@@ -5,8 +5,11 @@ Created on Wed May 27 10:12:13 2020
 @author: dcasasor
 """
 
+from typing import Optional
+from numpy.typing import ArrayLike
+
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
-from PharmaPy.Interpolation import local_newton_interpolation
+from PharmaPy.Interpolation import NewtonInterpolation
 from PharmaPy.Results import DynamicResult
 
 from scipy.interpolate import CubicSpline
@@ -14,13 +17,19 @@ import numpy as np
 
 
 def Interpolation(t_data, y_data, time, newton=True, num_points=3):
-    """Kept as a module-level name; the implementation now lives in
-    PharmaPy.Interpolation so the local-stencil logic exists once.
-    This file used to carry its own copy, complete with the
-    off-by-one that collapsed the stencil to a single node at the end
-    of the data."""
-    return local_newton_interpolation(time, t_data, y_data,
-                                      num_points=num_points)
+    idx_time = np.argmin(abs(time - t_data))
+
+    idx_lower = max(0, idx_time - 1)
+    idx_upper = min(len(t_data) - 1, idx_lower + num_points)
+
+    t_interp = t_data[idx_lower:idx_upper]
+    y_interp = y_data[idx_lower:idx_upper]
+
+    # Newton interpolation (quadratic, three points)
+    interp = NewtonInterpolation(t_interp, y_interp)
+    y_target = interp.evalPolynomial(time)
+
+    return y_target
 
 
 class BatchToFlowConnector:
@@ -97,6 +106,10 @@ class BatchToFlowConnector:
 
 
 class LiquidStream(LiquidPhase):
+    # ``__init__`` delegates to ``LiquidPhase.__init__``, adding one frame
+    # between the zero-amount warning and the constructing caller.
+    _zero_amount_stacklevel = LiquidPhase._zero_amount_stacklevel + 1
+
     def __init__(self, path_thermo=None, temp=298.15, pres=101325,
                  mass_flow=0, vol_flow=0, mole_flow=0,
                  controls=None, args_control=None,
@@ -150,11 +163,22 @@ class LiquidStream(LiquidPhase):
         return self._DynamicInlet
 
     @DynamicInlet.setter
-    def DynamicInlet(self, dynamic_object):
+    def DynamicInlet(self, dynamic_object: Optional[object]) -> None:
+        """Attach an inlet controller or restore static stream inputs.
+
+        Parameters
+        ----------
+        dynamic_object : object or None
+            Object exposing ``evaluate_inputs(time)`` with time [s].
+            None clears the controller; static flow [kg/s, mol/s, m**3/s]
+            and temperature [K] attributes then supply evaluated inputs.
+        """
+        self._DynamicInlet = dynamic_object
+        if dynamic_object is None:
+            return
+
         dynamic_object.controllable = self.controllable
         dynamic_object.parent_instance = self
-
-        self._DynamicInlet = dynamic_object
 
     def InterpolateInputs(self, time):
         if isinstance(time, (float, int)):
@@ -180,25 +204,60 @@ class LiquidStream(LiquidPhase):
 
         return y_interpol
 
-    def updatePhase(self, concentr=None, mass_conc=None,
-                    mass_frac=None, mole_frac=None,
-                    vol_flow=None, mass_flow=None, mole_flow=None):
+    def updatePhase(self, concentr: Optional[ArrayLike] = None,
+                    mass_conc: Optional[ArrayLike] = None,
+                    mass_frac: Optional[ArrayLike] = None,
+                    mole_frac: Optional[ArrayLike] = None,
+                    vol_flow: Optional[float] = None,
+                    mass_flow: Optional[float] = None,
+                    mole_flow: Optional[float] = None) -> None:
+        """Update liquid composition and reconcile explicit flow rates.
 
-        if vol_flow is None:
-            vol_flow = self.vol_flow
+        Parameters
+        ----------
+        concentr, mass_conc : array-like, optional
+            Species molar [mol/L] and mass [kg/m**3] concentrations, shape
+            ``(num_species,)``. ``concentr`` is the liquid stream's name for
+            the phase's ``mole_conc`` argument.
+        mass_frac, mole_frac : array-like, optional
+            Species mass and mole fractions [-], shape ``(num_species,)``.
+        vol_flow, mass_flow, mole_flow : float, optional
+            Volume [m**3/s], mass [kg/s], and molar [mol/s] flow rates.
+            None and zero mean no explicit flow was supplied.
 
-        if mass_flow is None:
-            mass_flow = self.mass_flow
+        Returns
+        -------
+        None
+            The stream state and flow aliases are updated in place.
 
-        if mole_flow is None:
-            mole_flow = self.mole_flow
+        Notes
+        -----
+        Only explicit positive flows participate in mass, volume, then mole
+        precedence. For scalar inventory and one-dimensional composition,
+        composition-only updates conserve mass flow [kg/s] and recompute the
+        dependent flows. Composition precedence, solvent completion, and
+        unchanged profile inventories follow :meth:`LiquidPhase.updatePhase`.
+        A no-argument update retains the state and flow values. As in previous
+        versions, updates delete the inherited ``mass``, ``vol``, and ``moles``
+        attributes; use the flow aliases to read the reconciled amounts.
+        Zero means "not supplied", so this method cannot set flow to zero.
+        """
+        # The parent reconciles amounts on the stream's per-second basis.
+        self.mass = self.mass_flow  # [kg/s]
+        self.vol = self.vol_flow  # [m**3/s]
+        self.moles = self.mole_flow  # [mol/s]
 
-        super().updatePhase(concentr, mass_conc, mass_frac, mole_frac,
-                            vol_flow, mass_flow, mole_flow)
+        super().updatePhase(
+            mole_conc=concentr, mass_conc=mass_conc,
+            mass_frac=mass_frac, mole_frac=mole_frac,
+            vol=0 if vol_flow is None else vol_flow,
+            mass=0 if mass_flow is None else mass_flow,
+            moles=0 if mole_flow is None else mole_flow,
+        )
 
-        self.mass_flow = self.mass
-        self.vol_flow = self.vol
-        self.mole_flow = self.moles
+        self.mass_flow = self.mass  # [kg/s]
+        self.vol_flow = self.vol  # [m**3/s]
+        self.mole_flow = self.moles  # [mol/s]
 
         del self.mass
         del self.vol
@@ -234,12 +293,116 @@ class SolidStream(SolidPhase):
         # # del self.vol
         # del self.moles
 
+    def updatePhase(self, x_distrib: Optional[np.ndarray] = None,
+                    distrib: Optional[np.ndarray] = None,
+                    mass: Optional[float] = None,
+                    moments: Optional[np.ndarray] = None,
+                    mass_flow: Optional[float] = None) -> None:
+        """Update solid-stream state and synchronize flow-basis aliases.
+
+        Parameters
+        ----------
+        x_distrib : numpy.ndarray, optional
+            Crystal-size grid with shape ``(num_sizes,)`` [um].
+        distrib : numpy.ndarray, optional
+            Total-population number distribution with shape ``(num_sizes,)``
+            [#/um].
+        mass : float, optional
+            Solid mass flow represented by the inherited phase amount
+            attribute [kg/s].
+        moments : numpy.ndarray, optional
+            Total-population moments with shape ``(num_moments,)``. Entry
+            ``n`` has the inherited solid-phase unit [m**n], with order zero
+            a crystal count [-].
+        mass_flow : float, optional
+            Additive flow-oriented alias for ``mass`` [kg/s]. Specify at most
+            one of ``mass`` and ``mass_flow``.
+
+        Raises
+        ------
+        ValueError
+            If both ``mass`` and ``mass_flow`` are supplied.
+
+        Notes
+        -----
+        ``SolidStream`` preserves the historical ``SolidPhase`` amount
+        attributes as flow-rate storage. After the phase update, ``mass`` and
+        ``moles`` therefore map to ``mass_flow`` [kg/s] and ``mole_flow``
+        [mol/s], respectively. When both ``vol`` and an existing ``vol_flow``
+        alias are present, ``vol_flow`` is refreshed from ``vol`` [m**3/s].
+        """
+        if mass is not None and mass_flow is not None:
+            raise ValueError("Specify either 'mass' or 'mass_flow', not both")
+
+        resolved_mass_flow = mass if mass_flow is None else mass_flow  # [kg/s]
+        super().updatePhase(
+            x_distrib=x_distrib,
+            distrib=distrib,
+            mass=resolved_mass_flow,
+            moments=moments,
+        )
+
+        self.mass_flow = self.mass  # [kg/s]
+        self.mole_flow = self.moles  # [mol/s]
+        if hasattr(self, 'vol_flow') and hasattr(self, 'vol'):
+            self.vol_flow = self.vol  # [m**3/s]
+
 
 class VaporStream(VaporPhase):
-    def __init__(self, path_thermo=None, temp=298.15, pres=101325,
-                 mass_flow=0, vol_flow=0, mole_flow=0,
-                 mass_frac=None, mole_frac=None, mole_conc=None,
-                 check_input=True, verbose=True):
+    """Homogeneous vapor flow with ideal-gas amounts and density.
+
+    Phase amount attributes are retained as per-second flow quantities and
+    synchronized with ``mass_flow``, ``vol_flow``, and ``mole_flow`` on updates.
+    """
+    def __init__(self, path_thermo: Optional[str] = None,
+                 temp: float = 298.15, pres: float = 101325,
+                 mass_flow: float = 0, vol_flow: float = 0, mole_flow: float = 0,
+                 mass_frac: Optional[np.ndarray] = None,
+                 mole_frac: Optional[np.ndarray] = None,
+                 mole_conc: Optional[np.ndarray] = None,
+                 check_input: bool = True, verbose: bool = True) -> None:
+        """Initialize a vapor stream and its consistent flow aliases.
+
+        Parameters
+        ----------
+        path_thermo : str, optional
+            Path to the species thermophysical-property JSON file.
+        temp, pres : float, optional
+            Temperature [K] and pressure [Pa], defaulting to standard ambient
+            temperature and one standard atmosphere.
+        mass_flow, vol_flow, mole_flow : float, optional
+            Mass [kg/s], volume [m**3/s], and molar [mol/s] flow. The first
+            positive value in that order controls; all zeros give zero flow.
+        mass_frac, mole_frac : array-like, optional
+            Species mass and mole fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
+        mole_conc : array-like, optional
+            Species molar concentrations [mol/L], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
+        check_input, verbose : bool, optional
+            Enable zero-flow warnings and composition diagnostics, respectively.
+
+        Raises
+        ------
+        ValueError
+            If no composition measure is supplied, a flow is negative, or
+            positive mass or volume flow is requested with zero molar mass.
+        RuntimeWarning
+            If more than one composition measure is supplied.
+
+        Warns
+        -----
+        RuntimeWarning
+            If all flows are zero and input checking is enabled.
+
+        Notes
+        -----
+        Exactly one composition measure is required. Supplied concentrations
+        are retained; concentrations derived from fractions use the converters'
+        liquid basis, not gas-EOS values. The first positive flow applies to
+        every composition row. Composition-dependent flows have one value per
+        row; shared flows independent of composition remain scalar.
+        """
 
         super().__init__(path_thermo, temp, pres,
                          mass=mass_flow, vol=vol_flow, moles=mole_flow,
@@ -247,28 +410,110 @@ class VaporStream(VaporPhase):
                          mole_conc=mole_conc, check_input=check_input,
                          verbose=verbose)
 
-        self.mass_flow = self.mass
-        self.vol_flow = self.vol
-        self.mole_flow = self.moles
+        self.mass_flow = self.mass  # [kg/s]
+        self.vol_flow = self.vol  # [m**3/s]
+        self.mole_flow = self.moles  # [mol/s]
 
         self.controllable = ('mass_flow', 'mole_flow', 'vol_flow', 'temp')
 
         self._DynamicInlet = None
 
-        # del self.mass
-        # del self.vol
-        # del self.moles
+    def updatePhase(self, mole_conc: Optional[np.ndarray] = None,
+                    mass_conc: Optional[np.ndarray] = None,
+                    mass_frac: Optional[np.ndarray] = None,
+                    mole_frac: Optional[np.ndarray] = None,
+                    vol: float = 0, mass: float = 0, moles: float = 0,
+                    vol_flow: Optional[float] = None,
+                    mass_flow: Optional[float] = None,
+                    mole_flow: Optional[float] = None,
+                    temp: Optional[float] = None,
+                    pres: Optional[float] = None) -> None:
+        """Update vapor flow using phase-style amounts or flow aliases.
+
+        Parameters
+        ----------
+        mole_conc, mass_conc : ndarray, optional
+            Species molar [mol/L] and mass [kg/m**3] concentrations, shape
+            ``(num_species,)`` or ``(num_points, num_species)``. Supplied
+            concentrations retain their basis.
+        mass_frac, mole_frac : ndarray, optional
+            Species mass and mole fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
+        vol, mass, moles : float, optional
+            Phase-style names for volume [m**3/s], mass [kg/s], and molar
+            [mol/s] flow. Zero means no amount was supplied.
+        vol_flow, mass_flow, mole_flow : float, optional
+            Flow aliases [m**3/s], [kg/s], and [mol/s], respectively. Each
+            non-None alias replaces its corresponding phase-style argument.
+        temp, pres : float, optional
+            Temperature [K] and pressure [Pa]; None retains stored state.
+
+        Raises
+        ------
+        ValueError
+            If a positive phase-style amount and a non-None alias are both
+            supplied for the same quantity, any explicit amount or flow is
+            negative, or positive mass or volume flow has zero molar mass.
+
+        Notes
+        -----
+        Only explicit amounts participate in mass, volume, then moles
+        precedence. With no positive explicit amount, state changes conserve
+        molar flow. All flow aliases are refreshed after every update; the
+        phase-style attributes remain available on the same per-second basis.
+        Composition precedence and the retained liquid concentration basis
+        follow :meth:`VaporPhase.updatePhase`.
+        A zero alias or amount means "not supplied", so flow cannot be set to
+        zero through ``updatePhase``. For composition profiles, conserved flows
+        retain the shared-scalar or per-row form described by the constructor.
+        """
+        for name, amount in (('mass', mass), ('vol', vol), ('moles', moles),
+                             ('mass_flow', mass_flow), ('vol_flow', vol_flow),
+                             ('mole_flow', mole_flow)):
+            # amount uses [kg/s], [m**3/s], or [mol/s], according to its name.
+            if amount is not None and amount < 0:
+                raise ValueError(f"{name} must be nonnegative")
+
+        if mass > 0 and mass_flow is not None:
+            raise ValueError("Specify either 'mass' or 'mass_flow', not both")
+        if vol > 0 and vol_flow is not None:
+            raise ValueError("Specify either 'vol' or 'vol_flow', not both")
+        if moles > 0 and mole_flow is not None:
+            raise ValueError("Specify either 'moles' or 'mole_flow', not both")
+
+        super().updatePhase(
+            mole_conc=mole_conc, mass_conc=mass_conc,
+            mass_frac=mass_frac, mole_frac=mole_frac,
+            vol=vol if vol_flow is None else vol_flow,
+            mass=mass if mass_flow is None else mass_flow,
+            moles=moles if mole_flow is None else mole_flow,
+            temp=temp, pres=pres,
+        )
+        self.mass_flow = self.mass  # [kg/s]
+        self.vol_flow = self.vol  # [m**3/s]
+        self.mole_flow = self.moles  # [mol/s]
 
     @property
     def DynamicInlet(self):
         return self._DynamicInlet
 
     @DynamicInlet.setter
-    def DynamicInlet(self, dynamic_object):
+    def DynamicInlet(self, dynamic_object: Optional[object]) -> None:
+        """Attach an inlet controller or restore static stream inputs.
+
+        Parameters
+        ----------
+        dynamic_object : object or None
+            Object exposing ``evaluate_inputs(time)`` with time [s].
+            None clears the controller; static flow [kg/s, mol/s, m**3/s]
+            and temperature [K] attributes then supply evaluated inputs.
+        """
+        self._DynamicInlet = dynamic_object
+        if dynamic_object is None:
+            return
+
         dynamic_object.controllable = self.controllable
         dynamic_object.parent_instance = self
-
-        self._DynamicInlet = dynamic_object
 
     def evaluate_inputs(self, time):
         if self.DynamicInlet is None:
@@ -280,8 +525,3 @@ class VaporStream(VaporPhase):
             inputs = self.DynamicInlet.evaluate_inputs(time)
 
         return inputs
-
-
-if __name__ == '__main__':
-    path = '../../data/evaporator/compounds_evap.json'
-    stream_liq = LiquidStream(path)

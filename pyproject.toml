@@ -1,0 +1,171 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pharmapy-sim"
+version = "0.0.1"
+description = "A numerical platform for the digital design of pharmaceutical processes"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE.md"]
+authors = [
+    {name = "Daniel Casas-Orozco", email = "dcasasor@purdue.edu"},
+]
+maintainers = [
+    {name = "David Bernal"},
+    {name = "Andres Cabeza"},
+    {name = "Can Li"},
+    {name = "Luisdomingo Guzman Julio"},
+    {name = "Mohamed Mazhar Laljee"},
+    {name = "Yirang Park"},
+    {name = "Sergey Gusev"},
+    {name = "Zachary Hillman"},
+    {name = "Piyush Sharma"},
+    {name = "Quinn Huckaba"},
+]
+keywords = [
+    "chemical-engineering",
+    "pharmaceutical",
+    "process-modeling",
+    "simulation",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.9",
+    "matplotlib>=3.5",
+    "pandas>=1.5",
+]
+
+[project.optional-dependencies]
+assimulo = [
+    "cython>=0.29,<3",
+]
+test = [
+    "pytest",
+]
+workshop = [
+    "ipykernel>=6",
+    "nbclient>=0.10",
+    "nbformat>=5",
+]
+docs = [
+    "ipykernel>=6",
+    "nbsphinx>=0.9",
+    "sphinx>=7.2,<9",
+    "sphinx-rtd-theme>=2,<4",
+    "sphinxcontrib-bibtex>=2.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/PharmaPy-org/PharmaPy"
+Repository = "https://github.com/PharmaPy-org/PharmaPy"
+"Bug Tracker" = "https://github.com/PharmaPy-org/PharmaPy/issues"
+
+[tool.setuptools.packages.find]
+include = ["PharmaPy*"]
+
+# ---------------------------------------------------------------------------
+# pixi: reproducible conda-forge-backed development environments.
+#
+# `[project]` above remains the authoritative surface for pip users. Install
+# from a checkout with `python -m pip install .`; after the first release, the
+# distribution command will be `python -m pip install pharmapy-sim`. pixi is
+# the developer/CI environment manager and the recommended way to obtain the
+# optional Assimulo backend, which is not pip-installable at the supported
+# version (it wraps the SUNDIALS C library via compiled Cython bindings and
+# ships as conda-forge binaries).
+#
+# Two environments mirror the pytest lanes in pytest.ini:
+#   * default  -> core, Assimulo-free (matches `-m "not assimulo"`)
+#   * assimulo -> full backend        (matches `-m assimulo`)
+#
+# A third environment, `docs`, reproduces the documentation build that the
+# Sphinx docs CI job and Read the Docs run.
+#
+# linux-64 and win-64 are locked and tested. Maintainers on other systems
+# should add their platform to `[tool.pixi.workspace].platforms`, regenerate
+# the lock, and verify both test lanes there (Assimulo 3.4.3 is also available
+# on conda-forge for osx-64).
+# ---------------------------------------------------------------------------
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64", "win-64"]
+# Keep SciPy conda-owned even when a newly published conda build has not yet
+# reached an external conda-to-PyPI mapping service. Without this overlay, pixi
+# can install a duplicate PyPI wheel in the same prefix.
+conda-pypi-map = { conda-forge = { mapping = { scipy = "scipy" } } }
+
+# Core runtime dependencies, resolved from conda-forge. Bounds mirror
+# `[project].dependencies` so the pixi and pip surfaces stay consistent.
+[tool.pixi.dependencies]
+python = "3.11.*"
+numpy = ">=1.22"
+scipy = ">=1.9"
+matplotlib = ">=3.5"
+pandas = ">=1.5"
+
+# Install PharmaPy itself as an editable install so `import PharmaPy` resolves
+# to the working tree in every pixi environment.
+[tool.pixi.pypi-dependencies]
+pharmapy-sim = { path = ".", editable = true }
+
+# Optional Assimulo backend (conda-forge only). `cython` bound mirrors the
+# `[project.optional-dependencies].assimulo` pin.
+[tool.pixi.feature.assimulo.dependencies]
+assimulo = "3.4.3.*"
+cython = ">=0.29,<3"
+
+[tool.pixi.feature.test.dependencies]
+pytest = "*"
+
+# Execute workshop notebooks only in the optional solver test environment.
+[tool.pixi.feature.workshop.dependencies]
+ipykernel = ">=6"
+nbclient = ">=0.10"
+nbformat = ">=5"
+
+# Documentation toolchain (conda-forge). Bounds mirror
+# `[project.optional-dependencies].docs` so the pixi and pip surfaces stay
+# consistent. `pandoc` is the one addition: nbsphinx shells out to it to convert
+# the example notebooks, and pip metadata cannot express a non-Python binary, so
+# CI and Read the Docs install it from apt while pixi resolves it from
+# conda-forge.
+[tool.pixi.feature.docs.dependencies]
+ipykernel = ">=6"
+nbsphinx = ">=0.9"
+pandoc = "*"
+sphinx = ">=7.2,<9"
+sphinx-rtd-theme = ">=2,<4"
+sphinxcontrib-bibtex = ">=2.6"
+
+# `pixi run docs` reproduces the warning-as-error build run by the Sphinx docs
+# CI job and by Read the Docs (`fail_on_warning: true`). Output goes to `site/`,
+# which is git-ignored.
+[tool.pixi.feature.docs.tasks]
+docs = "sphinx-build -W --keep-going -b html doc/online_docs site"
+
+# `docs` gets its own solve group so adding the documentation toolchain cannot
+# move the package versions resolved for the tested `default` and `assimulo`
+# environments.
+[tool.pixi.environments]
+default = { features = ["test"], solve-group = "default" }
+assimulo = { features = ["assimulo", "test", "workshop"], solve-group = "assimulo" }
+docs = { features = ["docs"], solve-group = "docs" }
+
+# Convenience tasks. `pixi run test` is the core lane; `pixi run -e assimulo
+# test-assimulo` exercises the solver-backed integration tests.
+[tool.pixi.tasks]
+test = "pytest -m 'not assimulo'"
+test-assimulo = "pytest -m assimulo"

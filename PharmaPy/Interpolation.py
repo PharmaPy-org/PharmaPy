@@ -7,28 +7,14 @@ Created on Tue Apr 14 22:06:49 2020
 """
 
 import numpy as np
-import matplotlib.pyplot as plt
 from scipy.interpolate import CubicSpline
 from scipy.special import comb
 
 
 def local_newton_interpolation(time, t_data, y_data, num_points=3):
-    """Newton interpolation over the num_points nodes nearest to `time`."""
-    num_points = max(1, min(num_points, len(t_data)))
-
     idx_time = np.argmin(abs(time - t_data))
 
-    # The slice bound below is EXCLUSIVE. It used to read
-    #     idx_upper = min(len(t_data) - 1, idx_lower + num_points)
-    # which is an inclusive-style clamp, so it dropped the final node from
-    # every window that reached the end of the data: at the last node the
-    # stencil collapsed to a single point and the 'interpolation' silently
-    # returned y_data[-2]. Since callers clamp time to t_data[-1] before
-    # calling (Connections.interpolate_inputs), that made every evaluation
-    # at or past the upstream horizon hold the second-to-last value rather
-    # than the last. Clamp idx_lower instead, so the window slides back off
-    # the end of the data rather than shrinking.
-    idx_lower = min(max(0, idx_time - 1), len(t_data) - num_points)
+    idx_lower = max(0, min(idx_time - 1, len(t_data) - num_points))
     idx_upper = idx_lower + num_points
 
     t_interp = t_data[idx_lower:idx_upper]
@@ -239,67 +225,3 @@ class PiecewiseLagrange:
             u_time = np.dot(poly, self.y_vals[k - 1])
 
         return u_time
-
-
-if __name__ == '__main__':
-    from scipy.interpolate import interp1d
-
-    case = 2
-
-    if case == 1:
-
-        x_discr = np.arange(0, 5)
-        y_discr = np.sin(x_discr)
-
-        x_interp = [0.5]
-        interp = NewtonInterpolation(x_discr, y_discr)
-        y_interp = interp.evalPolynomial(x_interp)
-
-        plots = False
-
-        if plots:
-            x_c = np.linspace(0, 5)
-            y_c = np.sin(x_c)
-
-            plt.plot(x_discr, y_discr, 'o', mfc='None')
-            plt.plot(x_c, y_c)
-
-            plt.plot(x_interp, interp, 's', mfc='None')
-
-    elif case == 2:  # Saturation example
-        sat = np.array(
-            [0.2322061, 0.24866445, 0.25621458, 0.26201002, 0.26689287,
-             0.27117952, 0.27503542, 0.27856042, 0.28181078, 0.28464856])
-        sat_two = 1.2 * sat + 0.05
-
-        sat = np.column_stack((sat, sat_two))
-        num_nodes = len(sat)
-        step_grid = 0.06 / num_nodes
-        z_sat = np.linspace(step_grid/2, 0.06 - step_grid/2, num_nodes)
-
-        z_bounds = z_sat[[0, -1]]
-        num_interp = 15
-        nodes_interp = np.linspace(*z_bounds, num_interp)
-
-        nodes_cont = np.linspace(*z_bounds, 100)
-
-        scipy = False
-        if scipy:
-            sat_input_fit = interp1d(z_sat, sat)
-            sat_interp_scipy = sat_input_fit(nodes_interp)
-            sat_interp = sat_interp_scipy
-            sat_cont = sat_input_fit(nodes_cont)
-        else:
-            interp = NewtonInterpolation(z_sat, sat)
-            sat_interp_pharmapy = interp.evalPolynomial(nodes_interp)
-            sat_interp = sat_interp_pharmapy
-
-            sat_cont = interp.evalPolynomial(nodes_cont)
-
-        plot = True
-        if plot:
-            fig, axis = plt.subplots()
-            axis.plot(z_sat, sat, 'o', mfc='None')
-            axis.plot(nodes_interp, sat_interp, 's', mfc='None')
-            axis.plot(nodes_cont, sat_cont)
-            axis.legend(('data', 'model'))

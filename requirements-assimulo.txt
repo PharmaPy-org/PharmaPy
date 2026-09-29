@@ -1,0 +1,3 @@
+# Optional solver stack for Assimulo-backed models and integration tests.
+-r requirements.txt
+cython>=0.29,<3

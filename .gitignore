@@ -1,8 +1,20 @@
 # Sphinx documentation
 docs/_build/
+site/
 
 # PyBuilder
 target/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Editor project settings
+.vscode/
+.idea/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -17,10 +29,14 @@ celerybeat-schedule
 # dotenv
 .env
 
-# virtualenv
-.venv/
+# virtualenv (.venv may be a directory or a symlink into a pixi env)
+.venv
+.venv.*
 venv/
 ENV/
+
+# pixi
+.pixi/
 
 # Spyder project settings
 .spyderproject
@@ -66,8 +82,10 @@ ENV/
 # Some output files
 *.pdf
 *.png
+!doc/online_docs/**/*.png
 *.wav
 *.jpg
+!doc/online_docs/**/*.jpg
 *.mp4
 
 # MS Office files

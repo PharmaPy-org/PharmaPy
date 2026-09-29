@@ -1,0 +1,24 @@
+# .readthedocs.yaml
+# Read the Docs configuration file
+# See https://docs.readthedocs.com/platform/stable/config-file/v2.html for details
+
+# Required
+version: 2
+
+build:
+  os: ubuntu-22.04
+  apt_packages:
+    - pandoc
+  tools:
+    python: "3.11"
+
+python:
+  install:
+    - method: pip
+      path: .
+      extra_requirements:
+        - docs
+
+sphinx:
+  configuration: doc/online_docs/conf.py
+  fail_on_warning: true

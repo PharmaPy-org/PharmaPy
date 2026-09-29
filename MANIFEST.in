@@ -1,0 +1,20 @@
+include LICENSE.md
+include README.md
+include CONTRIBUTING.md
+include AGENTS.md
+include INSTALLATION.md
+include DEPENDENCIES.md
+include TESTING.md
+include requirements.txt
+include requirements-assimulo.txt
+include environment.yml
+include .readthedocs.yaml
+
+recursive-include data *.json *.csv
+recursive-include tests *.py *.json *.csv
+recursive-include workshop_data *.json *.csv *.png
+recursive-include doc *.py *.rst *.ipynb *.png Makefile make.bat
+
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
+recursive-exclude * .DS_Store

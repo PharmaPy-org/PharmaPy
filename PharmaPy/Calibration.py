@@ -47,6 +47,25 @@ class PCR_calibration:
         self.y_suffixes = y_suffixes
 
     def __center_data(self, data=None, mean=None, std=None):
+        """Center and optionally standardize predictor data.
+
+        Parameters
+        ----------
+        data : numpy.ndarray
+            Predictor rows in the same units as the calibration data.
+        mean : numpy.ndarray, optional
+            Column means in predictor units. When omitted with ``std``, both
+            statistics are computed from ``data``.
+        std : numpy.ndarray, optional
+            Column standard deviations in predictor units.
+
+        Returns
+        -------
+        data_centered : numpy.ndarray
+            Centered predictors. Values are dimensionless [-] when
+            ``standardize`` or ``snv`` scaling is active.
+
+        """
         if mean is None and std is None:
             mean = data.mean(axis=0)
             std = data.std(axis=0)
@@ -189,12 +208,42 @@ class PCR_calibration:
 
     def predict(self, inputs, num_comp=None, regression_coeff=None,
                 full_output=False):
+        """Predict responses for new predictor rows.
+
+        Parameters
+        ----------
+        inputs : array-like
+            New predictor data in the same units as the calibration data.
+        num_comp : int, optional
+            Number of principal components used for prediction.
+        regression_coeff : numpy.ndarray, optional
+            Regression coefficients with respect to principal-component
+            scores.
+        full_output : bool, optional
+            If True, return projections, predictions, and MSE diagnostics.
+
+        Returns
+        -------
+        response : numpy.ndarray or dict
+            Predicted responses when ``full_output`` is False. If
+            ``full_output`` is True, return a dictionary containing
+            projections, predictions, and MSE. Prediction units match the
+            responses used to fit ``regression_coeff``.
+
+        Notes
+        -----
+        For non-SNV models, new predictors are centered with the training
+        mean and standard deviation so the scores remain on the fitted
+        principal-component basis.
+
+        """
         inputs = np.atleast_2d(inputs)
 
         if self.snv:
             inputs_centered = self.__center_data(inputs)
         else:
-            inputs_centered = self.__center_data(inputs)
+            inputs_centered = self.__center_data(inputs, self.data_mean,
+                                                 self.data_std)
 
         if regression_coeff is None:
             coeff = self.regression_coeff
