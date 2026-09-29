@@ -199,13 +199,22 @@ class MultiPhaseVessel():
 
     def _post_set_phases(self):
         self.define_material_states()
-        self.initialize_defualt_states()
+        self.initialize_default_states()
         self.configure_default_connections()
         self.nomenclature() 
     def configure_default_connections(self):
         """Hook for subclasses to create default outlet connections."""
         pass
-    def initialize_defualt_states(self):
+    def initialize_default_states(self):
+        """
+        Assign the default differential states after phases are set.
+
+        Returns
+        -------
+        None
+            Updates ``phase_states`` in place through
+            ``default_diff_states_from_phases``.
+        """
         self.default_diff_states_from_phases()
     def _initialize_state_collections(self):
 
