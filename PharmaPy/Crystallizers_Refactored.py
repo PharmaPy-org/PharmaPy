@@ -1,3 +1,4 @@
+from __future__ import annotations
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Mechanisms import *
 from PharmaPy.DataClasses import *
