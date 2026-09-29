@@ -25,6 +25,12 @@ class Mechanism:
     The vessel knows nothing about the implementation.
     """
 
+    # Window over which a mechanism that guards positivity should anticipate
+    # depletion, in seconds. MultiPhaseVessel.compile_structure overwrites
+    # this with its own positivity_horizon; the class default keeps a
+    # mechanism usable on its own, outside a vessel.
+    positivity_horizon = 1.0
+
     solver_states = ()
     output_states = ()
     owning_phase = None
@@ -357,7 +363,10 @@ class ReactionMechanism(Mechanism):
             conc[mask],
             temp,
             return_both=True,
-            delta_hrxn = deltah_rxn
+            delta_hrxn = deltah_rxn,
+            # The same window the vessel's own positivity limiter uses, so
+            # the two guards agree on how far ahead they are looking.
+            limiter_dt=self.positivity_horizon,
         )
 
         species_massPerVol_rates = np.zeros(phase.num_species)

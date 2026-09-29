@@ -64,7 +64,7 @@ from PharmaPy.Crystallizers_Refactored import (
     ContinuousCrystallizer as NewContCryst)
 from PharmaPy.Mechanisms import (OneDFVMMechanism,
                                  MomentsPopulationBalance)
-from PharmaPy.IntegratorBackends import AssimuloBackend
+from PharmaPy.IntegratorBackends import AssimuloBackend, ScipyBackend
 from PharmaPy.ProcessControl_Refactored import (SimpleTemperatureController,
                                                 ContinuousVesselController)
 
@@ -74,6 +74,32 @@ from PharmaPy.Utilities import CoolingWater
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(HERE, 'data', 'compound_database.json')
+
+# Which integrator the new-stack vessels are built with. Assimulo stays the
+# default so an unqualified run reproduces every number this module has ever
+# printed; PHARMAPY_BACKEND=scipy sweeps the same stages on the
+# dependency-free backend, under pytest or run directly. The command line is
+# not read, because under pytest sys.argv holds pytest's own arguments.
+BACKEND = os.environ.get('PHARMAPY_BACKEND', 'assimulo').lower()
+
+BACKENDS = {'assimulo': AssimuloBackend, 'scipy': ScipyBackend}
+
+if BACKEND not in BACKENDS:
+    raise ValueError(
+        'Unknown PHARMAPY_BACKEND %r. Choose one of %s.'
+        % (BACKEND, sorted(BACKENDS))
+    )
+
+
+def make_integrator():
+    """A fresh backend for one vessel.
+
+    Always called, never shared: a backend carries the compiled problem and
+    its event state for the unit it was handed, so two vessels sharing one
+    instance would recompile over each other.
+    """
+
+    return BACKENDS[BACKEND](options={'maxh': 60})
 
 # Same chemistry and kinetics as tests/Flowsheet/flowsheet_tests.py, so any
 # difference is attributable to the unit implementations rather than the model.
@@ -239,7 +265,7 @@ def test_stage2_new_new_old():
                                  name_solv='solvent')
 
     flst.R01 = NewBatchReactor(
-        integrator=AssimuloBackend(options={'maxh': 60}),
+        integrator=make_integrator(),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=SimpleTemperatureController(
             temp_func=lambda t: TEMP_INIT))
@@ -256,7 +282,7 @@ def test_stage2_new_new_old():
         x_grid=X_GR, distrib_init=np.zeros_like(X_GR))
 
     flst.CR01 = NewBatchCryst(
-        integrator=AssimuloBackend(options={'maxh': 60}),
+        integrator=make_integrator(),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=SimpleTemperatureController(temp_func=cooling_profile()))
     flst.CR01.Phases = [cryst_liquid, cryst_solid]
@@ -290,7 +316,7 @@ def test_stage3_new_old_new_old():
                            vol_flow=1e-5, name_solv='solvent')
 
     flst.R01 = NewContReactor(
-        integrator=AssimuloBackend(options={'maxh': 60}),
+        integrator=make_integrator(),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=ContinuousVesselController(
             temp_func=lambda t: TEMP_INIT))
@@ -310,7 +336,7 @@ def test_stage3_new_old_new_old():
         x_grid=X_GR, distrib_init=np.zeros_like(X_GR))
 
     flst.CR01 = NewSemiBatchCryst(
-        integrator=AssimuloBackend(options={'maxh': 60}),
+        integrator=make_integrator(),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=SimpleTemperatureController(temp_func=cooling_profile()))
     flst.CR01.Phases = [cryst_liquid, cryst_solid]
@@ -390,7 +416,7 @@ def _new_feed(mole_conc=None, vol_flow=FEED_VOLFLOW):
 
 
 def _new_reactor(cls, inlet=None, controller=None):
-    unit = cls(integrator=AssimuloBackend(options={'maxh': 60}),
+    unit = cls(integrator=make_integrator(),
                h_conv=H_CONV, diam=VESSEL_DIAM,
                controller=controller or SimpleTemperatureController(
                    temp_func=lambda t: TEMP_INIT))
@@ -610,7 +636,7 @@ def _moments_solid():
 def _continuous_cryst(solid_fn=_cryst_solid):
     conc = np.array([0., 0., CONC_CRYST, 0., 0.])
     unit = NewContCryst(
-        integrator=AssimuloBackend(options={'maxh': 60}),
+        integrator=make_integrator(),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=ContinuousVesselController(
             temp_func=lambda t: TEMP_CRYST))
@@ -627,7 +653,7 @@ def _continuous_cryst(solid_fn=_cryst_solid):
 
 def _semibatch_cryst(solid_fn=_cryst_solid):
     unit = NewSemiBatchCryst(
-        integrator=AssimuloBackend(options={'maxh': 60}),
+        integrator=make_integrator(),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=SimpleTemperatureController(
             temp_func=cooling_profile(TIME_R01)))
@@ -771,7 +797,7 @@ def _cross_crystallizer(mechanism_factory):
     solid.mechanisms = mechanism_factory(solid)
 
     unit = NewBatchCryst(
-        integrator=AssimuloBackend(options={'maxh': 60}),
+        integrator=make_integrator(),
         h_conv=H_CONV, diam=VESSEL_DIAM,
         controller=SimpleTemperatureController(
             temp_func=lambda t: CROSS_TEMP))
@@ -865,6 +891,110 @@ def test_stage9_fvm_versus_moments():
             % (100 * gaps[-1]))
 
 
+def _batch_cryst(solid_fn=_cryst_solid):
+    """A crystallizer with no ports at all, cooled on the standard profile."""
+    unit = NewBatchCryst(
+        integrator=make_integrator(),
+        h_conv=H_CONV, diam=VESSEL_DIAM,
+        controller=SimpleTemperatureController(
+            temp_func=cooling_profile(TIME_R01)))
+    conc = np.array([0., 0., CONC_CRYST, 0., 0.])
+    unit.Phases = [NewLiquidPhase(PATH, temp=TEMP_CRYST, mass_conc=conc,
+                                  vol=VOL_INIT, name_solv='solvent'),
+                   solid_fn()]
+    unit.CrystKinetics = cryst_kinetics()
+    unit.Utility = CoolingWater(mass_flow=1, temp_in=TEMP_CRYST)
+    return unit
+
+
+def _total_mass(unit):
+    """Mass held by every phase of a vessel, now."""
+    return float(sum(phase.mass for phase in unit.Phases))
+
+
+def test_stage10_standalone_all_modes():
+    """Each unit class solved on its own, with no flowsheet around it.
+
+    Stages 4-9 always run units in pairs, so a class that only works when
+    something is feeding it -- or only when something is draining it -- would
+    pass all of them. This drives all six on their own instead.
+
+    A batch vessel is closed, so its total mass must be constant; that is the
+    one invariant available without reconstructing the flow bookkeeping, and
+    it is the one that catches a mispacked rate vector. A semibatch or
+    continuous vessel is checked for reaching its final time with a finite,
+    advancing trajectory.
+
+    The closed tolerances differ by discretisation, and deliberately. A
+    reactor closes to solver tolerance, and so does a crystallizer
+    discretised by moments -- not to round-off: total mass is a linear
+    invariant of the state vector, and a BDF integrator preserves one only as
+    well as its Newton iteration converges, so at rtol 1e-6 a closed batch
+    reactor drifts about 9e-8. The 1D-FVM crystallizer is looser again: on
+    the 35-cell X_GR this
+    script uses, a closed batch drifts +3.4e-3 relative, and that number
+    falls to 1.2e-3, 4.6e-4 and 1.7e-4 as the grid is doubled to 70, 140 and
+    280 cells. It is the convergent discretisation error stage 9 measures
+    from the other direction, not a leak, so the bound here is set to catch a
+    leak appearing on top of it rather than to catch the error itself.
+    """
+
+    cases = (
+        ('BatchReactor', lambda: _new_reactor(NewBatchReactor), 1e-6),
+        ('SemiBatchReactor',
+         lambda: _new_reactor(NewSemiReactor, inlet=_new_feed()), None),
+        ('ContinuousReactor', _continuous_reactor, None),
+        ('BatchCrystallizer', _batch_cryst, 1e-2),
+        ('BatchCrystallizer/moments',
+         lambda: _batch_cryst(_moments_solid), 1e-6),
+        ('SemiBatchCrystallizer', _semibatch_cryst, None),
+        ('ContinuousCrystallizer', _continuous_cryst, None),
+    )
+
+    notes = []
+
+    for label, build, closed in cases:
+
+        unit = build()
+        mass_before = _total_mass(unit)
+
+        time, states = unit.solve_unit(runtime=TIME_R01, verbose=False)
+
+        time = np.asarray(time, dtype=float)
+        states = np.asarray(states, dtype=float)
+
+        if not np.isfinite(states).all():
+            raise AssertionError('%s: trajectory is not finite' % label)
+
+        if states.shape[0] != time.size:
+            raise AssertionError(
+                '%s: %d states for %d times'
+                % (label, states.shape[0], time.size))
+
+        if abs(time[-1] - TIME_R01) > 1e-6 * TIME_R01:
+            raise AssertionError(
+                '%s: stopped at t=%g of %g' % (label, time[-1], TIME_R01))
+
+        if np.any(np.diff(time) < 0):
+            raise AssertionError('%s: time runs backwards' % label)
+
+        if closed is not None:
+            mass_after = _total_mass(unit)
+            drift = abs(mass_after - mass_before) / max(mass_before, 1e-30)
+
+            if drift > closed:
+                raise AssertionError(
+                    '%s: closed vessel mass moved %.3e relative, over its '
+                    '%.0e budget (%g -> %g)'
+                    % (label, drift, closed, mass_before, mass_after))
+
+            notes.append('%s mass drift %.1e' % (label, drift))
+        else:
+            notes.append('%s %d pts' % (label, time.size))
+
+    return '; '.join(notes)
+
+
 STAGES = (
     ('0  old Filter alone                                 ', test_stage0_filter_alone),
     ('1  all-old   R01 -> CR01 -> F01                     ', test_stage1_all_old),
@@ -876,6 +1006,7 @@ STAGES = (
     ('7  new -> new   Continuous -> Batch (must refuse)   ', test_stage7_new_continuous_to_batch_refused),
     ('8  continuous -> semibatch, all pairings            ', test_stage8_continuous_to_semibatch_matrix),
     ('9  1D-FVM vs moments, compared on mass              ', test_stage9_fvm_versus_moments),
+    ('10 each unit class solved standalone                ', test_stage10_standalone_all_modes),
 )
 
 
@@ -893,7 +1024,7 @@ def main(show_traceback=True):
                 traceback.print_exc()
 
     print('\n' + '=' * 78)
-    print('MIXED FLOWSHEET RESULTS')
+    print('MIXED FLOWSHEET RESULTS  (backend: %s)' % BACKEND)
     print('=' * 78)
     for label, (status, detail) in results.items():
         print('  [%s] %s %s' % (status, label, detail))

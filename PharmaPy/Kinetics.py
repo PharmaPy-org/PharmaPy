@@ -592,7 +592,8 @@ class RxnKinetics:
             return jac_params
 
     def get_rxn_rates(self, conc, temp=298.15, overall_rates=True, jac=False,
-                      delta_hrxn=None, max_iter=3,return_both=False):
+                      delta_hrxn=None, max_iter=3, return_both=False,
+                      limiter_dt=1.0):
 
         if jac:
             jac_states = self.derivatives(conc, temp)
@@ -611,28 +612,45 @@ class RxnKinetics:
 
             rrates = rxn_rates.copy()
 
-            # Rescale the extent so no species is driven negative. This is
-            # scoped to return_both, the refactored mechanisms' call, and is
+            # Keep a species from being driven negative, by scaling the
+            # reaction extents rather than the species rates. This is scoped
+            # to return_both, the refactored mechanisms' call, and is
             # deliberately not applied to the reported rates: derivatives()
             # differentiates the unclamped rate law, so clamping here would
-            # hand a solver a rate and a Jacobian that disagree. Limiting
-            # consumption belongs to the balance that integrates the rates.
-            # The loop is also irreducibly 1-D, because np.where on a 2-D
-            # input yields row indices that conc[spec_indx] then misreads.
+            # hand a solver a rate and a Jacobian that disagree.
+            #
+            # One factor applied to EVERY extent, not a per-species fix to the
+            # reactions that consume each offender. Scaling all extents by a
+            # single number is trivially stoichiometry preserving, leaves the
+            # selectivity between reactions exactly as the kinetics set it,
+            # and terminates without iterating -- so there is no max_iter to
+            # exhaust and no way to return a rate set that still goes
+            # negative. It is the more conservative choice, because a reaction
+            # that does not touch the limiting species is throttled too.
+            #
+            # limiter_dt is the horizon over which depletion is anticipated,
+            # and it is explicit because conc and total_rates are in different
+            # units: adding them directly, as this once did, silently assumed
+            # a one second window. MultiPhaseVessel passes its own
+            # positivity_horizon so the vessel limiter and this one agree.
+            #
+            # Still irreducibly 1-D: conc[short] selects rows on a 2-D input.
             if return_both and np.asarray(conc).ndim == 1:
-                count=0
-                while count <max_iter:
-                    total_rates = np.dot(rrates, self.normalized_stoich.T)
-                    problem_species = total_rates + conc < -eps*10
-                    if not any(problem_species):
-                        break # no <0 species
-                    for spec_indx in np.where(problem_species)[0]:
-                        rxns_with_consumption = self.normalized_stoich[spec_indx,:] <0
-                        if not np.any(rxns_with_consumption):continue # it could have been fixed on a previous iteration since problem_species was defined
-                        total_consumed = np.dot(rrates[rxns_with_consumption], self.normalized_stoich[spec_indx,rxns_with_consumption])
-                        scale = min(1.0, -conc[spec_indx]/(total_consumed+eps)) # conc +scale*consumed >=0
-                        rrates[rxns_with_consumption]*=scale
-                    count+=1
+
+                total_rates = np.dot(rrates, self.normalized_stoich.T)
+                short = conc + total_rates * limiter_dt < -eps * 10
+
+                if short.any():
+
+                    # Positive where short: those species are net consumed.
+                    consumed = -total_rates[short] * limiter_dt
+
+                    scale = min(
+                        1.0,
+                        float(np.min(conc[short] / consumed)),
+                    )
+
+                    rrates = rrates * max(scale, 0.0)
 
             total_rates = np.dot(rrates, self.normalized_stoich.T)
             if return_both:
@@ -640,7 +658,10 @@ class RxnKinetics:
             if overall_rates:  # per species
                 return total_rates
             else:  # per rxn
-                return rxn_rates  # raw, unclamped, as pre-refactor
+                # Deliberately the raw extents: this path never ran the
+                # limiter pre-refactor and the legacy Reactors.py callers
+                # depend on getting kinetics untouched.
+                return rxn_rates
 
 
 class CrystKinetics:
