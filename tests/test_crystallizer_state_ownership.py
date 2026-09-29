@@ -5,10 +5,12 @@ Reported states remain integrated values; named-solvent phase objects retain
 their existing ideal-volume completion contract. This does not validate the
 physical equivalence of those two representations.
 """
+import json
 import numpy as np
 import pytest
 from PharmaPy.Crystallizers import BatchCryst, MSMPR, SemibatchCryst
 from PharmaPy.Kinetics import CrystKinetics
+from PharmaPy.Phases import LiquidPhase, SolidPhase
 from test_crystallizer_moment_inventory import inventory_unit
 
 RTOL = 1e-12  # [-], allowance for direct converter arithmetic roundoff
@@ -77,7 +79,8 @@ def test_retrieval_preserves_all_concentration_rows(data_path, unit_type, named)
 
 @pytest.mark.assimulo
 @pytest.mark.parametrize('named', [False, True])
-def test_real_growth_solve_publishes_raw_concentrations(data_path, named):
+@pytest.mark.parametrize('equal_density', [False, True])
+def test_real_growth_solve_publishes_raw_concentrations(data_path, named, equal_density, tmp_path):
     """Preserve actual native-solver reporting values through retrieval.
 
     Parameters
@@ -86,10 +89,34 @@ def test_real_growth_solve_publishes_raw_concentrations(data_path, named):
         Public thermodynamic database paths.
     named : bool
         Enable the solvent completion contract; False is the control.
+    equal_density : bool
+        Replace every liquid density with the same synthetic 1000 kg/m**3.
+    tmp_path : Path
+        Isolated directory for that explicit diagnostic property variant.
     """
     pytest.importorskip('assimulo')
-    unit, _ = inventory_unit(data_path, BatchCryst)
-    unit.Liquid_1.ind_solv = 4 if named else None
+    # Exact public issue #312 growth fixture, plus named/unnamed and
+    # equal-density controls. No private exercise values are used.
+    path = data_path['flowsheet'] / 'compound_database.json'
+    if equal_density:
+        properties = json.loads(path.read_text())
+        for component in properties.values():
+            component['rho_liq'] = 1000.0  # [kg/m**3], equal-density diagnostic
+        path = tmp_path/'equal_density.json'
+        path.write_text(json.dumps(properties))
+    temperature = 310.0  # [K], issue #312's isothermal diagnostic
+    volume = 2.0  # [m**3], issue's liquid charge
+    grid = np.geomspace(1.0,500.0,40)  # [um], issue's seed grid
+    population = 1e7*np.exp(-((grid-100.0)/40.0)**2)  # [#/um], issue's Gaussian seed
+    unit = BatchCryst('A',method='moments',controls={
+        'temp':lambda time:temperature+np.zeros_like(time)})
+    liquid = LiquidPhase(str(path),temp=temperature,vol=volume,
+                         mass_frac=[.1,.1,.1,.1,.6],name_solv='solvent' if named else None)
+    # [-], issue's unequal solute/solvent fractions
+    solid = SolidPhase(str(path),temp=temperature,x_distrib=grid,
+                       distrib=population,kv=.5,mass_frac=[1,0,0,0,0])
+    # [-], issue's non-unit shape factor and pure-A solid composition
+    unit.Phases = (liquid,solid)
     unit.Kinetics = CrystKinetics(coeff_solub=[40.0],
                                  growth=(1.0, 0.0, 1.0))
     # [kg/m**3], [um/s], [J/mol], [-]; isothermal seeded diagnostic growth
@@ -110,7 +137,7 @@ def test_real_growth_solve_publishes_raw_concentrations(data_path, named):
         original_retrieve(time, states)
 
     unit.retrieve_results = capture
-    times = np.linspace(0.0, 1200.0, 13)  # [s], finite-growth reporting interval
+    times = np.linspace(0.0, 6000.0, 61)  # [s], exact issue #312 reporting interval
     _, states = unit.solve_unit(time_grid=times, verbose=False)
     assert unit.result.mass_conc[-1, 0] < unit.result.mass_conc[0, 0]
     np.testing.assert_array_equal(states[:, 4:9], captured['concentration'])
