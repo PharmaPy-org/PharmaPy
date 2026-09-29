@@ -315,23 +315,34 @@ class DynamicExtractor:
 
         return inputs
 
-    def get_augmented_arrays(self, di_states, inputs):  # bottom_flows):
+    def get_augmented_arrays(
+            self, di_states: dict, inputs: dict) -> tuple[np.ndarray, ...]:
         """Build inlet-augmented state arrays for stage balances.
 
         Parameters
         ----------
         di_states : dict
-            Current stage states: mole fractions [-], internal energy [J], and
-            temperature [K].
+            Stage mole fractions ``x_i`` and ``y_i`` [-], each with shape
+            ``(num_stages, num_comp)``, and ``temp`` [K] with shape
+            ``(num_stages,)``.
         inputs : dict
-            Dynamic inlet values. Mole flows are [mol/s], mole fractions are
-            [-], and temperatures are [K].
+            Feed and solvent dictionaries containing ``Inlet`` values:
+            scalar ``mole_flow`` [mol/s], component ``mole_frac`` [-] with
+            shape ``(num_comp,)``, and scalar ``temp`` [K].
 
         Returns
         -------
-        tuple of ndarray
-            ``x_augm`` and ``y_augm`` [-], ``temp_augm`` [K],
-            ``light_flows`` [mol/s], and ``heavy_flows`` [mol/s].
+        x_augm, y_augm : ndarray
+            Light/heavy mole fractions [-], shape
+            ``(num_stages + 1, num_comp)``. The light inlet precedes the
+            light stages; the heavy inlet follows the heavy stages.
+        temp_augm : ndarray
+            Light-inlet, stage, then heavy-inlet temperatures [K], shape
+            ``(num_stages + 2,)``. Inlet temperatures follow the same phase
+            roles as inlet compositions, including when the feed is heavy.
+        light_flows, heavy_flows : ndarray
+            Fixed phase molar flows [mol/s], each with shape
+            ``(num_stages + 1,)``.
         """
         light = self.target_states['light_phase']
         heavy = self.target_states['heavy_phase']
@@ -343,8 +354,8 @@ class DynamicExtractor:
 
         x_augm = np.vstack((x_in, di_states['x_i']))  # [-]
         y_augm = np.vstack((di_states['y_i'], y_in))  # [-]
-        temp_augm = np.hstack((temp_in['feed'], di_states['temp'],
-                               temp_in['solvent']))  # [K]
+        temp_augm = np.hstack((temp_in[light], di_states['temp'],
+                               temp_in[heavy]))  # [K]
 
         light_flows = np.zeros(self.num_stages + 1)  # [mol/s]
         heavy_flows = np.zeros_like(light_flows)  # [mol/s]
@@ -353,11 +364,9 @@ class DynamicExtractor:
         light_in = inputs[light]['Inlet']['mole_flow']  # [mol/s]
 
         light_flows[0] = light_in  # [mol/s]
-        # light_flows[1:] = di_states['top_flows']
         light_flows[1:] = light_in  # [mol/s]
 
         heavy_flows[-1] = heavy_in  # [mol/s]
-        # heavy_flows[:-1] = bottom_flows
         heavy_flows[:-1] = heavy_in  # [mol/s]
 
         augm_arrays = (x_augm, y_augm, temp_augm, light_flows, heavy_flows)
