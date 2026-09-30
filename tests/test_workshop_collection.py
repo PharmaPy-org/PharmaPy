@@ -54,6 +54,7 @@ def test_workshop_collection_without_notebook_tool(missing_module: str) -> None:
 
         raise SystemExit(pytest.main([
             "tests/test_workshop_param_estimation.py",
+            "tests/test_workshop_pfr_batch.py",
             "tests/test_optional_dependencies.py",
             "-m", "not assimulo", "-q", "-rs",
         ]))
@@ -64,5 +65,5 @@ def test_workshop_collection_without_notebook_tool(missing_module: str) -> None:
     )
     output = result.stdout + result.stderr
     assert result.returncode == 0, output
-    assert "1 passed, 1 skipped" in output, output
+    assert "1 passed, 2 skipped" in output, output
     assert f"could not import '{missing_module}'" in output, output

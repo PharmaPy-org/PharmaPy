@@ -89,6 +89,42 @@ repository-relative paths while retaining the complete warning text. Do not supp
 or overwrite numerical references just to pass a test. Zero-inventory and
 missing-Utility warnings currently remain visible because this historical
 example fits concentrations without specifying a physical batch inventory or
-utility. Their model-assumption review, the second solved notebook, and the
-broader workshop certification work remain under
+utility. Their model-assumption review and broader workshop
+certification work remain under
 [#172](https://github.com/PharmaPy-org/PharmaPy/issues/172).
+
+## PFR/batch process-optimization workshop regression
+
+```bash
+pixi run --locked -e assimulo python -m pytest tests/test_workshop_pfr_batch.py -v
+```
+
+Two quick cases run the nominal flowsheet and initial costing from the repository
+root and notebook directory. A third case runs every cell, including both
+original optimization budgets (10 and 400 function evaluations), in a fresh
+kernel. The complete run takes about five minutes locally and runs in the
+existing informational Assimulo lane on every PR and master push; no additional
+CI job is required. Notebook tools remain optional at collection time, and the
+missing-tool checks above cover both workshop modules.
+
+The tests check species/cost ordering, feed volume, the cooling endpoint, and
+crystallizer-to-filter solid-mass transfer. Initial raw-material costs retain the
+unchanged historical values in `tests/fixtures/pfr_batch_2023.json`, with a 1e-10
+relative tolerance for these algebraic calculations. Reactant costs are also
+derived independently from feed moles, molecular weights, and prices.
+
+The complete run checks finite bounded decision variables, the evaluation budget,
+truthful optimizer-status reporting, and mean-size plotting after particles form.
+It does **not** certify the historical final optimized design or feasibility:
+current execution exhausts the original budget with a positive production
+shortfall, while the original stored result also reported `success=False`.
+Reproduction of historical numerical endpoints remains under
+[#172](https://github.com/PharmaPy-org/PharmaPy/issues/172); do not replace reference
+values or increase optimization budgets merely to make a regression green.
+
+Refresh published outputs using the same output/metadata hygiene described above:
+
+```bash
+pixi run --locked -e assimulo jupyter execute doc/online_docs/examples/PFR_Batch_solved.ipynb --inplace
+pixi run --locked docs
+```
