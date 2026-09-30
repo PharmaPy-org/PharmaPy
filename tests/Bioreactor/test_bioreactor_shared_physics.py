@@ -1,6 +1,7 @@
 """Coupled resource accounting across both biological optimization methods."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -11,7 +12,7 @@ from PharmaPy.Bioreactors.inventory import LinearInventoryAvailability
 from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef
 from PharmaPy.IntegratorBackends import FixedStepBackend, SciPyBackend
 from PharmaPy.Metabolic import MetabolicNetworkDefinition, ReactionDefinition
-from PharmaPy.Metabolic.closures.base import FluxSolution, MetabolicEnvironment, MetabolicInfeasibleError
+from PharmaPy.Metabolic.closures.base import FluxSolution, MetabolicEnvironment, MetabolicInfeasibleError, MetabolicNumericalError
 from PharmaPy.Metabolic.closures.reconciled import RateReconciledMFAClosure, ReconciliationTarget
 from PharmaPy.Metabolic.pathways import ConfiguredPathwayModel, PathwayModelDefinition
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
@@ -137,6 +138,84 @@ def test_lexicographic_selection_is_invariant_to_pathway_column_order():
                                      maximum_parameter='maximum'),)))
         rates.append(model.solve_fluxes([1., 0.], 1.).extracellular_rates)
     np.testing.assert_array_equal(*rates)
+
+
+@pytest.mark.parametrize('ids', [('a', 'b'), ('z', 'a')])
+@pytest.mark.parametrize('unit_factor', [1e-6, 1., 1e6])
+@pytest.mark.parametrize('weights', [(1., 1.), (1., 2.)])
+def test_pathway_minimum_norm_is_explicit_and_coordinate_invariant(ids, unit_factor, weights):
+    definition = PathwayModelDefinition(
+        state_ids=('substrate', 'product_a', 'product_b'), pathway_ids=ids,
+        exchange_matrix=np.array([[-1., -1.], [1., 0.], [0., 1.]]) / unit_factor,
+        growth_coefficients=np.ones(2) / unit_factor,
+        objective_coefficients=np.ones(2) / unit_factor,
+        parameters={'capacity': 1.}, uptake_constraints=(dict(
+            identifier='uptake', type='constant', species='substrate',
+            maximum_parameter='capacity'),),
+        secondary_optimization={'policy': 'scaled-minimum-norm',
+                                'reference_scales': dict(zip(ids, np.array(weights) * unit_factor))})
+    expected = np.square(weights) / np.sum(np.square(weights))
+    for model in (definition, replace(definition,
+            pathway_ids=ids[::-1], exchange_matrix=definition.exchange_matrix[:, ::-1])):
+        result = ConfiguredPathwayModel(model).solve_fluxes([1., 0., 0.], 1.)
+        np.testing.assert_allclose(result.extracellular_rates, [-1., *expected], atol=1e-7)
+        assert result.primary_objective == pytest.approx(1., abs=1e-9)
+        assert result.secondary_objective == pytest.approx(-np.sum((expected / weights) ** 2))
+        assert result.closure_policy_id.endswith('scaled-minimum-norm')
+
+
+@pytest.mark.parametrize('value', [0., -1., float('inf'), float('nan'), True, '1', None])
+def test_pathway_minimum_norm_rejects_invalid_scales(value):
+    with pytest.raises(ValueError, match='reference_scales'):
+        replace(_model(), secondary_optimization={
+            'policy': 'scaled-minimum-norm', 'reference_scales': {'growth': value}})
+
+
+@pytest.mark.parametrize('secondary', [
+    {}, {'policy': 'unknown', 'reference_scales': {'growth': 1.}},
+    {'policy': 'scaled-minimum-norm', 'reference_scales': {}},
+    {'policy': 'scaled-minimum-norm', 'reference_scales': {'growth': 1., 'extra': 1.}},
+])
+def test_pathway_minimum_norm_rejects_incomplete_or_unknown_configuration(secondary):
+    with pytest.raises(ValueError):
+        replace(_model(), secondary_optimization=secondary)
+
+
+def test_pathway_minimum_norm_respects_inventory_and_zero_objective():
+    definition = replace(_model(), secondary_optimization={
+        'policy': 'scaled-minimum-norm', 'reference_scales': {'growth': 1.}})
+    availability = LinearInventoryAvailability([.25], [[-1.]], [0.])
+    result = ConfiguredPathwayModel(definition).solve_fluxes([1., 1., 1.], 1., availability=availability)
+    assert result.growth_rate == pytest.approx(.25)
+    assert result.inventory_violation_inf < 1e-9
+    zero = replace(definition, objective_coefficients=[0.])
+    np.testing.assert_allclose(ConfiguredPathwayModel(zero).solve_fluxes([1., 1., 1.], 1.).fluxes, 0.)
+    with pytest.raises(MetabolicInfeasibleError):
+        ConfiguredPathwayModel(definition).solve_fluxes([1., 1., 1.], 1.,
+            availability=LinearInventoryAvailability([0.], [[-1.]], [-1.]))
+
+
+def test_pathway_minimum_norm_configuration_reaches_native_builder():
+    folder = EXAMPLES / 'generic_batch/inputs'
+    case = json.loads((folder / 'case.json').read_text())
+    definition = json.loads((folder / 'mechanism.json').read_text())
+    baseline = build_bioreactor(case, definition, folder / 'thermo.json')
+    assert baseline.mechanism.model.definition.secondary_optimization is None
+    definition['model']['pathways']['secondary_optimization'] = {
+        'policy': 'scaled-minimum-norm', 'reference_scales': {'assimilation': 1.}}
+    configured = build_bioreactor(case, definition, folder / 'thermo.json')
+    assert configured.mechanism.model.definition.secondary_optimization['policy'] == 'scaled-minimum-norm'
+
+
+def test_pathway_minimum_norm_does_not_accept_false_solver_success(monkeypatch):
+    from scipy.optimize import OptimizeResult
+    import PharmaPy.Metabolic.pathways as pathways
+    definition = replace(_model(), secondary_optimization={
+        'policy': 'scaled-minimum-norm', 'reference_scales': {'growth': 1.}})
+    monkeypatch.setattr(pathways, 'minimize', lambda *args, **kwargs:
+        OptimizeResult(x=np.array([0.]), success=True, message='false success'))
+    with pytest.raises(MetabolicNumericalError, match='minimum-norm selection failed'):
+        ConfiguredPathwayModel(definition).solve_fluxes([1., 1., 1.], 1.)
 
 
 def test_closed_uptake_screen_flags_free_growth_without_claiming_elemental_balance():

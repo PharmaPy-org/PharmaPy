@@ -8,11 +8,12 @@ parameters are supplied by the owning simulation input.
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from numbers import Real
 from types import MappingProxyType
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.optimize import linprog
+from scipy.optimize import linprog, minimize, LinearConstraint
 
 from .closures.base import FluxSolution, MetabolicInfeasibleError, MetabolicNumericalError
 
@@ -33,6 +34,7 @@ class PathwayModelDefinition:
     pathway_bound_rules: tuple = ()
     depletion_tolerance: float = 1.0e-8
     problem_name: str = "configured pathway optimization"
+    secondary_optimization: Mapping | None = None
 
     def __post_init__(self):
         states = tuple(str(item) for item in self.state_ids)
@@ -80,6 +82,20 @@ class PathwayModelDefinition:
         object.__setattr__(self, "pathway_bound_rules", tuple(
             MappingProxyType(dict(item)) for item in self.pathway_bound_rules
         ))
+        secondary = self.secondary_optimization
+        if secondary is not None:
+            if (not isinstance(secondary, Mapping)
+                    or set(secondary) != {'policy', 'reference_scales'}
+                    or secondary['policy'] != 'scaled-minimum-norm'):
+                raise ValueError('secondary_optimization requires scaled-minimum-norm and reference_scales')
+            scales = secondary['reference_scales']
+            if not isinstance(scales, Mapping) or set(scales) != set(pathways):
+                raise ValueError('reference_scales must name every pathway exactly once')
+            if any(isinstance(v, bool) or not isinstance(v, Real)
+                   or not np.isfinite(v) or v <= 0. for v in scales.values()):
+                raise ValueError('reference_scales must be finite positive numbers')
+            object.__setattr__(self, 'secondary_optimization', MappingProxyType(dict(
+                policy=secondary['policy'], reference_scales=MappingProxyType(dict(scales)))))
         self._validate_rules()
 
     def _validate_rules(self):
@@ -145,11 +161,12 @@ class PathwayModelDefinition:
             "objective_coefficients", "parameters", "uptake_constraints",
             "pathway_bound_rules", "depletion_tolerance", "problem_name",
         }
-        if set(payload) != required:
+        allowed = required | {'secondary_optimization'}
+        if not required <= set(payload) or set(payload) - allowed:
             raise ValueError(
                 "pathway model fields mismatch; "
                 f"missing={sorted(required - set(payload))}, "
-                f"unknown={sorted(set(payload) - required)}"
+                f"unknown={sorted(set(payload) - allowed)}"
             )
         return cls(**payload)
 
@@ -287,7 +304,15 @@ class ConfiguredPathwayModel:
         optimum = float(self.definition.objective_coefficients @ result.x)
         deterministic_bounds = list(bounds)
         deterministic_result = result
-        for index in sorted(range(len(self.pathway_ids)), key=self.pathway_ids.__getitem__):
+        secondary_value = None
+        policy = 'highs:pathway-lp:lexicographic-id'
+        indices = sorted(range(len(self.pathway_ids)), key=self.pathway_ids.__getitem__)
+        if self.definition.secondary_optimization is not None:
+            deterministic_result, secondary_value = self._minimum_norm(
+                result.x, optimum, a_ub, b_ub, lower, upper)
+            policy = 'highs:pathway-lp:scaled-minimum-norm'
+            indices = ()
+        for index in indices:
             pathway = self.pathway_ids[index]
             objective = np.zeros(len(self.pathway_ids), dtype=float)
             objective[index] = 1.0
@@ -319,7 +344,7 @@ class ConfiguredPathwayModel:
         return PathwayOptimizationResult(
             reaction_ids=self.pathway_ids, fluxes=fluxes,
             primary_objective=float(self.definition.objective_coefficients @ fluxes),
-            secondary_objective=None, growth_rate=float(self.growth_coefficients @ fluxes),
+            secondary_objective=secondary_value, growth_rate=float(self.growth_coefficients @ fluxes),
             lower_bounds=lower, upper_bounds=upper,
             active_lower=tuple(name for name, value in zip(self.pathway_ids, fluxes) if abs(value) <= 1e-8),
             active_upper=tuple(name for name, value, bound in zip(self.pathway_ids, fluxes, upper)
@@ -328,11 +353,61 @@ class ConfiguredPathwayModel:
             bound_violation_inf=float(max(0., np.max(lower - fluxes), np.max(fluxes - upper),
                                           np.max(a_ub @ fluxes - b_ub) if a_ub is not None else 0.)),
             primal_status='optimal', solver_status=int(result.status),
-            solver_message=str(result.message), closure_policy_id='highs:pathway-lp:lexicographic-id',
+            solver_message=str(result.message if secondary_value is None
+                               else deterministic_result.message), closure_policy_id=policy,
             cache_hit=False, extracellular_rates=rates, constraint_limits=MappingProxyType(named_limits),
             inventory_violation_inf=(None if availability is None else
                                      float(max(0., -np.min(availability.residual(fluxes))))),
         )
+
+    def _minimum_norm(self, initial, optimum, matrix, capacity, lower, upper):
+        """Minimize declared squared normalized flux on the primary optimal face."""
+        declared = self.definition.secondary_optimization['reference_scales']
+        scales = np.array([declared[name] for name in self.pathway_ids], dtype=float)
+        # A common coordinate factor improves conditioning without changing the minimizer.
+        coordinates = scales * (np.max(abs(initial / scales)) or 1.)
+        objective = self.definition.objective_coefficients * coordinates
+        norm = np.max(abs(objective))
+        equality = (objective / norm)[None, :] if norm else None
+        rhs = np.array([optimum / norm]) if norm else None
+        constraints = []
+        if equality is not None:
+            constraints.append(LinearConstraint(equality, rhs, rhs))
+        inequality = None
+        if matrix is not None:
+            inequality = matrix * coordinates
+            row_scale = np.maximum(np.max(abs(inequality), axis=1), abs(capacity))
+            row_scale[row_scale == 0.] = 1.
+            inequality = inequality / row_scale[:, None]
+            capacity = capacity / row_scale
+            selected = np.ones(len(capacity), dtype=bool)
+            if equality is not None:
+                # An inequality parallel to the fixed objective is constant on
+                # the optimal face; duplicating it can stall SLSQP at a vertex.
+                projection = (inequality @ equality[0]) / (equality[0] @ equality[0])
+                remainder = inequality - projection[:, None] * equality
+                selected = np.max(abs(remainder), axis=1) > (
+                    32 * np.finfo(float).eps * np.max(abs(inequality), axis=1))
+            if selected.any():
+                constraints.append(LinearConstraint(inequality[selected], -np.inf, capacity[selected]))
+        bounds = list(zip(lower / coordinates, upper / coordinates))
+        result = minimize(lambda z: float(z @ z), initial / coordinates,
+                          jac=lambda z: 2. * z, bounds=bounds, constraints=constraints,
+                          method='SLSQP', options={'ftol': 1e-12, 'maxiter': 1000})
+        z = result.x
+        # A supporting linear solve checks first-order optimality of this convex QP.
+        certificate = linprog(2. * z, A_ub=inequality, b_ub=capacity,
+                              A_eq=equality, b_eq=rhs, bounds=bounds, method='highs')
+        if (not result.success or not np.isfinite(z).all() or not certificate.success
+                or np.min(z - lower / coordinates) < -1e-8
+                or np.min(upper / coordinates - z) < -1e-8
+                or (equality is not None and np.max(abs(equality @ z - rhs)) > 1e-8)
+                or (inequality is not None and np.max(inequality @ z - capacity) > 1e-8)
+                or 2. * z @ (z - certificate.x) > 1e-7 * max(1., z @ z)):
+            raise MetabolicNumericalError(f'Pathway minimum-norm selection failed: {result.message}')
+        result.x = z * coordinates
+        # FluxSolution records secondary scores in maximization convention.
+        return result, -float(np.sum((result.x / scales) ** 2))
 
     def audit_closed_uptake(self):
         """Screen for growth or secretion without net uptake; not elemental closure."""

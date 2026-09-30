@@ -10,6 +10,7 @@ PATHWAY_FIELDS = (
     "state_ids", "pathway_ids", "exchange_matrix", "growth_coefficients",
     "objective_coefficients", "uptake_constraints", "pathway_bound_rules",
     "depletion_tolerance", "problem_name", "flux_basis", "rule_graph", "constants",
+    "secondary_optimization",
 )
 CULTURE_FIELDS = (
     "extracellular_species", "internal_reactions", "rule_graph", "kinetic_outputs",
@@ -200,6 +201,7 @@ def normalize_forward_inputs(case, definition):
     if definition.pop("schema_version") != 1:
         raise ValueError("unsupported mechanism schema_version")
     definition["model"].setdefault("flux_basis", None)
+    definition["model"].setdefault("secondary_optimization", None)
     _keys(definition["model"], MODEL_FIELDS, "model")
     _keys(definition["state"], STATE_FIELDS, "state")
     kind = definition["mechanism"]

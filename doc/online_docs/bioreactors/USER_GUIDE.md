@@ -43,6 +43,33 @@ IDs, exchange/growth/objective coefficients and uptake constraints. Reconciliati
 selects `mechanism: "rate-reconciled-culture"` with `network`, kinetic output maps,
 explicit flux bases and a reconciliation policy. Keep inactive sections empty.
 
+### Optional pathway selection among primary optima
+
+In `model.pathways`, add this optional configuration, replacing the identifiers
+and scales with those of your declared pathways:
+
+```json
+"secondary_optimization": {
+  "policy": "scaled-minimum-norm",
+  "reference_scales": {"pathway_a": 1.0, "pathway_b": 2.0}
+}
+```
+
+The primary objective and constraints remain unchanged. On that optimal face,
+the solver minimizes `sum((v_j / reference_scales[j])**2)`. Every pathway needs
+one finite positive scale, in the same units and normalization as its flux.
+Scales define a modeling preference, not fitted trajectory corrections or an
+inferred enzyme cost. Rename or reorder scales with their associated pathways;
+convert them with the flux coordinates when changing units.
+
+The result reports `closure_policy_id = highs:pathway-lp:scaled-minimum-norm`
+and the negative squared norm as `secondary_objective` (maximization convention).
+Failed feasibility or optimality checks raise an error without reverting to the
+alphabetical selection. Omitting the field, or setting it to `null`, preserves
+the existing alphabetical tie-break and all current example configurations.
+This option does not add automatic flux-variability/ambiguity screening or claim
+that a unique numerical allocation is a biologically validated prediction.
+
 ## 3. Replace kinetics without replacing the reactor
 
 An affine provider declaration has this form (replace the names and coefficients):

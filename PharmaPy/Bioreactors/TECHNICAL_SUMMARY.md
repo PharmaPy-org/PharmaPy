@@ -20,6 +20,13 @@ Pathways support input-defined dimensions; reversible pathways require supported
 nonnegative coordinates. Pathway models need no rule graph unless chosen for an
 optional provider and are not routed through kinetic reconciliation.
 
+Reduced pathways optionally accept `secondary_optimization` with policy
+`scaled-minimum-norm` and positive reference scales keyed by pathway identifier.
+This minimizes the squared normalized flux on the primary optimal face, with
+independent linearized optimality and original-constraint checks. It is an
+explicit modeling preference, not a biological law. Omitting it preserves the
+legacy alphabetical selection; existing examples do not configure this option.
+
 Providers return finite named rates, units, identity and validity diagnostics.
 Pathway capacities use `mol/(kgDW time)`, with time matching `flux_time_unit`,
 then convert to the declared exchange basis. Invalid units, negative capacities

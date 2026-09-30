@@ -1,5 +1,22 @@
 # Bioreactor implementation: final net changes
 
+## Optional pathway minimum-norm selection (2026-09-30)
+
+Pathway inputs may now declare `secondary_optimization` with policy
+`scaled-minimum-norm` and finite positive `reference_scales` keyed by pathway.
+The secondary convex optimization preserves the primary LP optimum and original
+constraints. Independent first-order optimality and feasibility checks reject
+unresolved results; there is no fallback to a fabricated allocation.
+Absent configuration retains the existing alphabetical selection. This is an
+explicit numerical modeling preference, not a biological validation claim or
+automatic ambiguity screening. Native reactor and integrator code is unchanged.
+
+Verification: 36 focused policy/input-compatibility tests passed, plus analytical
+allocation checks with 3, 5, 12 and 20 pathways. Tests include renaming, ordering,
+equivalent units, unequal scales, inventory constraints, infeasibility, and false
+solver success. No example input/output was modified and no demonstration was
+rerun; the full-suite result below predates this opt-in addition.
+
 ## Reconciliation fixture organization (2026-09-30)
 
 Synthetic reconciliation benchmarks moved from the generic fed-batch example
