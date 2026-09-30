@@ -5,6 +5,7 @@ Reported states remain integrated values; named-solvent phase objects retain
 their existing ideal-volume completion contract. This does not validate the
 physical equivalence of those two representations.
 """
+from copy import deepcopy
 import json
 import numpy as np
 import pytest
@@ -93,8 +94,15 @@ def test_real_growth_solve_publishes_raw_concentrations(data_path, named, equal_
         Replace every liquid density with the same synthetic 1000 kg/m**3.
     tmp_path : Path
         Isolated directory for that explicit diagnostic property variant.
+
+    Notes
+    -----
+    A separate real CVode solve supplies concentrations before publication.
+    Exact equality checks all 61 reporting rows and five species against the
+    public solve_unit path, without replacing a method on either unit.
     """
     pytest.importorskip('assimulo')
+    from assimulo.solvers import CVode
     # Exact public issue #312 growth fixture, plus named/unnamed and
     # equal-density controls. No private exercise values are used.
     path = data_path['flowsheet'] / 'compound_database.json'
@@ -120,25 +128,26 @@ def test_real_growth_solve_publishes_raw_concentrations(data_path, named, equal_
     unit.Kinetics = CrystKinetics(coeff_solub=[40.0],
                                  growth=(1.0, 0.0, 1.0))
     # [kg/m**3], [um/s], [J/mol], [-]; isothermal seeded diagnostic growth
-    original_retrieve = unit.retrieve_results
-    captured = {}
-
-    def capture(time, states):
-        """Observe the real solver handoff before normal result retrieval.
-
-        Parameters
-        ----------
-        time : ndarray
-            Reporting times [s].
-        states : ndarray
-            Moments [um**n], concentrations [kg/m**3], liquid volume [m**3].
-        """
-        captured['concentration'] = states[:, 4:9].copy()  # [kg/m**3]
-        original_retrieve(time, states)
-
-    unit.retrieve_results = capture
     times = np.linspace(0.0, 6000.0, 61)  # [s], exact issue #312 reporting interval
+    # Integrate a separate real unit without publishing its results. Matching
+    # solve_unit's native Newton/BDF defaults isolates the retrieval handoff
+    # while leaving the public solve path and every collaborator unchanged.
+    reference = deepcopy(unit)
+    initial, final_time = reference.initialize_states(time_grid=times)
+    # [um**n, kg/m**3, m**3], native state vector; [s], integration endpoint
+    parameters = reference.Kinetics.concat_params()[reference.mask_params]
+    # Per mechanism: prefactor [#/m**3/s] for nucleation or [um/s] for
+    # growth/dissolution, activation [J/mol], then exponents [-]. This case
+    # uses relative supersaturation and a zero secondary-moment exponent.
+    problem = reference.set_ode_problem(False, initial, parameters, False)
+    solver = CVode(problem)
+    solver.iter = "Newton"
+    solver.discr = "BDF"
+    solver.verbosity = 50  # [-], Assimulo's quiet level used by solve_unit
+    _, raw_states = solver.simulate(final_time, ncp_list=times)
+    # [um**n, kg/m**3, m**3], native states before any result publication
+    expected = raw_states[:, 4:9].copy()  # [kg/m**3], independent solver output
     _, states = unit.solve_unit(time_grid=times, verbose=False)
     assert unit.result.mass_conc[-1, 0] < unit.result.mass_conc[0, 0]
-    np.testing.assert_array_equal(states[:, 4:9], captured['concentration'])
-    np.testing.assert_array_equal(unit.result.mass_conc, captured['concentration'])
+    np.testing.assert_array_equal(states[:, 4:9], expected)
+    np.testing.assert_array_equal(unit.result.mass_conc, expected)

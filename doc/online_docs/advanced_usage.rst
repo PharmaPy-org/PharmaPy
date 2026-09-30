@@ -29,6 +29,24 @@ Liquid heat capacity
 
 :code:`LiquidPhase.getCp` now defaults to the mass basis [J/kg/K], like its siblings; callers needing [J/mol/K] must pass :code:`basis='mole'`.
 
+Dynamic extraction inlet temperatures
+=====================================
+
+``DynamicExtractor`` pairs each inlet's composition and temperature [K] by
+its light/heavy phase role. The light stream enters the first stage and the
+heavy stream enters the last, whether that stream is named ``feed`` or
+``solvent``. Earlier versions swapped inlet temperatures when the feed was
+heavy; corrected stage energies and temperatures can therefore differ for
+unequal-temperature inlets in that configuration.
+
+IDA's differential-state flags follow the same stage-major order as the
+solution vector. The independent light-phase mole fractions and stage
+internal energy receive integration error control; the final light-phase
+mole fraction, heavy-phase composition, and temperature remain algebraic.
+This also corrects previously inaccurate multistage trajectories under the
+default algebraic-state suppression, including when the feed is light.
+No solver-option override is needed to obtain the corrected state flags.
+
 Continuous holdup accuracy
 ==========================
 

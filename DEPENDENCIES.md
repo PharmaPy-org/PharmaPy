@@ -99,3 +99,14 @@ Documentation builds require Python 3.10 or newer, above the package's own
 `requires-python = ">=3.9"`, because `doc/online_docs/conf.py` resolves the
 installed distribution with `importlib.metadata.packages_distributions`, added
 in 3.10. CI, Read the Docs, and the pixi `docs` environment all pin 3.11.
+
+## Workshop execution dependencies
+
+The `workshop` optional extra contains `nbclient>=0.10`, `nbformat>=5`, and
+`ipykernel>=6` for fresh-kernel notebook regression tests. These bounds select
+the current execution API, notebook format 4 support, and the same kernel floor
+as the docs extra. The Pixi `workshop` feature mirrors them and is included only
+in the `assimulo` environment; `environment.yml` includes the same tools for
+the manual solver-test fallback. Neither core tests nor documentation builds
+execute solver notebooks. The existing core and solver package versions remain
+unchanged in the refreshed lock.

@@ -113,14 +113,9 @@ def test_mass_fraction_distribution_conserves_mass(thermo_path):
     [0, 2.46/9, 3.69/9, 4.92/9, 0] kg in the bins. Expectations use these
     independent particle masses rather than the conversion routine.
 
-    The profile is zero-ended because ``convert_distribution`` normalizes on
-    a rectangle (bin-width) basis while ``getMoments`` uses the trapezoidal
-    rule, which halves end-node weights. With an end-loaded profile the bases
-    disagree, and re-applying the phase's own distribution through
-    ``updatePhase`` changes its mass. This pre-existing quadrature mismatch is
-    tracked in https://github.com/PharmaPy-org/PharmaPy/issues/269. This
-    zero-ended fixture is a provisional compatibility case; add end-loaded
-    profiles and update the moment-based mass expectation when #269 is fixed.
+    This zero-ended uniform fixture retains the legacy values. End-loaded
+    and nonuniform populations are covered in test_distribution_quadrature_contract
+    after #269 aligns conversion support with moment quadrature.
     """
     grid = np.array([100.0, 200.0, 300.0, 400.0, 500.0])  # [um]
     weights = np.array([0.0, 2.0, 3.0, 4.0, 0.0])  # [-], unnormalized
@@ -205,8 +200,8 @@ def test_zero_mass_distribution_and_moments_are_preserved(thermo_path, distrib_t
 
 
 @pytest.mark.parametrize('grid, widths, expected_conversion', [
-    (UNIFORM_GRID, UNIFORM_WIDTH, [0.0, 0.25, 0.25, 0.0]),
-    (GEOMETRIC_GRID, GEOMETRIC_WIDTHS, [0.0, 2 / 165, 64 / 165, 0.0]),
+    (UNIFORM_GRID, UNIFORM_WIDTH, [0.0, 0.5, 0.5, 0.0]),
+    (GEOMETRIC_GRID, GEOMETRIC_WIDTHS, [0.0, 1 / 33, 32 / 33, 0.0]),
 ])
 def test_grid_update_refreshes_conversion_widths(
         thermo_path, grid, widths, expected_conversion):
@@ -225,17 +220,11 @@ def test_grid_update_refreshes_conversion_widths(
 
     Notes
     -----
-    The uniform grid's third moment is 1e14 um**3; each occupied bin contributes
-    0.5 * 50 * 1e12 um**3 after applying kv. On the geometric grid the third
-    moment is 187.5 * 8e12 + 750 * 64e12 = 49.5e15 um**3. Bin volumes are
-    0.5 * 150 * 8e12 and 0.5 * 600 * 64e12 um**3. These ratios preserve the
-    existing conversion's normalization defect: a volume -> number -> volume
-    round trip returns ``kv * v_i`` when the quadratures agree. Bin-sum
-    quadrature in the conversion also differs from the trapezoidal moments,
-    causing further disagreement for geometric grids or nonzero end weights.
-    No tracking issue number exists yet; this is recorded as follow-up work
-    on this branch. These provisional expectations pin current behavior only
-    to isolate #162 and must change when the conversion is corrected.
+    The occupied uniform nodes each contribute half the total third moment.
+    On the geometric grid, trapezoidal contributions are 187.5 * 8e12 and
+    750 * 64e12 um**3, in the ratio 1:32. Shape factor cancels. Grid update
+    still refreshes the FVM widths, but conversion now uses trapezoidal nodal
+    support so that its fractions agree with population moments (#269).
     """
     phase = SolidPhase(
         thermo_path, mass_frac=SOLID_COMPOSITION, kv=SHAPE_FACTOR,

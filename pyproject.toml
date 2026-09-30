@@ -55,6 +55,11 @@ assimulo = [
 test = [
     "pytest",
 ]
+workshop = [
+    "ipykernel>=6",
+    "nbclient>=0.10",
+    "nbformat>=5",
+]
 docs = [
     "ipykernel>=6",
     "nbsphinx>=0.9",
@@ -70,6 +75,9 @@ Repository = "https://github.com/PharmaPy-org/PharmaPy"
 
 [tool.setuptools.packages.find]
 include = ["PharmaPy*"]
+
+[tool.setuptools.package-data]
+PharmaPy = ["data/minimum_modeling_objects.json"]
 
 # ---------------------------------------------------------------------------
 # pixi: reproducible conda-forge-backed development environments.
@@ -125,6 +133,12 @@ cython = ">=0.29,<3"
 [tool.pixi.feature.test.dependencies]
 pytest = "*"
 
+# Execute workshop notebooks only in the optional solver test environment.
+[tool.pixi.feature.workshop.dependencies]
+ipykernel = ">=6"
+nbclient = ">=0.10"
+nbformat = ">=5"
+
 # Documentation toolchain (conda-forge). Bounds mirror
 # `[project.optional-dependencies].docs` so the pixi and pip surfaces stay
 # consistent. `pandoc` is the one addition: nbsphinx shells out to it to convert
@@ -150,7 +164,7 @@ docs = "sphinx-build -W --keep-going -b html doc/online_docs site"
 # environments.
 [tool.pixi.environments]
 default = { features = ["test"], solve-group = "default" }
-assimulo = { features = ["assimulo", "test"], solve-group = "assimulo" }
+assimulo = { features = ["assimulo", "test", "workshop"], solve-group = "assimulo" }
 docs = { features = ["docs"], solve-group = "docs" }
 
 # Convenience tasks. `pixi run test` is the core lane; `pixi run -e assimulo
