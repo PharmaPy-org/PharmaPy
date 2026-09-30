@@ -9,4 +9,5 @@ remaining work. Consult its linked issues for current ownership and status, and
   the rationale and limits of five issue-closure recommendations, and independent
   verification of six reported defects and regressions.
 
+- [Crystallizer concentration ownership (#312)](crystallizer_state_ownership.md)
 - [Crystal-grid inventory convergence (#391)](crystallizer_grid_conservation.md)
