@@ -1,14 +1,14 @@
 """Structural checks for prohibited test substitutes, with source-only fixtures.
 
 The guard recognizes explicit framework APIs and imported PharmaPy attribute /
-process-environment mutation. It does not execute fixture source strings or
-perform general alias/data-flow analysis; review still checks other substitutes.
+process-environment and import-state mutation. It does not execute fixture
+source strings or perform general alias/data-flow analysis; review still checks
+other substitutes.
 """
 
 from __future__ import annotations
 
 import ast
-import hashlib
 from pathlib import Path
 from typing import Mapping
 
@@ -33,20 +33,22 @@ FORBIDDEN_CONSTRUCTORS = frozenset(
     }
 )
 FORBIDDEN_FIXTURES = frozenset({"mocker", "monkeypatch"})
-# os._Environ exposes these mutating mapping methods; reads/copies are allowed.
-FORBIDDEN_ENVIRON_METHODS = frozenset(
+# Mapping mutations shared by os.environ and sys.modules; reads/copies are allowed.
+FORBIDDEN_MAPPING_METHODS = frozenset(
     {
         "__setitem__", "__delitem__", "__ior__", "clear", "pop", "popitem",
         "setdefault", "update",
     }
 )
-FORBIDDEN_SYS_MODULE_METHODS = frozenset(
-    {"__setitem__", "clear", "pop", "popitem", "setdefault", "update"}
+FORBIDDEN_LIST_METHODS = frozenset(
+    {
+        "append", "extend", "insert", "remove", "pop", "clear", "reverse", "sort",
+        "__setitem__", "__delitem__", "__iadd__", "__imul__",
+    }
 )
-
-# The #202 migrations retired every legacy exemption. Keep the ratchet empty
-# so previously grandfathered content cannot silently become exempt again.
-LEGACY_MONKEYPATCH_FILE_DIGESTS = {}
+IMPORT_STATE_PATHS = frozenset(
+    {"sys.modules", "sys.meta_path", "builtins.__import__"}
+)
 
 
 def _is_forbidden_module(module_name: str) -> bool:
@@ -140,26 +142,6 @@ def _is_pharmapy_import(node: ast.AST, imports: Mapping[str, str]) -> bool:
     return path is not None and (path == "PharmaPy" or path.startswith("PharmaPy."))
 
 
-def _target_mutates_sys_modules(node: ast.AST) -> bool:
-    """Return whether an assignment target replaces ``sys.modules`` state.
-
-    Parameters
-    ----------
-    node : ast.AST
-        Assignment or deletion target to inspect.
-
-    Returns
-    -------
-    bool
-        ``True`` when the target contains a ``sys.modules[...]`` lookup.
-    """
-    return any(
-        isinstance(candidate, ast.Subscript)
-        and _attribute_path(candidate.value) == "sys.modules"
-        for candidate in ast.walk(node)
-    )
-
-
 def _mock_policy_violations(
     test_file: Path, display_path: Path | None = None
 ) -> list[str]:
@@ -236,10 +218,6 @@ def _mock_policy_violations(
                 node.targets if isinstance(node, (ast.Assign, ast.Delete))
                 else [node.target]
             )
-            if any(_target_mutates_sys_modules(target) for target in targets):
-                violations.append(
-                    f"{relative_path}:{node.lineno}: sys.modules replacement"
-                )
             replacements = set()
             for target in targets:
                 for candidate in ast.walk(target):
@@ -247,6 +225,20 @@ def _mock_policy_violations(
                         getattr(candidate, "ctx", None), (ast.Store, ast.Del)
                     ):
                         continue
+                    # Attribute/subscript writes mutate shared state. A plain
+                    # imported-name assignment only rebinds a local name; an
+                    # augmented mapping/list assignment can mutate the object.
+                    import_state_path = None
+                    if isinstance(candidate, ast.Attribute):
+                        import_state_path = _imported_path(candidate, imports)
+                    elif isinstance(candidate, ast.Subscript):
+                        import_state_path = _imported_path(candidate.value, imports)
+                    elif isinstance(node, ast.AugAssign):
+                        path = _imported_path(candidate, imports)
+                        if path in {"sys.modules", "sys.meta_path"}:
+                            import_state_path = path
+                    if import_state_path in IMPORT_STATE_PATHS:
+                        replacements.add(import_state_path)
                     if isinstance(candidate, ast.Attribute):
                         if _is_pharmapy_import(candidate.value, imports):
                             replacements.add("PharmaPy attribute")
@@ -266,12 +258,25 @@ def _mock_policy_violations(
             call_path = _attribute_path(node.func)
             imported_call = _imported_path(node.func, imports)
             environment_mutation = imported_call in {"os.putenv", "os.unsetenv"}
+            import_state_mutations = set()
             if isinstance(node.func, ast.Attribute):
                 environment_mutation |= (
                     _imported_path(node.func.value, imports) == "os.environ"
-                    and node.func.attr in FORBIDDEN_ENVIRON_METHODS
+                    and node.func.attr in FORBIDDEN_MAPPING_METHODS
                 )
-            if call_path in {"setattr", "delattr"} and node.args:
+                receiver = _imported_path(node.func.value, imports)
+                if (
+                    receiver == "sys.modules"
+                    and node.func.attr in FORBIDDEN_MAPPING_METHODS
+                ) or (
+                    receiver == "sys.meta_path"
+                    and node.func.attr in FORBIDDEN_LIST_METHODS
+                ):
+                    import_state_mutations.add(receiver)
+            if (
+                call_path in {"setattr", "delattr"}
+                or imported_call in {"builtins.setattr", "builtins.delattr"}
+            ) and node.args:
                 if _is_pharmapy_import(node.args[0], imports):
                     violations.append(
                         f"{relative_path}:{node.lineno}: PharmaPy attribute replacement"
@@ -281,6 +286,15 @@ def _mock_policy_violations(
                     and len(node.args) > 1
                     and isinstance(node.args[1], ast.Constant)
                     and node.args[1].value == "environ"
+                )
+                if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                    receiver = _imported_path(node.args[0], imports)
+                    path = f"{receiver}.{node.args[1].value}"
+                    if path in IMPORT_STATE_PATHS:
+                        import_state_mutations.add(path)
+            for path in sorted(import_state_mutations):
+                violations.append(
+                    f"{relative_path}:{node.lineno}: {path} replacement"
                 )
             if environment_mutation:
                 violations.append(
@@ -301,15 +315,6 @@ def _mock_policy_violations(
                     f"{relative_path}:{node.lineno}: prohibited dynamic fixture "
                     f"'{node.args[0].value}'"
                 )
-            if (
-                isinstance(node.func, ast.Attribute)
-                and _attribute_path(node.func.value) == "sys.modules"
-                and node.func.attr in FORBIDDEN_SYS_MODULE_METHODS
-            ):
-                violations.append(
-                    f"{relative_path}:{node.lineno}: sys.modules replacement"
-                )
-
             if isinstance(node.func, ast.Name):
                 constructor_name = node.func.id
             elif isinstance(node.func, ast.Attribute):
@@ -323,37 +328,6 @@ def _mock_policy_violations(
                 )
 
     return violations
-
-
-def _legacy_exemption_failures(
-    file_violations: Mapping[str, list[str]],
-    legacy_digests: Mapping[str, str],
-) -> list[str]:
-    """Find legacy exemption rows that no longer describe live debt.
-
-    Parameters
-    ----------
-    file_violations : mapping of str to list of str
-        Prohibited substitute diagnostics keyed by repository-relative path.
-    legacy_digests : mapping of str to str
-        Exact source digests temporarily exempted under issue #202.
-
-    Returns
-    -------
-    list[str]
-        Diagnostics for missing or already-migrated legacy files.
-    """
-    failures = []
-    for relative_path in legacy_digests:
-        if relative_path not in file_violations:
-            failures.append(
-                f"{relative_path}: remove the exemption for the missing file"
-            )
-        elif not file_violations[relative_path]:
-            failures.append(
-                f"{relative_path}: remove the obsolete exemption after migration"
-            )
-    return failures
 
 
 @pytest.mark.parametrize(
@@ -491,8 +465,160 @@ def test_policy_detects_environment_mutation(tmp_path: Path, source: str) -> Non
 
 
 @pytest.mark.parametrize(
+    ("source", "target"),
+    [
+        (
+            "import sys as runtime\n"
+            "runtime.modules['assimulo'] = replacement",
+            "sys.modules",
+        ),
+        ("from sys import modules\nmodules['assimulo'] = replacement", "sys.modules"),
+        ("from sys import modules as loaded\ndel loaded['assimulo']", "sys.modules"),
+        ("import sys\nsys.modules |= {'assimulo': replacement}", "sys.modules"),
+        (
+            "from sys import modules\n"
+            "modules |= {'assimulo': replacement}",
+            "sys.modules",
+        ),
+        ("import sys\nsys.modules = replacement", "sys.modules"),
+        ("import sys\nsys.modules: dict = replacement", "sys.modules"),
+        ("import sys\ndel sys.modules", "sys.modules"),
+        ("import sys\n(sys.modules, local) = values", "sys.modules"),
+        ("import sys\nsetattr(sys, 'modules', replacement)", "sys.modules"),
+        ("import sys\ndelattr(sys, 'modules')", "sys.modules"),
+        (
+            "from sys import modules as loaded\n"
+            "loaded.__setitem__('assimulo', replacement)",
+            "sys.modules",
+        ),
+        (
+            "from sys import modules as loaded\n"
+            "loaded.__delitem__('assimulo')",
+            "sys.modules",
+        ),
+        (
+            "from sys import modules as loaded\n"
+            "loaded.__ior__({'assimulo': replacement})",
+            "sys.modules",
+        ),
+        ("from sys import modules as loaded\nloaded.clear()", "sys.modules"),
+        ("from sys import modules as loaded\nloaded.pop('assimulo')", "sys.modules"),
+        ("from sys import modules as loaded\nloaded.popitem()", "sys.modules"),
+        (
+            "from sys import modules as loaded\n"
+            "loaded.setdefault('assimulo', replacement)",
+            "sys.modules",
+        ),
+        (
+            "from sys import modules as loaded\n"
+            "loaded.update(replacement)",
+            "sys.modules",
+        ),
+        ("import sys\nsys.meta_path.insert(0, Blocker())", "sys.meta_path"),
+        ("from sys import meta_path\nmeta_path[0] = replacement", "sys.meta_path"),
+        ("import sys as runtime\ndel runtime.meta_path[:]", "sys.meta_path"),
+        ("from sys import meta_path\nmeta_path += [replacement]", "sys.meta_path"),
+        ("import sys\nsys.meta_path *= 0", "sys.meta_path"),
+        ("import sys\nsys.meta_path = []", "sys.meta_path"),
+        ("import sys\nsetattr(sys, 'meta_path', [])", "sys.meta_path"),
+        (
+            "from sys import meta_path as finders\n"
+            "finders.append(replacement)",
+            "sys.meta_path",
+        ),
+        (
+            "from sys import meta_path as finders\n"
+            "finders.extend([replacement])",
+            "sys.meta_path",
+        ),
+        (
+            "from sys import meta_path as finders\n"
+            "finders.remove(replacement)",
+            "sys.meta_path",
+        ),
+        ("from sys import meta_path as finders\nfinders.pop()", "sys.meta_path"),
+        ("from sys import meta_path as finders\nfinders.clear()", "sys.meta_path"),
+        (
+            "from sys import meta_path as finders\n"
+            "finders.__setitem__(0, replacement)",
+            "sys.meta_path",
+        ),
+        (
+            "from sys import meta_path as finders\n"
+            "finders.__delitem__(0)",
+            "sys.meta_path",
+        ),
+        (
+            "from sys import meta_path as finders\n"
+            "finders.__iadd__([replacement])",
+            "sys.meta_path",
+        ),
+        ("from sys import meta_path as finders\nfinders.__imul__(0)", "sys.meta_path"),
+        ("from sys import meta_path as finders\nfinders.reverse()", "sys.meta_path"),
+        ("from sys import meta_path as finders\nfinders.sort()", "sys.meta_path"),
+        ("import builtins\nbuiltins.__import__ = replacement", "builtins.__import__"),
+        (
+            "import builtins as builtin_module\n"
+            "del builtin_module.__import__",
+            "builtins.__import__",
+        ),
+        (
+            "import builtins\n"
+            "setattr(builtins, '__import__', replacement)",
+            "builtins.__import__",
+        ),
+        ("import builtins\ndelattr(builtins, '__import__')", "builtins.__import__"),
+        (
+            "import builtins\n"
+            "builtins.setattr(builtins, '__import__', replacement)",
+            "builtins.__import__",
+        ),
+        (
+            "import sys\n"
+            "from builtins import delattr as delete\n"
+            "delete(sys, 'meta_path')",
+            "sys.meta_path",
+        ),
+    ],
+)
+def test_policy_detects_import_state_mutation(
+    tmp_path: Path, source: str, target: str
+) -> None:
+    """Reject import-state mutation without executing the source fixtures.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Isolated pytest-provided directory for the source sample.
+    source : str
+        Python source mutating the module cache, finders, or import hook.
+    target : str
+        Qualified import-state object expected in the diagnostic.
+    """
+    test_file = tmp_path / "test_example.py"
+    test_file.write_text(source, encoding="utf-8")
+    violations = _mock_policy_violations(
+        test_file, display_path=Path("tests/test_example.py")
+    )
+    mutation_line = len(source.splitlines())
+    assert violations == [
+        f"tests/test_example.py:{mutation_line}: {target} replacement"
+    ]
+
+
+@pytest.mark.parametrize(
     "source",
     [
+        "import sys\nvalue = sys.modules.get('assimulo')",
+        "from sys import modules\ncopy = modules.copy()\ncopy['assimulo'] = replacement",
+        "from sys import modules\nmodules = {}",
+        "import sys\nfinders = sys.meta_path.copy()\nfinders.insert(0, local)",
+        "from sys import meta_path\nfirst = meta_path[0]",
+        "from sys import meta_path\nmeta_path = []",
+        "import builtins\nmodule = builtins.__import__('sys')",
+        "from builtins import __import__\n__import__ = local_function",
+        "child_source = 'import sys; sys.meta_path.insert(0, Blocker())'",
+        "class Local: pass\nsys = Local()\nsys.modules = {}",
         "class Local: pass\nsetattr(Local, 'name', object())",
         "class Local: pass\nLocal.name = object()",
         "from PharmaPy.Reactors import BatchReactor\n"
@@ -526,57 +652,20 @@ def test_policy_allows_real_object_setup_and_environment_copies(
     ) == []
 
 
-def test_policy_rejects_retired_legacy_exemptions() -> None:
-    """Require missing and migrated files to remove obsolete digest rows."""
-    relative_path = "tests/test_migrated.py"
-
-    migrated_failures = _legacy_exemption_failures(
-        {relative_path: []}, {relative_path: "retired-digest"}
-    )
-    missing_failures = _legacy_exemption_failures(
-        {}, {relative_path: "missing-digest"}
-    )
-
-    assert migrated_failures == [
-        f"{relative_path}: remove the obsolete exemption after migration"
-    ]
-    assert missing_failures == [
-        f"{relative_path}: remove the exemption for the missing file"
-    ]
-
-
 def test_tests_do_not_use_prohibited_substitutes() -> None:
-    """Keep new mock and monkeypatch APIs out of the PharmaPy test suite."""
+    """Reject prohibited substitutes in every Python file in the test suite."""
     test_files = sorted(TESTS_ROOT.rglob("*.py"))
     assert test_files, "No Python tests were discovered for the policy check"
 
-    file_violations = {}
-    for test_file in test_files:
-        relative_path = test_file.relative_to(TESTS_ROOT.parent).as_posix()
-        file_violations[relative_path] = _mock_policy_violations(test_file)
-
-    violations = _legacy_exemption_failures(
-        file_violations, LEGACY_MONKEYPATCH_FILE_DIGESTS
-    )
-    for relative_path, path_violations in file_violations.items():
-        if not path_violations:
-            continue
-
-        test_file = TESTS_ROOT.parent / relative_path
-        legacy_digest = LEGACY_MONKEYPATCH_FILE_DIGESTS.get(relative_path)
-        normalized_source = test_file.read_text(encoding="utf-8")
-        current_digest = hashlib.sha256(
-            normalized_source.encode("utf-8")
-        ).hexdigest()
-        if current_digest == legacy_digest:
-            continue
-
-        violations.extend(path_violations)
-
+    violations = [
+        violation
+        for test_file in test_files
+        for violation in _mock_policy_violations(test_file)
+    ]
     message = (
-        "Prohibited test substitutes found. Legacy files are grandfathered "
-        "only at the exact digests in LEGACY_MONKEYPATCH_FILE_DIGESTS; remove "
-        "all prohibited substitutes whenever one of those files changes:\n"
+        "Prohibited test substitutes found. Follow the real-collaborator and "
+        "isolated-subprocess alternatives in AGENTS.md; migrate the test "
+        "instead of adding an exemption:\n"
         + "\n".join(violations)
     )
     assert not violations, message

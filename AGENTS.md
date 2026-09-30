@@ -208,8 +208,8 @@ Prioritize, in order:
   `pytest.MonkeyPatch`, runtime replacement of imports, modules, attributes, or
   environment state. These techniques make it too easy to verify configured
   substitutes instead of the PharmaPy behavior users rely on. The #202
-  migrations retired all legacy exemptions; keep the digest table in
-  `tests/test_mock_policy.py` empty to prevent their reintroduction.
+  migrations retired all legacy exemptions. Migrate the test instead of adding
+  an exemption to `tests/test_mock_policy.py`.
 - Exercise deterministic behavior through public APIs with representative real
   collaborators. For optional, licensed, external, or expensive boundaries,
   run the real collaborator in its marked environment, test a deterministic
