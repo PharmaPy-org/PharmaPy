@@ -1,63 +1,136 @@
 {
+  "schema_version": 2,
   "mechanism": "pathway-lp",
+  "parameters": {
+    "rates": {
+      "uptake": {
+        "glucose": 10.0,
+        "oxygen": 15.0
+      },
+      "transfer": {
+        "oxygen": 7.5
+      }
+    },
+    "affinities": {
+      "glucose": 0.015
+    },
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {
+      "saturation": {
+        "oxygen": 0.21
+      }
+    },
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {
+      "state_ids": [
+        "glucose",
+        "acetate",
+        "oxygen"
+      ],
+      "pathway_ids": [
+        "v1",
+        "v2",
+        "v3",
+        "v4"
+      ],
+      "exchange_matrix": [
+        [
+          0.0,
+          -9.46,
+          -9.84,
+          -19.23
+        ],
+        [
+          -39.43,
+          0.0,
+          1.24,
+          12.12
+        ],
+        [
+          -35.0,
+          -12.92,
+          -12.73,
+          0.0
+        ]
+      ],
+      "growth_coefficients": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "objective_coefficients": [
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "uptake_constraints": [
+        {
+          "identifier": "glucose_uptake",
+          "type": "monod",
+          "species": "glucose",
+          "maximum_parameter": "rates.uptake.glucose",
+          "half_saturation_parameter": "affinities.glucose",
+          "mass_transfer_parameter": null,
+          "saturation_parameter": null
+        },
+        {
+          "identifier": "oxygen_uptake",
+          "type": "transfer-cap",
+          "species": "oxygen",
+          "maximum_parameter": "rates.uptake.oxygen",
+          "half_saturation_parameter": null,
+          "mass_transfer_parameter": "rates.transfer.oxygen",
+          "saturation_parameter": "coefficients.saturation.oxygen"
+        }
+      ],
+      "pathway_bound_rules": [
+        {
+          "type": "disable-at-depletion",
+          "species": "acetate",
+          "pathways": [
+            "v1"
+          ]
+        }
+      ],
+      "depletion_tolerance": 1e-08,
+      "problem_name": "configured batch pathway allocation"
+    },
+    "kinetics": {},
+    "reconciliation": {
+      "reconciliation_policy": null
+    }
+  },
+  "network": null,
+  "rate_provider": null,
   "transport": {
     "species": "oxygen",
     "kla_per_s": 0.0020833333333333333,
     "saturation_mol_m3": 0.21
   },
   "flux_time_unit": "1/h",
-  "model": {
-    "state_ids": ["glucose", "acetate", "oxygen"],
-    "pathway_ids": ["v1", "v2", "v3", "v4"],
-    "exchange_matrix": [
-      [0.0, -9.46, -9.84, -19.23],
-      [-39.43, 0.0, 1.24, 12.12],
-      [-35.0, -12.92, -12.73, 0.0]
-    ],
-    "growth_coefficients": [1.0, 1.0, 1.0, 1.0],
-    "objective_coefficients": [1.0, 1.0, 1.0, 1.0],
-    "parameters": {
-      "glucose_half_saturation": 0.015,
-      "glucose_uptake_max": 10.0,
-      "oxygen_mass_transfer": 7.5,
-      "oxygen_saturation": 0.21,
-      "oxygen_uptake_max": 15.0
-    },
-    "uptake_constraints": [
-      {
-        "identifier": "glucose_uptake",
-        "type": "monod",
-        "species": "glucose",
-        "maximum_parameter": "glucose_uptake_max",
-        "half_saturation_parameter": "glucose_half_saturation"
-      },
-      {
-        "identifier": "oxygen_uptake",
-        "type": "transfer-cap",
-        "species": "oxygen",
-        "maximum_parameter": "oxygen_uptake_max",
-        "mass_transfer_parameter": "oxygen_mass_transfer",
-        "saturation_parameter": "oxygen_saturation"
-      }
-    ],
-    "pathway_bound_rules": [
-      {
-        "type": "disable-at-depletion",
-        "species": "acetate",
-        "pathways": ["v1"]
-      }
-    ],
-    "depletion_tolerance": 1e-08,
-    "problem_name": "configured batch pathway allocation"
+  "recipes": {
+    "batch": []
   },
-  "recipes": {"batch": []},
   "state": {
+    "species": {
+      "unit": "mol",
+      "amounts": {
+        "acetate": 0.0004,
+        "glucose": 0.0108,
+        "oxygen": 0.00021
+      }
+    },
     "biomass_kg": 1e-06,
-    "liquid_volume_m3": 0.001,
-    "species_mol": {
-      "acetate": 0.0004,
-      "glucose": 0.0108,
-      "oxygen": 0.00021
-    }
-  }
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "$comment": "Schema 2. Fill the shared template; see doc/online_docs/bioreactors/templates/guide.json."
 }

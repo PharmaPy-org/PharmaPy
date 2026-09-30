@@ -1,0 +1,2077 @@
+{
+  "schema_version": 2,
+  "mechanism": "rate-reconciled-culture",
+  "parameters": {
+    "rates": {
+      "k1": 673.09,
+      "k4": 3697.81,
+      "k6": 910.66,
+      "k7": 62.17,
+      "k10": 7175.67,
+      "k11": 104.15,
+      "k15": 2.23,
+      "k16": 7.56,
+      "k18": 76.38,
+      "k20": 0.15,
+      "k21": 0.99,
+      "k22": 7.12,
+      "k25": 8.63,
+      "k27": 843.72,
+      "k30": 116.74,
+      "k32": 931.88,
+      "k40": 9.58,
+      "k43": 0.08
+    },
+    "affinities": {
+      "k2": 19.97,
+      "k3": 11.61,
+      "k5": 4.23,
+      "k8": 9.78,
+      "k9": 0.7,
+      "k12": 0.67,
+      "k13": 0.9,
+      "k14": 0.87,
+      "k17": 0.03,
+      "k19": 0.996,
+      "k23": 0.1,
+      "k24": 1.34,
+      "k26": 0.92,
+      "k28": 0.13,
+      "k29": 0.05,
+      "k31": 10.51,
+      "k33": 0.93,
+      "k34": 0.1,
+      "k35": 2.56,
+      "k36": 1.88,
+      "k37": 0.78,
+      "k38": 0.01,
+      "k39": 0.01,
+      "k41": 0.11,
+      "k42": 0.28,
+      "k44": 0.98
+    },
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {
+      "k45": 0.0003,
+      "reference_interval_day": 0.25
+    },
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {
+      "flux_basis": {},
+      "state_ids": [],
+      "pathway_ids": [],
+      "exchange_matrix": [],
+      "growth_coefficients": [],
+      "objective_coefficients": [],
+      "uptake_constraints": [],
+      "pathway_bound_rules": [],
+      "depletion_tolerance": null,
+      "problem_name": null
+    },
+    "kinetics": {
+      "flux_basis": {
+        "exchange": {
+          "amount_unit": "nmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        },
+        "growth": {
+          "amount_unit": "nmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day",
+          "amount_per_million_cells": 2310.0
+        },
+        "product": {
+          "amount_unit": "nmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        }
+      },
+      "extracellular_species": [
+        "GLC",
+        "LAC",
+        "ALA",
+        "ASN",
+        "ASP",
+        "CYSTINE",
+        "GLN",
+        "GLY",
+        "SER",
+        "NH3",
+        "GLU"
+      ],
+      "rule_graph": [
+        {
+          "identifier": "v1",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.k1"
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLC"
+                      },
+                      {
+                        "parameter": "affinities.k3"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "LAC"
+                          },
+                          {
+                            "parameter": "affinities.k2"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLC"
+                          },
+                          {
+                            "parameter": "affinities.k3"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v2",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k4"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLC"
+                          },
+                          {
+                            "parameter": "affinities.k5"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k32"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "LAC"
+                          },
+                          {
+                            "parameter": "affinities.k33"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLC"
+                      },
+                      {
+                        "parameter": "affinities.k5"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "LAC"
+                      },
+                      {
+                        "parameter": "affinities.k33"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v3",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k6"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLC"
+                          },
+                          {
+                            "parameter": "affinities.k9"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k7"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "ALA"
+                          },
+                          {
+                            "parameter": "affinities.k8"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLC"
+                      },
+                      {
+                        "parameter": "affinities.k9"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "ALA"
+                      },
+                      {
+                        "parameter": "affinities.k8"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v8",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k10"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLN"
+                          },
+                          {
+                            "parameter": "affinities.k12"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k11"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLU"
+                          },
+                          {
+                            "parameter": "affinities.k13"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "NH3"
+                          },
+                          {
+                            "parameter": "affinities.k14"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLN"
+                      },
+                      {
+                        "parameter": "affinities.k12"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLU"
+                      },
+                      {
+                        "parameter": "affinities.k13"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "NH3"
+                      },
+                      {
+                        "parameter": "affinities.k14"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLU"
+                          },
+                          {
+                            "parameter": "affinities.k13"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "NH3"
+                          },
+                          {
+                            "parameter": "affinities.k14"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v9",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k15"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "NH3"
+                          },
+                          {
+                            "parameter": "affinities.k17"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k16"
+                      },
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "concentration": "GLU"
+                              },
+                              {
+                                "parameter": "affinities.k34"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "concentration": "GLN"
+                              },
+                              {
+                                "parameter": "affinities.k35"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "NH3"
+                      },
+                      {
+                        "parameter": "affinities.k17"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLU"
+                      },
+                      {
+                        "parameter": "affinities.k34"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLN"
+                      },
+                      {
+                        "parameter": "affinities.k35"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLU"
+                          },
+                          {
+                            "parameter": "affinities.k34"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLN"
+                          },
+                          {
+                            "parameter": "affinities.k35"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v10",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.k18"
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "ASN"
+                      },
+                      {
+                        "parameter": "affinities.k19"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "ASN"
+                      },
+                      {
+                        "parameter": "affinities.k19"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v11",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k20"
+                      },
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "concentration": "ASP"
+                              },
+                              {
+                                "parameter": "affinities.k36"
+                              }
+                            ]
+                          },
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "concentration": "ASN"
+                              },
+                              {
+                                "parameter": "affinities.k37"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k43"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLU"
+                          },
+                          {
+                            "parameter": "affinities.k44"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "ASP"
+                      },
+                      {
+                        "parameter": "affinities.k36"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "ASN"
+                      },
+                      {
+                        "parameter": "affinities.k37"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "ASP"
+                          },
+                          {
+                            "parameter": "affinities.k36"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "ASN"
+                          },
+                          {
+                            "parameter": "affinities.k37"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v12",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k21"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "SER"
+                          },
+                          {
+                            "parameter": "affinities.k23"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "NH3"
+                          },
+                          {
+                            "parameter": "affinities.k38"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.k22"
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLY"
+                          },
+                          {
+                            "parameter": "affinities.k24"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLY"
+                          },
+                          {
+                            "parameter": "affinities.k24"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "SER"
+                      },
+                      {
+                        "parameter": "affinities.k23"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "NH3"
+                      },
+                      {
+                        "parameter": "affinities.k38"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLY"
+                      },
+                      {
+                        "parameter": "affinities.k24"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLY"
+                          },
+                          {
+                            "parameter": "affinities.k24"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLY"
+                          },
+                          {
+                            "parameter": "affinities.k24"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v13",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.k25"
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "CYSTINE"
+                      },
+                      {
+                        "parameter": "affinities.k26"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "CYSTINE"
+                      },
+                      {
+                        "parameter": "affinities.k26"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v16",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.k27"
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLN"
+                      },
+                      {
+                        "parameter": "affinities.k28"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "ASN"
+                      },
+                      {
+                        "parameter": "affinities.k29"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "ALA"
+                      },
+                      {
+                        "parameter": "affinities.k39"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLN"
+                          },
+                          {
+                            "parameter": "affinities.k28"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "ASN"
+                          },
+                          {
+                            "parameter": "affinities.k29"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      1,
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "ALA"
+                          },
+                          {
+                            "parameter": "affinities.k39"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v17",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "parameter": "rates.k30"
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "LAC"
+                      },
+                      {
+                        "parameter": "affinities.k31"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "v18",
+          "expression": {
+            "ref": "v16"
+          }
+        },
+        {
+          "identifier": "v19",
+          "expression": {
+            "ref": "v17"
+          }
+        },
+        {
+          "identifier": "v35",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.k40"
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLC"
+                      },
+                      {
+                        "parameter": "affinities.k41"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLU"
+                      },
+                      {
+                        "parameter": "affinities.k42"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLU"
+                      },
+                      {
+                        "parameter": "affinities.k42"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  1,
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLC"
+                      },
+                      {
+                        "parameter": "affinities.k41"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "concentration": "GLU"
+                      },
+                      {
+                        "parameter": "affinities.k42"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLU"
+                          },
+                          {
+                            "parameter": "affinities.k42"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "divide",
+                        "args": [
+                          {
+                            "concentration": "GLU"
+                          },
+                          {
+                            "parameter": "affinities.k42"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "growth",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "ref": "v18"
+              },
+              {
+                "constant": "biomass_nmol_per_million_cells"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "death",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "parameter": "coefficients.k45"
+              },
+              {
+                "parameter": "coefficients.reference_interval_day"
+              }
+            ]
+          }
+        }
+      ],
+      "kinetic_outputs": {
+        "growth": "growth",
+        "growth_reaction": "R018",
+        "death": "death",
+        "exchange_fluxes": {
+          "R001": "v1",
+          "R002": "v2",
+          "R003": "v3",
+          "R008": "v8",
+          "R009": "v9",
+          "R010": "v10",
+          "R011": "v11",
+          "R012": "v12",
+          "R013": "v13",
+          "R016": "v16",
+          "R017": "v17",
+          "R018": "v18",
+          "R019": "v19",
+          "R035": "v35"
+        }
+      },
+      "exchange_mappings": [
+        {
+          "species": "GLC",
+          "reaction": "R020",
+          "internal_coefficient": 1
+        },
+        {
+          "species": "LAC",
+          "reaction": "R021",
+          "internal_coefficient": -1
+        },
+        {
+          "species": "ALA",
+          "reaction": "R022",
+          "internal_coefficient": -1
+        },
+        {
+          "species": "ASN",
+          "reaction": "R023",
+          "internal_coefficient": 1
+        },
+        {
+          "species": "ASP",
+          "reaction": "R024",
+          "internal_coefficient": -1
+        },
+        {
+          "species": "CYSTINE",
+          "reaction": "R025",
+          "internal_coefficient": 1
+        },
+        {
+          "species": "GLU",
+          "reaction": "R025",
+          "internal_coefficient": -1
+        },
+        {
+          "species": "GLN",
+          "reaction": "R026",
+          "internal_coefficient": 1
+        },
+        {
+          "species": "GLY",
+          "reaction": "R027",
+          "internal_coefficient": -1
+        },
+        {
+          "species": "SER",
+          "reaction": "R028",
+          "internal_coefficient": 1
+        },
+        {
+          "species": "NH3",
+          "reaction": "R029",
+          "internal_coefficient": -1
+        },
+        {
+          "species": "GLU",
+          "reaction": "R033",
+          "internal_coefficient": -1
+        }
+      ],
+      "degradation_mappings": [],
+      "product_mapping": {
+        "reaction": "R019",
+        "molecular_weight_g_mol": 126.0
+      },
+      "constants": {
+        "seconds_per_day": 86400.0,
+        "biomass_nmol_per_million_cells": 2310.0
+      },
+      "condition_bounds": {}
+    },
+    "reconciliation": {
+      "internal_reactions": [
+        "R001",
+        "R002",
+        "R003",
+        "R004",
+        "R005",
+        "R006",
+        "R007",
+        "R008",
+        "R009",
+        "R010",
+        "R011",
+        "R012",
+        "R013",
+        "R014",
+        "R015",
+        "R016",
+        "R017",
+        "R032",
+        "R034",
+        "R035"
+      ],
+      "normalization_exclusions": [],
+      "reconciliation_relative_bound": null,
+      "reconciliation_bound_increment": null,
+      "untargeted_exchanges": [],
+      "parameter_corrections": {},
+      "problem_name": "Khare control with unweighted stoichiometric reconciliation",
+      "reconciliation_policy": "unweighted"
+    }
+  },
+  "network": {
+    "identifier": "khare-2026-cho-control",
+    "version": "1",
+    "internal_metabolites": [
+      "G6P",
+      "PYR",
+      "ATP",
+      "NADHcyto",
+      "LAC",
+      "GLU",
+      "ALA",
+      "AKG",
+      "OXA",
+      "CO2",
+      "NADHmito",
+      "MAL",
+      "FADH2",
+      "GLN",
+      "NH3",
+      "ASN",
+      "ASP",
+      "SER",
+      "GLY",
+      "CYSTINE",
+      "CYSTEINE",
+      "O2",
+      "BIOM",
+      "ANTI"
+    ],
+    "reactions": [
+      {
+        "identifier": "R001",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "G6P": -1,
+          "PYR": 2,
+          "ATP": 3,
+          "NADHcyto": 2
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R002",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "PYR": -1,
+          "NADHcyto": -1,
+          "LAC": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R003",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "PYR": -1,
+          "GLU": -1,
+          "ALA": 1,
+          "AKG": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R004",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "PYR": -1,
+          "OXA": -1,
+          "AKG": 1,
+          "CO2": 2,
+          "NADHmito": 2
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R005",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1,
+          "MAL": 1,
+          "CO2": 1,
+          "NADHmito": 1,
+          "FADH2": 1,
+          "ATP": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R006",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "MAL": -1,
+          "OXA": 1,
+          "NADHmito": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R007",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "MAL": -1,
+          "PYR": 1,
+          "CO2": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R008",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLN": -1,
+          "GLU": 1,
+          "NH3": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R009",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "AKG": -1,
+          "NH3": -1,
+          "NADHmito": -1,
+          "GLU": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R010",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ASN": -1,
+          "ASP": 1,
+          "NH3": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R011",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "ASP": -1,
+          "AKG": -1,
+          "OXA": 1,
+          "GLU": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R012",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "SER": -1,
+          "CO2": -1,
+          "NH3": -1,
+          "NADHcyto": -1,
+          "GLY": 2
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R013",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "CYSTINE": -1,
+          "NADHcyto": -1,
+          "CYSTEINE": 2
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R014",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "NADHmito": -1,
+          "O2": -0.5,
+          "ATP": 2.5
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R015",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "FADH2": -1,
+          "O2": -0.5,
+          "ATP": 1.5
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R016",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ALA": -0.0838,
+          "ASN": -0.041,
+          "ASP": -0.0804,
+          "ATP": -8.6825,
+          "CYSTEINE": -0.0261,
+          "G6P": -0.452,
+          "GLN": -0.0873,
+          "GLY": -0.056,
+          "OXA": -0.427,
+          "SER": -0.096,
+          "BIOM": 1,
+          "FADH2": 0.004,
+          "GLU": 0.0082,
+          "MAL": 0.4445,
+          "NADHmito": 0.6391,
+          "PYR": 0.2085
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R017",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ALA": -0.0614,
+          "ASN": -0.0344,
+          "ASP": -0.0389,
+          "ATP": -9.2,
+          "CYSTEINE": -0.024,
+          "GLU": -0.0479,
+          "GLN": -0.0449,
+          "GLY": -0.0719,
+          "SER": -0.1,
+          "ANTI": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R018",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "BIOM": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R019",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ANTI": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R020",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ATP": -1,
+          "G6P": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R021",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "LAC": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R022",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "ALA": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R023",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "ASN": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R024",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "ASP": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R025",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "GLU": -1,
+          "CYSTINE": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R026",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLN": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R027",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLY": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R028",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "SER": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R029",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "NH3": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R030",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "O2": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R031",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "CO2": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R032",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "CYSTEINE": -2,
+          "O2": -1,
+          "CYSTINE": 1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R033",
+        "lower": -1000000.0,
+        "name": null,
+        "stoichiometry": {
+          "GLU": -1
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R034",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "NADHcyto": -1,
+          "NADHmito": 0.5,
+          "FADH2": 0.5
+        },
+        "upper": 1000000.0
+      },
+      {
+        "identifier": "R035",
+        "lower": 0.0,
+        "name": null,
+        "stoichiometry": {
+          "G6P": -1,
+          "ATP": -1,
+          "GLU": -2,
+          "NADHcyto": 2,
+          "SER": 2,
+          "AKG": 2
+        },
+        "upper": 1000000.0
+      }
+    ],
+    "exchange_reactions": [
+      "R018",
+      "R019",
+      "R020",
+      "R021",
+      "R022",
+      "R023",
+      "R024",
+      "R025",
+      "R026",
+      "R027",
+      "R028",
+      "R029",
+      "R030",
+      "R031",
+      "R033"
+    ],
+    "objective": {
+      "R018": 1.0
+    },
+    "representation": "reduced",
+    "exchange_roles": {
+      "R018": "tracked",
+      "R019": "tracked",
+      "R020": "tracked",
+      "R021": "tracked",
+      "R022": "tracked",
+      "R023": "tracked",
+      "R024": "tracked",
+      "R025": "tracked",
+      "R026": "tracked",
+      "R027": "tracked",
+      "R028": "tracked",
+      "R029": "tracked",
+      "R030": "external-supply",
+      "R031": "untracked-exchange",
+      "R033": "tracked"
+    }
+  },
+  "rate_provider": {
+    "type": "rule-graph",
+    "identifier": "khare-som-kinetics",
+    "version": "1",
+    "output_units": {
+      "v1": "nmol/(10^6 cell day)",
+      "v2": "nmol/(10^6 cell day)",
+      "v3": "nmol/(10^6 cell day)",
+      "v8": "nmol/(10^6 cell day)",
+      "v9": "nmol/(10^6 cell day)",
+      "v10": "nmol/(10^6 cell day)",
+      "v11": "nmol/(10^6 cell day)",
+      "v12": "nmol/(10^6 cell day)",
+      "v13": "nmol/(10^6 cell day)",
+      "v16": "nmol/(10^6 cell day)",
+      "v17": "nmol/(10^6 cell day)",
+      "v18": "nmol/(10^6 cell day)",
+      "v19": "nmol/(10^6 cell day)",
+      "v35": "nmol/(10^6 cell day)",
+      "growth": "1/day",
+      "death": "1/day"
+    },
+    "inputs": {},
+    "outputs": {},
+    "validity_domain": {},
+    "extrapolation": null,
+    "providers": [],
+    "default_provider": null,
+    "output_sources": {}
+  },
+  "transport": {
+    "species": null,
+    "kla_per_s": null,
+    "saturation_mol_m3": null
+  },
+  "flux_time_unit": null,
+  "recipes": {
+    "process": [
+      {
+        "time": 3.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.006299999999999999,
+        "concentrations_mmol_l": {
+          "GLC": 360.8,
+          "LAC": 0.0,
+          "ALA": 21.8,
+          "ASN": 35.0,
+          "ASP": 62.3,
+          "CYSTINE": 0.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 110.5,
+          "NH3": 0.0,
+          "GLU": 100.6
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 3.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.0006299999999999999,
+        "concentrations_mmol_l": {
+          "GLC": 0.0,
+          "LAC": 0.0,
+          "ALA": 0.0,
+          "ASN": 0.0,
+          "ASP": 0.0,
+          "CYSTINE": 85.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 0.0,
+          "NH3": 0.0,
+          "GLU": 0.0
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 4.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.0065079,
+        "concentrations_mmol_l": {
+          "GLC": 360.8,
+          "LAC": 0.0,
+          "ALA": 21.8,
+          "ASN": 35.0,
+          "ASP": 62.3,
+          "CYSTINE": 0.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 110.5,
+          "NH3": 0.0,
+          "GLU": 100.6
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 4.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.00065079,
+        "concentrations_mmol_l": {
+          "GLC": 0.0,
+          "LAC": 0.0,
+          "ALA": 0.0,
+          "ASN": 0.0,
+          "ASP": 0.0,
+          "CYSTINE": 85.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 0.0,
+          "NH3": 0.0,
+          "GLU": 0.0
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 5.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.006722660699999999,
+        "concentrations_mmol_l": {
+          "GLC": 360.8,
+          "LAC": 0.0,
+          "ALA": 21.8,
+          "ASN": 35.0,
+          "ASP": 62.3,
+          "CYSTINE": 0.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 110.5,
+          "NH3": 0.0,
+          "GLU": 100.6
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 5.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.00067226607,
+        "concentrations_mmol_l": {
+          "GLC": 0.0,
+          "LAC": 0.0,
+          "ALA": 0.0,
+          "ASN": 0.0,
+          "ASP": 0.0,
+          "CYSTINE": 85.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 0.0,
+          "NH3": 0.0,
+          "GLU": 0.0
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 5.0,
+        "event_type": "stock_to_target",
+        "composition": "supplied",
+        "volume_l": null,
+        "concentrations_mmol_l": {
+          "GLC": 2500.0
+        },
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 39.0
+      },
+      {
+        "time": 6.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.009259344670799998,
+        "concentrations_mmol_l": {
+          "GLC": 360.8,
+          "LAC": 0.0,
+          "ALA": 21.8,
+          "ASN": 35.0,
+          "ASP": 62.3,
+          "CYSTINE": 0.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 110.5,
+          "NH3": 0.0,
+          "GLU": 100.6
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 6.0,
+        "event_type": "feed",
+        "composition": "supplied",
+        "volume_l": 0.0009259344670799999,
+        "concentrations_mmol_l": {
+          "GLC": 0.0,
+          "LAC": 0.0,
+          "ALA": 0.0,
+          "ASN": 0.0,
+          "ASP": 0.0,
+          "CYSTINE": 85.0,
+          "GLN": 0.0,
+          "GLY": 0.0,
+          "SER": 0.0,
+          "NH3": 0.0,
+          "GLU": 0.0
+        },
+        "target_species": null,
+        "target_concentration_mmol_l": null,
+        "volume_basis": "solution",
+        "density_kg_l": 1.0
+      },
+      {
+        "time": 6.0,
+        "event_type": "stock_to_target",
+        "composition": "supplied",
+        "volume_l": null,
+        "concentrations_mmol_l": {
+          "GLC": 2500.0
+        },
+        "target_species": "GLC",
+        "target_concentration_mmol_l": 47.0
+      }
+    ]
+  },
+  "state": {
+    "species": {
+      "unit": "mmol",
+      "amounts": {
+        "GLC": 6.489,
+        "LAC": 0.2793,
+        "ALA": 0.0735,
+        "ASN": 1.0983,
+        "ASP": 0.2541,
+        "CYSTINE": 0.06972,
+        "GLN": 0.9156,
+        "GLY": 0.2352,
+        "SER": 1.6296,
+        "NH3": 0.6636,
+        "GLU": 0.5607
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": 103.95,
+    "dead_cells_million": 0.0,
+    "product_g": 0.0021,
+    "integral": 0.0
+  },
+  "$comment": "Khare 2026 control/SOM coefficients k1-k45 from supplement Table 6, network Table 2, initial means Table 11, feeds Table 12. Rates nmol/(million cells day); affinities mM. Growth basis 2310 nmol pseudo-biomass/million cells and product pseudo-MW 126 g/mol from Nolan thesis pp49-50; not whole antibody MW. R35 bare Km35 interpreted as Km35a following Cui 2024 Box I. Death k45 is source dimensionless: assume a fixed 0.25-day reference interval (not solver step), yielding 0.0012/day. No fitted multipliers. Numerical reaction caps +/-1e6 are not biological capacities. Unweighted reconciliation matches the SOM flux objective; native integration and inventory constraints remain. Initial dead cells/IVCD zero. CYSTINE feed 85 mM is an explicit interpretation of ambiguous Cysteine/Cystine entry; missing modeled feed constituents assumed zero. Absolute feed volumes implement the baseline current-volume percentages (7A then 7B based on pre-addition volume); changing kinetics may require recalculating those volumes. Glucose targets 39/47 mM are approximate graph readings. End day7 before feeding; withdrawals and evaporation neglected. See ../README.md."
+}

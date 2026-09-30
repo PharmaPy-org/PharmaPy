@@ -14,6 +14,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.optimize import linprog
 
 
 FloatArray = NDArray[np.float64]
@@ -56,6 +57,8 @@ class MetabolicNetworkDefinition:
         reactions: Sequence[ReactionDefinition],
         objective: Mapping[str, float],
         exchange_reaction_ids: Sequence[str] = (),
+        representation="unspecified",
+        exchange_roles=None,
     ):
         self.network_id = str(network_id)
         self.version = str(version)
@@ -89,6 +92,14 @@ class MetabolicNetworkDefinition:
             raise ValueError("objective must contain finite coefficients.")
         if set(self.exchange_reaction_ids) - reaction_set:
             raise ValueError("exchange_reaction_ids contains an unknown reaction.")
+        if representation not in {"unspecified", "reduced", "chemical"}:
+            raise ValueError("network representation must be reduced or chemical.")
+        roles = dict(exchange_roles or {})
+        if (set(roles) - set(self.exchange_reaction_ids)
+                or set(roles.values()) - {"tracked", "external-supply", "untracked-exchange", "bookkeeping"}):
+            raise ValueError("exchange roles must reference boundary reactions and supported roles.")
+        self.representation = representation
+        self.exchange_roles = MappingProxyType(roles)
         self.objective = MappingProxyType(dict(objective))
         metabolite_index = {name: index for index, name in enumerate(self.internal_metabolite_ids)}
         matrix = np.zeros((len(self.internal_metabolite_ids), len(self.reactions)))
@@ -121,6 +132,8 @@ class MetabolicNetworkDefinition:
             "objective": dict(sorted(self.objective.items())),
             "exchange_reactions": self.exchange_reaction_ids,
         }
+        if representation != "unspecified" or roles:
+            payload.update(representation=representation, exchange_roles=roles)
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         self.content_digest = hashlib.sha256(encoded).hexdigest()
 
@@ -145,7 +158,72 @@ class MetabolicNetworkDefinition:
             exchange_reaction_ids=payload.get(
                 "exchange_reaction_ids", payload.get("exchange_reactions", ())
             ),
+            representation=payload.get("representation") or "unspecified",
+            exchange_roles=payload.get("exchange_roles"),
         )
+
+    def audit_conservation(self):
+        """Check internal stoichiometry without assuming molecular compositions.
+
+        A positive conserved vector is necessary for mass consistency, not
+        proof of elemental balance. Declared boundary exchanges are excluded.
+        This diagnostic does not change bounds or repair lumped reactions.
+        """
+        columns = [i for i, name in enumerate(self.reaction_ids)
+                   if name not in self.exchange_reaction_ids]
+        if not columns:
+            return {"stoichiometric_consistency": "NOT_ASSESSED",
+                    "elemental_balance": "NOT_ASSESSED"}
+        matrix = self.stoichiometric_matrix[:, columns].T.copy()
+        scale = np.max(np.abs(matrix), axis=1)
+        matrix /= np.where(scale > 0., scale, 1.)[:, None]
+        # Homogeneity permits m >= 1 instead of a strict positivity constraint.
+        result = linprog(np.ones(matrix.shape[1]), A_eq=matrix,
+                         b_eq=np.zeros(len(columns)), bounds=(1., None),
+                         method="highs")
+        if result.success:
+            residual = np.max(np.abs(matrix @ result.x))
+            status = "PASS" if residual <= 1e-7 and np.min(result.x) >= 1. - 1e-7 else "UNRESOLVED"
+        else:
+            status = "FAIL" if result.status == 2 else "UNRESOLVED"
+        return {"stoichiometric_consistency": status,
+                "elemental_balance": "NOT_ASSESSED"}
+
+    def audit_closed_uptake(self):
+        """Test boundary production with all sign-defined boundary uptake closed.
+
+        Mixed-sign boundary reactions need an explicit transport model and are
+        not classified here. This is a feasibility screen, not thermodynamics.
+        """
+        bounds = list(zip(self.lower_bounds, self.upper_bounds))
+        exports = {}
+        for i, reaction in enumerate(self.reactions):
+            if reaction.reaction_id not in self.exchange_reaction_ids:
+                continue
+            values = np.array(list(reaction.stoichiometry.values()))
+            if np.all(values >= 0.) and np.any(values > 0.):
+                bounds[i] = (bounds[i][0], min(0., bounds[i][1]))
+                exports[i] = -1.
+            elif np.all(values <= 0.) and np.any(values < 0.):
+                bounds[i] = (max(0., bounds[i][0]), bounds[i][1])
+                exports[i] = 1.
+            else:
+                return {"status": "NOT_ASSESSED", "reason": "mixed-sign or zero boundary reaction"}
+        if not exports or any(lo > hi for lo, hi in bounds):
+            return {"status": "NOT_ASSESSED", "reason": "no boundary reactions or mandatory uptake"}
+        maxima = {}
+        for i, sign in exports.items():
+            objective = np.zeros(len(self.reactions))
+            objective[i] = -sign
+            result = linprog(objective, A_eq=self.stoichiometric_matrix,
+                             b_eq=np.zeros(len(self.internal_metabolite_ids)),
+                             bounds=bounds, method="highs")
+            if not result.success:
+                return {"status": "NOT_ASSESSED" if result.status == 2 else "UNRESOLVED",
+                        "reason": result.message}
+            maxima[self.reaction_ids[i]] = max(0., float(-result.fun))
+        return {"status": "FAIL" if max(maxima.values()) > 1e-7 else "PASS",
+                "maximum_exports": maxima}
 
     # Applies named bound overrides to produce aligned lower and upper flux vectors.
     def bounds(self, overrides: Optional[Mapping[str, Tuple[float, float]]] = None):

@@ -1,0 +1,74 @@
+{
+  "scope": "experimental reproduction through reconciliation; no refitting",
+  "elapsed_seconds": 15.843195374996867,
+  "runs": {
+    "F10": {
+      "maximum_absolute_trajectory_difference": 1.712467575520904e-06,
+      "maximum_absolute_oracle_difference": 7.361456159982183e-06,
+      "maximum_scaled_target_difference": 0.0,
+      "maximum_balance_residual": 2.3936408410918375e-13,
+      "final_volume_l": 1.1061000000000083,
+      "experimental": {
+        "biomass": {
+          "rmse_g_l": 1.7917359554349601,
+          "direct_rmse_g_l": 1.7917360303250576,
+          "measurements": 14
+        },
+        "glucose": {
+          "rmse_g_l": 1.871148316509276,
+          "direct_rmse_g_l": 1.8711480234927567,
+          "measurements": 18
+        },
+        "acetate": {
+          "rmse_g_l": 0.10721765648910554,
+          "direct_rmse_g_l": 0.10721761138913159,
+          "measurements": 17
+        }
+      }
+    },
+    "F11": {
+      "maximum_absolute_trajectory_difference": 1.072454177464266e-06,
+      "maximum_absolute_oracle_difference": 6.011900213653831e-06,
+      "maximum_scaled_target_difference": 0.0,
+      "maximum_balance_residual": 2.278177646530821e-13,
+      "final_volume_l": 1.100800000000004,
+      "experimental": {
+        "biomass": {
+          "rmse_g_l": 1.6516549396218887,
+          "direct_rmse_g_l": 1.6516549928587223,
+          "measurements": 14
+        },
+        "glucose": {
+          "rmse_g_l": 1.638695364334063,
+          "direct_rmse_g_l": 1.638695260425755,
+          "measurements": 18
+        },
+        "acetate": {
+          "rmse_g_l": 0.10169586500110604,
+          "direct_rmse_g_l": 0.10169584708747338,
+          "measurements": 18
+        }
+      }
+    }
+  },
+  "input_sha256": {
+    "reconciliation/inputs/F11/case.json": "1a18bf480245c4cbf09b75c133ddd1684ab49ad7037da7b2e976b4a4ab6cf0c2",
+    "reconciliation/inputs/F11/mechanism.json": "15381f44ee20344d1fa6ba81141b21945bc677e674596b7b3fa261bb27d31559",
+    "reconciliation/inputs/case.json": "289f7a0e7b956cd42fc3f69cfd7b2f132830925a054062c34f8034aa4ca28609",
+    "reconciliation/inputs/mechanism.json": "a5c989285e7f40f57cfaddb94d6fdb3dfe32dfad694855d672ec9f069137a126",
+    "inputs/thermo.json": "dd7bd2687b30622828522e610e721d95a2e8314a66f2f36be326c71c18de66f0",
+    "reference/F10.json": "96f59e997336c2b052db892fdb4b4924b2754e679dde74ca46db5e6c1b255e84",
+    "reference/F11.json": "876cc4b063c67fa22ac3fb7d50399e4daa38d655d4311050643fe17b9430476e"
+  },
+  "passed": true,
+  "refinements": {
+    "tolerance": {
+      "maximum_concentration_change_g_l": 6.565003269898284e-06,
+      "maximum_oracle_error_g_l": 7.965014381383639e-07
+    },
+    "step": {
+      "maximum_concentration_change_g_l": 2.026272441835175e-06,
+      "maximum_oracle_error_g_l": 5.336612418194164e-06
+    }
+  }
+}

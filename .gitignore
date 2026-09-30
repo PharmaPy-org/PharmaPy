@@ -98,3 +98,6 @@ examples/bioreactors/design_runner.py
 # Generic forward-simulation demonstration output
 !examples/bioreactors/generic_batch/outputs/trajectories.png
 !examples/bioreactors/generic_fed_batch/outputs/trajectories.png
+
+# Packaged synthetic biologics demonstration figure
+!examples/bioreactors/mammalian_surrogate_fed_batch/outputs/trajectories.png

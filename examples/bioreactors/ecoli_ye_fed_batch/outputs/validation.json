@@ -1,0 +1,59 @@
+{
+  "scope": "Native direct-kinetic forward reproduction, corrected feed accounting; no fit, no rate reconciliation, no oxygen validation.",
+  "runs": {
+    "F10": {
+      "biomass": {
+        "experimental_rmse_g_l": 1.791736031441795,
+        "source_experimental_rmse_g_l": 1.463811210690013,
+        "final_g_l": 44.05728426529697
+      },
+      "glucose": {
+        "experimental_rmse_g_l": 1.871148019774568,
+        "source_experimental_rmse_g_l": 1.63229990735777,
+        "final_g_l": 0.005720018806048551
+      },
+      "acetate": {
+        "experimental_rmse_g_l": 0.10721761076534608,
+        "source_experimental_rmse_g_l": 0.08259051054938452,
+        "final_g_l": 0.04512146014451634
+      },
+      "final_volume_l": 1.1060999999999996,
+      "independent_max_absolute_error": {
+        "biomass": 3.7971463058283916e-06,
+        "glucose": 9.097158307103115e-06,
+        "acetate": 2.743332221166739e-06,
+        "fraction_a": 8.745884346739174e-07,
+        "fraction_b": 5.97410136027321e-07,
+        "volume": 8.659739592076221e-15
+      },
+      "minimum_concentration_g_l": 0.0
+    },
+    "F11": {
+      "biomass": {
+        "experimental_rmse_g_l": 1.6516549942419039,
+        "source_experimental_rmse_g_l": 1.420491261051355,
+        "final_g_l": 44.06730991276145
+      },
+      "glucose": {
+        "experimental_rmse_g_l": 1.6386952579373493,
+        "source_experimental_rmse_g_l": 1.3127311475587,
+        "final_g_l": 0.005749269685483739
+      },
+      "acetate": {
+        "experimental_rmse_g_l": 0.1016958466890879,
+        "source_experimental_rmse_g_l": 0.10798085340064478,
+        "final_g_l": 0.045339742096459135
+      },
+      "final_volume_l": 1.100799999999996,
+      "independent_max_absolute_error": {
+        "biomass": 2.9556867531255193e-06,
+        "glucose": 7.1094793052672856e-06,
+        "acetate": 2.1051089504897647e-06,
+        "fraction_a": 6.800989150734793e-07,
+        "fraction_b": 4.6397676545240074e-07,
+        "volume": 8.548717289613705e-15
+      },
+      "minimum_concentration_g_l": 0.0
+    }
+  }
+}

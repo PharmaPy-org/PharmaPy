@@ -1,0 +1,13 @@
+{
+  "scope": "Synthetic surrogate qualification, not experimental validation",
+  "runs": {
+    "affine": {
+      "maximum_normalized_trajectory_error": 0.007097897462767092,
+      "inside_validity_domain": true
+    },
+    "polynomial": {
+      "maximum_normalized_trajectory_error": 0.001234237168778038,
+      "inside_validity_domain": true
+    }
+  }
+}

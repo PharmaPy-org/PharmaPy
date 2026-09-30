@@ -1,0 +1,106 @@
+{
+  "schema_version": 2,
+  "mechanism": null,
+  "parameters": {
+    "rates": {},
+    "affinities": {},
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {
+      "flux_basis": {},
+      "state_ids": [],
+      "pathway_ids": [],
+      "exchange_matrix": [],
+      "growth_coefficients": [],
+      "objective_coefficients": [],
+      "uptake_constraints": [],
+      "pathway_bound_rules": [],
+      "depletion_tolerance": null,
+      "problem_name": null
+    },
+    "kinetics": {
+      "flux_basis": {},
+      "extracellular_species": [],
+      "rule_graph": [],
+      "kinetic_outputs": {},
+      "exchange_mappings": [],
+      "degradation_mappings": [],
+      "product_mapping": {},
+      "constants": {},
+      "condition_bounds": {},
+      "species_mass_rates": {},
+      "rate_unit": null
+    },
+    "reconciliation": {
+      "internal_reactions": [],
+      "normalization_exclusions": [],
+      "reconciliation_relative_bound": null,
+      "reconciliation_bound_increment": null,
+      "untargeted_exchanges": [],
+      "parameter_corrections": {},
+      "problem_name": null,
+      "reconciliation_policy": null,
+      "reconciliation_scaling": {
+        "target_floor": {
+          "value": null,
+          "basis": {
+            "amount_unit": null,
+            "normalization": null,
+            "time_unit": null
+          }
+        },
+        "target_floors": {},
+        "internal_scale": null
+      }
+    }
+  },
+  "network": {
+    "identifier": null,
+    "version": null,
+    "internal_metabolites": [],
+    "reactions": [],
+    "exchange_reactions": [],
+    "objective": {},
+    "representation": null,
+    "exchange_roles": {}
+  },
+  "rate_provider": {
+    "type": null,
+    "identifier": null,
+    "version": null,
+    "output_units": {},
+    "inputs": {},
+    "outputs": {},
+    "validity_domain": {},
+    "extrapolation": null,
+    "providers": [],
+    "default_provider": null,
+    "output_sources": {}
+  },
+  "transport": {
+    "species": null,
+    "kla_per_s": null,
+    "saturation_mol_m3": null
+  },
+  "flux_time_unit": null,
+  "recipes": {
+    "process": []
+  },
+  "state": {
+    "species": {
+      "unit": null,
+      "amounts": {}
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "$comment": "One template for all supported modes. Choose pathway-lp or rate-reconciled-culture. Fill the corresponding model sections; leave unused sections blank or {}. Parameter groups hold numeric maps with user-chosen species, rate and condition identifiers. Dotted references connect coefficients to declared kinetics or bounds; labels do not select equations. See doc/online_docs/bioreactors/templates/guide.json for compact records and units. This blank file intentionally cannot run until required science is supplied."
+}

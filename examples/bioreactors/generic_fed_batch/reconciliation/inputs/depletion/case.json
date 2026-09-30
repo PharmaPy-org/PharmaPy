@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "biology": {
+    "conditions": {
+      "growth_per_day": 0.0
+    }
+  },
+  "numerics": {
+    "backend": "fixed-step",
+    "step": {
+      "unit": "day",
+      "value": 0.01
+    },
+    "relative_tolerance": null,
+    "absolute_tolerance": null,
+    "maximum_step": {
+      "unit": null,
+      "value": null
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  },
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "fed-batch",
+    "runtime": {
+      "unit": "day",
+      "value": 1.5
+    },
+    "temperature_k": 298.15,
+    "volume_policy": "working-volume"
+  },
+  "recipe": {
+    "name": "benchmark",
+    "require_complete_inputs": true
+  },
+  "$comment": "Manufactured known-answer fed-batch reconciliation benchmark; no empirical calibration or biological validation."
+}

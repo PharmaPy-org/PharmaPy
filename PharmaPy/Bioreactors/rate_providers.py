@@ -1,12 +1,13 @@
 """Biological-rate providers for mechanistic, surrogate, and hybrid models."""
 
 from collections.abc import Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from types import MappingProxyType
 
 import numpy as np
 
-from .culture import CultureModelDefinition, evaluate_rule_graph
+from .culture import evaluate_rule_graph, _validate_graph
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,11 @@ class RateProviderResult:
         object.__setattr__(self, "units", MappingProxyType(units))
         object.__setattr__(self, "diagnostics", MappingProxyType(dict(self.diagnostics)))
 
+    def __deepcopy__(self, memo):
+        """Preserve read-only rate mappings during native result replay."""
+        return type(self)(dict(self.rates), dict(self.units), self.provider_id, self.version,
+                          self.inside_validity_domain, deepcopy(dict(self.diagnostics), memo))
+
 
 class RuleGraphRateProvider:
     """Supply biological rates from the existing declarative kinetic graph."""
@@ -39,18 +45,33 @@ class RuleGraphRateProvider:
     def __init__(self, declaration, definition, expected_outputs):
         self.definition = definition
         self.expected_outputs = tuple(expected_outputs)
+        _validate_graph(definition, self.expected_outputs)
         units = declaration.get("output_units")
         if not isinstance(units, Mapping) or not set(self.expected_outputs) <= set(units):
             raise ValueError("rule-graph output_units must cover all assigned outputs")
         self.units = {name: units[name] for name in self.expected_outputs}
         self.provider_id = str(declaration.get("identifier", "rule-graph"))
         self.version = str(declaration.get("version", "1"))
+        self.validity_domain = {name: tuple(map(float, bounds))
+                                for name, bounds in declaration.get('validity_domain', {}).items()}
+        if set(self.validity_domain) - {r['identifier'] for r in definition.rule_graph}:
+            raise ValueError('rule-graph validity_domain references an unknown rule')
+        if any(len(b) != 2 or not np.isfinite(b).all() or b[0] > b[1]
+               for b in self.validity_domain.values()):
+            raise ValueError('rule-graph validity bounds must be finite ordered pairs')
+        self.extrapolation = declaration.get('extrapolation')
+        if self.validity_domain and self.extrapolation not in {'error', 'allow'}:
+            raise ValueError('rule-graph extrapolation must be explicitly error or allow')
 
     def evaluate(self, snapshot, conditions):
         graph = evaluate_rule_graph(self.definition, snapshot, conditions)
+        outside = tuple(name for name, bounds in self.validity_domain.items()
+                        if not bounds[0] <= graph[name] <= bounds[1])
+        if outside and self.extrapolation == 'error':
+            raise ValueError(f'rule-graph outside validity domain: {list(outside)}')
         rates = {name: graph[name] for name in self.expected_outputs}
         return RateProviderResult(rates, self.units, self.provider_id, self.version,
-                                  True, {"provider_type": "rule-graph"})
+                                  not outside, {"provider_type": "rule-graph", "outside_rules": outside})
 
 
 class AffineSurrogateRateProvider:
@@ -75,6 +96,8 @@ class AffineSurrogateRateProvider:
                 raise ValueError(f"surrogate input {alias!r} is invalid")
             if not str(spec["name"]) or not str(spec["unit"]):
                 raise ValueError(f"surrogate input {alias!r} requires name and unit")
+            if spec['source'] == 'concentration' and spec['unit'] != 'mmol/L':
+                raise ValueError('surrogate concentration input units must be mmol/L')
         for name, spec in self.outputs.items():
             if set(spec) != {"unit", "intercept", "coefficients"}:
                 raise ValueError(f"surrogate output {name!r} is invalid")
@@ -88,7 +111,7 @@ class AffineSurrogateRateProvider:
             raise ValueError("surrogate validity_domain must cover every input")
         self.validity_domain = {name: tuple(map(float, limits))
                                 for name, limits in domain.items()}
-        if any(len(limits) != 2 or limits[0] > limits[1]
+        if any(len(limits) != 2 or not np.isfinite(limits).all() or limits[0] > limits[1]
                for limits in self.validity_domain.values()):
             raise ValueError("surrogate validity bounds must be ordered pairs")
         self.extrapolation = declaration.get("extrapolation")
@@ -182,8 +205,8 @@ def register_rate_provider(provider_type, factory):
 
 def build_rate_provider(declaration, definition, expected_outputs):
     """Resolve one explicitly declared biological-rate provider."""
-    if not isinstance(definition, CultureModelDefinition):
-        raise TypeError("definition must be a CultureModelDefinition")
+    if not all(hasattr(definition, name) for name in ('rule_graph', 'parameters', 'constants')):
+        raise TypeError("definition must expose rule_graph, parameters and constants")
     if not isinstance(declaration, Mapping) or "type" not in declaration:
         raise ValueError("rate provider requires an explicit type")
     provider_type = declaration["type"]

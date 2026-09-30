@@ -1,0 +1,273 @@
+{
+  "schema_version": 2,
+  "mechanism": "rate-reconciled-culture",
+  "parameters": {
+    "rates": {
+      "ua": 1.5,
+      "ub": 0.5,
+      "p": 1.0,
+      "q": 1.0,
+      "g": 0.0,
+      "growth": 0.0,
+      "death": 0.0
+    },
+    "affinities": {},
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {},
+    "kinetics": {
+      "extracellular_species": [
+        "nutrient_a",
+        "nutrient_b",
+        "byproduct"
+      ],
+      "rule_graph": [
+        {
+          "identifier": "ua",
+          "expression": {
+            "parameter": "rates.ua"
+          }
+        },
+        {
+          "identifier": "ub",
+          "expression": {
+            "parameter": "rates.ub"
+          }
+        },
+        {
+          "identifier": "p",
+          "expression": {
+            "parameter": "rates.p"
+          }
+        },
+        {
+          "identifier": "q",
+          "expression": {
+            "parameter": "rates.q"
+          }
+        },
+        {
+          "identifier": "g",
+          "expression": {
+            "parameter": "rates.g"
+          }
+        },
+        {
+          "identifier": "growth",
+          "expression": {
+            "parameter": "rates.growth"
+          }
+        },
+        {
+          "identifier": "death",
+          "expression": {
+            "parameter": "rates.death"
+          }
+        }
+      ],
+      "kinetic_outputs": {
+        "growth": "growth",
+        "death": "death",
+        "exchange_fluxes": {
+          "ua": "ua",
+          "ub": "ub",
+          "p": "p",
+          "q": "q",
+          "g": "g"
+        },
+        "growth_reaction": "g"
+      },
+      "exchange_mappings": [
+        {
+          "reaction": "ua",
+          "species": "nutrient_a",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "ub",
+          "species": "nutrient_b",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "q",
+          "species": "byproduct",
+          "internal_coefficient": -1.0
+        }
+      ],
+      "degradation_mappings": [],
+      "product_mapping": {
+        "reaction": "p",
+        "molecular_weight_g_mol": 100.0
+      },
+      "constants": {
+        "seconds_per_day": 86400.0
+      },
+      "condition_bounds": {
+        "temperature_k": [
+          298.15,
+          298.15
+        ]
+      },
+      "flux_basis": {
+        "exchange": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        },
+        "growth": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day",
+          "amount_per_million_cells": 2.0
+        },
+        "product": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        }
+      }
+    },
+    "reconciliation": {
+      "internal_reactions": [
+        "x",
+        "y"
+      ],
+      "normalization_exclusions": [],
+      "untargeted_exchanges": [],
+      "parameter_corrections": {},
+      "reconciliation_relative_bound": null,
+      "reconciliation_bound_increment": null,
+      "reconciliation_policy": "unweighted",
+      "problem_name": "Manufactured two-dimensional projection"
+    }
+  },
+  "network": {
+    "identifier": "two-branch-compatible",
+    "representation": "reduced",
+    "internal_metabolites": [
+      "A",
+      "B",
+      "P",
+      "Q",
+      "G"
+    ],
+    "exchange_reactions": [
+      "ua",
+      "ub",
+      "p",
+      "q",
+      "g"
+    ],
+    "exchange_roles": {
+      "ua": "tracked",
+      "ub": "tracked",
+      "p": "tracked",
+      "q": "tracked",
+      "g": "tracked"
+    },
+    "objective": {
+      "p": 1.0
+    },
+    "reactions": [
+      {
+        "identifier": "ua",
+        "stoichiometry": {
+          "A": 1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "ub",
+        "stoichiometry": {
+          "B": 1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "x",
+        "stoichiometry": {
+          "A": -1.0,
+          "P": 1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "y",
+        "stoichiometry": {
+          "A": -1.0,
+          "B": -1.0,
+          "Q": 2.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "p",
+        "stoichiometry": {
+          "P": -1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "q",
+        "stoichiometry": {
+          "Q": -1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "g",
+        "stoichiometry": {
+          "G": -1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      }
+    ]
+  },
+  "rate_provider": {
+    "type": "rule-graph",
+    "identifier": "declared-targets",
+    "version": "1",
+    "output_units": {
+      "ua": "mmol/(10^6 cell day)",
+      "ub": "mmol/(10^6 cell day)",
+      "p": "mmol/(10^6 cell day)",
+      "q": "mmol/(10^6 cell day)",
+      "g": "mmol/(10^6 cell day)",
+      "growth": "1/day",
+      "death": "1/day"
+    }
+  },
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "benchmark": []
+  },
+  "state": {
+    "species": {
+      "unit": "mmol",
+      "amounts": {
+        "nutrient_a": 0.037,
+        "nutrient_b": 10.0,
+        "byproduct": 0.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": 1.0,
+    "dead_cells_million": 0.0,
+    "product_g": 0.0,
+    "integral": 0.0
+  },
+  "$comment": "Level 5 manufactured transition benchmark. All properties and targets are declared synthetic quantities; no biological calibration."
+}

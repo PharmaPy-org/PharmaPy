@@ -1,161 +1,64 @@
-# Native bioreactor demonstrators
+# Native bioreactor forward examples
 
-These examples use `build_bioreactor` to construct standard PharmaPy
-`LiquidPhase`, biological `Mechanism`, and native `BatchReactor` or
-`SemiBatchReactor` objects. JSON is only a reproducible serialization of the
-scientific and operating inputs; it does not invoke a separate simulator.
+Each core example supplies `inputs/case.json`, `inputs/mechanism.json`,
+`inputs/thermo.json`, a forward `workflow.ipynb`, and trajectory CSV/PNG/SVG outputs.
+The shared path is `build_bioreactor -> native BatchReactor/SemiBatchReactor -> solve_unit`.
 
-The shared construction path is:
+See the concise [configuration and provider guide](../../doc/online_docs/bioreactors/USER_GUIDE.md).
 
-`input mappings -> LiquidPhase + Mechanism -> native reactor -> solve_unit`
+| Example | Purpose |
+| --- | --- |
+| [Generic batch](generic_batch/README.md) | Small configurable batch with analytical checks. |
+| [Generic fed-batch](generic_fed_batch/README.md) | Feed events, dilution and material accounting; includes synthetic reconciliation benchmarks. |
+| [Batch E. coli](batch_ecoli_dfba/README.md) | Reduced-pathway optimization and qualitative diauxic growth reproduction. |
+| [Fed-batch E. coli](ecoli_ye_fed_batch/README.md) | Experimental reproduction with continuous feed and sampling. Its [reconciliation assessment](ecoli_ye_fed_batch/reconciliation/README.md) checks the frozen model through metabolic reconciliation. |
 
-- `batch_ecoli_dfba`: arbitrary-pathway batch dFBA and published qualitative benchmark.
-- `fed_batch_cho`: input-declared kinetic rules, rate-reconciled MFA, and fed-batch events.
-- `generic_batch`: a small forward-only homework example with one nutrient and one
-  pathway, an analytical solution, and a nutrient-to-biomass mass-balance check.
-- `generic_fed_batch`: the same homework model with a nutrient-feed pulse, both
-  event-side states, dilution, and feed-corrected analytical/mass-balance checks.
+The [synthetic mammalian/surrogate example](mammalian_surrogate_fed_batch/README.md)
+adds viable cells, product titer and an end-to-end mechanistic-to-surrogate comparison.
+It is illustrative capability evidence, not experimental validation.
 
-Start with [the generic notebook](generic_batch/workflow.ipynb) for a short introduction.
-It needs only `case.json`, `mechanism.json`, and `thermo.json`; its seven steps show
-input editing, native simulation, result extraction, independent checks, plotting,
-and optional export. The supplied outputs are an illustrative six-hour batch run,
-not experimental measurements. No estimation or design study is run in this example.
-Then use [the generic fed-batch notebook](generic_fed_batch/workflow.ipynb) to see
-the same seven-step workflow with a scheduled feed. Its inputs and output file
-types match the batch example. The notebook explains the native carrier-volume
-convention for specifying feeds.
+Run the notebook cells in order: select folders, load/edit inputs, construct and
+solve, extract trajectories, plot, export. Change the input values using the
+[shared templates](../../doc/online_docs/bioreactors/templates/README.md).
+Core forward notebooks need no runner or verification scripts. They do not fit biological parameters or
+select experiments. The synthetic mammalian notebook fits surrogate coefficients to a generated rate grid. Their exports overwrite the configured output paths.
 
-Biological-rate providers share a validated native mechanism contract. The
-registered `rule-graph`, `affine-surrogate`, and `hybrid` providers can be
-selected through the mechanism input; provider identity, units, validity-domain
-status, and composition are retained in runtime diagnostics.
+`case.operation.volume_policy` selects native mass/density volume or the declared
+working-volume basis. Both execute through native reactors. Working-volume
+supports declared continuous inlets, additions and well-mixed samples; continuous
+outlets/perfusion and unmanaged connections remain unsupported. Configure rate
+units and biological conversion properties explicitly; the converter cannot infer
+missing cell mass, feed composition or biological coefficients.
 
-## Editable workflow notebooks
-
-Each example's `workflow.ipynb` now runs the example tasks directly through
-PharmaPy APIs instead of importing `run_*.py`. Numbered markdown sections and
-Python comment blocks describe what to edit, required units, and how to execute
-each cell with Shift+Enter. Configuration is loaded into editable dictionaries;
-construction, propagation, result extraction, and plots are visible. The two
-flagship notebooks also expose inference and experiment-design steps.
-The shared `run_design_study` library coordinator retains the full calibrated
-synthetic design/refit/refinement study. It is not a laboratory data-acquisition
-workflow. Redundant command-line runner scripts are not distributed.
-
-Default execution (`WRITE_ARTIFACTS = False`) leaves packaged inputs and outputs
-unchanged. In the flagship notebooks, custom configurations skip the original-case
-regression comparison while physical and study acceptance checks remain active;
-optional export defaults to `custom_results/`. In the generic notebooks, optional
-export defaults to `outputs/` and replaces the supplied CSV, plot, and summary;
-change `EXPORT_DIR` first to preserve those files. Generic analytical checks
-assume the declared one-pathway, constant-density, pre-depletion model and must be
-revised if that model is changed.
-
-| Notebook | Forward simulation and plots | Additional steps |
-| --- | --- | --- |
-| [Generic batch](generic_batch/workflow.ipynb) | 1–6 | 7: optional export |
-| [Generic fed-batch](generic_fed_batch/workflow.ipynb) | 1–6 | 7: optional export |
-| [E. coli](batch_ecoli_dfba/workflow.ipynb) | 1–6 | 7–10: estimation; 11–12: design; 13: regression; 14: optional export |
-| [CHO](fed_batch_cho/workflow.ipynb) | 1–6 | 7–8: calibration/design; 9: regression; 10: optional export |
-
-Run cells in order with Shift+Enter, restarting after configuration changes.
-See each notebook's instructions before adapting species or model families.
-
-## Reproduce and check the demonstrator
-
-From a source checkout, using Python 3.11:
+Use Python 3.11 with the dependencies in
+[requirements-py311.txt](requirements-py311.txt). Run regression checks directly:
 
 ```sh
-python3.11 examples/bioreactors/verify_installation.py
+python -m pytest -q -p no:cacheprovider -o pythonpath=. tests/Bioreactor
 ```
 
-This creates a new isolated environment outside the checkout, installs the exact
-versions in `requirements-py311.txt`, runs `pip check`, and executes `tests/Bioreactor`
-including both full flagship notebook workflows and the generic notebook checks. Packaged simulation and inference outputs
-are preserved as references. It exits nonzero on failed acceptance and writes
-`installation_report.json`. Allow time for repeated dynamic fits. The environment
-is retained; `--environment /path/to/new/environment` chooses its location.
+Retired CHO, hybridoma and duplicate demonstration folders, old campaign outputs,
+and installation/regression-refresh helpers have been removed. Minimal historical
+inputs and captured numerical failure states remain under `tests/Bioreactor/fixtures`
+only where active tests need them. Synthetic benchmark inputs remain with the
+generic fed-batch example. The [validation ladder](../../PharmaPy/Bioreactors/TECHNICAL_SUMMARY.md#qualification-and-limits)
+records the qualification scope; numerical correctness does not establish general
+biological predictivity. Published comparison assets retained with core examples
+are reference evidence, not outputs regenerated by every forward notebook.
 
-The qualification scope is Python 3.11 with the examples' SciPy and fixed-step
-backends. Assimulo/IDA and other operating systems are not qualified by this
-command. This is source-checkout execution, not installation through the legacy
-root `requirements.txt`, which also requests optional Assimulo. No inherited
-`PYTHONPATH`, external dependency overlay, or existing PharmaPy environment is used.
+## Empty optional input slots
 
-After setup, open any of the four `workflow.ipynb` files using that environment and execute its
-cells in order. For a forward simulation alone, run Steps 1–6. Library callers
-can use `build_bioreactor(case, mechanism, thermo_path).solve()` directly.
+The four core examples are isothermal liquid-phase simulations. Their
+`thermo.json` files retain molecular weights (`mw`) and liquid densities
+(`rho_liq`), which native construction and balances use. Unused property arrays
+(including `cp_liq` and `p_vap`) are `[]`; unused scalar/text properties are `null`.
+Every property key is retained. Empty arrays satisfy phase/stream construction
+without supplying invented heat-capacity or vapor-pressure coefficients.
 
-### Focused notebook checks
-
-To check the flagship notebooks' direct API use and instructional structure
-without running their long fitting studies, use the configured environment:
-
-```sh
-python -m pytest -q -p no:cacheprovider -o pythonpath=. tests/Bioreactor/test_bioreactor_workflow_notebooks.py -k uses_library_directly
-```
-
-The test requires each code cell to start with `# STEP `, contain at least two
-comment lines among the next five lines, and compile. It does not require the
-literal `# WHAT TO DO:` marker. These checks alone do not qualify simulation or
-inference results. The generic execution tests are in
-`tests/Bioreactor/test_bioreactor_generic_example.py`; they also exercise edited
-uptake rates and feed volumes. Full verification remains the command above.
-
-### Explicit experiment-design acceptance
-
-Both flagship `inputs/design.json` files select `acceptance.profile: capability`
-for the WP3 methodology demonstration. Reports distinguish `capability_status`
-from `empirical_benefit_status`; top-level `status` applies to the declared profile.
-The capability profile requires replay, equal cost, stable model-based uncertainty
-benefit, and finite confirmation results. Failed fitting or numerical solutions
-still raise errors. Independent simulation/accounting checks remain mandatory in
-the complete verification command.
-
-The `predictive-benefit` profile additionally requires lower mean withheld MSE
-in the declared noisy confirmations. It remains the default when no profile is
-provided. Neither profile permits skipping the numerical/capability gates.
-`OBSERVED` means benefit in that finite synthetic sample, not statistical proof;
-`NOT_DEMONSTRATED` retains an unfavorable or tied comparison, and `INVALID`
-identifies nonfinite confirmation diagnostics. Capability PASS must never be
-presented as empirical predictive validation.
-
-### Packaged evidence
-
-`installation_report.json` records the historical environment that generated the
-packaged reports; its runner names describe that earlier execution. Running the
-current verification command replaces only the installation report with the new
-test outcome. Scientific input values, reference outputs, seeds, noise, and
-acceptance thresholds are not automatically refreshed.
-
-The selected CHO design predicts a 17.26% local parameter-SD reduction, but its
-five-seed mean standardized withheld MSE is 0.14326 versus 0.13769 for the matched
-control. This small conditional comparison does not demonstrate predictive
-superiority. Local information improvement and realized noisy prediction benefit
-are different claims. CHO remains `NOT_DEMONSTRATED` for empirical benefit and
-would still fail the `predictive-benefit` profile.
-
-## Evidence and baselines
-
-Each flagship example packages its scientific references under `documentation/` and records
-evidence checksums in `inputs/source_manifest.json`. Current endpoint checks use
-`inputs/regression_baseline.json`: generated model outputs with input/source hashes
-and generation metadata, **not experimental measurements**. Previously untraced
-constants are retained there as superseded history. The explicit maintenance
-command `PYTHONPATH=. python examples/bioreactors/refresh_regression.py` changes baselines;
-normal verification never refreshes them. Review scientific changes before using it.
-
-Each flagship folder also includes one executable `workflow.ipynb` that calls
-the PharmaPy library directly without writing artifacts. The notebooks demonstrate the
-complete simulation plus E. coli parameter estimation/design or CHO experiment design;
-they do not contain an alternative model or execution path.
-
-The generic examples instead package `case.json`, `mechanism.json`, and
-`thermo.json`, with `trajectories.csv`, `trajectories.png`, and `summary.json` as
-outputs. Their evidence is comparison with an independent analytical solution
-and declared mass accounting, not a published-data benchmark. The fed-batch case
-adds one pulse at three hours; it preserves pre/post event rows and checks
-biomass continuity, nutrient addition, volume change, and dilution. Neither
-generic example demonstrates estimation, experiment design, or experimental
-predictive accuracy.
+These blanks mean **not supplied**, not zero. Repopulate the corresponding
+properties before requesting energy balances, vapor-liquid calculations, or other
+property calculations that need them. No native thermodynamic functionality was
+removed. The supplied forward trajectories are unchanged by this input cleanup.
+Populated case/model values, intentional zero rates, required mappings and
+construction/validation fields remain; unused optional model sections already
+use empty objects or `null`.

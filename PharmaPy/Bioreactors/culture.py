@@ -39,8 +39,16 @@ class CultureModelDefinition:
     reconciliation_relative_bound: float = None
     reconciliation_bound_increment: float = None
     problem_name: str = "configured rate-reconciled culture"
+    parameter_corrections: dict = None
+    untargeted_exchanges: tuple = ()
+    flux_basis: dict = None
+    reconciliation_policy: str = "relative-regularized"
+    reconciliation_scaling: dict = None
 
     def __post_init__(self):
+        object.__setattr__(self, "flux_basis", MappingProxyType({
+            key: MappingProxyType(dict(value)) for key, value in (self.flux_basis or {}).items()
+        }))
         species = tuple(map(str, self.extracellular_species))
         internal = tuple(map(str, self.internal_reactions))
         if not species or len(species) != len(set(species)):
@@ -67,12 +75,52 @@ class CultureModelDefinition:
         )
         object.__setattr__(self, "product_mapping", MappingProxyType(dict(self.product_mapping)))
         object.__setattr__(self, "constants", MappingProxyType(_flatten(self.constants)))
-        object.__setattr__(self, "parameters", MappingProxyType(_flatten(self.parameters)))
+        parameters = _flatten(self.parameters)
+        corrections = dict(self.parameter_corrections or {})
+        for name, declaration in corrections.items():
+            if name not in parameters:
+                raise ValueError(f"correction references unknown parameter {name!r}")
+            if set(declaration) - {"kind", "choice", "source"}:
+                raise ValueError(f"unknown correction fields for {name!r}")
+            kind, choice = declaration.get("kind"), declaration.get("choice")
+            if kind not in {"multiplicative", "additive"}:
+                raise ValueError("correction kind must be multiplicative or additive")
+            if choice not in {"neutral", "supplied"}:
+                raise ValueError("correction choice must be neutral or supplied")
+            value = parameters[name]
+            if not np.isfinite(value):
+                raise ValueError(f"correction {name!r} must be finite")
+            if choice == "neutral" and value != (1.0 if kind == "multiplicative" else 0.0):
+                raise ValueError(f"neutral correction {name!r} requires its neutral value")
+            source = declaration.get("source")
+            if choice == "supplied" and (not isinstance(source, str) or not source.strip()):
+                raise ValueError(f"supplied correction {name!r} requires a source")
+        object.__setattr__(self, "parameters", MappingProxyType(parameters))
+        object.__setattr__(self, "parameter_corrections", MappingProxyType({
+            name: MappingProxyType(dict(item)) for name, item in corrections.items()
+        }))
+        untargeted = tuple(self.untargeted_exchanges)
+        exchanges = set(self.kinetic_outputs["exchange_fluxes"])
+        if len(untargeted) != len(set(untargeted)) or not set(untargeted) <= exchanges:
+            raise ValueError("untargeted exchanges must be unique declared exchange reactions")
+        if not exchanges - set(untargeted):
+            raise ValueError("rate reconciliation requires at least one kinetic target")
+        object.__setattr__(self, "untargeted_exchanges", untargeted)
         object.__setattr__(
             self,
             "condition_bounds",
             MappingProxyType(dict(self.condition_bounds or {})),
         )
+        if self.reconciliation_policy not in {"relative-regularized", "unweighted", "unit-scaled"}:
+            raise ValueError("unknown reconciliation_policy")
+        if self.reconciliation_policy == 'unit-scaled' and not self.flux_basis:
+            raise ValueError('unit-scaled reconciliation requires declared flux_basis')
+        if self.reconciliation_policy != "relative-regularized":
+            if (self.reconciliation_relative_bound is not None
+                    or self.reconciliation_bound_increment is not None):
+                raise ValueError(f"{self.reconciliation_policy} reconciliation requires null relative target bounds")
+            _validate_graph(self)
+            return
         bound = self.reconciliation_relative_bound
         if bound is None or not np.isfinite(bound) or bound < 0.5:
             raise ValueError(
@@ -104,41 +152,45 @@ class CultureSnapshot:
     dead_cells_million: float
     product_g: float
     ivcd_million_cell_day_per_ml: float
+    biomass_kg: float = 0.0
 
     @property
     def viable_cell_density_million_ml(self):
         return self.viable_cells_million / (self.volume_l * 1000.0)
 
 
-def _references(expression):
+def _references(expression, key="ref"):
     if not isinstance(expression, dict):
         return set()
-    found = {expression["ref"]} if set(expression) == {"ref"} else set()
+    found = {expression[key]} if set(expression) == {key} else set()
     for value in expression.values():
         if isinstance(value, dict):
-            found.update(_references(value))
+            found.update(_references(value, key))
         elif isinstance(value, list):
             for item in value:
-                found.update(_references(item))
+                found.update(_references(item, key))
     return found
 
 
-def _validate_graph(definition):
+def _validate_graph(definition, outputs=None):
     available = set()
     for rule in definition.rule_graph:
         if set(rule) != {"identifier", "expression"}:
             raise ValueError("rules require only identifier and expression")
+        if _references(rule['expression'], 'accepted_flux'):
+            raise ValueError('accepted fluxes are only available after reconciliation')
         unknown = _references(rule["expression"]) - available
         if unknown:
             raise ValueError(f"rule graph contains forward references {sorted(unknown)}")
         available.add(rule["identifier"])
-    required = {definition.kinetic_outputs["growth"], definition.kinetic_outputs["death"],
-                *dict(definition.kinetic_outputs["exchange_fluxes"]).values()}
+    required = (set(outputs) if outputs is not None else
+                {definition.kinetic_outputs["growth"], definition.kinetic_outputs["death"],
+                 *dict(definition.kinetic_outputs["exchange_fluxes"]).values()})
     if not required <= available:
         raise ValueError("kinetic outputs reference undeclared rules")
 
 
-def _evaluate(expr, values, definition, state, conditions):
+def _evaluate(expr, values, definition, state, conditions, accepted_fluxes=None):
     if isinstance(expr, (int, float)):
         return float(expr)
     if set(expr) == {"ref"}:
@@ -153,9 +205,18 @@ def _evaluate(expr, values, definition, state, conditions):
         return float(getattr(state, expr["state"]))
     if set(expr) == {"condition"}:
         return float(conditions[expr["condition"]])
+    if set(expr) == {'accepted_flux'}:
+        if accepted_fluxes is None:
+            raise ValueError('accepted fluxes are only available after reconciliation')
+        return accepted_fluxes[expr['accepted_flux']]
     op = expr.get("op")
+    if op == "greater-select":
+        condition, positive, negative = expr["args"]
+        branch = (positive if _evaluate(condition, values, definition, state, conditions, accepted_fluxes)
+                  > float(expr["threshold"]) else negative)
+        return _evaluate(branch, values, definition, state, conditions, accepted_fluxes)
     args = [
-        _evaluate(item, values, definition, state, conditions)
+        _evaluate(item, values, definition, state, conditions, accepted_fluxes)
         for item in expr.get("args", ())
     ]
     if op == "add":
@@ -179,8 +240,6 @@ def _evaluate(expr, values, definition, state, conditions):
         return concentration / (args[1] + concentration)
     if op == "quadratic":
         return args[0] * args[3] ** 2 + args[1] * args[3] + args[2]
-    if op == "greater-select":
-        return args[1] if args[0] > float(expr["threshold"]) else args[2]
     raise ValueError(f"unsupported kinetic operator {op!r}")
 
 

@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "biology": {
+    "conditions": {}
+  },
+  "numerics": {
+    "backend": null,
+    "step": {
+      "unit": null,
+      "value": null
+    },
+    "relative_tolerance": null,
+    "absolute_tolerance": null,
+    "maximum_step": {
+      "unit": null,
+      "value": null
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  },
+  "operation": {
+    "carrier_density_kg_l": null,
+    "carrier_species": null,
+    "initial_mass_kg": null,
+    "initial_volume": {
+      "unit": null,
+      "value": null
+    },
+    "mode": null,
+    "runtime": {
+      "unit": null,
+      "value": null
+    },
+    "temperature_k": null,
+    "volume_policy": "native"
+  },
+  "recipe": {
+    "name": null,
+    "require_complete_inputs": false
+  },
+  "$comment": "Copy case.json, mechanism.json, and thermo.json together. Fill null values using the template guide at doc/online_docs/bioreactors/templates/guide.json. Select mode and numerics here; select biological mathematics only in mechanism.json. Optional numerical settings and temperature may remain null."
+}

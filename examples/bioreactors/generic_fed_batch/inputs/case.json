@@ -1,36 +1,25 @@
 {
-  "biology": {
-    "conditions": {},
-    "mechanism": "pathway-lp"
-  },
+  "schema_version": 2,
+  "biology": {"conditions": {}},
   "numerics": {
     "backend": "scipy",
+    "step": {"unit": "h", "value": 0.1},
     "relative_tolerance": 1e-09,
     "absolute_tolerance": 1e-12,
-    "maximum_step": {
-      "unit": "s",
-      "value": 300.0
-    },
-    "step": {
-      "unit": "h",
-      "value": 0.1
-    }
+    "maximum_step": {"unit": "s", "value": 300.0},
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
   },
   "operation": {
     "carrier_density_kg_l": 1.0,
     "carrier_species": "water",
     "initial_mass_kg": 1.0,
-    "initial_volume": {
-      "unit": "L",
-      "value": 1.0
-    },
+    "initial_volume": {"unit": "L", "value": 1.0},
     "mode": "fed-batch",
-    "runtime": {
-      "unit": "h",
-      "value": 6.0
-    }
+    "runtime": {"unit": "h", "value": 6.0},
+    "temperature_k": null,
+    "volume_policy": "native"
   },
-  "recipe": {
-    "name": "fed_batch"
-  }
+  "recipe": {"name": "fed_batch", "require_complete_inputs": false},
+  "$comment": "Schema 2. Fill the shared template; see doc/online_docs/bioreactors/templates/guide.json."
 }

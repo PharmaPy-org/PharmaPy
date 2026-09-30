@@ -1,0 +1,28 @@
+{
+  "inputs": {
+    "s": {
+      "source": "concentration",
+      "name": "glucose",
+      "unit": "mmol/L"
+    },
+    "x": {
+      "source": "concentration",
+      "name": "viable",
+      "unit": "mmol/L"
+    }
+  },
+  "validity_domain": {
+    "s": [
+      5.0,
+      15.0
+    ],
+    "x": [
+      200.0,
+      800.0
+    ]
+  },
+  "training_points_per_axis": 9,
+  "cell_dry_mass_g": 3e-10,
+  "maximum_normalized_trajectory_error": 0.05,
+  "scope": "Synthetic training grid, not experimental measurements. Error normalized by baseline peak for each output."
+}

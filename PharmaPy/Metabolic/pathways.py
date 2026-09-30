@@ -14,6 +14,8 @@ import numpy as np
 from numpy.typing import NDArray
 from scipy.optimize import linprog
 
+from .closures.base import FluxSolution, MetabolicInfeasibleError, MetabolicNumericalError
+
 FloatArray = NDArray[np.float64]
 
 
@@ -85,7 +87,7 @@ class PathwayModelDefinition:
         state_set = set(self.state_ids)
         pathway_set = set(self.pathway_ids)
         parameter_set = set(self.parameters)
-        uptake_types = {"constant", "monod", "transfer-cap"}
+        uptake_types = {"constant", "monod", "transfer-cap", "provider"}
         identifiers = tuple(rule.get("identifier") for rule in self.uptake_constraints)
         if any(not isinstance(item, str) or not item for item in identifiers) or len(
             identifiers
@@ -100,6 +102,10 @@ class PathwayModelDefinition:
                     "uptake constraint references unknown state "
                     f"{rule['species']!r}."
                 )
+            if rule['type'] == 'provider':
+                if set(rule) != required | {'output'} or not isinstance(rule['output'], str) or not rule['output']:
+                    raise ValueError('provider uptake requires a named output')
+                continue
             parameter_fields = {
                 "constant": ("maximum_parameter",),
                 "monod": ("maximum_parameter", "half_saturation_parameter"),
@@ -149,41 +155,45 @@ class PathwayModelDefinition:
 
 
 @dataclass(frozen=True)
-class PathwayOptimizationResult:
+class PathwayOptimizationResult(FluxSolution):
     """Represent one optimized pathway allocation and its audited bounds."""
 
-    fluxes: FloatArray
-    growth_rate: float
-    extracellular_rates: FloatArray
-    lower_bounds: FloatArray
-    upper_bounds: FloatArray
-    constraint_limits: Mapping[str, float]
-    status: int
-    message: str
+    extracellular_rates: FloatArray = None
+    constraint_limits: Mapping[str, float] = field(default_factory=dict)
+
+    @property
+    def status(self):
+        return self.solver_status
+
+    @property
+    def message(self):
+        return self.solver_message
 
 
 class ConfiguredPathwayModel:
     """Solve an arbitrary input-declared pathway LP without biological identities."""
 
-    def __init__(self, definition: PathwayModelDefinition):
+    def __init__(self, definition: PathwayModelDefinition, *, exchange_scale=1.):
         self.definition = definition
         self.state_names = definition.state_ids
         self.pathway_ids = definition.pathway_ids
         self.source_matrix = definition.exchange_matrix
         self.growth_coefficients = definition.growth_coefficients
         self.depletion_tolerance = definition.depletion_tolerance
+        if not np.isfinite(exchange_scale) or exchange_scale <= 0.:
+            raise ValueError('exchange_scale must be finite and positive')
+        self.exchange_scale = float(exchange_scale)
 
     def _limit(self, rule, concentrations, biomass):
         """Evaluate one registered uptake-capacity equation."""
         parameters = self.definition.parameters
         concentration = float(concentrations[rule["species"]])
-        # Adaptive integrators may evaluate trial states just beyond depletion;
-        # the physical capacity is zero there and accepted inventories are
-        # protected by the corresponding depletion rules.
+        # Inventory constraints account for stocks and actual reactor supply;
+        # only concentration-dependent kinetics vanish at zero concentration.
         concentration = max(concentration, 0.0)
         maximum = parameters[rule["maximum_parameter"]]
         if rule["type"] == "constant":
-            return maximum if concentration > self.depletion_tolerance else 0.0
+            return maximum
         if rule["type"] == "monod":
             half = parameters[rule["half_saturation_parameter"]]
             if maximum <= 0.0 or half <= 0.0:
@@ -197,9 +207,9 @@ class ConfiguredPathwayModel:
         saturation = parameters[rule["saturation_parameter"]]
         if maximum <= 0.0 or mass_transfer < 0.0 or saturation < 0.0:
             raise ValueError("transfer-cap parameters have invalid signs.")
-        return min(maximum, mass_transfer * saturation / biomass)
+        return min(maximum, mass_transfer * saturation / biomass / self.exchange_scale)
 
-    def solve_fluxes(self, concentrations, biomass=None):
+    def solve_fluxes(self, concentrations, biomass=None, *, availability=None, uptake_limits=None):
         """Maximize the declared objective under configured uptake and pathway bounds."""
         if isinstance(concentrations, Mapping):
             if set(concentrations) != set(self.state_names):
@@ -220,11 +230,27 @@ class ConfiguredPathwayModel:
         limits = []
         named_limits = {}
         state_index = {name: index for index, name in enumerate(self.state_names)}
+        expected = {r['output'] for r in self.definition.uptake_constraints if r['type'] == 'provider'}
+        supplied = dict(uptake_limits or {})
+        if set(supplied) != expected or any(not np.isfinite(v) or v < 0. for v in supplied.values()):
+            raise ValueError('provider uptake limits must match declared outputs and be finite nonnegative capacities')
         for rule in self.definition.uptake_constraints:
-            limit = self._limit(rule, state, biomass_value)
+            limit = (supplied[rule['output']] if rule['type'] == 'provider'
+                     else self._limit(rule, state, biomass_value))
             rows.append(-self.source_matrix[state_index[rule["species"]], :])
             limits.append(limit)
             named_limits[rule["identifier"]] = float(limit)
+
+        if availability is None:
+            # Without a reactor supply map, exhausted pools cannot supply flux.
+            for name, concentration in state.items():
+                if concentration <= 0.:
+                    rows.append(-self.source_matrix[state_index[name]])
+                    limits.append(0.)
+        else:
+            matrix, capacity = availability.linear_relaxation(None, None)
+            rows.extend(matrix)
+            limits.extend(capacity)
 
         lower = np.zeros(len(self.pathway_ids), dtype=float)
         upper = np.full(len(self.pathway_ids), np.inf, dtype=float)
@@ -248,7 +274,12 @@ class ConfiguredPathwayModel:
             A_ub=a_ub, b_ub=b_ub, bounds=bounds, method="highs", options=solver_options,
         )
         if not result.success:
-            raise RuntimeError(
+            if result.status == 2:
+                raise MetabolicInfeasibleError(
+                    result.message, network_id=self.definition.problem_name,
+                    lower_bounds=lower, upper_bounds=upper, status=result.status,
+                    environment_context=state)
+            raise MetabolicNumericalError(
                 f"Pathway LP failed for {self.definition.problem_name}: "
                 f"status={result.status}, message={result.message}"
             )
@@ -256,7 +287,8 @@ class ConfiguredPathwayModel:
         optimum = float(self.definition.objective_coefficients @ result.x)
         deterministic_bounds = list(bounds)
         deterministic_result = result
-        for index, pathway in enumerate(self.pathway_ids):
+        for index in sorted(range(len(self.pathway_ids)), key=self.pathway_ids.__getitem__):
+            pathway = self.pathway_ids[index]
             objective = np.zeros(len(self.pathway_ids), dtype=float)
             objective[index] = 1.0
             deterministic_result = linprog(
@@ -266,7 +298,7 @@ class ConfiguredPathwayModel:
                 options=solver_options,
             )
             if not deterministic_result.success:
-                raise RuntimeError(f"Pathway LP tie-break failed for {pathway!r}.")
+                raise MetabolicNumericalError(f"Pathway LP tie-break failed for {pathway!r}.")
             fixed = float(deterministic_result.x[index])
             if abs(fixed) <= 1.0e-10:
                 fixed = 0.0
@@ -276,7 +308,7 @@ class ConfiguredPathwayModel:
             deterministic_result.x, "optimized fluxes", len(self.pathway_ids)
         )
         if a_ub is not None and np.any(a_ub @ fluxes - b_ub > 1.0e-8):
-            raise RuntimeError(
+            raise MetabolicNumericalError(
                 "HiGHS returned a flux vector outside configured constraints."
             )
         rates = _readonly_vector(
@@ -285,15 +317,38 @@ class ConfiguredPathwayModel:
         lower.setflags(write=False)
         upper.setflags(write=False)
         return PathwayOptimizationResult(
-            fluxes,
-            float(self.growth_coefficients @ fluxes),
-            rates,
-            lower,
-            upper,
-            MappingProxyType(named_limits),
-            int(result.status),
-            str(result.message),
+            reaction_ids=self.pathway_ids, fluxes=fluxes,
+            primary_objective=float(self.definition.objective_coefficients @ fluxes),
+            secondary_objective=None, growth_rate=float(self.growth_coefficients @ fluxes),
+            lower_bounds=lower, upper_bounds=upper,
+            active_lower=tuple(name for name, value in zip(self.pathway_ids, fluxes) if abs(value) <= 1e-8),
+            active_upper=tuple(name for name, value, bound in zip(self.pathway_ids, fluxes, upper)
+                               if abs(value - bound) <= 1e-8),
+            mass_balance_residual_inf=None,
+            bound_violation_inf=float(max(0., np.max(lower - fluxes), np.max(fluxes - upper),
+                                          np.max(a_ub @ fluxes - b_ub) if a_ub is not None else 0.)),
+            primal_status='optimal', solver_status=int(result.status),
+            solver_message=str(result.message), closure_policy_id='highs:pathway-lp:lexicographic-id',
+            cache_hit=False, extracellular_rates=rates, constraint_limits=MappingProxyType(named_limits),
+            inventory_violation_inf=(None if availability is None else
+                                     float(max(0., -np.min(availability.residual(fluxes))))),
         )
+
+    def audit_closed_uptake(self):
+        """Screen for growth or secretion without net uptake; not elemental closure."""
+        count = len(self.pathway_ids)
+        matrix = np.vstack((-self.source_matrix, np.ones(count)))
+        capacity = np.r_[np.zeros(len(self.state_names)), 1.]
+        maxima = {}
+        for name, objective in [('growth', self.growth_coefficients),
+                                *zip(self.state_names, self.source_matrix)]:
+            result = linprog(-objective, A_ub=matrix, b_ub=capacity,
+                             bounds=(0., None), method='highs')
+            if not result.success:
+                return dict(status='UNRESOLVED', reason=result.message)
+            maxima[name] = max(0., float(-result.fun))
+        return dict(status='FAIL' if max(maxima.values()) > 1e-7 else 'PASS',
+                    maximum_exports=maxima, scope='Normalized total pathway activity <= 1; no net uptake.')
 
 
 def _readonly_vector(values, name, length=None):

@@ -1,0 +1,448 @@
+{
+  "purpose": "Filling instructions and record examples, not a fourth simulation input. Use the same three blank files for every supported model; reference a populated example only to see completed mathematics.",
+  "scope": {
+    "modes": [
+      "batch",
+      "fed-batch",
+      "semibatch"
+    ],
+    "mechanisms": [
+      "pathway-lp",
+      "rate-reconciled-culture",
+      "configured-kinetics"
+    ],
+    "limitations": "This schema configures existing model capabilities. Unsupported physics, new kinetic operators, continuous perfusion or arbitrary DAE equations still need implementation; a template cannot infer a metabolic network, kinetic laws, or unavailable material data."
+  },
+  "steps": [
+    "Copy the three template files. Replace placeholder identifiers; null means not yet supplied or inactive, never a guessed physical value.",
+    "Declare each solute and the carrier in thermo.json. Keep the same solute identifiers in initial amounts, model species, transport and recipes.",
+    "Fill case.json with reactor mode, initial volume/mass/density, duration, conditions and solver settings. Set recipe.name to process or another key you declare in mechanism.recipes.",
+    "Select mechanism.json mechanism. Fill pathways for pathway-lp, or kinetics plus reconciliation plus network and rate_provider for rate-reconciled-culture. Unused sections may stay blank or be {}. For configured-kinetics, fill kinetics.rule_graph, species_mass_rates and rate_unit; other model sections, network, transport and flux_time_unit remain blank/null. A null rate_provider preserves direct rules; explicit providers replace assigned outputs. pathway-lp also accepts rate_provider with provider-type uptake constraints; see USER_GUIDE.md.",
+    "Populate only relevant parameter groups. Define how each coefficient is used through parameter references in your selected equations or uptake constraints.",
+    "Enter initial species amounts and the active biological states. Volume comes from case.json; do not enter it twice.",
+    "For batch, leave the chosen recipe list empty. For scheduled additions, copy the generic event record and fill its applicable fields.",
+    "Pass the dictionaries and thermo.json path to the existing build_bioreactor function, then call assembly.solve()."
+  ],
+  "parameter_groups": {
+    "rates": {
+      "meaning": "Rate coefficients grouped by process, then species or rate identifier. Units follow the configured equations; there is no automatic conversion of kinetic coefficients.",
+      "example": {
+        "uptake": {
+          "<species_id>": null
+        },
+        "death": {
+          "baseline": null,
+          "maximum": null
+        },
+        "degradation": {
+          "<species_id>": null
+        }
+      }
+    },
+    "affinities": {
+      "meaning": "Half-saturation or affinity coefficients in the concentration basis used by the consuming expression.",
+      "example": {
+        "<species_id>": null
+      }
+    },
+    "yields": {
+      "meaning": "Growth or conversion coefficients. Preserve the direction and molar/mass/cell basis defined by the source equation; placement here does not infer or invert a yield.",
+      "example": {
+        "growth": {
+          "<species_id>": null
+        },
+        "conversion": {
+          "<source_species>": {
+            "<product_species>": null
+          }
+        }
+      }
+    },
+    "maintenance": {
+      "meaning": "Maintenance coefficients on the rate and biomass/cell basis of the consuming equation.",
+      "example": {
+        "<species_id>": null
+      }
+    },
+    "responses": {
+      "meaning": "Condition-dependent polynomials and response-shape coefficients; polynomial order is the order used by the declared expression.",
+      "example": {
+        "<condition_id>": {
+          "<rate_id>": []
+        },
+        "<response_id>": {
+          "midpoint": null,
+          "slope": null
+        }
+      }
+    },
+    "coefficients": {
+      "meaning": "Other numeric coefficients, organized by the relationship they describe. This is the extension space for coefficients that do not fit another group.",
+      "example": {
+        "<relationship_id>": {
+          "<species_or_rate_id>": null
+        }
+      }
+    },
+    "corrections": {
+      "meaning": "Explicit multiplicative or additive corrections used by declared equations. Attach optional neutral/supplied policy and provenance under model.reconciliation.parameter_corrections.",
+      "example": {
+        "<relationship_id>": {
+          "<species_id>": null
+        }
+      }
+    }
+  },
+  "references": {
+    "syntax": "Join parameter-map keys with dots; polynomial list entries use zero-based indices. A reference is an identifier, not an executable Python expression. Names cannot contain literal dots.",
+    "example": {
+      "parameter": "rates.uptake.<species_id>"
+    },
+    "policy_example": {
+      "corrections.<relationship_id>.<species_id>": {
+        "kind": "multiplicative",
+        "choice": "supplied",
+        "source": "State evidence or disclose an illustrative assumption."
+      }
+    },
+    "neutral_policy": "For multiplicative neutral corrections use value 1; for additive corrections use 0. A supplied policy requires a nonempty source. Policies validate the declared values; they do not apply a correction unless your equation references it."
+  },
+  "case_fields": {
+    "biology.conditions": "Named conditions consumed by configured kinetics, e.g. pH. Empty for a model with no condition-dependent kinetics.",
+    "numerics.backend": [
+      "scipy",
+      "fixed-step"
+    ],
+    "numerics.step": "Output interval for SciPy; propagation interval for fixed-step. Time unit: s, min, h, day.",
+    "numerics.optional": "Leave tolerances, maximum_step and Jacobian settings null if not used by the selected backend. See populated examples for supported numerical choices.",
+    "operation": "Mass kg; density kg/L; volume unit m3, L, mL or uL; temperature K (null retains native 298.15 K). Initial mass must equal declared volume times density. Temperature is isothermal, not a new temperature-dependent kinetic law.",
+    "recipe.name": "Must match a key under mechanism.recipes.",
+    "operation.volume_policy": "native (default): phase mass/thermodynamic density. working-volume: initial_volume is held between scheduled additions and increases with their additive solution volumes. Uses native mechanism states and property hooks. No continuous streams, withdrawals, phase connections, thermal expansion or inferred biomass volume. Does not establish elemental/mass closure. Initial mass/volume/density consistency remains required.",
+    "recipe.time_unit": "Optional unit for numeric recipe times (s, min, h, day); defaults to numerics.step.unit. Explicit time quantities with value/unit override this default."
+  },
+  "state_fields": {
+    "species": "unit mol, mmol, umol, nmol, pmol or fmol; amounts is a species-to-amount map containing every non-carrier species, including zero amounts.",
+    "pathway-lp": "Fill biomass_kg; leave cell/product/integral fields null.",
+    "rate-reconciled-culture": "Fill viable_cells_million, dead_cells_million, product_g and integral (million cell day/mL); leave biomass_kg null."
+  },
+  "pathways": {
+    "matrix": "exchange_matrix rows follow state_ids; columns follow pathway_ids. growth_coefficients and objective_coefficients follow pathway_ids.",
+    "flux_time_unit": [
+      "1/s",
+      "1/min",
+      "1/h",
+      "1/day"
+    ],
+    "uptake_record": {
+      "identifier": "<constraint_id>",
+      "type": "constant",
+      "species": "<species_id>",
+      "maximum_parameter": "rates.uptake.<species_id>",
+      "half_saturation_parameter": null,
+      "mass_transfer_parameter": null,
+      "saturation_parameter": null
+    },
+    "uptake_types": [
+      "constant",
+      "monod",
+      "transfer-cap"
+    ],
+    "uptake_optional": "monod additionally references an affinity; transfer-cap additionally references transfer and saturation coefficients. Keep unused record fields null.",
+    "depletion_rule": {
+      "type": "disable-at-depletion",
+      "species": "<species_id>",
+      "pathways": [
+        "<pathway_id>"
+      ]
+    }
+  },
+  "kinetics": {
+    "rule_record": {
+      "identifier": "<rate_id>",
+      "expression": {
+        "op": "multiply",
+        "args": [
+          {
+            "parameter": "rates.uptake.<species_id>"
+          },
+          {
+            "op": "monod",
+            "args": [
+              {
+                "concentration": "<species_id>"
+              },
+              {
+                "parameter": "affinities.<species_id>"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    "meaning": "Rules explicitly select operators and reference concentrations, parameters, conditions, constants, states or earlier rules; declaration order must satisfy dependencies. Coefficient names alone never determine equations.",
+    "outputs": "kinetic_outputs maps growth/death and exchange-reaction IDs to declared rule outputs. Exchange, degradation and product mappings declare conversion to reactor source terms. Copy the record shapes from the supplied culture example; substitute your identifiers, units and conversions.",
+    "provider": "rule-graph, affine-surrogate, hybrid, or a registered provider. Provider-specific configuration follows the existing provider interface.",
+    "operators": [
+      "add",
+      "multiply",
+      "subtract",
+      "divide",
+      "negate",
+      "exp",
+      "maximum",
+      "minimum",
+      "monod",
+      "quadratic",
+      "greater-select"
+    ],
+    "quadratic": "args are [a, b, c, x], giving a*x*x+b*x+c.",
+    "greater_select": "args are [condition, result_if_greater, result_otherwise], plus a numeric threshold field.",
+    "references": [
+      {
+        "parameter": "<dotted_parameter_path>"
+      },
+      {
+        "concentration": "<species_id>"
+      },
+      {
+        "condition": "<condition_id>"
+      },
+      {
+        "constant": "<constant_id>"
+      },
+      {
+        "state": "<native_culture_state_attribute>"
+      },
+      {
+        "ref": "<earlier_rule_id>"
+      }
+    ],
+    "outputs_record": {
+      "growth": "<growth_rate_id>",
+      "growth_reaction": "<reaction_id>",
+      "death": "<death_rate_id>",
+      "exchange_fluxes": {
+        "<reaction_id>": "<rate_id>"
+      }
+    },
+    "exchange_record": {
+      "species": "<species_id>",
+      "reaction": "<reaction_id>",
+      "internal_coefficient": null
+    },
+    "degradation_record": {
+      "source": "<species_id>",
+      "products": {
+        "<species_id>": null
+      },
+      "rate_output": "<rate_id>"
+    },
+    "product_record": {
+      "reaction": "<reaction_id>",
+      "molecular_weight_g_mol": null,
+      "mass_per_cmol_g": null
+    },
+    "constants_record": {
+      "growth_flux_to_per_day": null,
+      "cell_flux_to_mmol": null,
+      "cell_product_scale": null,
+      "product_g_per_cmol": null,
+      "product_molecular_weight_g_mol": null,
+      "seconds_per_day": 86400.0
+    },
+    "constants_note": "These conversion factors retain the existing native culture interface and must match the source rate basis. They are not tunable substitutes for missing material information."
+  },
+  "recipes": {
+    "time": "Event time uses numerics.step.unit. Events at the final endpoint are not applied before harvest. Same-time events execute in their declared order.",
+    "record": {
+      "time": null,
+      "event_type": null,
+      "volume_l": null,
+      "concentrations_mmol_l": {},
+      "target_species": null,
+      "target_concentration_mmol_l": null,
+      "composition": null,
+      "volume_basis": null,
+      "density_kg_l": null
+    },
+    "types": {
+      "feed": "volume_basis defaults to carrier: volume_l supplies carrier and declared solute mass is added separately. solution: volume_l is total solution volume; solute mass displaces carrier at the declared feed density. Both use additive-volume mixing; working-volume increases by total added mass / declared density.",
+      "target_concentration": "Solute-only addition calculated using current reactor volume. Under working-volume its volume contribution is assumed negligible; use stock_to_target for additions with solvent/dilution.",
+      "stock_to_target": "Use stock composition in concentrations_mmol_l, target_species and target concentration. Includes solvent and dilution under the declared constant-density, additive-volume assumption; leave volume_l null."
+    },
+    "density_kg_l": "Optional positive feed/stock density in kg/L; defaults to operation.carrier_density_kg_l. For solution-volume feeds, concentrations exclude the carrier; its remaining mass is calculated from total solution density."
+  },
+  "thermo": "Duplicate the generic species property record for each solute and carrier, renaming <species_id>. These are native PharmaPy thermodynamic properties, not an organism-specific schema. Supply the property values and coefficient arrays required by the native property correlations; do not treat blank values as physical defaults.",
+  "compatibility": "Legacy unversioned and version-1 inputs remain accepted. Version 2 reorganizes input representation only; it does not change reactor, kinetics, metabolic optimization or integration mathematics.",
+  "providers": {
+    "rule-graph": "Fill output_units for every assigned output. Leave surrogate/hybrid fields blank.",
+    "affine-surrogate": {
+      "inputs": {
+        "<input_alias>": {
+          "source": "concentration",
+          "name": "<species_id>",
+          "unit": "mmol/L"
+        }
+      },
+      "outputs": {
+        "<rate_id>": {
+          "unit": "<rate_unit>",
+          "intercept": null,
+          "coefficients": {
+            "<input_alias>": null
+          }
+        }
+      },
+      "validity_domain": {
+        "<input_alias>": [
+          null,
+          null
+        ]
+      },
+      "extrapolation": "error"
+    },
+    "hybrid": "Fill providers with provider records, default_provider with an identifier, and output_sources with output-to-provider overrides. Blank unrelated fields are ignored for built-in providers.",
+    "registered": "The registered factory defines its extra input fields. Its configuration is forwarded without stripping custom blank values."
+  },
+  "network": {
+    "internal_metabolites": "Names of the intracellular balance rows.",
+    "reaction_record": {
+      "identifier": "<reaction_id>",
+      "lower": null,
+      "upper": null,
+      "name": null,
+      "stoichiometry": {
+        "<metabolite_id>": null
+      }
+    },
+    "exchange_reactions": "Ordered exchange-reaction identifiers declared above.",
+    "objective": "Reaction-to-coefficient map on the declared network; does not replace the rate-reconciliation objective."
+  },
+  "physical_input_checks": {
+    "feed_composition": "Optional composition on feed/stock records: supplied (complete declared solutes), nutrient-free (no nonzero solutes), unknown (possibly partial information). Omitted legacy fields are unspecified. Unknown and unspecified add only declared solutes and are reported as incomplete.",
+    "strict_mode": "Set case.recipe.require_complete_inputs to true to reject unknown/unspecified feed composition before solving. This checks feed declarations, not completeness of all chemistry.",
+    "network": "Optional representation: reduced or chemical. Optional exchange_roles maps boundary reaction IDs to tracked, external-supply, untracked-exchange, or bookkeeping. Roles describe assumptions; they never change bounds. A mapped inventory must have tracked role if explicitly declared.",
+    "diagnostics": "Call assembly.diagnostics(histories) after solve. Reports feed completeness, first observed depletion times in seconds, potential consuming reactions, structural conservation and closed-uptake export checks. Does not infer missing feed values or claim elemental closure."
+  },
+  "flux_basis": {
+    "location": "model.pathways.flux_basis uses exchange and growth; model.kinetics.flux_basis uses exchange, growth and product. Empty/omitted preserves the pathway mol/kgDW/time contract or the culture legacy unverified conversions.",
+    "record": {
+      "exchange": {
+        "amount_unit": null,
+        "normalization": null,
+        "time_unit": null
+      },
+      "growth": {
+        "amount_unit": null,
+        "normalization": null,
+        "time_unit": null
+      },
+      "product": {
+        "amount_unit": null,
+        "normalization": null,
+        "time_unit": null
+      }
+    },
+    "amount_units": "Exchange: mol, mmol, umol, nmol, pmol, fmol (molecular amounts). Product: those units, corresponding carbon-mole units (mol-C through fmol-C), or kg, g, mg, ug, ng, pg. Growth: 1 for specific growth, or a supported amount/mass unit with amount_per_million_cells supplied in that same unit.",
+    "normalization": "cell, 10^6 cell, gDW, or kgDW; specific growth uses none. Conversion between cell and dry-mass bases requires biomass_g_per_million_cells. Conversion within either family does not. No cell mass or carbon content is inferred.",
+    "time_units": "s, min, h, day. All network flux bases must use the same time unit; production fluxes share one population normalization.",
+    "product_conversion": "Molecular amount requires product_mapping.molecular_weight_g_mol; carbon amount requires product_mapping.mass_per_cmol_g. Mass flux needs neither. Only the selected conversion is applied.",
+    "contract": "Kinetic exchange targets and stoichiometric columns must already use the declared reaction bases. Changing basis requires consistent network and target reparameterization; the reader does not rescale S or infer chemistry. Provider labels must exactly match amount_unit/(normalization time_unit), or 1/time_unit for specific growth. Kinetic growth/death/degradation outputs used directly remain 1/day; a differently based growth target needs a separate rule output.",
+    "legacy": "Remove cell_flux_to_mmol, growth_flux_to_per_day and cell_product_scale when adopting explicit bases, or keep only values consistent with the derived conversions. seconds_per_day must equal 86400. No CHO interpretation is selected automatically.",
+    "pathway_contract": "Exchange coefficients and uptake maxima use the declared amount/population basis. Half-saturation and saturation concentrations remain mol/m3; mass-transfer parameters use the flux time unit. Growth is specific (amount_unit 1, normalization none); both time units must equal flux_time_unit. Native biomass remains kgDW. Changing labels alone does not convert supplied coefficients."
+  },
+  "reconciliation_policy": {
+    "location": "model.reconciliation.reconciliation_policy",
+    "relative-regularized": "Default when omitted: relative target residuals, internal-flux regularization, and progressively widened target bounds. Requires reconciliation_relative_bound and reconciliation_bound_increment.",
+    "unweighted": "Equal absolute residual weights, no internal-flux penalty, and no target-derived bounds. Set both relative-bound fields to null. Network and inventory constraints still apply. One common numerical objective scale does not alter relative weights or the optimum.",
+    "unit-scaled": "Opt-in dimensionless residuals sum(((flux-target)/reference_scale)^2), without internal penalties or target-derived bounds. Both relative-bound fields must be null. Requires explicit flux_basis and reconciliation_scaling.target_scales for exactly the targeted reactions. Reference scales are converted automatically into the configured flux coordinates; keep their physical values/bases fixed when changing model units. Existing policies retain their original semantics."
+  },
+  "configured_kinetics": {
+    "species_mass_rates": "Map species identifiers to signed volumetric source-rule identifiers. Unmapped species have zero reaction source. Biomass can be an ordinary configured species.",
+    "rate_unit": "Shared rate unit, e.g. g/(L h) or mol/(m3 min); converted through BioreactorUnitConverter and multiplied by working volume to give kg/s.",
+    "rule_inputs": "Concentrations are mmol/L; state volume_l is L; conditions and parameters are user-defined. Coefficients must match the equations; unit labels do not reparameterize expressions.",
+    "limits": "Direct kinetics do not enforce a metabolic network or elemental conservation. Biological feasibility depends on supplied equations."
+  },
+  "continuous_feeding_and_sampling": {
+    "flow": {
+      "time": {
+        "value": 0,
+        "unit": "h"
+      },
+      "event_type": "flow",
+      "inlet": "feed_1",
+      "volume_flow": {
+        "value": 1,
+        "unit": "mL/min"
+      },
+      "concentrations": {
+        "unit": "g/L",
+        "values": {
+          "<species_id>": 1
+        }
+      },
+      "density": {
+        "value": 1,
+        "unit": "kg/L"
+      },
+      "composition": "supplied"
+    },
+    "stop": "Use flow with the same inlet identifier and zero volume_flow; unnamed flows share inlet identifier inlet.",
+    "sample": {
+      "time": {
+        "value": 1,
+        "unit": "h"
+      },
+      "event_type": "sample",
+      "volume": {
+        "value": 1,
+        "unit": "mL"
+      }
+    },
+    "basis": "Continuous inlet concentrations and density describe the complete solution. For discrete feeds declare volume_basis=solution for complete-solution volume; the legacy default carrier adds solute volume separately.",
+    "volume": "working-volume integrates the sum of declared inlet flows. Native volume requires feed density consistent with configured thermophysical properties. Outlets, perfusion and phase connections are not supported by working-volume.",
+    "sampling": "Well-mixed withdrawal removes phase species and declared extensive biological states proportionally; exposure integrals are unchanged."
+  },
+  "reconciliation_scaling": {
+    "location": "model.reconciliation.reconciliation_scaling",
+    "target_floor": {
+      "value": 1e-06,
+      "basis": {
+        "amount_unit": "mmol",
+        "normalization": "10^6 cell",
+        "time_unit": "day"
+      }
+    },
+    "target_floors": "Optional reaction-to-quantity overrides, with the same value/basis record. Reaction identifiers are user-defined. Each record converts into its declared exchange, growth or product coordinates.",
+    "internal_scale": "Optional positive value/basis record specifying a constant internal-flux normalization in the declared exchange coordinate basis. Null retains the configured nonexcluded target-sum normalization.",
+    "legacy": "Omitting this section retains the existing numerical 1e-6 source-coordinate floor. An explicit basis:null quantity also means source coordinates. Such scales do not automatically preserve physical weights when source units change.",
+    "units": "Unit-bearing floors are converted with BioreactorUnitConverter. No dry mass, carbon content or molecular weight is invented. A common declared floor must be dimensionally compatible with every target it covers; use target_floors for mixed dimensions.",
+    "normalization": "The default target sum and internal normalization presume commensurate network coordinates. For mixed dimensions, supply a coherent internal_scale and compatible per-target floors; do not add molecular, mass and specific-growth rates as physical quantities. Unit declarations do not rescale network columns or kinetic coefficients.",
+    "target_scales": "For unit-scaled only: map every targeted reaction identifier to {value: positive number, basis: explicit rate-basis declaration}. No omitted/null bases or other scaling fields. These are fixed residual reference scales, not floors. Exclude untargeted reactions. Equal numeric values in the original flux bases preserve the original unweighted optimum. Product mass/molar conversion requires the supplied product molecular weight; missing properties are not inferred.",
+    "unit_scaled_example": {
+      "reconciliation_policy": "unit-scaled",
+      "reconciliation_relative_bound": null,
+      "reconciliation_bound_increment": null,
+      "reconciliation_scaling": {
+        "target_scales": {
+          "user_exchange": {
+            "value": 1.0,
+            "basis": {
+              "amount_unit": "mmol",
+              "normalization": "10^6 cell",
+              "time_unit": "day"
+            }
+          },
+          "user_product": {
+            "value": 1.0,
+            "basis": {
+              "amount_unit": "mg",
+              "normalization": "10^6 cell",
+              "time_unit": "day"
+            }
+          }
+        }
+      }
+    }
+  }
+}

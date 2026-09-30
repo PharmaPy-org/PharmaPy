@@ -1,8 +1,0 @@
-{
-  "step_days": [0.1, 0.05, 0.025],
-  "accounting_atol_kg": 1e-10,
-  "constraint_tolerance": 2e-7,
-  "coupling_atol": 1e-9,
-  "maximum_peak_normalized_difference": 0.05,
-  "interpretation": "Predeclared demonstration thresholds: exact declared-source accounting to roundoff and 5% peak-scaled mesh agreement, not experimental accuracy or an industry standard."
-}

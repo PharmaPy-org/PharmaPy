@@ -1,56 +1,85 @@
 {
+  "schema_version": 2,
   "mechanism": "pathway-lp",
+  "parameters": {
+    "rates": {
+      "uptake": {
+        "nutrient": 2.0
+      }
+    },
+    "affinities": {},
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {
+      "state_ids": [
+        "nutrient"
+      ],
+      "pathway_ids": [
+        "assimilation"
+      ],
+      "exchange_matrix": [
+        [
+          -10.0
+        ]
+      ],
+      "growth_coefficients": [
+        1.0
+      ],
+      "objective_coefficients": [
+        1.0
+      ],
+      "uptake_constraints": [
+        {
+          "identifier": "nutrient_uptake",
+          "type": "constant",
+          "species": "nutrient",
+          "maximum_parameter": "rates.uptake.nutrient",
+          "half_saturation_parameter": null,
+          "mass_transfer_parameter": null,
+          "saturation_parameter": null
+        }
+      ],
+      "pathway_bound_rules": [
+        {
+          "type": "disable-at-depletion",
+          "species": "nutrient",
+          "pathways": [
+            "assimilation"
+          ]
+        }
+      ],
+      "depletion_tolerance": 1e-10,
+      "problem_name": "idealized single-nutrient batch growth"
+    },
+    "kinetics": {},
+    "reconciliation": {
+      "reconciliation_policy": null
+    }
+  },
+  "network": null,
+  "rate_provider": null,
   "transport": null,
   "flux_time_unit": "1/h",
-  "model": {
-    "state_ids": [
-      "nutrient"
-    ],
-    "pathway_ids": [
-      "assimilation"
-    ],
-    "exchange_matrix": [
-      [
-        -10.0
-      ]
-    ],
-    "growth_coefficients": [
-      1.0
-    ],
-    "objective_coefficients": [
-      1.0
-    ],
-    "parameters": {
-      "nutrient_uptake_max": 2.0
-    },
-    "uptake_constraints": [
-      {
-        "identifier": "nutrient_uptake",
-        "type": "constant",
-        "species": "nutrient",
-        "maximum_parameter": "nutrient_uptake_max"
-      }
-    ],
-    "pathway_bound_rules": [
-      {
-        "type": "disable-at-depletion",
-        "species": "nutrient",
-        "pathways": [
-          "assimilation"
-        ]
-      }
-    ],
-    "depletion_tolerance": 1e-10,
-    "problem_name": "idealized single-nutrient batch growth"
-  },
   "recipes": {
     "batch": []
   },
   "state": {
+    "species": {
+      "unit": "mol",
+      "amounts": {
+        "nutrient": 0.01
+      }
+    },
     "biomass_kg": 0.0001,
-    "liquid_volume_m3": 0.001,
-    "species_mol": {
-      "nutrient": 0.01
-    }
-  }
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "$comment": "Schema 2. Fill the shared template; see doc/online_docs/bioreactors/templates/guide.json."
 }

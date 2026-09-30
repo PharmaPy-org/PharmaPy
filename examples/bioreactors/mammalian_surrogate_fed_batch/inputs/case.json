@@ -1,0 +1,42 @@
+{
+  "schema_version": 2,
+  "biology": {
+    "conditions": {}
+  },
+  "numerics": {
+    "backend": "scipy",
+    "step": {
+      "unit": "day",
+      "value": 0.05
+    },
+    "relative_tolerance": 1e-09,
+    "absolute_tolerance": 1e-12,
+    "maximum_step": {
+      "unit": "h",
+      "value": 1.0
+    },
+    "jacobian_relative_step": 1e-05,
+    "jacobian_state_scale": 1e-06
+  },
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "fed-batch",
+    "runtime": {
+      "unit": "day",
+      "value": 3.0
+    },
+    "temperature_k": 310.15,
+    "volume_policy": "working-volume"
+  },
+  "recipe": {
+    "name": "culture",
+    "require_complete_inputs": false
+  },
+  "$comment": "Synthetic mammalian-cell/product demonstration; not fitted experimental physiology."
+}

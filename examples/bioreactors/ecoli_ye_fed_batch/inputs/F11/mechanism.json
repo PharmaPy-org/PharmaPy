@@ -1,0 +1,1123 @@
+{
+  "schema_version": 2,
+  "mechanism": "configured-kinetics",
+  "parameters": {
+    "rates": {},
+    "affinities": {},
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {
+      "qS_max": 0.5997,
+      "K_S": 0.05,
+      "qYEF_A_max": 1.6327,
+      "K_YEF_A": 0.2262,
+      "qYEF_B_max": 0.1,
+      "K_YEF_B": 1.6999,
+      "K_qSox": 38.1119,
+      "Ki_YEA_qSox": 0.2431,
+      "Ki_YEB_qSox": 49.2706,
+      "qAc_max": 0.2949,
+      "K_A": 0.8567,
+      "Ki_AS": 0.0549,
+      "qm": 0.04,
+      "Y_XSem": 0.4391,
+      "Y_XYEF_A": 0.5557,
+      "Y_XYEF_B": 0.168,
+      "Y_XA": 0.4,
+      "Y_AS": 0.667
+    },
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {},
+    "kinetics": {
+      "rule_graph": [
+        {
+          "identifier": "biomass",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "biomass"
+              },
+              0.001
+            ]
+          }
+        },
+        {
+          "identifier": "glucose",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "glucose"
+              },
+              0.180156
+            ]
+          }
+        },
+        {
+          "identifier": "acetate",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "acetate"
+              },
+              0.060052
+            ]
+          }
+        },
+        {
+          "identifier": "fraction_a",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "fraction_a"
+              },
+              0.001
+            ]
+          }
+        },
+        {
+          "identifier": "fraction_b",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "fraction_b"
+              },
+              0.001
+            ]
+          }
+        },
+        {
+          "identifier": "q_s",
+          "expression": {
+            "relationship": "saturating-uptake",
+            "inputs": {
+              "maximum": {
+                "parameter": "coefficients.qS_max"
+              },
+              "substrate": {
+                "ref": "glucose"
+              },
+              "half_saturation": {
+                "parameter": "coefficients.K_S"
+              }
+            }
+          }
+        },
+        {
+          "identifier": "q_a",
+          "expression": {
+            "relationship": "saturating-uptake",
+            "inputs": {
+              "maximum": {
+                "parameter": "coefficients.qYEF_A_max"
+              },
+              "substrate": {
+                "ref": "fraction_a"
+              },
+              "half_saturation": {
+                "parameter": "coefficients.K_YEF_A"
+              }
+            }
+          }
+        },
+        {
+          "identifier": "q_b",
+          "expression": {
+            "relationship": "saturating-uptake",
+            "inputs": {
+              "maximum": {
+                "parameter": "coefficients.qYEF_B_max"
+              },
+              "substrate": {
+                "ref": "fraction_b"
+              },
+              "half_saturation": {
+                "parameter": "coefficients.K_YEF_B"
+              }
+            }
+          }
+        },
+        {
+          "identifier": "q_ox",
+          "expression": {
+            "relationship": "additive-inhibition",
+            "inputs": {
+              "rate": {
+                "relationship": "capacity-limited-rate",
+                "inputs": {
+                  "rate": {
+                    "ref": "q_s"
+                  },
+                  "capacity": {
+                    "parameter": "coefficients.K_qSox"
+                  }
+                }
+              },
+              "inhibitors": [
+                {
+                  "concentration": {
+                    "ref": "q_a"
+                  },
+                  "constant": {
+                    "parameter": "coefficients.Ki_YEA_qSox"
+                  }
+                },
+                {
+                  "concentration": {
+                    "ref": "q_b"
+                  },
+                  "constant": {
+                    "parameter": "coefficients.Ki_YEB_qSox"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "identifier": "q_ac",
+          "expression": {
+            "relationship": "additive-inhibition",
+            "inputs": {
+              "rate": {
+                "relationship": "saturating-uptake",
+                "inputs": {
+                  "maximum": {
+                    "parameter": "coefficients.qAc_max"
+                  },
+                  "substrate": {
+                    "ref": "acetate"
+                  },
+                  "half_saturation": {
+                    "parameter": "coefficients.K_A"
+                  }
+                }
+              },
+              "inhibitors": [
+                {
+                  "concentration": {
+                    "op": "maximum",
+                    "args": [
+                      0,
+                      {
+                        "ref": "glucose"
+                      }
+                    ]
+                  },
+                  "constant": {
+                    "parameter": "coefficients.Ki_AS"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "identifier": "mu",
+          "expression": {
+            "relationship": "yield-sum",
+            "inputs": {
+              "terms": [
+                {
+                  "rate": {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "ref": "q_ox"
+                      },
+                      {
+                        "parameter": "coefficients.qm"
+                      }
+                    ]
+                  },
+                  "yield": {
+                    "parameter": "coefficients.Y_XSem"
+                  }
+                },
+                {
+                  "rate": {
+                    "ref": "q_a"
+                  },
+                  "yield": {
+                    "parameter": "coefficients.Y_XYEF_A"
+                  }
+                },
+                {
+                  "rate": {
+                    "ref": "q_b"
+                  },
+                  "yield": {
+                    "parameter": "coefficients.Y_XYEF_B"
+                  }
+                },
+                {
+                  "rate": {
+                    "ref": "q_ac"
+                  },
+                  "yield": {
+                    "parameter": "coefficients.Y_XA"
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          "identifier": "rate_biomass",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "ref": "mu"
+              },
+              {
+                "ref": "biomass"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "rate_glucose",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "negate",
+                "args": [
+                  {
+                    "ref": "q_s"
+                  }
+                ]
+              },
+              {
+                "ref": "biomass"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "rate_acetate",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "op": "subtract",
+                        "args": [
+                          {
+                            "ref": "q_s"
+                          },
+                          {
+                            "ref": "q_ox"
+                          }
+                        ]
+                      },
+                      {
+                        "parameter": "coefficients.Y_AS"
+                      }
+                    ]
+                  },
+                  {
+                    "ref": "q_ac"
+                  }
+                ]
+              },
+              {
+                "ref": "biomass"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "rate_fraction_a",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "negate",
+                "args": [
+                  {
+                    "ref": "q_a"
+                  }
+                ]
+              },
+              {
+                "ref": "biomass"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "rate_fraction_b",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "negate",
+                "args": [
+                  {
+                    "ref": "q_b"
+                  }
+                ]
+              },
+              {
+                "ref": "biomass"
+              }
+            ]
+          }
+        }
+      ],
+      "species_mass_rates": {
+        "biomass": "rate_biomass",
+        "glucose": "rate_glucose",
+        "acetate": "rate_acetate",
+        "fraction_a": "rate_fraction_a",
+        "fraction_b": "rate_fraction_b"
+      },
+      "rate_unit": "g/(L h)"
+    },
+    "reconciliation": {
+      "reconciliation_policy": null
+    }
+  },
+  "network": null,
+  "rate_provider": null,
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "F11": [
+      {
+        "time": 1.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 3.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 4.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 6.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 7.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 9.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 10.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 10.677222222222222,
+        "event_type": "feed",
+        "volume_l": 0.0011,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 10.715555555555556,
+        "event_type": "feed",
+        "volume_l": 0.0019,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 10.719722222222222,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000009,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 10.744722222222222,
+        "event_type": "feed",
+        "volume_l": 0.0019,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 10.748888888888889,
+        "event_type": "feed",
+        "volume_l": 0.0005,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 11.177222222222222,
+        "event_type": "feed",
+        "volume_l": 9.999999999999964e-05,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 12.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 13.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 15.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 15.677222222222222,
+        "event_type": "feed",
+        "volume_l": 0.0016000000000000005,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 15.879444444444445,
+        "event_type": "feed",
+        "volume_l": 0.001999999999999999,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 15.883611111111112,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 16.177222222222223,
+        "event_type": "feed",
+        "volume_l": 0.0012999999999999989,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 16.5,
+        "event_type": "flow",
+        "volume_l_h": 0.008,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 16.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 16.677222222222223,
+        "event_type": "feed",
+        "volume_l": 0.0009000000000000004,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 17.0,
+        "event_type": "flow",
+        "volume_l_h": 0.01,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 17.177222222222223,
+        "event_type": "feed",
+        "volume_l": 0.00030000000000000073,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 17.5,
+        "event_type": "flow",
+        "volume_l_h": 0.013,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 17.677222222222223,
+        "event_type": "feed",
+        "volume_l": 0.001,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 18.0,
+        "event_type": "flow",
+        "volume_l_h": 0.018000000000000002,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 18.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 18.177222222222223,
+        "event_type": "feed",
+        "volume_l": 0.00019999999999999928,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 18.5,
+        "event_type": "flow",
+        "volume_l_h": 0.023,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 18.589444444444446,
+        "event_type": "feed",
+        "volume_l": 0.0019000000000000004,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 18.593611111111112,
+        "event_type": "feed",
+        "volume_l": 9.999999999999964e-05,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 18.677222222222223,
+        "event_type": "feed",
+        "volume_l": 9.999999999999964e-05,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 19.0,
+        "event_type": "flow",
+        "volume_l_h": 0.028,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 19.156666666666666,
+        "event_type": "feed",
+        "volume_l": 0.0019000000000000004,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 19.160833333333333,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 19.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 19.6775,
+        "event_type": "feed",
+        "volume_l": 0.0012999999999999971,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 20.1775,
+        "event_type": "feed",
+        "volume_l": 0.0013000000000000008,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 20.25,
+        "event_type": "flow",
+        "volume_l_h": 0.0,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 20.4825,
+        "event_type": "feed",
+        "volume_l": 0.0019000000000000022,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 20.486666666666668,
+        "event_type": "feed",
+        "volume_l": 9.999999999999786e-05,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 20.6775,
+        "event_type": "feed",
+        "volume_l": 0.0011000000000000014,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 21.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 21.128888888888888,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 21.133055555555554,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 21.1775,
+        "event_type": "feed",
+        "volume_l": 0.00030000000000000073,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 21.554166666666667,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 21.558333333333334,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 21.6775,
+        "event_type": "feed",
+        "volume_l": 0.001,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.075555555555557,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.079722222222223,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.1775,
+        "event_type": "feed",
+        "volume_l": 0.00039999999999999856,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.45916666666667,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.463333333333335,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 22.6775,
+        "event_type": "feed",
+        "volume_l": 0.001200000000000003,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.943055555555556,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 22.947222222222223,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.1775,
+        "event_type": "feed",
+        "volume_l": 0.001,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.25,
+        "event_type": "flow",
+        "volume_l_h": 0.036000000000000004,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 23.460277777777776,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.464444444444446,
+        "event_type": "feed",
+        "volume_l": 0.00019999999999999573,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.648055555555555,
+        "event_type": "feed",
+        "volume_l": 0.0019000000000000056,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.65222222222222,
+        "event_type": "feed",
+        "volume_l": 0.00019999999999999573,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.6775,
+        "event_type": "feed",
+        "volume_l": 0.00039999999999999856,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.906388888888888,
+        "event_type": "feed",
+        "volume_l": 0.0019000000000000056,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 23.910555555555554,
+        "event_type": "feed",
+        "volume_l": 9.999999999999431e-05,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.0,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 24.15222222222222,
+        "event_type": "feed",
+        "volume_l": 0.0019000000000000056,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.156388888888888,
+        "event_type": "feed",
+        "volume_l": 9.999999999999431e-05,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.1775,
+        "event_type": "feed",
+        "volume_l": 0.00030000000000000426,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.34,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.344166666666666,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.548333333333332,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.5525,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.6775,
+        "event_type": "feed",
+        "volume_l": 0.0013999999999999987,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.84,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 24.844166666666666,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.006944444444443,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.011111111111113,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.1775,
+        "event_type": "feed",
+        "volume_l": 0.001700000000000003,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.32,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.324166666666667,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.44527777777778,
+        "event_type": "feed",
+        "volume_l": 0.0017999999999999971,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.449444444444445,
+        "event_type": "feed",
+        "volume_l": 0.00020000000000000286,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.5,
+        "event_type": "sample",
+        "volume_l": 0.008
+      },
+      {
+        "time": 25.607777777777777,
+        "event_type": "feed",
+        "volume_l": 0.0018999999999999985,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.611944444444443,
+        "event_type": "feed",
+        "volume_l": 0.00010000000000000143,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 25.6775,
+        "event_type": "feed",
+        "volume_l": 0.00039999999999999856,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      },
+      {
+        "time": 26.0,
+        "event_type": "flow",
+        "volume_l_h": 0.005,
+        "concentrations_g_l": {
+          "glucose": 600.0
+        },
+        "density_kg_l": 1.336
+      },
+      {
+        "time": 26.1775,
+        "event_type": "feed",
+        "volume_l": 0.0011999999999999958,
+        "concentrations_g_l": {},
+        "density_kg_l": 1.0,
+        "volume_basis": "solution"
+      }
+    ]
+  },
+  "state": {
+    "species": {
+      "unit": "mol",
+      "amounts": {
+        "biomass": 7.4e-05,
+        "glucose": 0.08381624814050045,
+        "acetate": 0.0024978352094851127,
+        "fraction_a": 2.67,
+        "fraction_b": 7.33
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "$comment": "Direct source kinetics: S3, 3L, GSF_YE_Paper_FedBatch. Acetate source sign corrected. Profile interpreted as g glucose/h, divided by 600 g/L; source volume slopes confirm this. Logged feed volumes are NOT a second feed. Biomass and yeast fractions use formal 1 g/mol bookkeeping bases. Isothermal; oxygen is not validated. Feed density 1.336 kg/L is a declared stock-density assumption; it affects carrier mass, not the configured additive volume or nutrient feed."
+}

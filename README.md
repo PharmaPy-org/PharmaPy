@@ -16,11 +16,10 @@ fed-batch simulations, JSON inputs, executable notebooks, and verification.
 Start with the [generic batch](examples/bioreactors/generic_batch/workflow.ipynb)
 or [generic fed-batch](examples/bioreactors/generic_fed_batch/workflow.ipynb)
 notebook for a small forward-only example with analytical and mass-balance checks.
-The E. coli and CHO examples add metabolic modeling and synthetic inference/design
-studies. These demonstrations do not establish independent experimental accuracy.
+The E. coli examples add metabolic modeling; the synthetic mammalian example demonstrates cells, product and surrogate substitution. Start with the [configuration guide](doc/online_docs/bioreactors/USER_GUIDE.md). These demonstrations do not establish independent experimental accuracy.
 
-For the isolated bioreactor verification environment, use the Python 3.11 setup
-command in that guide; its pinned dependencies and optional-solver scope differ
+For the isolated bioreactor verification environment, use Python 3.11 and install the pinned requirements linked in that guide;
+its optional-solver scope differs
 from the legacy installation instructions above.
 
 <!-- BEGIN Status badges -->

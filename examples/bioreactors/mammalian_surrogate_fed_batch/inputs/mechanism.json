@@ -1,0 +1,191 @@
+{
+  "schema_version": 2,
+  "mechanism": "configured-kinetics",
+  "parameters": {
+    "rates": {
+      "uptake": 0.5,
+      "death": 0.01,
+      "product": 0.01
+    },
+    "affinities": {
+      "glucose": 1.0
+    },
+    "yields": {
+      "biomass": 0.4
+    },
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {},
+    "reconciliation": {},
+    "kinetics": {
+      "rule_graph": [
+        {
+          "identifier": "X",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              0.001,
+              {
+                "concentration": "viable"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "q",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.uptake"
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "glucose"
+                  },
+                  {
+                    "parameter": "affinities.glucose"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "consumption",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              -1.0,
+              {
+                "ref": "q"
+              },
+              {
+                "ref": "X"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "growth",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "yields.biomass"
+              },
+              {
+                "ref": "q"
+              },
+              {
+                "ref": "X"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "death",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.death"
+              },
+              {
+                "ref": "X"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "net_growth",
+          "expression": {
+            "op": "subtract",
+            "args": [
+              {
+                "ref": "growth"
+              },
+              {
+                "ref": "death"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "product",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.product"
+              },
+              {
+                "ref": "X"
+              }
+            ]
+          }
+        }
+      ],
+      "species_mass_rates": {
+        "glucose": "consumption",
+        "viable": "net_growth",
+        "dead": "death",
+        "product": "product"
+      },
+      "rate_unit": "g/(L day)"
+    }
+  },
+  "network": null,
+  "rate_provider": null,
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "culture": [
+      {
+        "time": {
+          "value": 1.0,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "volume_flow": {
+          "value": 0.03,
+          "unit": "L/day"
+        },
+        "concentrations": {
+          "unit": "g/L",
+          "values": {
+            "glucose": 5.0
+          }
+        },
+        "density": {
+          "value": 1.0,
+          "unit": "kg/L"
+        },
+        "composition": "supplied"
+      }
+    ]
+  },
+  "state": {
+    "species": {
+      "unit": "g",
+      "amounts": {
+        "glucose": 1.80156,
+        "viable": 0.3,
+        "dead": 0.0,
+        "product": 0.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "$comment": "Synthetic reduced kinetics. Viable/dead pools are dry biomass; 1 g/mol is formal bookkeeping, not cell molecular weight. No claim of elemental closure."
+}

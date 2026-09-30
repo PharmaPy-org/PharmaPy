@@ -1,0 +1,26 @@
+{
+  "status": "PASS",
+  "scope": "Manufactured equal-weight fed-batch reconciliation verification, not experimental validation.",
+  "expected_unlimited_flux_mmol_per_million_cells_day": 3.0,
+  "maximum_absolute_errors": {
+    "nutrient_mmol": 2.398081733190338e-14,
+    "product_g": 9.43689570931383e-16,
+    "viable_cells_million": 2.220446049250313e-16,
+    "volume_l": 4.218847493575595e-15,
+    "ivcd_million_cell_day_per_ml": 6.713483159746358e-07
+  },
+  "final_native": {
+    "nutrient_mmol": 5.581818181818197,
+    "product_g": 0.40909090909091,
+    "viable_cells_million": 0.9090909090909088,
+    "volume_l": 1.1499999999999981,
+    "ivcd_million_cell_day_per_ml": 0.0013382034586782254
+  },
+  "comparison_tolerances": {
+    "inventory_atol": 1e-10,
+    "inventory_rtol": 1e-10,
+    "ivcd_atol": 2e-06
+  },
+  "independent_reference": "Closed-form projection and piecewise balances in tests/Bioreactor/test_bioreactor_known_answer.py; no production optimization/event/conversion code used.",
+  "all_recorded_inventories_nonnegative": true
+}

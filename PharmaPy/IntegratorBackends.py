@@ -1201,10 +1201,30 @@ class SciPyBackend(IntegratorBackend):
 
         # A hard state constraint is handled as a depletion boundary, rather
         # than by accepting a negative state and clipping the reported result.
-        active = set()
+        absolute_tolerance = np.broadcast_to(solve_options.get('atol', 1e-6), initial.shape)
+        reference_state = abs(unit.solver_state_collection.pack(unit._initial_solver_state))
+        boundary_tolerance = np.where(reference_state > 0., np.minimum(
+            absolute_tolerance, solve_options.get('rtol', 1e-3) * reference_state), absolute_tolerance)
+        rate_tolerance = boundary_tolerance / (final_time - unit.elapsed_time)
+        active = {position for position in constrained if initial[position] == 0.0}
 
         def rates(time, states):
-            values = unit.unit_model(time, states, limiter_dt=0.0)
+            # Evaluate the boundary within the requested absolute error budget.
+            # Otherwise roundoff supply/uptake imbalance repeatedly releases an
+            # empty pool and exposes the discontinuous unconstrained kinetics.
+            boundary = constrained[states[constrained] <= .5 * boundary_tolerance[constrained]]
+            evaluation_state = states.copy()
+            evaluation_state[boundary] = 0.0
+            values = unit.unit_model(time, evaluation_state, limiter_dt=0.0)
+            replenishing = boundary[(states[boundary] > 0.0)
+                                     & (values[boundary] > rate_tolerance[boundary])]
+            if replenishing.size:
+                # A real source may balance uptake below the boundary tolerance.
+                # Snapping that positive pool to zero creates an artificial switch.
+                evaluation_state[replenishing] = states[replenishing]
+                values = unit.unit_model(time, evaluation_state, limiter_dt=0.0)
+            stationary = boundary[abs(values[boundary]) <= rate_tolerance[boundary]]
+            values[stationary] = 0.0
             for position in active:
                 if states[position] <= 0.0 and values[position] < 0.0:
                     values[position] = 0.0
@@ -1238,7 +1258,7 @@ class SciPyBackend(IntegratorBackend):
             events = []
             for position in candidates:
                 def boundary(time, states, position=position):
-                    return states[position]
+                    return states[position] - boundary_tolerance[position]
                 boundary.terminal = True
                 boundary.direction = -1.0
                 events.append(boundary)

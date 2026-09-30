@@ -2644,11 +2644,19 @@ class MultiPhaseVessel():
         for process in self.intraphase_processes:
             phase = self.phase_states.get_phase(process.phaseref)
 
+            inputs = {}
+            if getattr(process.mechanism, 'requires_inlet_rates', False):
+                inputs['inlet_rates'] = {
+                    key: buffer.contributions[buffer.INLET, state_slice].copy()
+                    for key, state_slice in self.solver_state_collection.material_slices.items()
+                    if key.phaseref == process.phaseref
+                }
             intraphase_result = process.mechanism.get_solver_state_rates(
                 process=process,
                 phase=phase,
                 time=time,
-                completed_state=completed_state
+                completed_state=completed_state,
+                **inputs
             )
 
             for state_key,rate in intraphase_result.state_rates.items():

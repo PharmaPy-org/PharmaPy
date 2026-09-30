@@ -46,7 +46,7 @@ class FluxSolution:
     upper_bounds: FloatArray
     active_lower: Tuple[str, ...]
     active_upper: Tuple[str, ...]
-    mass_balance_residual_inf: float
+    mass_balance_residual_inf: Optional[float]
     bound_violation_inf: float
     primal_status: str
     solver_status: object
@@ -54,6 +54,20 @@ class FluxSolution:
     closure_policy_id: str
     cache_hit: bool
     fva_intervals: Optional[Mapping[str, Tuple[float, float]]] = None
+    inventory_violation_inf: Optional[float] = None
+    tie_break: Optional[Mapping] = None
+
+    def diagnostics(self):
+        """Common numerical evidence; residuals do not certify physical closure."""
+        return dict(policy=self.closure_policy_id, primal_status=self.primal_status,
+                    solver_status=self.solver_status, solver_message=self.solver_message,
+                    primary_objective=self.primary_objective,
+                    secondary_objective=self.secondary_objective,
+                    tie_break=None if self.tie_break is None else dict(self.tie_break),
+                    mass_balance_residual_inf=self.mass_balance_residual_inf,
+                    bound_violation_inf=self.bound_violation_inf,
+                    inventory_violation_inf=self.inventory_violation_inf,
+                    active_lower=list(self.active_lower), active_upper=list(self.active_upper))
 
 
 class MetabolicNumericalError(RuntimeError):

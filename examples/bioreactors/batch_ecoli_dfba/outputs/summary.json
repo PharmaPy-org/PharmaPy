@@ -1,9 +1,0 @@
-{
-  "comparison_kind": "generated_model_regression_not_experimental_validation",
-  "final_biomass_gdw_l": 0.9001141862626618,
-  "native_unit": "BatchReactor",
-  "raw_minimum_species_mass_kg": 0.0,
-  "reference_final_biomass_gdw_l": 0.9001141862626618,
-  "relative_final_biomass_error": 0.0,
-  "status": "PASS"
-}

@@ -79,7 +79,7 @@ def test_flagship_inputs_construct_native_reactor_specializations():
         "fed_batch_cho": SemiBatchReactor,
     }
     for folder_name, reactor_type in expected.items():
-        folder = root / folder_name
+        folder = (Path(__file__).parent / 'fixtures' if folder_name == 'fed_batch_cho' else root) / folder_name
         case = json.loads((folder / "inputs/case.json").read_text())
         definition = json.loads((folder / "inputs/mechanism.json").read_text())
         assembly = build_bioreactor(case, definition, folder / "inputs/thermo.json")
@@ -192,3 +192,107 @@ def test_native_vessel_assembles_differential_algebraic_residual():
     derivatives = unit.create_solver_init_derivatives(states)
     assert unit.solver_state_collection.differential_mask.tolist() == [True] * 4 + [False]
     assert np.allclose(unit.dae_residual(0.0, states, derivatives), 0.0)
+
+
+def test_network_conservation_audit_distinguishes_internal_and_boundary_reactions():
+    from PharmaPy.Metabolic import MetabolicNetworkDefinition, ReactionDefinition
+
+    def network(stoichiometry, exchanges=()):
+        return MetabolicNetworkDefinition(
+            'audit', '1', ('A', 'B'),
+            [ReactionDefinition('convert', stoichiometry, 0., 10.),
+             ReactionDefinition('feed', {'A': 1.}, 0., 10.)],
+            {'convert': 1.}, exchanges)
+
+    balanced = network({'A': -1., 'B': 2.}, ('feed',))
+    before = balanced.stoichiometric_matrix.copy()
+    assert balanced.audit_conservation() == {
+        'stoichiometric_consistency': 'PASS', 'elemental_balance': 'NOT_ASSESSED'}
+    np.testing.assert_array_equal(before, balanced.stoichiometric_matrix)
+    # A source disguised as an internal reaction cannot conserve positive mass.
+    assert network({'A': -1., 'B': 2.}).audit_conservation()[
+        'stoichiometric_consistency'] == 'FAIL'
+    for scale in (1., 1e-12, 1e12):
+        assert network({'A': scale, 'B': scale}, ('feed',)).audit_conservation()[
+            'stoichiometric_consistency'] == 'FAIL'
+    assert network({'A': -1., 'B': 2.}, ('feed', 'convert')).audit_conservation()[
+        'stoichiometric_consistency'] == 'NOT_ASSESSED'
+
+
+def test_culture_audit_exposes_untracked_exchanges_without_changing_bounds():
+    folder = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/fed_batch_cho'
+    case = json.loads((folder / 'inputs/case.json').read_text())
+    definition = json.loads((folder / 'inputs/mechanism.json').read_text())
+    mechanism = build_bioreactor(case, definition, folder / 'inputs/thermo.json').mechanism
+    lower, upper = mechanism.network.bounds()
+    report = mechanism.audit_conservation()
+    assert {item['reaction'] for item in report['untracked_exchanges']} == {
+        'R041', 'R042', 'R043', 'R044', 'R045'}
+    assert report['elemental_balance'] == 'NOT_ASSESSED'
+    assert report['growth_coupled_to_flux'] is True
+    assert report['inventory_constraints'] == 'BOUNDARY'
+    mechanism.prepare_step(60.)
+    assert mechanism.audit_conservation()['inventory_constraints'] == 'FIXED_STEP'
+    np.testing.assert_array_equal(mechanism.network.lower_bounds, lower)
+    np.testing.assert_array_equal(mechanism.network.upper_bounds, upper)
+    for field, value in [('species', 'missing'), ('reaction', 'missing'),
+                         ('internal_coefficient', float('nan'))]:
+        invalid = copy.deepcopy(definition)
+        invalid['model']['kinetics']['exchange_mappings'][0][field] = value
+        with np.testing.assert_raises(ValueError):
+            build_bioreactor(case, invalid, folder / 'inputs/thermo.json')
+
+
+def test_inventory_constraint_couples_growth_to_resource_exposure():
+    from PharmaPy.Bioreactors.inventory import InventoryAvailability
+
+    availability = InventoryAvailability(
+        [1.], [[-1., 0.]], [0.], viable=1., step_day=1.,
+        cell_flux_scale=1., growth=0., death=0., growth_index=1)
+    # The same uptake becomes infeasible when a larger population consumes it.
+    assert availability.residual(np.array([0.75, 0.]))[0] > 0.
+    assert availability.residual(np.array([0.75, 1.]))[0] < 0.
+    flux = np.array([0.75, 0.4])
+    delta = np.eye(2) * 1e-6
+    numerical = np.column_stack([
+        (availability.residual(flux + step) - availability.residual(flux - step)) / 2e-6
+        for step in delta])
+    np.testing.assert_allclose(availability.jacobian(flux), numerical, rtol=1e-8)
+
+
+def test_closed_uptake_audit_detects_resource_free_production():
+    from PharmaPy.Metabolic import MetabolicNetworkDefinition, ReactionDefinition
+    feed = ReactionDefinition('feed', {'A': 1.}, 0., 10.)
+    export = ReactionDefinition('export', {'B': -1.}, 0., 10.)
+    balanced = ReactionDefinition('convert', {'A': -1., 'B': 1.}, 0., 10.)
+    source = ReactionDefinition('source', {'B': 1.}, 0., 10.)
+    def network(reactions, **kwargs):
+        return MetabolicNetworkDefinition('test', '1', ('A', 'B'), reactions,
+                                          {'export': 1.}, ('feed', 'export'), **kwargs)
+    assert network([feed, export, balanced]).audit_closed_uptake()['status'] == 'PASS'
+    audit = network([feed, export, balanced, source]).audit_closed_uptake()
+    assert audit['status'] == 'FAIL'
+    assert audit['maximum_exports']['export'] == 10.
+    for roles in ({'missing': 'tracked'}, {'feed': 'invented'}):
+        with np.testing.assert_raises(ValueError):
+            network([feed, export, balanced], exchange_roles=roles)
+    with np.testing.assert_raises(ValueError):
+        network([feed, export, balanced], representation='invented')
+
+
+def test_exchange_role_must_agree_with_inventory_mapping():
+    folder = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/fed_batch_cho/inputs'
+    case = json.loads((folder / 'case.json').read_text())
+    definition = json.loads((folder / 'mechanism.json').read_text())
+    definition['network']['exchange_roles']['R043'] = 'tracked'
+    with np.testing.assert_raises_regex(ValueError, 'inventory mapping'):
+        build_bioreactor(case, definition, folder / 'thermo.json')
+
+
+def test_closed_uptake_audit_does_not_pass_an_infeasible_closed_model():
+    from PharmaPy.Metabolic import MetabolicNetworkDefinition, ReactionDefinition
+    n = MetabolicNetworkDefinition('test', '1', ('A',), [
+        ReactionDefinition('feed', {'A': 1.}, 1., 10.),
+        ReactionDefinition('export', {'A': -1.}, 0., 10.)],
+        {'export': 1.}, ('feed', 'export'))
+    assert n.audit_closed_uptake()['status'] == 'NOT_ASSESSED'

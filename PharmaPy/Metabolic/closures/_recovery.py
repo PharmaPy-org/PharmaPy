@@ -29,7 +29,7 @@ def _affine_basis(matrix, rhs):
         for i in range(len(rows)):
             if i != rank and rows[i][column]:
                 factor = rows[i][column]
-                rows[i] = [a - factor*b for a, b in zip(rows[i], rows[rank])]
+                rows[i] = [a - factor*b if b else a for a, b in zip(rows[i], rows[rank])]
         pivots.append(column)
     if any(not any(row[:-1]) and row[-1] for row in rows):
         raise ValueError('inconsistent candidate equalities')
@@ -81,8 +81,9 @@ def _objective_gap(matrix, lower, upper, terms, inequality, capacity, flux):
         linear[i] -= F(value) * weight
         constant += F(value)**2 * weight
     lagrangian_linear = [2*linear[j]
-        + sum(F(equality_dual[i])*F(matrix[i, j]) for i in range(len(matrix)))
-        - sum(F(multipliers[i])*F(C[i, j]) for i in range(len(C)) if multipliers[i])
+        + sum(F(equality_dual[i])*F(matrix[i, j]) for i in range(len(matrix))
+              if equality_dual[i] and matrix[i, j])
+        - sum(F(multipliers[i])*F(C[i, j]) for i in range(len(C)) if multipliers[i] and C[i, j])
         for j in range(count)]
     bound = constant - sum(F(multipliers[i])*F(d[i]) for i in range(len(d)))
     # Minimize each separable Lagrangian term on the declared finite box.
@@ -96,9 +97,10 @@ def _objective_gap(matrix, lower, upper, terms, inequality, capacity, flux):
     # An exact arithmetic allowance for the candidate's floating reconstruction:
     # its constraint residuals can put its objective slightly below the optimum.
     defect = sum(abs(F(equality_dual[i]) * sum(F(matrix[i,j])*F(flux[j])
-                 for j in range(count))) for i in range(len(matrix)))
+                 for j in range(count) if matrix[i,j] and flux[j]))
+                 for i in range(len(matrix)) if equality_dual[i])
     defect += sum(F(multipliers[i])*max(Fraction(0),
-                  -sum(F(C[i,j])*F(flux[j]) for j in range(count))-F(d[i]))
+                  -sum(F(C[i,j])*F(flux[j]) for j in range(count) if C[i,j] and flux[j])-F(d[i]))
                   for i in range(len(C)) if multipliers[i])
     return float(gap), float(defect), float(objective)
 
@@ -123,6 +125,8 @@ def boundary_candidate(matrix, lower, upper, terms, availability, tolerance):
     identity = np.eye(len(lower))
     lo_active = (seed.lower.marginals != 0) | (lower == upper)
     hi_active = (seed.upper.marginals != 0) & ~lo_active
+    if growth is not None:
+        lo_active[growth] = hi_active[growth] = False
     active = (seed.ineqlin.marginals != 0) & (capacity >= 0)
     equations = np.vstack([matrix, identity[lo_active], identity[hi_active], inequality[active]])
     rhs = np.r_[np.zeros(len(matrix)), lower[lo_active], upper[hi_active], np.zeros(sum(active))]
@@ -148,7 +152,7 @@ def boundary_candidate(matrix, lower, upper, terms, availability, tolerance):
         # Only algebraically constant directions are removed. Never normalize
         # a roundoff remnant of a constraint that is exactly constant.
         F = lambda x: Fraction(float(x))
-        keep = np.array([any(sum(F(row[i])*basis[i][j] for i in range(len(lower)))
+        keep = np.array([any(sum(F(row[i])*basis[i][j] for i in np.flatnonzero(row) if basis[i][j])
                         for j in range(raw.shape[1]))
                         for row in np.vstack([identity, -identity, availability.matrix])])
         if exposure == 0:
