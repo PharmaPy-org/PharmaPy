@@ -228,6 +228,11 @@ class DynamicExtractor:
         repeats the stage-major flags used by IDA: independent light-phase
         mole fractions and energy are differential; all other states are
         algebraic. The dictionary metadata retains its existing field layout.
+
+        ``SimulationResult`` counts whole fields by their metadata type, so
+        its coarse differential-equation summary includes the dependent final
+        light-phase fraction. ``alg_map`` provides the exact per-component
+        classification used by IDA.
         """
         num_comp = self.num_comp  # [-]
         name_species = self.name_species
@@ -249,7 +254,10 @@ class DynamicExtractor:
         self.alg_map = get_alg_map(self.states_di, self.num_stages)  # [-]
         # The last x_i row is sum(x_i) - 1, with no time derivative. All y_i
         # rows and temperature are already algebraic in the field metadata.
-        self.alg_map.reshape(self.num_stages, -1)[:, num_comp - 1] = 0  # [-]
+        light_field_position = self.name_states.index('x_i')
+        light_field_offset = sum(self.dim_states[:light_field_position])
+        dependent_component = light_field_offset + num_comp - 1
+        self.alg_map.reshape(self.num_stages, -1)[:, dependent_component] = 0  # [-]
 
         self.fstates_di = {}
 

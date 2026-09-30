@@ -37,7 +37,7 @@ HEAVY_FLOW = 3.0  # [mol/s]
 INITIAL_TEMPERATURE = 300.0  # [K], between the unequal inlet temperatures
 ENTHALPY_REFERENCE = 298.15  # [K], LiquidPhase.getEnthalpy reference
 ROUND_OFF_RTOL = 1e-10  # [-], allows rounding in the batch/root initialization
-BALANCE_ATOL = 1e-8  # [J/s] or [J], roundoff allowance for kJ-scale balances
+BALANCE_ATOL = 1e-8  # [J/s], [J], or [1/s], balance/probe roundoff allowance
 
 
 def distribution_coefficients(x_light, x_heavy, temp):
@@ -225,26 +225,40 @@ def test_solver_flags_match_actual_residual_derivatives(extractor_factory, feed_
     -----
     Per stage, only the first two light-phase mole fractions and energy have
     derivatives. The dependent third mole fraction, all heavy-phase entries,
-    and temperature are algebraic. A unit derivative probe must therefore
-    subtract one only in the three differential residual rows.
+    and temperature are algebraic. Probe each state derivative separately:
+    each differential variable changes exactly one residual by minus one,
+    while algebraic derivatives change none. Expected flags follow named
+    fields so the check also applies when metadata fields are reordered.
     """
     extractor, initial = extractor_factory(feed_is_heavy, 330.0, 290.0)
     # Inlet temperatures [K] deliberately differ to retain nonzero energy rates.
     states = np.column_stack([
         initial[name] for name in extractor.name_states
     ]).ravel()  # x_i/y_i [-], u_int [J], temp [K] per stage
+    field_flags = {
+        "x_i": [1, 1, 0], "y_i": [0, 0, 0], "u_int": [1], "temp": [0],
+    }  # [-], independently specified derivative dependence per field
     expected_flags = np.array([
-        1, 1, 0, 0, 0, 0, 1, 0,
-        1, 1, 0, 0, 0, 0, 1, 0,
-    ])  # [-], stage-major order for two stages and three components
+        flag for _ in range(extractor.num_stages)
+        for name in extractor.name_states for flag in field_flags[name]
+    ])  # [-], complete named field blocks in stage-major order
     np.testing.assert_array_equal(extractor.alg_map, expected_flags)
     zero_derivative = np.zeros_like(states)  # x_i/y_i [1/s], u_int [J/s], temp [K/s]
-    probe_derivative = np.ones_like(states)  # unit probes in the same state-rate units
     baseline = extractor.unit_model(0.0, states, zero_derivative)
-    probed = extractor.unit_model(0.0, states, probe_derivative)
-    # Residual differences [1/s] or [J/s]; algebraic rows stay exactly unchanged.
-    np.testing.assert_allclose(
-        baseline - probed, expected_flags, rtol=0, atol=BALANCE_ATOL)
+    # Residuals: x_i [1/s or -], y_i [-], u_int [J/s], temp [J].
+    for state_index, is_differential in enumerate(expected_flags):
+        probe_derivative = zero_derivative.copy()  # [1/s], [J/s], or [K/s]
+        probe_derivative[state_index] = 1.0  # unit probe in that state's rate units
+        probed = extractor.unit_model(0.0, states, probe_derivative)
+        # Same mixed residual units as baseline; algebraic rows stay unchanged.
+        difference = baseline - probed  # nonzero differences [1/s] or [J/s]
+        changed_rows = np.flatnonzero(difference)
+        if is_differential:
+            assert changed_rows.size == 1
+            np.testing.assert_allclose(
+                difference[changed_rows], 1.0, rtol=0, atol=BALANCE_ATOL)
+        else:
+            np.testing.assert_allclose(difference, 0.0, rtol=0, atol=BALANCE_ATOL)
 
 
 @pytest.mark.assimulo
