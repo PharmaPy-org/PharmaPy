@@ -29,11 +29,11 @@ Download the source code from our `Github repository`_ and navigate (:code:`cd`)
 
 .. code-block:: bash
 
-   conda install --file requirements.txt -c conda-forge
+   conda install assimulo --file requirements.txt -c conda-forge
    python -m pip install -e .
 
-.. _Github repository: https://github.com/CryPTSys/PharmaPy/tree/develop
-.. _miniconda: https://github.com/CryPTSys/PharmaPy/
+.. _Github repository: https://github.com/PharmaPy-org/PharmaPy
+.. _miniconda: https://docs.conda.io/en/latest/miniconda.html
 
 Once the software is installed, install and/or use your preferred IDE or text editor to construct PharmaPy flowsheets. For instance, on an active conda environment, install the `Spyder IDE`_ by doing :code:`conda -c conda-forge install spyder`, which provides a nice development environment very well suited for scientific computing. 
 

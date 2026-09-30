@@ -84,3 +84,6 @@ ENV/
 source/crystallization/
 .vscode
 refactor_old_cryst_test.py
+# Python packaging (python -m build)
+build/
+dist/

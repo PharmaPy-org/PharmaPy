@@ -12,20 +12,22 @@ from typing import Any
 
 # Assimulo is optional: pip installs PharmaPy with scipy only. The PyPI
 # "assimulo" package stopped at 3.0 and ships no wheels, so conda-forge is the
-# only practical source. Keep all user-facing solver diagnostics synchronized
-# here.
-_SUPPORTED_ASSIMULO_VERSION = "3.4.3"
+# only practical source. The install command is left unpinned so conda can
+# pick a build that matches the environment's Python and numpy; the tested
+# version is reported for reference. Keep all user-facing solver diagnostics
+# synchronized here.
+_TESTED_ASSIMULO_VERSION = "3.7.3"
 _INSTALL_MESSAGE = (
     "Assimulo is required for solver-backed PharmaPy simulations that use "
     "AssimuloBackend, AssimuloDAEBackend, or a legacy (non-refactored) unit "
-    "operation. Install it with 'conda install -c conda-forge "
-    f"assimulo={_SUPPORTED_ASSIMULO_VERSION}' (the PyPI package is outdated "
+    "operation. Install it with 'conda install -c conda-forge assimulo' "
+    f"(tested with {_TESTED_ASSIMULO_VERSION}; the PyPI package is outdated "
     "and has no wheels), or use ScipyBackend, which needs only scipy."
 )
 _BROKEN_INSTALL_MESSAGE = (
     "Assimulo is installed but could not be imported. Verify that Assimulo "
-    f"{_SUPPORTED_ASSIMULO_VERSION} and its compiled SUNDIALS libraries are "
-    "compatible with this Python environment."
+    "and its compiled SUNDIALS libraries are compatible with this Python "
+    f"environment (tested with Assimulo {_TESTED_ASSIMULO_VERSION})."
 )
 
 

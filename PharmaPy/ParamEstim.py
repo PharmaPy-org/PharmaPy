@@ -977,11 +977,11 @@ class Deconvolution:
             second = gs.gauss_dxdx_mult(self.x_data, *self.optim_params)
 
             axis.plot(self.x_data, first)
-            axis.set_ylabel('$\partial f / \partial x$')
+            axis.set_ylabel(r'$\partial f / \partial x$')
 
             axis_sec = axis.twinx()
             axis_sec.plot(self.x_data, second, '--')
-            axis_sec.set_ylabel('$\partial^2 f / \partial x^2$')
+            axis_sec.set_ylabel(r'$\partial^2 f / \partial x^2$')
 
             fig.legend(('first', 'second'), bbox_to_anchor=(1, 1),
                        bbox_transform=axis.transAxes)
@@ -992,7 +992,7 @@ class Deconvolution:
         elif which == 'first':
             first = gs.gauss_dx_mult(self.x_data, *self.optim_params)
             axis.plot(self.x_data, first)
-            axis.set_ylabel('$\partial f / \partial x$')
+            axis.set_ylabel(r'$\partial f / \partial x$')
 
             axis.spines['right'].set_visible(False)
             axis.spines['top'].set_visible(False)
@@ -1000,7 +1000,7 @@ class Deconvolution:
         elif which == 'second':
             second = gs.gauss_dxdx_mult(self.x_data, *self.optim_params)
             axis.plot(self.x_data, second)
-            axis.set_ylabel('$\partial^2 f / \partial x^2$')
+            axis.set_ylabel(r'$\partial^2 f / \partial x^2$')
 
             axis.spines['right'].set_visible(False)
             axis.spines['top'].set_visible(False)

@@ -439,7 +439,7 @@ class DeliquoringStep:
                 axis[1].lines[-1].set_label(self.Liquid_1.name_species[ind])
 
             axis[1].legend(loc='best')
-            axis[1].set_ylabel('$C$ $(\mathregular{kg \ m^{-3}})$')
+            axis[1].set_ylabel(r'$C$ $(\mathregular{kg \ m^{-3}})$')
             axis[1].set_xlabel('$z/L$')
 
         elif time is not None:
@@ -453,7 +453,7 @@ class DeliquoringStep:
             axis[1].legend(self.Liquid_1.name_species, loc='best')
 
             axis[1].set_xlabel('$z/L$')
-            axis[1].set_ylabel('$C_j$ ($\mathregular{kg \ m^{-3}}$)')
+            axis[1].set_ylabel(r'$C_j$ ($\mathregular{kg \ m^{-3}}$)')
             axis[1].text(1, 1.04, '$t = %.1f$ s' % self.timeProf[idx_time],
                       ha='right', transform=axis[1].transAxes)
 
@@ -463,7 +463,7 @@ class DeliquoringStep:
 
             axis[1].plot(self.timeProf, profiles)
             axis[1].set_xlabel('time (s)')
-            axis[1].set_ylabel('$C_j$ ($\mathregular{kg \ m^{-3}}$)')
+            axis[1].set_ylabel(r'$C_j$ ($\mathregular{kg \ m^{-3}}$)')
             axis[1].text(1, 1.04, '$z^* = %.1f$' % self.z_centers[idx_z],
                          ha='right', transform=axis.transAxes)
 
@@ -1235,7 +1235,7 @@ class DisplacementWashing:
                 ax.text(1, 1.04, '$t = %.0f$ s' % self.timeProf[t_idx],
                         ha='right', transform=ax.transAxes)
 
-        ax.set_ylabel('$C_i$ $(\mathregular{kg \ m^{-3}})$')
+        ax.set_ylabel(r'$C_i$ $(\mathregular{kg \ m^{-3}})$')
 
         for ind in pick_idx:
             ax.legend(self.Liquid_1.name_species[ind], loc='best')
@@ -1292,8 +1292,8 @@ if __name__ == '__main__':
         axw[0].plot(volume, cstar[-1, :, :-1])
 
         axw[0].set_xlabel(r'$t$')
-        axw[0].set_ylabel('$\dfrac{C - C_0}{C_{in} - C_0}$')
+        axw[0].set_ylabel(r'$\dfrac{C - C_0}{C_{in} - C_0}$')
 
         axw[1].plot(z_vals, conc_real[:, -1, :-1])
         axw[1].set_xlabel('$z$')
-        axw[1].set_ylabel('$\dfrac{C - C_0}{C_{in} - C_0}$')
+        axw[1].set_ylabel(r'$\dfrac{C - C_0}{C_{in} - C_0}$')

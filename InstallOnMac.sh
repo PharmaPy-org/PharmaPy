@@ -7,7 +7,7 @@ read env_name
 echo ------------------------------
 echo Creating conda environment...
 echo ------------------------------
-conda create -n $env_name python=3.9 --file requirements.txt -c conda-forge
+conda create -n $env_name python=3.12 assimulo --file requirements.txt -c conda-forge
 echo ------------------------------
 echo Activating conda environment...
 echo ------------------------------

@@ -52,12 +52,12 @@ def latexify_name(name, units=False):
         count += 1
 
     if len(out) > 1:
-        out = ' \ '.join(out)
+        out = r' \ '.join(out)
     else:
         out = out[0]
 
     if units:
-        out = '$\mathregular{' + out + '}$'
+        out = r'$\mathregular{' + out + '}$'
     else:
         out = '$' + out + '$'
 

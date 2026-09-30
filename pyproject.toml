@@ -14,8 +14,20 @@ license = "BSD-3-Clause"
 license-files = ["LICENSE.md"]
 authors = [
     { name = "Daniel Casas-Orozco", email = "dcasasor@purdue.edu" },
+    { name = "Zachary Hillman", email = "zachary.hillman18@gmail.com" },
+]
+maintainers = [
+    { name = "Zachary Hillman", email = "zachary.hillman18@gmail.com" },
+]
+keywords = [
+    "pharmaceutical",
+    "process simulation",
+    "flowsheet",
+    "crystallization",
+    "chemical engineering",
 ]
 classifiers = [
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
     "Operating System :: OS Independent",
     "Intended Audience :: Science/Research",

@@ -31,7 +31,7 @@ Step 6: Test PharmaPy by running pytest from this directory: python -m pytest
 # ---------- Manual installation ----------
 Step 1: Create a conda environment named <env_name> (optional)
 
-conda create --name <env_name> python=3.9
+conda create --name <env_name> python=3.12
 
 Step 1.1: If making a virtual environment
 
@@ -57,9 +57,10 @@ conda config -- show envs_dirs
 step 1.1.2: Create a path
 conda create --prefix <Directory address + /<env_name>>
 
-Step 2: Install the package requirements in requirements.txt
+Step 2: Install the package requirements in requirements.txt, plus the
+optional Assimulo solvers (drop "assimulo" for a scipy-only environment)
 
-conda install -c conda-forge --file requirements.txt
+conda install -c conda-forge assimulo --file requirements.txt
 
 Step 3: Install PharmaPy; navigate to the source directory
 

@@ -1,11 +1,11 @@
 # PharmaPy
 
-PharmaPy is a pythonic library for the analysis of pharmaceutical manufacturing systems.\
+PharmaPy is a pythonic library for the analysis of pharmaceutical manufacturing systems.
 
 It allows to simulate the dynamics of standalone, drug substance unit operations in a variety of operating modes (batch, continuous, semibatch). Also, PharmaPy facilitates setting up and simulating pharmaceutical **flowsheets**, i.e., interconnected unit operations in a variety of operation modes, ranging from end-to-end batch, end-to-end continuous, and hybrid operation (combination of batch and/or continuous and semicontinuous unit operations).
 
 ## Getting started
-Read our [link to documentation page] for more information on how to install and use PharmaPy.
+Source code, examples and documentation sources are on [GitHub](https://github.com/PharmaPy-org/PharmaPy).
 
 ### Installation
 PharmaPy is published on PyPI as `pharmapy-org`, and you import it as `PharmaPy`:
@@ -33,8 +33,4 @@ The only integrator this installs is scipy's. Unit operations built on `MultiPha
   python -c "import diffeqpy; diffeqpy.install()"
   ```
 
-To get a development install with every backend, download the source code and follow `install_instructions.txt`. It sets up a conda environment that includes Assimulo and installs PharmaPy in editable mode.
-
-<!-- BEGIN Status badges -->
-[![Downloads]]
-<!-- END Status badges -->
+To get a development install with every backend, clone the [GitHub repository](https://github.com/PharmaPy-org/PharmaPy) and follow `install_instructions.txt`. It sets up a conda environment that includes Assimulo and installs PharmaPy in editable mode.
