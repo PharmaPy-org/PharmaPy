@@ -8,3 +8,5 @@ remaining work. Consult its linked issues for current ownership and status, and
 - [PR #263](pr263.md): zero-radius FVM policy for future maintainer consideration,
   the rationale and limits of five issue-closure recommendations, and independent
   verification of six reported defects and regressions.
+
+- [Crystal-grid inventory convergence (#391)](crystallizer_grid_conservation.md)
