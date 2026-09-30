@@ -3,8 +3,8 @@
 <img align="left" src="./doc/online_docs/images/PharmaPy_logo.jpeg" alt="PharmaPy_logo" height="250">
 
 <!-- BEGIN Status badges -->
-[![CI](https://github.com/SECQUOIA/PharmaPy/actions/workflows/ci.yml/badge.svg)](https://github.com/SECQUOIA/PharmaPy/actions/workflows/ci.yml)
-![GitHub all releases](https://img.shields.io/github/downloads/CryPTSys/PharmaPy/total)
+[![CI](https://github.com/PharmaPy-org/PharmaPy/actions/workflows/ci.yml/badge.svg)](https://github.com/PharmaPy-org/PharmaPy/actions/workflows/ci.yml)
+[![Historical CryPTSys release downloads](https://img.shields.io/github/downloads/CryPTSys/PharmaPy/total)](https://github.com/CryPTSys/PharmaPy/releases)
 [![DOI](https://img.shields.io/badge/DOI-10.1016%2Fj.compchemeng.2021.107408-blue)](https://www.sciencedirect.com/science/article/abs/pii/S0098135421001861)
 <!-- END Status badges -->
 
@@ -33,4 +33,4 @@ support, and verification commands.
 See the [contributing guide](https://github.com/PharmaPy-org/PharmaPy/blob/master/CONTRIBUTING.md)
 for the development workflow and integration contract.
 
-Read our [documentation](https://pharmapy.readthedocs.io/en/latest/) or chat with the [PharmaPy Simulation Assistant](https://chatgpt.com/g/g-679bb3b5c5188191b26680b147a4f4a2-pharmapy-simulation-assistant) for more information on how to install and how to use PharmaPy.
+Read our [documentation](https://pharmapy-org.readthedocs.io/en/latest/) or chat with the [PharmaPy Simulation Assistant](https://chatgpt.com/g/g-679bb3b5c5188191b26680b147a4f4a2-pharmapy-simulation-assistant) for more information on how to install and how to use PharmaPy.

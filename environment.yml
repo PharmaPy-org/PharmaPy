@@ -9,4 +9,7 @@ dependencies:
   - matplotlib
   - pandas
   - pytest
+  - ipykernel>=6
+  - nbclient>=0.10
+  - nbformat>=5
   - pip

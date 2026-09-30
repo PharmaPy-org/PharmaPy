@@ -3,110 +3,44 @@
 import pytest
 
 from PharmaPy.Distillation import DistillationColumn
+from PharmaPy.Streams import LiquidStream
 
 
 pytestmark = pytest.mark.unit
 
 
-def test_steady_state_solve_uses_calc_plates_results():
-    """``solve_unit`` forwards shortcut-design results to ``calc_plates``.
+def test_steady_state_solve_uses_calc_plates_results(data_path):
+    """``solve_unit`` carries real shortcut results into real outlets."""
+    thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
+    feed = LiquidStream(
+        thermo_path,
+        temp=350.0,  # [K]
+        mole_flow=25.0,  # [mol/s]
+        mole_frac=[0.4, 0.6, 0.0, 0.0],  # [-]
+        verbose=False,
+    )
+    column = DistillationColumn(
+        pres=101325.0,  # [Pa]
+        q_feed=1.0,  # [-]
+        LK="A",
+        HK="B",
+        perc_LK=95.0,  # [%]
+        perc_HK=5.0,  # [%]
+        reflux=1.0,  # [-]
+        num_plates=8,  # [-]
+        num_feed=4,  # [-]
+    )
+    column.Inlet = feed
 
-    A small subclass test double avoids monkeypatching the instance while
-    keeping the assertion focused on the ``solve_unit`` orchestration branch.
-    The shortcut-design and plate-calculation numerics are covered by their
-    dedicated tests, so this test stops before result retrieval.
-    """
-    material_balances = {
-        "x_dist": [0.95, 0.05],  # [-]
-        "x_bottom": [0.05, 0.95],  # [-]
-        "dist_flow": 1.0,  # [mol/s]
-        "bottom_flow": 2.0,  # [mol/s]
-    }
-    expected = {
-        "material_balances": material_balances,
-        "min_reflux": 1.2,  # [-]
-        "num_min": 4,  # [-]
-        "reflux": 1.8,  # [-]
-        "num_plates": 7,  # [-]
-    }
+    design = column.solve_unit(solve_ss=True)
 
-    class ShortcutDesignColumn(DistillationColumn):
-        """Column test double for shortcut-design handoff."""
-
-        def __init__(self, design):
-            """Store a deterministic shortcut design.
-
-            Parameters
-            ----------
-            design : dict
-                Shortcut-design result. Mole fractions are [-], molar flows are
-                [mol/s], reflux values are [-], and stage counts are [-].
-            """
-            super().__init__(
-                pres=101325.0,  # [Pa]
-                q_feed=1.0,  # [-]
-                LK="ethanol",
-                HK="water",
-                perc_LK=95.0,  # [%]
-                perc_HK=5.0,  # [%]
-            )
-            self.design = design
-            self.calc_plates_calls = []
-
-        def calculate_shortcut_design(self):
-            """Return the deterministic shortcut-design result.
-
-            Returns
-            -------
-            dict
-                Shortcut-design result with mole fractions [-], molar flows
-                [mol/s], reflux values [-], and stage counts [-].
-            """
-            return self.design
-
-        def calc_plates(self, **kwargs):
-            """Capture the plate-calculation keyword arguments.
-
-            Parameters
-            ----------
-            **kwargs
-                Plate-calculation inputs. Mole fractions are [-], molar flows
-                are [mol/s], reflux is [-], and stage counts are [-].
-
-            Returns
-            -------
-            None
-                The call is recorded in ``calc_plates_calls``.
-            """
-            self.calc_plates_calls.append(kwargs)
-
-        def retrieve_results(self, *args, **kwargs):
-            """Prevent accidental result retrieval in this handoff test.
-
-            Parameters
-            ----------
-            *args
-                Positional result-retrieval arguments.
-            **kwargs
-                Keyword result-retrieval arguments.
-
-            Raises
-            ------
-            AssertionError
-                Always, because this test stops before retrieval.
-            """
-            raise AssertionError("solve_unit should not retrieve results twice")
-
-    column = ShortcutDesignColumn(expected)
-
-    result = column.solve_unit(solve_ss=True)
-
-    assert result == expected
-    assert column.calc_plates_calls == [{
-        "x_dist": [0.95, 0.05],  # [-]
-        "x_bottom": [0.05, 0.95],  # [-]
-        "dist_flow": 1.0,  # [mol/s]
-        "bottom_flow": 2.0,  # [mol/s]
-        "reflux": 1.8,  # [-]
-        "num_plates": 7,  # [-]
-    }]
+    material = design["material_balances"]
+    assert column.result.num_plates == design["num_plates"]
+    assert column.result.reflux == pytest.approx(design["reflux"])
+    assert column.OutletDistillate.mole_flow == pytest.approx(
+        material["dist_flow"]
+    )
+    assert column.OutletBottom.mole_flow == pytest.approx(
+        material["bottom_flow"]
+    )
+    assert column.Outlet is column.OutletBottom

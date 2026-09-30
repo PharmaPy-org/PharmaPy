@@ -5,6 +5,8 @@ Created on Mon Mar  2 15:36:35 2020
 @author: dcasasor
 """
 
+from typing import Union
+
 from PharmaPy.NameAnalysis import NameAnalyzer, get_dict_states
 from PharmaPy.Interpolation import local_newton_interpolation
 
@@ -14,8 +16,60 @@ import numpy as np
 import copy
 
 
-def interpolate_inputs(time, t_inlet, y_inlet, **kwargs_interp_fn):
-    if isinstance(time, (float, int)):
+def interpolate_inputs(time: Union[float, np.ndarray],
+                       t_inlet: Union[float, np.ndarray],
+                       y_inlet: np.ndarray,
+                       **kwargs_interp_fn) -> Union[float, np.ndarray]:
+    """Interpolate upstream profiles, holding the endpoint after their support.
+
+    Parameters
+    ----------
+    time : float or numpy.ndarray
+        Evaluation time [s], scalar or an ascending array of shape
+        (num_times,).
+    t_inlet : float or numpy.ndarray
+        Upstream times [s], shape (num_upstream_times,); a scalar represents
+        one sample and requires exactly one row in ``y_inlet``.
+    y_inlet : numpy.ndarray
+        Values with time on the first axis. Multiple upstream samples support
+        scalar fields of shape (num_upstream_times,) and vector fields of
+        shape (num_upstream_times, num_fields), preserving their physical
+        units (for example mass flow [kg/s] or mass fractions [-]). A single
+        upstream sample may have additional field axes, which are preserved.
+    **kwargs_interp_fn : dict
+        Keyword arguments forwarded to the selected interpolation routine.
+
+    Returns
+    -------
+    scalar or numpy.ndarray
+        Interpolated values in the input units. Scalar time removes the time
+        axis; array time replaces it with the requested time axis.
+
+    Raises
+    ------
+    ValueError
+        If a single upstream time is not paired with exactly one value row.
+
+    Notes
+    -----
+    A single upstream sample is constant for all scalar or array times.
+    Multi-point profiles use local Newton interpolation for scalar time and
+    cubic splines for array time; values beyond the final time hold the actual
+    endpoint. Earlier times extrapolate, so callers requiring measured support
+    must validate the beginning of their evaluation interval.
+    """
+    t_inlet = np.atleast_1d(t_inlet)  # [s], scalar times represent one sample
+    if len(t_inlet) == 1:
+        if np.ndim(y_inlet) == 0 or len(y_inlet) != 1:
+            raise ValueError(
+                'y_inlet must have exactly one value row when t_inlet has '
+                'one sample; supply matching time and value rows.')
+        if np.ndim(time) == 0:
+            return y_inlet[0]
+        return np.broadcast_to(
+            y_inlet[0], (len(time),) + np.shape(y_inlet)[1:]).copy()
+
+    if np.ndim(time) == 0:
         # Assume steady state for extrapolation
         time = min(time, t_inlet[-1])
 
@@ -30,10 +84,10 @@ def interpolate_inputs(time, t_inlet, y_inlet, **kwargs_interp_fn):
             y_interp = interpol(time_interpol)
 
             if y_inlet.ndim == 1:
-                y_extrap = np.tile(y_interp[-1], sum(flags_extrapol))
+                y_extrap = np.tile(interpol(t_inlet[-1]), sum(flags_extrapol))
                 y_interp = np.concatenate((y_interp, y_extrap))
             else:
-                y_extrap = np.tile(y_interp[-1], (sum(flags_extrapol), 1))
+                y_extrap = np.tile(interpol(t_inlet[-1]), (sum(flags_extrapol), 1))
                 y_interp = np.vstack((y_interp, y_extrap))
         else:
             y_interp = interpol(time)
@@ -297,12 +351,28 @@ class Connection:
         else:
             self.Matter.time_upstream = time_prof[-1]
 
-    def ConvertUnits(self):
+    def ConvertUnits(self) -> None:
+        """Convert upstream states using the destination's selected names.
+
+        Notes
+        -----
+        Resolve a flow/non-flow name selector from the transferred matter
+        before name analysis. Mixer inlet assignment happens after conversion,
+        so an unconnected mixer still exposes both alternatives here. Stream
+        quantities retain their per-second basis; batch amounts retain their
+        inventory basis. Converted states are stored in ``Matter.y_inlet``.
+        """
         mode_source = self.source_uo.oper_mode
         mode_dest = self.destination_uo.oper_mode
 
         flow_flag = (mode_source == 'Continuous' and mode_dest != 'Batch')
         btf_flag = self.source_uo.__class__.__name__ == 'BatchToFlowConnector'
+
+        if flow_flag or btf_flag:
+            names_states_in = self.destination_uo.names_states_in
+            if isinstance(names_states_in, dict) and 'flow' in names_states_in:
+                selector = 'flow' if hasattr(self.Matter, 'mass_flow') else 'non_flow'
+                names_states_in = names_states_in[selector]
 
         if flow_flag:
             states_up = self.source_uo.names_states_out
@@ -315,7 +385,7 @@ class Connection:
                     states_down = self.destination_uo.names_states_in['liquid_mixer']
 
             else:
-                states_down = self.destination_uo.names_states_in
+                states_down = names_states_in
             
             # if hasattr(self.Matter, 'moments'):
             #     num_distr = len(self.Matter.moments)
@@ -349,7 +419,7 @@ class Connection:
                     states_down = self.destination_uo.names_states_in['liquid_mixer']
 
             else:
-                states_down = self.destination_uo.names_states_in
+                states_down = names_states_in
 
             name_analyzer = NameAnalyzer(
                 states_up, states_down, self.num_species,

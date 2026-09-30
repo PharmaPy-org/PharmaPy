@@ -207,10 +207,9 @@ Prioritize, in order:
   `PropertyMock`. Do not introduce pytest's `monkeypatch` fixture or
   `pytest.MonkeyPatch`, runtime replacement of imports, modules, attributes, or
   environment state. These techniques make it too easy to verify configured
-  substitutes instead of the PharmaPy behavior users rely on. The exact legacy
-  files listed by digest in `tests/test_mock_policy.py` are temporarily
-  grandfathered under #202; changing one invalidates its exemption and requires
-  removing every prohibited substitute from that file.
+  substitutes instead of the PharmaPy behavior users rely on. The #202
+  migrations retired all legacy exemptions; keep the digest table in
+  `tests/test_mock_policy.py` empty to prevent their reintroduction.
 - Exercise deterministic behavior through public APIs with representative real
   collaborators. For optional, licensed, external, or expensive boundaries,
   run the real collaborator in its marked environment, test a deterministic

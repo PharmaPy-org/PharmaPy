@@ -44,72 +44,9 @@ FORBIDDEN_SYS_MODULE_METHODS = frozenset(
     {"__setitem__", "clear", "pop", "popitem", "setdefault", "update"}
 )
 
-# Issue #202 removes these exact legacy files in focused PRs. The content
-# digests form a ratchet: any edit to a file that still uses monkeypatch makes
-# the repository check fail. A migration must remove both every violation
-# and its now-obsolete exemption row.
-LEGACY_MONKEYPATCH_FILE_DIGESTS = {
-    "tests/test_batch_cryst_concentration_jacobian.py": (
-        "df111caf9baee2bd10a3f983ef8f90d902f2b678505328125fa30c62331db0f2"
-    ),
-    "tests/test_crystallizer_energy_balances.py": (
-        "b48a7902a1046f06472e9a39a041826267fdd3f302589dbf64ae894e2eb2551b"
-    ),
-    "tests/test_deliquoring_particle_size_units.py": (
-        "e9dc7ce86a1361c3f4b486586678d7f0f801aff3ad7bceab01ee9eed913a12d6"
-    ),
-    "tests/test_drying_energy_rate_basis.py": (
-        "92c65c66296a5a57ee6e06fc695bc6eccf215dc37bc597aab49726c1c4b2fb88"
-    ),
-    "tests/test_drying_gas_balance.py": (
-        "1efc9c1940200e60b39ecbf8cd020f049c6ccc57d3f9af070964abda8cd22c38"
-    ),
-    "tests/test_drying_latent_heat_factor.py": (
-        "0c50a7437f94113114901fc630f5b167d0ec00546bdda7027b64805d22d00fd7"
-    ),
-    "tests/test_drying_model.py": (
-        "d4592e91a578bcfec961530a659d3490b84d6b376231775e96d91f2ad773c9c5"
-    ),
-    "tests/test_dynamic_collector_state_ordering.py": (
-        "10af90d6a1a1c682d6f3ba6de5e034b4b55d4f0139d6b5b930ed4e173c37d58c"
-    ),
-    "tests/test_dynamic_extractor_default_k_fun.py": (
-        "cf9a39a039806799756b6d3ea2b9353ad623afbd8b58cec02414feacbd8216d3"
-    ),
-    "tests/test_dynamic_extractor_stage_efficiency.py": (
-        "8a666ab0e76c7423de36c1019f5449a1bd882240932f5790e755974575c2e71e"
-    ),
-    "tests/test_exception_handling.py": (
-        "22617523a4774cd3dfc40400778915494b3c0fc932fe07f0c626868887287d9a"
-    ),
-    "tests/test_extractor_modes.py": (
-        "657659bd3ed2c53eed18935e15e45586ce4e190a75d203c9e353b4ac7ad3e49b"
-    ),
-    "tests/test_metamodeler_codegen.py": (
-        "958a52435715c302ea81b3d5c17ce4dc14fa9ae3ea9100f30774c4860a33f02d"
-    ),
-    "tests/test_optional_assimulo_imports.py": (
-        "e65a16b56b0620f02a7e831f995c2e07b8f6b70b8caf8eb480257dc56d5f1480"
-    ),
-    "tests/test_paramestim_calibration_fit_predict.py": (
-        "39da4b9c6ff5e81bf625cb6c7cf44b05f231d53ad364a1ef457c6e8826bca304"
-    ),
-    "tests/test_paramestim_gradient_assembly.py": (
-        "b73418cd050a3abaa428caced65cb78c654f25801f970c808b30d92bfbce16c8"
-    ),
-    "tests/test_phases_vapor_latent_heat_shape.py": (
-        "e0c96b1d4fea3726d5dde9ed95cd14d9b0f39fd42adc83da28eee18e0d9c72d2"
-    ),
-    "tests/test_reactors_energy.py": (
-        "d636392346ebbef16de3bd6abf13f4f9aa6c6cbec1e5891466a4162a27bd0298"
-    ),
-    "tests/test_reversible_jacobian_reverse_term.py": (
-        "e568cb5ac7d3ede1bf4429974303872a00b8276b1083f1de72513bc37fb619a8"
-    ),
-    "tests/test_simexec_routing.py": (
-        "7abab90e232de7f27614c51ea4d424346254dd4a03682dbaacefcf9c3b1f5afa"
-    ),
-}
+# The #202 migrations retired every legacy exemption. Keep the ratchet empty
+# so previously grandfathered content cannot silently become exempt again.
+LEGACY_MONKEYPATCH_FILE_DIGESTS = {}
 
 
 def _is_forbidden_module(module_name: str) -> bool:

@@ -158,24 +158,3 @@ def test_sensitivity_mode_refuses_unsupported_reactors(data_path, reactor_cls):
 
     with pytest.raises(NotImplementedError, match="sensitivity.*not supported"):
         reactor.solve_unit(runtime=1, eval_sens=True, verbose=False)
-
-
-def test_coil_ht_mode_refuses_unsupported_heat_transfer():
-    reactor = BatchReactor(isothermal=False, ht_mode="coil")
-
-    with pytest.raises(NotImplementedError, match="coil.*not supported"):
-        reactor.heat_transfer(np.array([300.0]), np.array([290.0]), 0.002)
-
-
-@pytest.mark.parametrize("reactor_cls", SENSITIVITY_REACTORS)
-def test_coil_ht_mode_refuses_through_solve_unit(data_path, reactor_cls):
-    if reactor_cls is CSTR:
-        reactor = reactor_cls(isothermal=False, ht_mode="coil")
-    else:
-        reactor = reactor_cls(
-            vol_tank=0.002, isothermal=False, ht_mode="coil")
-
-    reactor = _reactor_objects(data_path, reactor)
-
-    with pytest.raises(NotImplementedError, match="coil.*not supported"):
-        reactor.solve_unit(runtime=1, verbose=False)

@@ -10,6 +10,8 @@ from scipy.optimize import newton
 
 from PharmaPy.Commons import mid_fn
 from PharmaPy.Phases import LiquidPhase
+from PharmaPy.ThermoModule import (
+    VALID_ACTIVITY_MODELS as VALID_GAMMA_METHODS, validate_activity_model)
 from PharmaPy.Streams import LiquidStream
 from PharmaPy.Connections import get_inputs_new
 
@@ -56,10 +58,8 @@ def material_setter(instance, oper_mode):
     return out
 
 
-VALID_GAMMA_METHODS = ('ideal', 'UNIFAC', 'UNIQUAC')
-
-
-def validate_gamma_method(gamma_method, param_name='gamma_method'):
+def validate_gamma_method(gamma_method: str,
+                          param_name: str = 'gamma_method') -> None:
     """Validate an activity-coefficient model selector.
 
     Parameters
@@ -74,10 +74,7 @@ def validate_gamma_method(gamma_method, param_name='gamma_method'):
     ValueError
         If ``gamma_method`` is not one of ``VALID_GAMMA_METHODS``.
     """
-    if gamma_method not in VALID_GAMMA_METHODS:
-        raise ValueError(
-            f"{param_name} must be one of {VALID_GAMMA_METHODS}, "
-            f"got {gamma_method!r}")
+    validate_activity_model(gamma_method, param_name=param_name)
 
 
 class ContinuousExtractor:

@@ -33,6 +33,10 @@ to install pixi and create the development environments, then use
   `Assimulo integration tests` job is informational; see
   [TESTING.md](TESTING.md). A maintainer merges accepted changes.
 
+Historical model decisions and verification evidence are indexed in
+[review notes](doc/review_notes/README.md). These records provide context for
+future work; the standards above and the linked issues govern current work.
+
 ## Integration contract for parallel workstreams
 
 A *workstream* is development coordinated by project maintainers or
