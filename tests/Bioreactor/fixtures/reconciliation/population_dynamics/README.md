@@ -1,17 +1,11 @@
-# Level 2: population-coupled fed-batch reconciliation
+# Population dynamics
 
 This manufactured benchmark verifies growing and dying populations coupled to
 reconciled nutrient uptake and product formation. It uses the existing standard
 JSON → `build_bioreactor` → `assembly.solve` → native reactor workflow. No shared
-runtime code or JSON schema changes were required for this level.
+runtime code or JSON schema changes were required for this benchmark.
 
-## Run and outputs
-
-Run the six cells in `workflow.ipynb`, which defaults to `inputs/growth_death`.
-Select `growth`, `constrained_growth` or `monod` by changing both the input and
-output paths in Step 1. Every configuration uses the same `case.json`,
-`mechanism.json` and `thermo.json` structure. The notebook only simulates and
-exports forward trajectories to CSV, PNG and SVG.
+## Verification
 
 ```sh
 python -m pytest tests/Bioreactor/test_bioreactor_qualification.py tests/Bioreactor/test_bioreactor_known_answer.py -q
@@ -70,13 +64,6 @@ material references are also checked against closed-form exponential solutions.
 The maximum absolute errors are divided by fixed scales `[10, 1, 0.2, 0.1, 1,
 0.001]` for `[A, N, D, P, V, I]`; every scaled error must be below 1e-6.
 
-| Variant | Maximum scaled error | Forward notebook time, approximately |
-| --- | ---: | ---: |
-| growth | 7.2e-10 | 1.7 s |
-| growth_death | 3.3e-10 | 1.4 s |
-| constrained_growth | 1.4e-10 | 1.3 s |
-| monod | 1.8e-7 | 37 s |
-
 Times include plotting/export and depend on the machine. The tighter adaptive
 settings used for this accuracy check make the changing-target Monod case more
 expensive; these times are not a general throughput guarantee.
@@ -93,18 +80,13 @@ exposure updates introduce discretization error even when growth is constant.
 
 ## What this establishes
 
-Level 2 verifies the configured population–flux feedback, accepted-growth
+Population dynamics verifies the configured population–flux feedback, accepted-growth
 conversion, death, exposure, feeds and sampling on a known-answer network.
-It preserves the separate Level 1 depletion/replenishment checks. It does not
+It preserves the separate Analytic balances depletion/replenishment checks. It does not
 establish realistic CHO prediction, arbitrary network correctness, weighted
 reconciliation, or accurate timing of depletion during growing-population runs.
-Multiple independent fluxes and competing nutrients remain the next level.
+Multiple independent fluxes and competing nutrients are covered by the
+[network-structure fixtures](../network_structure/README.md).
 
 
 ## Retained verification
-
-Historical campaign reports and intermediate output trees have been removed.
-The input triples, forward notebook and independent numerical checks remain.
-Run `python -m pytest tests/Bioreactor/test_bioreactor_qualification.py` from the
-repository root. The notebook regenerates forward trajectory outputs; the tests
-check the declared equations directly rather than relying on packaged reports.

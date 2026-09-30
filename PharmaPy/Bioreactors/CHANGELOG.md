@@ -1,5 +1,25 @@
 # Bioreactor implementation: final net changes
 
+## Reconciliation fixture organization (2026-09-30)
+
+Synthetic reconciliation benchmarks moved from the generic fed-batch example
+to `tests/Bioreactor/fixtures/reconciliation`. Descriptive groups replace
+numbered directories: analytic balances, population dynamics, network structure,
+optimization constraints, operating transitions and coupled systems.
+All 126 input files are byte-identical to their originals. Independent reference
+mathematics and test assertions are retained. Redundant notebooks and saved
+outputs were removed from the delivery, with recovery copies in Alterable.
+
+Test paths and documentation now refer to the fixtures. Optional operating-test
+reports use an explicit `BIOREACTOR_VERIFICATION_OUTPUT` directory instead of
+writing into fixture folders. No production code or native architecture changed.
+The example guide now includes environment installation and notebook instructions.
+
+Verification: 613 bioreactor tests passed in 351.99 seconds, with 38 warnings;
+an additional report-export check passed. Input checksums and unchanged test
+function sets were verified. This is existing-environment verification, not a
+new clean-environment installation qualification.
+
 ## Qualification and documentation consolidation (2026-09-28)
 
 Levels 2–6 now share `tests/Bioreactor/test_bioreactor_qualification.py`, with
@@ -101,7 +121,8 @@ and an explicit `unweighted` policy (equal absolute target residuals, no interna
 penalty or target bounds). Both retain native network and inventory constraints.
 The unweighted objective uses a common target-magnitude scale with a positive
 floor to resolve small rates without changing the mathematical minimizer.
-The shared JSON templates expose this choice; the Khare example uses `unweighted`.
+The shared JSON templates expose this choice; the retained Khare regression
+fixture uses `unweighted` (it is not a current demonstration example).
 Remaining reconciliation ties use an automatic capacity-normalized squared-flux
 selection with primary-penalized coordinates fixed. It reuses existing solvers and
 constraints, reports selection diagnostics, and needs no additional JSON fields.

@@ -12,5 +12,5 @@ The synthetic inputs demonstrate execution and material accounting, not
 experimental validation. Analytical checks are in
 `tests/Bioreactor/test_bioreactor_generic_example.py`.
 
-The [reconciliation benchmark](reconciliation/README.md) extends this example
+The [reconciliation benchmark](../../../tests/Bioreactor/fixtures/reconciliation/README.md) is maintained with the test fixtures
 with known-answer metabolic networks and progressively harder numerical tests.

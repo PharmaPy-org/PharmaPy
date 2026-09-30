@@ -13,7 +13,7 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.optimize import linprog, minimize_scalar
 
-BASE = Path(__file__).parents[2]/'examples/bioreactors/generic_fed_batch/reconciliation/level6'
+BASE = Path(__file__).parents[2]/'tests/Bioreactor/fixtures/reconciliation/coupled_systems'
 CASES = ('coupled04', 'coupled10', 'coupled20', 'coupled20_scaled')
 
 

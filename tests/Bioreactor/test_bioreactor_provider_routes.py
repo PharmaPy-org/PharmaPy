@@ -12,7 +12,7 @@ ROOT = Path(__file__).parents[2] / 'examples/bioreactors'
 
 
 def inputs(kind):
-    folder = (ROOT/'generic_fed_batch/reconciliation/inputs/consistent'
+    folder = (Path(__file__).parent/'fixtures/reconciliation/analytic_balances/inputs/consistent'
               if kind == 'reconciled' else ROOT/'generic_batch/inputs')
     case = json.loads((folder/'case.json').read_text())
     model = json.loads((folder/'mechanism.json').read_text())

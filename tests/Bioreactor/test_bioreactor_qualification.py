@@ -26,7 +26,7 @@ from reconciliation_reference import (
 
 # Population qualification
 
-POPULATION_BASE = Path(__file__).parents[2] / 'examples/bioreactors/generic_fed_batch/reconciliation/level2'
+POPULATION_BASE = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/reconciliation/population_dynamics'
 POPULATION_SCALES = np.array([10., 1., .2, .1, 1., .001])
 
 
@@ -181,7 +181,7 @@ def test_population_equivalent_specific_growth_basis():
 
 # Network qualification
 
-NETWORK_BASE = Path(__file__).parents[2] / 'examples/bioreactors/generic_fed_batch/reconciliation/level3'
+NETWORK_BASE = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/reconciliation/network_structure'
 NETWORK_FIELDS = ['nutrient_a_mmol', 'nutrient_b_mmol', 'byproduct_mmol', 'product_g',
           'viable_cells_million', 'dead_cells_million', 'volume_l', 'ivcd_million_cell_day_per_ml']
 NETWORK_SCALES = np.array([10., 10., 2., .1, 1., .1, 1., .001])
@@ -420,7 +420,7 @@ def test_network_adaptive_refinement(change):
 
 # Constraint qualification
 
-CONSTRAINT_BASE = Path(__file__).parents[2]/'examples/bioreactors/generic_fed_batch/reconciliation/level4'
+CONSTRAINT_BASE = Path(__file__).parents[2]/'tests/Bioreactor/fixtures/reconciliation/optimization_constraints'
 CONSTRAINT_CASES = ['relative', 'relaxed', 'untargeted', 'normalization', 'near_zero',
          'redundant', 'equivalent_units']
 CONSTRAINT_IDS = ['ua', 'ub', 'p', 'q', 'g']
@@ -869,7 +869,7 @@ def test_flux_variability_retains_analytical_intervals():
 
 # Operation qualification
 
-OPERATION_BASE = Path(__file__).parents[2]/'examples/bioreactors/generic_fed_batch/reconciliation/level5'
+OPERATION_BASE = Path(__file__).parents[2]/'tests/Bioreactor/fixtures/reconciliation/operating_transitions'
 OPERATION_CASES = sorted(p.name for p in (OPERATION_BASE/'inputs').iterdir() if p.is_dir())
 OPERATION_SCALES = np.array([1.,1.,1.,.1,1.,1.,1.,.0001])
 
@@ -1022,7 +1022,7 @@ def operation_run(case, config, thermo):
     assembly.mechanism.closure.solve = checked
     previous = signal.getsignal(signal.SIGALRM)
     def timeout(*args):
-        raise TimeoutError('Level 5 small-system run exceeded the 60-second campaign guard')
+        raise TimeoutError('Operating-transition small-system run exceeded the 60-second campaign guard')
     signal.signal(signal.SIGALRM,timeout)
     signal.alarm(60)
     start = time.perf_counter()
@@ -1040,8 +1040,9 @@ def operation_error(assembly,histories,expected):
 
 
 def operation_record_refinement(name, values):
-    if os.environ.get('LEVEL5_RECORD') == '1':
-        path = OPERATION_BASE/'outputs/refinement.json'
+    if os.environ.get('BIOREACTOR_VERIFICATION_OUTPUT'):
+        path = Path(os.environ['BIOREACTOR_VERIFICATION_OUTPUT'])/'refinement.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
         report = json.loads(path.read_text()) if path.exists() else {}
         report[name] = values
         path.write_text(json.dumps(report,indent=2)+'\n')
@@ -1066,8 +1067,8 @@ def test_operation_campaign(name,backend):
         tighter = operation_reference(case,config,histories,continuous=True,precision=.25)
         nominal = operation_reference(case,config,histories,continuous=True)
         assert max(np.max(abs(a-b)/OPERATION_SCALES) for a,b in zip(tighter,nominal)) < 2e-7
-    if os.environ.get('LEVEL5_RECORD')=='1':
-        folder = OPERATION_BASE/'outputs'/name/backend
+    if os.environ.get('BIOREACTOR_VERIFICATION_OUTPUT'):
+        folder = Path(os.environ['BIOREACTOR_VERIFICATION_OUTPUT'])/name/backend
         folder.mkdir(parents=True,exist_ok=True)
         times = np.concatenate([h.time/86400. for h in histories])
         header = ','.join(['time_day',*NETWORK_FIELDS])
@@ -1226,7 +1227,7 @@ def test_operation_continuation_does_not_replay_old_events():
 
 @pytest.mark.parametrize('backend',['fixed-step','scipy'])
 def test_operation_pathway_receives_native_continuous_supply(backend):
-    folder=OPERATION_BASE.parents[1]/'inputs'
+    folder=Path(__file__).parents[2]/'examples/bioreactors/generic_fed_batch/inputs'
     case=json.loads((folder/'case.json').read_text())
     config=json.loads((folder/'mechanism.json').read_text())
     case['operation']['runtime']={'value':.06,'unit':'h'}

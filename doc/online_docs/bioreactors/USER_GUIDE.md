@@ -6,7 +6,7 @@
 | --- | --- | --- |
 | `configured-kinetics` | You have explicit volumetric biological source equations or fitted source-rate models. | `mammalian_surrogate_fed_batch` |
 | `pathway-lp` | A reduced pathway map and objective determine feasible activity under uptake capacities. | `generic_batch` |
-| `rate-reconciled-culture` | Predicted/observed rate targets need reconciliation with a metabolic network. | `generic_fed_batch/reconciliation` |
+| `rate-reconciled-culture` | Predicted/observed rate targets need reconciliation with a metabolic network. | `tests/Bioreactor/fixtures/reconciliation/analytic_balances` |
 
 These are model choices, not organism restrictions. Supply a defensible model,
 units and parameters for your process; the simulator does not infer missing biology.

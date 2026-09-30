@@ -1,14 +1,8 @@
-# Level 5: operating transitions
-
-This manufactured benchmark checks the existing JSON → `build_bioreactor` → native
-fed-batch reactor workflow. It is numerical verification, not biological validation.
-All chemistry, targets, properties and operations are declared in the standard
-three JSON inputs. The forward-only notebook exports CSV/PNG/SVG trajectories.
-The independent test reference is not used by the simulation.
+# Operating transitions
 
 ## Acceptance criteria frozen before the campaign
 
-Use the two-branch network from Level 3: exchanges `[x+y,y,x,2y,0]`, with targets
+Use the two-branch network from Network structure: exchanges `[x+y,y,x,2y,0]`, with targets
 `[1.5,.5,1,1,0]`. Independently enumerate its two-dimensional quadratic-program
 active sets. Integrate piecewise constant inventory rates to analytically located
 depletions and scheduled jumps. Relative-policy cases add the declared scaled
@@ -42,11 +36,6 @@ operations; initial/final events; invalid operations; replay; equivalent units a
 renamed identifiers; native and working volume. Relative-policy starvation may
 correctly be infeasible when positive lower bounds prohibit the required zero rate.
 
-Run `python -m pytest tests/Bioreactor/test_bioreactor_qualification.py -q` from the repository.
-Use `workflow.ipynb` for forward simulation; change only the input/output folder
-selection to run another packaged configuration. Use `assembly.reset()` for a full
-recipe replay. `unit.reset()` alone does not own or reset an assembly's schedule.
-
 ## Packaged cases and results
 
 | Input folder | Purpose |
@@ -78,9 +67,3 @@ validation, or universal reliability for every possible configuration.
 
 
 ## Retained verification
-
-Historical campaign reports and intermediate output trees have been removed.
-The input triples, forward notebook and independent numerical checks remain.
-Run `python -m pytest tests/Bioreactor/test_bioreactor_qualification.py` from the
-repository root. The notebook regenerates forward trajectory outputs; the tests
-check the declared equations directly rather than relying on packaged reports.

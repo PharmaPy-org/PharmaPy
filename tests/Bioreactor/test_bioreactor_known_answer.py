@@ -8,7 +8,7 @@ import pytest
 
 from PharmaPy.Bioreactors import build_bioreactor
 
-EXAMPLE = Path(__file__).parents[2] / 'examples/bioreactors/generic_fed_batch/reconciliation'
+EXAMPLE = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/reconciliation/analytic_balances'
 
 
 def load(variant):

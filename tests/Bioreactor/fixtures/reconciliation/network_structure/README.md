@@ -1,16 +1,9 @@
-# Level 3: branching fed-batch reconciliation
+# Network structure
 
 This manufactured benchmark tests two independent conversion rates, competing
 nutrients, two products, growth coupling and nonunique internal pathways. All
 process information is in the same standard JSON structures used by the other
 examples. No local adapters, new schema or alternate execution path are used.
-
-Run all six cells of `workflow.ipynb`. Step 1 defaults to `inputs/switching` and
-`outputs/switching`; change both paths to select another case. The notebook only
-loads, builds, simulates, tabulates, plots and exports. Each output directory
-contains CSV/PNG/SVG trajectories plus an independently generated reference CSV
-and verification JSON. The latter records numerical settings, environment, input
-and closure hashes, errors, timing and applicable convergence/nonuniqueness evidence.
 
 ## Declared equations and cases
 
@@ -105,7 +98,7 @@ The original reconciliation SLSQP stopping tolerance (`ftol=1e-10`) allowed
 exchange errors up to about 7e-6 and scaled trajectory/permutation differences
 above 1e-6. Tightening the existing stopping tolerance to 1e-12 resolves these
 failures without changing the mathematical problem, constraints or interface.
-This is the only shared runtime change for Level 3. The inner tolerance is not
+This is the only shared runtime change for Network structure. The inner tolerance is not
 currently a JSON option; changing ODE tolerances cannot correct a static QP error.
 Acceptance criteria were not loosened. Broader regression results and any open
 failures are recorded in `PharmaPy/Bioreactors/TECHNICAL_SUMMARY.md#qualification-and-limits`.
@@ -121,9 +114,3 @@ python -m pytest tests/Bioreactor/test_bioreactor_qualification.py tests/Bioreac
 
 
 ## Retained verification
-
-Historical campaign reports and intermediate output trees have been removed.
-The input triples, forward notebook and independent numerical checks remain.
-Run `python -m pytest tests/Bioreactor/test_bioreactor_qualification.py` from the
-repository root. The notebook regenerates forward trajectory outputs; the tests
-check the declared equations directly rather than relying on packaged reports.

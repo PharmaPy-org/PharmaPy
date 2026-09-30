@@ -88,7 +88,8 @@ thermodynamic or dynamic gas-headspace models.
 checks for population dynamics, networks, constraints, operations and coupled-model
 references. `reconciliation_reference.py` supplies independent test mathematics,
 not production code. Known-answer and captured-failure regression modules provide
-additional coverage. Example input folders retain their historical level names.
+additional coverage. Synthetic reconciliation inputs are grouped by verification purpose under
+`tests/Bioreactor/fixtures/reconciliation`, separately from user examples.
 
 Qualification covers analytic balances/projections, growth/death/limitation,
 nonunique networks, nonlinear exposure/inventory feasibility, units, population

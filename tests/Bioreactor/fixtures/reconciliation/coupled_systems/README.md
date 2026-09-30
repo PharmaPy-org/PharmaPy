@@ -1,9 +1,7 @@
-# Level 6: coupled synthetic network regression inputs
+# Coupled systems
 
-Four standard input triples (`coupled04`, `coupled10`, `coupled20`, and
+Four input triples (`coupled04`, `coupled10`, `coupled20`, and
 `coupled20_scaled`) exercise progressively larger coupled reconciliation systems.
-The forward notebook uses the shared native builder. Edit its input/output paths
-to choose a configuration; executing it regenerates trajectory CSV/PNG/SVG outputs.
 
 The historical full campaign passed its numerical gates. Its large intermediate
 output trees, report generators and artifact-only acceptance tests were removed.

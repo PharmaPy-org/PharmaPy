@@ -6,7 +6,7 @@ physical-feasibility tests. Their original demonstration folders were retired;
 these fixtures do not assert successful biological reproduction.
 
 `reconciliation/closure_states.json` contains selected historical numerical
-failure states, copied without changing their values from the former Level 6
+failure states, copied without changing their values from the historical coupled-system
 reports and trajectories. The regression test independently resolves each
 problem, including original constraints and objective checks. Keeping these
 small snapshots avoids retaining hundreds of megabytes of campaign output.

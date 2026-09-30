@@ -1,26 +1,9 @@
-# Known-answer fed-batch rate reconciliation
-
-The next benchmark is [Level 2: growing and dying populations](level2/README.md),
-which preserves these Level 1 configurations and adds population–flux coupling.
-The [Level 3 branching benchmark](level3/README.md) adds competing nutrients,
-multiple products and nonunique internal pathways through the same workflow.
-[Level 4](level4/README.md) tests reconciliation policies;
-[Level 5](level5/README.md) tests depletion, replenishment and operating transitions.
+# Analytic balances
 
 This is a manufactured verification problem, not a biological dataset or a CHO
 reproduction. It checks the existing shared reconciliation, unit conversion,
 feeding, sampling and reactor balances against an independently derived answer.
 No runtime architecture changes or process-specific Python adapters are required.
-
-## Run
-
-Open `workflow.ipynb` and run its six cells. The default is `inputs/conflicting`;
-change `input_dir` and `EXPORT_DIR` to the matching `consistent` or `depletion`
-folders to select another configuration. Each input folder contains only the
-same schema-2 `case.json`, `mechanism.json` and native `thermo.json` used by the
-other examples. The notebook calls `build_bioreactor(...).solve()` and only
-produces forward CSV/PNG/SVG trajectories. Reference comparisons live in tests,
-not in the notebook.
 
 ## Exactly specified optimization
 
@@ -91,7 +74,7 @@ inventory constraint limits consumption to the available amount without clipping
 negative concentrations afterward.
 
 The fixed step is 0.01 day. This benchmark has exact grid-aligned event and
-depletion times, so its saved extensive balances can be checked against the
+depletion times, so its computed extensive balances can be checked against the
 continuous solution. The IVCD exposure integral uses the solver's first-order
 quadrature: its exact increment is `N/1000 * log(V_end/V_start)/F`, or
 `N*dt/(1000*V)` when F is zero. Tests separately check its error and reduction
@@ -99,8 +82,8 @@ under step refinement rather than treating that quadrature as exact.
 
 ## Evidence and limits
 
-Each `outputs/<configuration>` contains forward trajectories/figures, an
-independent `reference_trajectories.csv`, and `verification.json`. The reference
+The known-answer test computes an independent reference for each configuration.
+The reference
 uses closed-form balances, without the production rule evaluator, optimizer,
 unit converter or event handlers. Verification checks all event sides, finite
 nonnegative inventories, molecular-amount conservation, the projected rates,

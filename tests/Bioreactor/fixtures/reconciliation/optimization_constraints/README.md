@@ -1,10 +1,10 @@
-# Level 4: reconciliation policy validation setup
+# Optimization constraints
 
 ## Cases and execution
 
 Every input folder contains the same standard `case.json`, `mechanism.json` and
 `thermo.json` structure. The network, initial inventories and feed/sample schedule
-reuse Level 3's compatible two-branch model. All properties are synthetic and
+reuse Network structure's compatible two-branch model. All properties are synthetic and
 declared; no biological fitting is involved.
 
 | Folder | Change from the relative-regularized baseline | Validation target |
@@ -25,14 +25,6 @@ Run the validation checks:
 ```sh
 python -m pytest tests/Bioreactor/test_bioreactor_qualification.py -q --tb=short
 ```
-
-For forward simulation, run the six cells of `workflow.ipynb`; its default is
-`inputs/relative`. Change both input and output paths in Step 1 to select another
-case. It exports only forward CSV/PNG/SVG trajectories. The intentionally
-infeasible case raises an error. The notebook is executed for `relative`. All ten feasible input sets have forward
-CSV/PNG/SVG exports and independent reference CSVs. The intentionally infeasible
-case has an error report, not fabricated trajectories. Per-case `verification.json`
-records input/runtime hashes, environment, errors and wall time.
 
 ## Independent problem and frozen criteria
 
@@ -60,7 +52,7 @@ common mmol-based coordinates; objective agreement at absolute/relative 1e-8;
 network and bound residuals <1e-8 in those coordinates; the expected first
 feasible envelope must be selected. Forward tests for relative, relaxed and
 untargeted compare all eight states against independent fixed-step balances,
-with maximum scaled error <1e-6 using Level 3's scales and state ordering.
+with maximum scaled error <1e-6 using Network structure's scales and state ordering.
 
 The recovery test deliberately fails the primary optimizer. Recovery
 must return a solution matching the original independently specified problem or
@@ -115,9 +107,3 @@ is explicit in these fixtures. Mixed-dimensional policy scales require compatibl
 user declarations; no species-specific solver paths or coefficients were added.
 
 ## Retained verification
-
-Historical campaign reports and intermediate output trees have been removed.
-The input triples, forward notebook and independent numerical checks remain.
-Run `python -m pytest tests/Bioreactor/test_bioreactor_qualification.py` from the
-repository root. The notebook regenerates forward trajectory outputs; the tests
-check the declared equations directly rather than relying on packaged reports.
