@@ -142,6 +142,39 @@ def _is_pharmapy_import(node: ast.AST, imports: Mapping[str, str]) -> bool:
     return path is not None and (path == "PharmaPy" or path.startswith("PharmaPy."))
 
 
+def _reaches_module_cache(node: ast.AST, imports: Mapping[str, str]) -> bool:
+    """Identify an object looked up through the ``sys.modules`` cache.
+
+    Parameters
+    ----------
+    node : ast.AST
+        Expression for the object whose attribute or item is written, deleted,
+        or passed to ``setattr``/``delattr``.
+    imports : mapping of str to str
+        Local import bindings and their qualified paths.
+
+    Returns
+    -------
+    bool
+        Whether the attribute/subscript chain from ``node`` to its root
+        contains a ``sys.modules[...]`` lookup, including import aliases.
+
+    Notes
+    -----
+    Only the ``.value`` links are followed, so ``sys.modules[name].attr = x``
+    mutates a cached module while ``seen[sys.modules[name]] = x`` only uses
+    one as a key.
+    """
+    while isinstance(node, (ast.Attribute, ast.Subscript)):
+        if (
+            isinstance(node, ast.Subscript)
+            and _imported_path(node.value, imports) == "sys.modules"
+        ):
+            return True
+        node = node.value
+    return False
+
+
 def _mock_policy_violations(
     test_file: Path, display_path: Path | None = None
 ) -> list[str]:
@@ -239,6 +272,11 @@ def _mock_policy_violations(
                             import_state_path = path
                     if import_state_path in IMPORT_STATE_PATHS:
                         replacements.add(import_state_path)
+                    # Writing through a cached module mutates that module.
+                    if isinstance(
+                        candidate, (ast.Attribute, ast.Subscript)
+                    ) and _reaches_module_cache(candidate.value, imports):
+                        replacements.add("sys.modules")
                     if isinstance(candidate, ast.Attribute):
                         if _is_pharmapy_import(candidate.value, imports):
                             replacements.add("PharmaPy attribute")
@@ -281,6 +319,8 @@ def _mock_policy_violations(
                     violations.append(
                         f"{relative_path}:{node.lineno}: PharmaPy attribute replacement"
                     )
+                if _reaches_module_cache(node.args[0], imports):
+                    import_state_mutations.add("sys.modules")
                 environment_mutation |= (
                     _imported_path(node.args[0], imports) == "os"
                     and len(node.args) > 1
@@ -514,6 +554,27 @@ def test_policy_detects_environment_mutation(tmp_path: Path, source: str) -> Non
             "loaded.update(replacement)",
             "sys.modules",
         ),
+        (
+            "import sys\n"
+            "sys.modules['PharmaPy.Reactors'].solve = replacement",
+            "sys.modules",
+        ),
+        (
+            "from sys import modules as loaded\n"
+            "loaded['assimulo'].solvers.CVode = replacement",
+            "sys.modules",
+        ),
+        ("import sys\ndel sys.modules['assimulo'].CVode", "sys.modules"),
+        (
+            "import sys\n"
+            "setattr(sys.modules['PharmaPy.Reactors'], 'solve', replacement)",
+            "sys.modules",
+        ),
+        (
+            "import sys as runtime\n"
+            "delattr(runtime.modules['assimulo'].solvers, 'CVode')",
+            "sys.modules",
+        ),
         ("import sys\nsys.meta_path.insert(0, Blocker())", "sys.meta_path"),
         ("from sys import meta_path\nmeta_path[0] = replacement", "sys.meta_path"),
         ("import sys as runtime\ndel runtime.meta_path[:]", "sys.meta_path"),
@@ -612,6 +673,10 @@ def test_policy_detects_import_state_mutation(
         "import sys\nvalue = sys.modules.get('assimulo')",
         "from sys import modules\ncopy = modules.copy()\ncopy['assimulo'] = replacement",
         "from sys import modules\nmodules = {}",
+        "import sys\nsolver = sys.modules['assimulo'].CVode",
+        "import sys\nseen = {}\nseen[sys.modules['assimulo']] = True",
+        "import sys\nclass Local: pass\n"
+        "setattr(Local, 'module', sys.modules['assimulo'])",
         "import sys\nfinders = sys.meta_path.copy()\nfinders.insert(0, local)",
         "from sys import meta_path\nfirst = meta_path[0]",
         "from sys import meta_path\nmeta_path = []",
