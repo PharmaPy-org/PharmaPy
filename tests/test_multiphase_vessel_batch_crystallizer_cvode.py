@@ -3,7 +3,8 @@
 Fixture: the cooling crystallizer of ``tests/Flowsheet``, charged with the
 reactor product and cooled from 313.15 to 278.15 K over 2 h on 35 geometric
 size classes. Nucleation starts about 20 min in, which is where CVode used to
-stop.
+stop. An independent integrator, SciPy LSODA, is the reference, on this feed
+and on two with less product C.
 
 Units: temp [K], conc [mol/L], vol [m**3], time [s], x_grid [um],
 crystal count [#/m**3 of slurry], L4,3 [um].
@@ -16,7 +17,7 @@ import numpy as np
 import pytest
 
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
-from PharmaPy.IntegratorBackends import AssimuloBackend
+from PharmaPy.IntegratorBackends import AssimuloBackend, ScipyBackend
 from PharmaPy.Interpolation import PiecewiseLagrange
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Mechanisms import OneDFVMMechanism
@@ -47,6 +48,7 @@ DISSOLUTION = (1, 0, 1)  # k_d [um/s], E [J/mol], order [-]
 
 # R01's product after 1 h at 313.15 K in the case study: A, B, C, D, solvent.
 FEED_CONC = np.array([0.00231, 0.1036, 0.1250, 0.1013, 0.0])  # [mol/L]
+PRODUCT_INDEX = 2  # C in FEED_CONC
 FEED_TEMP = 313.15  # [K]
 FEED_VOL = 0.06  # [m**3]
 CRYSTAL_MASS_FRAC = [0.0, 0.0, 1.0, 0.0, 0.0]  # [-], pure C
@@ -68,15 +70,29 @@ NUCLEATED_COUNT_FLOOR = 1e9  # [#/m**3]
 # both in each state's own units.
 CVODE_DEFAULT_ATOL = 1e-6
 EXPLICIT_ATOL = 1e-8
+# The reference runs a hundred times tighter than CVode's default.
+REFERENCE_RTOL = 1e-8  # [-]
+# Product C concentrations the agreement test runs besides the case-study
+# feed, other species unchanged, so at lower supersaturation. A design
+# choice: on these two, at the MAX_STEP cap, CVode with the Krylov linear
+# solver overcounted the crystals by 50 and 61 %, while on the case-study
+# feed it happened to agree.
+LEANER_PRODUCT_CONC = (0.095, 0.115)  # [mol/L]
+# Dense CVode and LSODA agree to about 1e-5 on all three feeds. 1e-3 leaves
+# headroom across platforms and stays far below the Krylov errors.
+AGREEMENT_RTOL = 1e-3  # [-]
 
 
-def _build(integrator):
+def _build(integrator, feed_conc=FEED_CONC):
     """Set up the case-study crystallizer, ready to solve.
 
     Parameters
     ----------
     integrator : IntegratorBackend
         Fresh backend for this vessel.
+    feed_conc : numpy.ndarray, optional
+        Feed concentrations of A, B, C, D and solvent [mol/L], shape
+        ``(5,)``. Defaults to ``FEED_CONC``.
 
     Returns
     -------
@@ -101,7 +117,8 @@ def _build(integrator):
         controller=SimpleTemperatureController(temp_func=cooling),
     )
     crystallizer.Phases = [
-        LiquidPhase(DATA_PATH, temp=FEED_TEMP, mole_conc=FEED_CONC.copy(),
+        LiquidPhase(DATA_PATH, temp=FEED_TEMP,
+                    mole_conc=np.array(feed_conc, dtype=float),
                     vol=FEED_VOL, name_solv="solvent"),
         solid,
     ]
@@ -115,20 +132,23 @@ def _build(integrator):
     return crystallizer, mechanism
 
 
-def _solve(integrator):
+def _solve(integrator, feed_conc=FEED_CONC):
     """Solve the case-study crystallizer and summarise its final crystals.
 
     Parameters
     ----------
     integrator : IntegratorBackend
         Fresh backend for this vessel.
+    feed_conc : numpy.ndarray, optional
+        Feed concentrations of A, B, C, D and solvent [mol/L], shape
+        ``(5,)``. Defaults to ``FEED_CONC``.
 
     Returns
     -------
     numpy.ndarray
         Crystal count [#/m**3 of slurry] and L4,3 [um], shape ``(2,)``.
     """
-    crystallizer, mechanism = _build(integrator)
+    crystallizer, mechanism = _build(integrator, feed_conc)
     time, _ = crystallizer.solve_unit(runtime=RUNTIME, verbose=False)
     assert time[-1] == pytest.approx(RUNTIME)
 
@@ -181,3 +201,18 @@ def test_cvode_takes_the_declared_tolerances_unless_atol_is_set():
 
     np.testing.assert_array_equal(solver.atol, EXPLICIT_ATOL)
 
+
+@pytest.mark.parametrize(
+    "product_conc", (FEED_CONC[PRODUCT_INDEX],) + LEANER_PRODUCT_CONC
+)
+def test_cvode_matches_an_independent_integrator(product_conc):
+    """Crystal count and L4,3 agree with LSODA on the same model."""
+    feed_conc = FEED_CONC.copy()  # [mol/L]
+    feed_conc[PRODUCT_INDEX] = product_conc
+    cvode = _solve(AssimuloBackend(options={"maxh": MAX_STEP}), feed_conc)
+    reference = _solve(ScipyBackend(
+        method="LSODA", options={"maxh": MAX_STEP, "rtol": REFERENCE_RTOL}
+    ), feed_conc)
+
+    assert reference[0] > NUCLEATED_COUNT_FLOOR
+    np.testing.assert_allclose(cvode, reference, rtol=AGREEMENT_RTOL)

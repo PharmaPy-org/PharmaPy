@@ -85,12 +85,25 @@ class IntegratorBackend(ABC):
         """
         Ask for a class of linear solver by neutral name.
 
-        Unit operations know the shape of their own Jacobian ("krylov" for a
-        large sparse discretized system, "dense" for a handful of states) but
-        should not know which integrator they were handed. Each backend
-        translates the request into its own vocabulary, and a backend with no
-        such choice keeps its default: this is a performance hint, not a
-        correctness requirement.
+        Unit operations know the shape of their own Jacobian but should not
+        know which integrator they were handed. Each backend translates the
+        request into its own vocabulary, and a backend with no such choice
+        keeps its default.
+
+        Parameters
+        ----------
+        kind : str
+            ``"dense"``, ``"krylov"`` or ``"sparse"``. A name the backend
+            does not map is recorded and otherwise ignored.
+
+        Notes
+        -----
+        The choice can change the answer, not only the cost. When a long
+        step crosses a sharp onset, such as nucleation in a crystallizer,
+        CVode's unpreconditioned Krylov solver settles on a wrong trajectory
+        far more often than the dense solver, which is why crystallizers ask
+        for ``"dense"``. On the case-study crystallizer a 10 s step cap
+        removed the error for both.
         """
 
         self.linear_solver = kind
@@ -1233,10 +1246,10 @@ class ScipyBackend(IntegratorBackend):
       AssimuloDAEBackend or DiffeqpyBackend.
     - **Sensitivities.** Parameter estimation still needs AssimuloBackend.
     - **A Krylov linear solver.** scipy's implicit methods always do a direct
-      linear solve, so a crystallizer's ``set_linear_solver("krylov")`` is
-      recorded and not acted on. On a large discretized phase that dense
-      finite-difference Jacobian is the main cost against CVode with SPGMR;
-      passing ``jac_sparsity`` through ``options`` is how to recover it.
+      linear solve, so ``set_linear_solver("krylov")`` is recorded and not
+      acted on. On a large discretized phase that dense finite-difference
+      Jacobian is the main cost; passing ``jac_sparsity`` through
+      ``options`` is how to recover it.
 
     Events
     ------

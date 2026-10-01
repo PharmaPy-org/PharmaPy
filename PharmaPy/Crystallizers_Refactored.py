@@ -120,11 +120,26 @@ class _BaseCrystallizer(MultiPhaseVessel):
         "Place holder in case future children need special behavior"
         pass
     def configure_solver(self):
-        # The distribution block makes the system large and sparse, so an
-        # iterative linear solve beats forming the dense Jacobian. Asking the
-        # backend rather than poking at its solver keeps this working for any
-        # backend; one that has no such choice ignores the request.
-        self.integrator.set_linear_solver("krylov")
+        """Ask the integrator for a dense direct linear solver.
+
+        Notes
+        -----
+        Before nucleation the state does not change, so CVode lengthens its
+        step and can cross nucleation onset in one long step. With the 60 s
+        step cap of the flowsheet tests, the unpreconditioned Krylov (SPGMR)
+        solver requested before then missed the final crystal count by more
+        than 2 % on 12 of 33 case-study feeds (0.04 to 0.20 mol/L of C), by
+        up to 106 %, and a 100 times tighter relative tolerance did not help.
+        The dense solve missed 2 of the 33, by at most 5 %. With a 10 s cap
+        both agreed with SciPy LSODA on every feed, so the step is the root
+        cause and dense is the more forgiving choice, not a cure. Each dense
+        Jacobian costs one right-hand side evaluation per state, which is
+        affordable at the grids used here: 800 size classes solve in about
+        16 s. Asking the backend rather than its solver keeps this
+        independent of the integrator; one with no such choice ignores the
+        request.
+        """
+        self.integrator.set_linear_solver("dense")
     def _post_set_phases(self):
         super()._post_set_phases()
         

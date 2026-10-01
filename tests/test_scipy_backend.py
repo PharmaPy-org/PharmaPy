@@ -217,7 +217,7 @@ def test_default_options_are_not_shared_between_instances():
 
 
 def test_krylov_request_does_not_raise():
-    """Crystallizers_Refactored asks for it on every solve."""
+    """A caller may still ask for it; scipy has no linear solver to pick."""
 
     backend = ScipyBackend()
     backend.set_linear_solver("krylov")
