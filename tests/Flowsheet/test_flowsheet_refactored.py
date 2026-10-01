@@ -28,6 +28,7 @@ import traceback
 
 import numpy as np
 import pytest
+from scipy.integrate import trapezoid
 
 HAS_ASSIMULO = importlib.util.find_spec("assimulo") is not None
 pytestmark = [
@@ -107,28 +108,13 @@ RXNS = ['A + B --> C', 'C + A --> D']
 K_VALS = np.array([2.654e4, 5.3e2])
 EA_VALS = np.array([4.0e4, 3.0e4])
 
-# The old units and the refactored ones now want nucleation in DIFFERENT
-# units, so they no longer share one constant.
-#
-# Old PharmaPy's BatchCryst multiplies nucleation by the slurry volume inside
-# fvm_method (it passes vol=vol_slurry), so its prefactors are per unit of
-# whatever basis that implies. The refactored mechanisms take nucleation as
-# #/(s m3 slurry) and never multiply, so their prefactor absorbs that factor
-# once: kP_intensive = kP_old * vol_slurry.
-#
-# This is the unit conversion implied by the basis change, NOT a refit. With
-# the unconverted values the refactored chemistry is about 1/VOL_INIT = 17x
-# hotter and no longer integrates at all (CVode corrector failures near
-# t = 1270 s). A genuine refit against experimental data is still outstanding.
+# One set of nucleation constants, #/(s m3 slurry), for both stacks. The
+# legacy batch unit multiplies the rate by the slurry volume because it counts
+# crystals in the whole vessel; the refactored mechanism counts them per m3 of
+# slurry. That is a difference of state basis, not of kinetics. Scaling the
+# refactored prefactors by the vessel volume instead slowed nucleation 17-fold.
 PRIM = (3e8, 0, 3)
 SEC = (4.46e10, 0, 2, 1e-5)
-
-# Literal rather than VOL_INIT, which is defined further down; they are the
-# same nominal vessel volume and the assert below keeps them that way.
-_NUCL_BASIS_VOL = 0.06
-
-PRIM_INTENSIVE = (PRIM[0] * _NUCL_BASIS_VOL, PRIM[1], PRIM[2])
-SEC_INTENSIVE = (SEC[0] * _NUCL_BASIS_VOL, SEC[1], SEC[2], SEC[3])
 GROWTH = (5, 0, 1.32)
 DISSOL = (1, 0, 1)
 SOLUB = np.array([2.269e2, -1.88e0, 3.89e-3])
@@ -139,8 +125,6 @@ MASSFRAC_SOLID = [0, 0, 1, 0, 0]
 TEMP_INIT = 313.15
 CONC_INIT = np.array([0.33, 0.33, 0, 0, 0])
 VOL_INIT = 0.06
-assert VOL_INIT == _NUCL_BASIS_VOL, (
-    'the nucleation basis conversion above assumes the nominal vessel volume')
 
 FEED_VOLFLOW = 1e-5      # m3/s
 
@@ -169,16 +153,9 @@ def rxn_kinetics():
                        ea_params=EA_VALS)
 
 
-def old_cryst_kinetics():
-    """For the pre-refactor crystallizers, which scale nucleation themselves."""
-    return CrystKinetics(SOLUB, nucl_prim=PRIM, nucl_sec=SEC, growth=GROWTH,
-                         dissolution=DISSOL)
-
-
 def cryst_kinetics():
-    """For the refactored mechanisms: nucleation in #/(s m3 slurry)."""
-    return CrystKinetics(SOLUB, nucl_prim=PRIM_INTENSIVE,
-                         nucl_sec=SEC_INTENSIVE, growth=GROWTH,
+    """Case-study crystallization kinetics, for both stacks."""
+    return CrystKinetics(SOLUB, nucl_prim=PRIM, nucl_sec=SEC, growth=GROWTH,
                          dissolution=DISSOL)
 
 
@@ -249,7 +226,7 @@ def test_stage1_all_old():
                            mass_frac=MASSFRAC_SOLID)
     flst.CR01 = OldBatchCryst(target_comp='C', method='1D-FVM', scale=1e-9,
                               controls={'temp': cooling_profile()})
-    flst.CR01.Kinetics = old_cryst_kinetics()
+    flst.CR01.Kinetics = cryst_kinetics()
     flst.CR01.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
     flst.CR01.Phases = solid_cry
 
@@ -1006,6 +983,102 @@ def test_stage10_standalone_all_modes():
     return '; '.join(notes)
 
 
+# =====================================================================
+# Stage 11 -- the refactored crystallizer against the legacy one, on the
+# same feed, cooling program, kinetics and size grid.
+# =====================================================================
+# R01's product after TIME_R01 at TEMP_INIT: A, B, C, D, solvent.
+CRYST_FEED = np.array([0.00231, 0.1036, 0.1250, 0.1013, 0.0])  # [mol/L]
+
+# The two discretise one population balance on one grid, but integrate the
+# moments by different rules (trapezoid vs rectangle) and inject nuclei at
+# 0 vs 1 um. On this fixture that moves the crystallized mass by 0.15 %,
+# the crystal count by 0.74 % and L4,3 by 0.11 %; each bound is about three
+# times that or more. The legacy unit solves with CVode's Krylov linear
+# solver, which on this feed agrees with a dense solve to about 1e-5 but
+# overcounts the crystals by about 60 % on some leaner feeds, so check the
+# legacy solve first before changing CRYST_FEED.
+LEGACY_MASS_RTOL = 5e-3     # [-]
+LEGACY_COUNT_RTOL = 2e-2    # [-]
+LEGACY_SIZE_RTOL = 5e-3     # [-]
+
+
+def _legacy_crystallizer_summary():
+    """Crystallized mass [kg], crystal count [#/m3 slurry], L4,3 [um]."""
+    unit = OldBatchCryst(target_comp='C', method='1D-FVM', scale=1e-9,
+                         controls={'temp': cooling_profile()})
+    unit.Kinetics = cryst_kinetics()
+    unit.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
+    unit.Phases = (
+        LiquidPhase(PATH, temp=TEMP_INIT, mole_conc=CRYST_FEED.copy(),
+                    vol=VOL_INIT, name_solv='solvent'),
+        SolidPhase(PATH, x_distrib=X_GR, distrib=np.zeros_like(X_GR),
+                   mass_frac=MASSFRAC_SOLID))
+    unit.solve_unit(runtime=TIME_CR01, sundials_opts={'maxh': 60},
+                    verbose=False)
+
+    result = unit.result
+    conc = np.asarray(result.mass_conc)[:, 2]         # [kg/m3] of C
+    vol = np.asarray(result.vol)                      # [m3] liquid
+    count = np.asarray(result.distrib)[-1]            # [#/um] in the vessel
+    sizes = np.asarray(result.x_cryst)                # [um]
+    vol_slurry = vol[-1] + unit.Solid_1.kv * np.asarray(result.mu_n)[-1, 3]
+
+    return np.array([
+        conc[0] * vol[0] - conc[-1] * vol[-1],
+        trapezoid(count, sizes) / vol_slurry,
+        trapezoid(count * sizes**4, sizes) / trapezoid(count * sizes**3, sizes),
+    ])
+
+
+def _refactored_crystallizer_summary():
+    """Crystallized mass [kg], crystal count [#/m3 slurry], L4,3 [um]."""
+    solid = _cryst_solid()
+    unit = NewBatchCryst(
+        integrator=make_integrator(),
+        h_conv=H_CONV, diam=VESSEL_DIAM,
+        controller=SimpleTemperatureController(temp_func=cooling_profile()))
+    unit.Phases = [NewLiquidPhase(PATH, temp=TEMP_INIT,
+                                  mole_conc=CRYST_FEED.copy(), vol=VOL_INIT,
+                                  name_solv='solvent'),
+                   solid]
+    unit.CrystKinetics = cryst_kinetics()
+    unit.Utility = CoolingWater(mass_flow=1, temp_in=283.15)
+    unit.solve_unit(runtime=TIME_CR01, verbose=False)
+
+    mech = solid.mechanisms
+    mech = mech[0] if isinstance(mech, (list, tuple)) else mech
+    mass_c = np.asarray(unit.result.mass_j_liquid0)[:, 2]           # [kg]
+    density = np.asarray(unit.result.distrib_solid0)[-1]  # [#/(um m3)]
+
+    return np.array([
+        mass_c[0] - mass_c[-1],
+        mech.integrate_over_size(density),
+        mech.integrate_over_size(density * X_GR**4)
+        / mech.integrate_over_size(density * X_GR**3),
+    ])
+
+
+def test_stage11_refactored_crystallizer_matches_legacy():
+    """Crystallized mass, crystal count and L4,3 agree with the legacy unit."""
+    legacy = _legacy_crystallizer_summary()
+    refactored = _refactored_crystallizer_summary()
+    gap = np.abs(refactored / legacy - 1)
+
+    for value, rtol, name in zip(gap, (LEGACY_MASS_RTOL, LEGACY_COUNT_RTOL,
+                                       LEGACY_SIZE_RTOL),
+                                 ('crystallized mass', 'crystal count',
+                                  'L4,3')):
+        if value > rtol:
+            raise AssertionError(
+                '%s differs from the legacy crystallizer by %.3f %% '
+                '(bound %.1f %%): refactored %s, legacy %s'
+                % (name, 100 * value, 100 * rtol, refactored, legacy))
+
+    return ('mass %.2e, count %.2e, L4,3 %.2e relative to legacy'
+            % tuple(gap))
+
+
 STAGES = (
     ('0  old Filter alone                                 ', test_stage0_filter_alone),
     ('1  all-old   R01 -> CR01 -> F01                     ', test_stage1_all_old),
@@ -1018,6 +1091,7 @@ STAGES = (
     ('8  continuous -> semibatch, all pairings            ', test_stage8_continuous_to_semibatch_matrix),
     ('9  1D-FVM vs moments, compared on mass              ', test_stage9_fvm_versus_moments),
     ('10 each unit class solved standalone                ', test_stage10_standalone_all_modes),
+    ('11 refactored crystallizer vs legacy                ', test_stage11_refactored_crystallizer_matches_legacy),
 )
 
 
