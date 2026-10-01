@@ -116,6 +116,11 @@ class StateVariable:
     # If limit_negative_inventory==True, the vessel's generic material limiter checks this
     # state for negative inventory. States with their own internal
     # positivity/conservation handling may set this to False.
+    abs_tol: float | Sequence[float] | None = None
+    # Absolute integration tolerance in this state's own units: a scalar, or
+    # one value per element. None leaves the integrator's default. A state
+    # whose values sit many orders of magnitude from the others needs its
+    # own, or the solver resolves it to a meaningless absolute precision.
 
     compute_value: Callable[
         [

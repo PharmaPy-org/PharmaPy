@@ -1066,6 +1066,17 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
 class OneDFVMMechanism(PopulationBalanceMechanism):
 
+    # Absolute integration tolerance on the number density [#/(um m3 slurry)].
+    # A numerical design choice, checked on the case-study crystallizer
+    # (35 geometric cells over 1-1500 um, CVode with a dense linear solver):
+    # crystal count and L4,3 agree to five significant figures for values from
+    # 1e2 to 1e4 at rtol 1e-6 and 1e-8, and with SciPy LSODA, while 1e6 moves
+    # the count by 0.04 % and 1e8 by 0.7 %. Over that whole grid it admits at
+    # most 1.5e7 crystals per m3, against the 5e10 the batch makes. The
+    # solver default of 1e-6 made CVode fail at nucleation onset. Lower it for
+    # populations far more dilute than this.
+    DEFAULT_ABS_TOL = 1e4
+
     def __init__(
         self,
         owning_phase:BasePhase,
@@ -1079,9 +1090,47 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         distribution_state_name="distrib",
         scale=None,
         rad=None,
+        abs_tol=None,
     ):
-        """
-        Assumes an x_grid of constant dx
+        """Finite-volume population balance on a fixed size grid.
+
+        Parameters
+        ----------
+        owning_phase : BasePhase
+            Solid phase whose crystals the distribution describes.
+        target_components : str or list of str
+            Species that crystallize.
+        solvent_name : str
+            Name of the solvent species.
+        x_grid : array-like
+            Size grid [um], shape ``(num_grid,)``, strictly increasing.
+            Uniform and geometric grids are both supported.
+        distrib_init : numpy.ndarray
+            Initial number density [#/(um m3 slurry)], shape ``(num_grid,)``.
+        kinetics : CrystKinetics, optional
+            Crystallization kinetics, usually set later through the vessel's
+            ``CrystKinetics`` property.
+        density : float, optional
+            Crystal density [kg/m3]. None uses the owning phase's density.
+        kv : float, optional
+            Volume shape factor [-]. Defaults to 1.
+        distribution_state_name : str, optional
+            Name of the distribution state. Defaults to ``'distrib'``.
+        scale : float, optional
+            Deprecated and ignored; see ``_reject_scale``.
+        rad : float, optional
+            Nucleus size [um]. Defaults to the first grid node, where the
+            boundary condition injects nuclei.
+        abs_tol : float or array-like, optional
+            Absolute integration tolerance on the number density
+            [#/(um m3 slurry)], a scalar or one value per size class.
+            Defaults to ``DEFAULT_ABS_TOL``.
+
+        Raises
+        ------
+        ValueError
+            If the grid has fewer than two nodes or is not strictly
+            increasing.
         """
         super().__init__(
             owning_phase=owning_phase,
@@ -1127,7 +1176,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
                 dim=len(self.x_grid),
                 units="#/(micron m3 slurry)",
                 state_type="diff",
-                limit_negative_inventory=False
+                limit_negative_inventory=False,
+                abs_tol=self.DEFAULT_ABS_TOL if abs_tol is None else abs_tol,
             ),
         )
 
@@ -1543,6 +1593,17 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
     mass basis, so the mass-basis path here is unproven.
     """
 
+    # Absolute integration tolerances on the moments [um**k/m3 slurry] are the
+    # moments N * L**k of N crystals per m3 of slurry, all of size L.
+    # N is OneDFVMMechanism.DEFAULT_ABS_TOL integrated over one 1 um size
+    # class, and L sits inside the 1-1500 um range the flowsheet tests
+    # resolve. A numerical design choice, checked with CVode and a dense
+    # linear solver on a cooled case-study batch and an isothermal 278 K one:
+    # crystal count within 0.1 % and 1e-5 of SciPy LSODA respectively, and
+    # within 0.1 % for tolerances 100 times tighter or looser.
+    DEFAULT_ABS_TOL_NUMBER = 1e4  # [#/m3 slurry]
+    DEFAULT_ABS_TOL_SIZE = 100.0  # [um]
+
     def __init__(
         self,
         owning_phase,
@@ -1555,7 +1616,39 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         rad=0.0,
         scale=None,
         moments_state_name='mu_n',
+        abs_tol=None,
     ):
+        """Population balance carried as its leading moments.
+
+        Parameters
+        ----------
+        owning_phase : BasePhase
+            Solid phase whose crystals the moments describe.
+        target_components : str or list of str
+            Species that crystallize.
+        solvent_name : str
+            Name of the solvent species.
+        moments_init : array-like
+            Initial moments mu_0..mu_{n-1} [um**k/m3 slurry], shape
+            ``(num_mom,)``.
+        kinetics : CrystKinetics, optional
+            Crystallization kinetics, usually set later through the vessel's
+            ``CrystKinetics`` property.
+        density : float, optional
+            Crystal density [kg/m3]. None uses the owning phase's density.
+        kv : float, optional
+            Volume shape factor [-]. Defaults to 1.
+        rad : float, optional
+            Nucleus size [um]. Defaults to 0.
+        scale : float, optional
+            Deprecated and ignored; see ``_reject_scale``.
+        moments_state_name : str, optional
+            Name of the moments state. Defaults to ``'mu_n'``.
+        abs_tol : float or array-like, optional
+            Absolute integration tolerance per moment [um**k/m3 slurry].
+            Defaults to ``DEFAULT_ABS_TOL_NUMBER *
+            DEFAULT_ABS_TOL_SIZE**k``.
+        """
         super().__init__(
             owning_phase=owning_phase,
             target_components=target_components,
@@ -1586,6 +1679,10 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         self.output_states = [state for state in self.output_states
                               if state.name != moments_state_name]
 
+        if abs_tol is None:
+            abs_tol = (self.DEFAULT_ABS_TOL_NUMBER
+                       * self.DEFAULT_ABS_TOL_SIZE ** np.arange(self.num_mom))  # [um**k/m3]
+
         self.solver_states = (
             StateVariable(
                 name=moments_state_name,
@@ -1594,6 +1691,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
                 units='micron**n',
                 state_type='diff',
                 limit_negative_inventory=False,
+                abs_tol=abs_tol,
             ),
         )
 

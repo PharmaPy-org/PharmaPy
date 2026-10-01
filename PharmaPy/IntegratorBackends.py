@@ -95,6 +95,28 @@ class IntegratorBackend(ABC):
 
         self.linear_solver = kind
 
+    @staticmethod
+    def declared_absolute_tolerances(unit, default):
+        """Per-state absolute tolerances the unit declares, or None.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Compiled unit. A unit without ``solver_absolute_tolerances``
+            declares none.
+        default : float or array-like
+            Tolerance the backend would otherwise apply, in each state's
+            units.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            One tolerance per solver state, or None when the unit declares
+            none and the backend should keep its own setting.
+        """
+        declare = getattr(unit, 'solver_absolute_tolerances', None)
+        return None if declare is None else declare(default)
+
     @abstractmethod
     def compile_integrator(
         self,
@@ -212,6 +234,14 @@ class AssimuloBackend(IntegratorBackend):
 
                 if name == "time_limit":
                     solver.report_continuously = True
+
+        # States that declare their own absolute tolerance get it, unless the
+        # caller set atol, which then applies to every state as passed.
+        if 'atol' not in (options or {}) and 'atol' not in (self.options or {}):
+            atol = self.declared_absolute_tolerances(unit, solver.atol)
+
+            if atol is not None:
+                solver.atol = atol
 
         if eval_sens:
 
@@ -1376,6 +1406,34 @@ class ScipyBackend(IntegratorBackend):
 
         return translated
 
+    def solve_ivp_options(self, unit):
+        """Keyword arguments for solve_ivp on this unit.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Compiled unit whose solver states may declare absolute
+            tolerances.
+
+        Returns
+        -------
+        dict
+            ``translate_options()``, with ``atol`` replaced by the unit's
+            per-state tolerances [state units], shape
+            ``(num_solver_states,)``, when it declares any and the caller did
+            not set ``atol``, which then applies to every state as passed.
+            The same rule as AssimuloBackend.
+        """
+        kwargs = self.translate_options()
+
+        if 'atol' not in self.options:
+            atol = self.declared_absolute_tolerances(unit, kwargs['atol'])
+
+            if atol is not None:
+                kwargs['atol'] = atol
+
+        return kwargs
+
     def make_rhs(self, unit):
         """
         Wrap the unit's model as a solve_ivp right-hand side.
@@ -1674,7 +1732,7 @@ class ScipyBackend(IntegratorBackend):
             # caller a scipy error about an argument they did not pass.
             grid = grid[(grid >= start_time) & (grid <= final_time)]
 
-        kwargs = self.translate_options()
+        kwargs = self.solve_ivp_options(unit)
 
         min_segment = self.min_segment
 

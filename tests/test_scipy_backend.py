@@ -48,6 +48,9 @@ UTILITY_TEMP_IN = 273.55  # [K]
 HEAT_TRANSFER_COEFF = 1e4  # [W/m**2/K]
 VESSEL_DIAMETER = 0.01  # [m]
 
+# CVode's default absolute tolerance, which ScipyBackend adopts [state units].
+DEFAULT_ATOL = 1e-6
+
 RUNTIME = 10.0  # [s]
 GRID = np.linspace(0.0, RUNTIME, 21)
 
@@ -391,3 +394,13 @@ def test_statistics_report_only_counters_scipy_tracks():
     # Counters CVode prints and scipy does not track are absent, not zero.
     for absent in ("nsteps", "nerrfails", "nniters", "nnfails"):
         assert absent not in statistics
+
+
+def test_a_unit_that_declares_no_tolerance_keeps_the_scalar_default():
+    """Only states declaring abs_tol change it, and a reactor declares none."""
+
+    reactor = build_reactor(ScipyBackend())
+    reactor.compile_structure()
+
+    assert reactor.solver_absolute_tolerances(DEFAULT_ATOL) is None
+    assert ScipyBackend().solve_ivp_options(reactor)["atol"] == DEFAULT_ATOL

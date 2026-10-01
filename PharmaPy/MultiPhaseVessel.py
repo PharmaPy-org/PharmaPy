@@ -1690,6 +1690,49 @@ class MultiPhaseVessel():
         return self.solver_state_collection.pack(
             self.complete_state({},0))
 
+    def solver_absolute_tolerances(self, default):
+        """Absolute integration tolerances, one per solver state, in solver order.
+
+        Parameters
+        ----------
+        default : float or array-like
+            Tolerance the backend would otherwise apply, in each state's own
+            units. A scalar applies to every state; an array must already
+            have one entry per solver state.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Shape ``(num_solver_states,)``: a state's declared
+            ``StateVariable.abs_tol`` where it has one and ``default``
+            elsewhere. None when no state declares one, so the backend keeps
+            its own setting untouched.
+
+        Notes
+        -----
+        One absolute tolerance cannot suit states that differ by ten orders of
+        magnitude, such as a crystal number density of 1e10 #/(um m3) next to
+        species masses of 1 kg. With the solver default of 1e-6 on the
+        density, an empty size class must be resolved to a millionth of a
+        crystal per micron and cubic metre, and CVode fails as soon as
+        nucleation starts.
+        """
+        collection = self.solver_state_collection
+        declared = [(collection.slices[key], collection.states[key].abs_tol)
+                    for key in collection.keys
+                    if collection.states[key].abs_tol is not None]
+
+        if not declared:
+            return None
+
+        atol = np.array(np.broadcast_to(np.asarray(default, dtype=float),
+                                        (collection.dim,)))
+
+        for state_slice, abs_tol in declared:
+            atol[state_slice] = abs_tol
+
+        return atol
+
     def solve_unit(
         self,
         runtime=None,

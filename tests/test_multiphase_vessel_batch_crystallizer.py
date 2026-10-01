@@ -1,6 +1,8 @@
 """Driving-force and population-balance contracts for the batch crystallizer.
 
-Tests evaluate ``unit_model`` at t = 0, so they need no integrator.
+Tests evaluate ``unit_model`` at t = 0, so they need no integrator, except
+the tolerance handoff test, which stops a SciPy solve at its first
+``solve_ivp`` call.
 
 Units: charge mass [kg], temp [K], x_grid [um], distrib [#/(um m**3)],
 conc and solubility [kg/m**3 of PURE SOLVENT], supersat [-] relative,
@@ -18,6 +20,7 @@ import pytest
 
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.DataClasses import PhaseRef
+from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Mechanisms import MomentsPopulationBalance, OneDFVMMechanism
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
@@ -66,6 +69,12 @@ LIMITER_HORIZON = 1.0  # [s], the step the vessel inventory limiter assumes
 ALGEBRAIC_RTOL = 1e-12  # [-]
 # Literals transcribed from a run of this fixture are quoted to eight digits.
 REFERENCE_RTOL = 1e-6  # [-]
+# CVode's default absolute tolerance, which ScipyBackend adopts, and an
+# explicit one distinct from it. Both in each state's own units.
+SOLVER_DEFAULT_ATOL = 1e-6
+EXPLICIT_ATOL = 1e-8
+# Never integrated: the handoff test stops at the first solve_ivp call.
+HANDOFF_RUNTIME = 1.0  # [s]
 # Anti-vacuity floors. Any real crystallization exceeds these by decades.
 ACTIVE_MASS_RATE_FLOOR = 1e-6  # [kg/s]
 ACTIVE_NUCLEATION_FLOOR = 1.0  # [#/(um m**3 s)]
@@ -653,6 +662,79 @@ def test_legacy_conversion_refuses_crystals_without_a_slurry_volume():
 
     with pytest.raises(ValueError, match="slurry volume is unknown"):
         solid.to_legacy()
+
+
+def test_population_state_declares_its_own_absolute_tolerance():
+    """Species masses keep the integrator default; the density gets its own.
+
+    One absolute tolerance cannot serve masses of order 1 kg and number
+    densities of order 1e10 #/(um m**3) at once.
+    """
+    vessel = _build_crystallizer(WARM_TEMP)
+    collection = vessel.solver_state_collection
+    species_key = next(k for k in collection.states if k.name == "mass_j")
+    distrib_key = next(k for k in collection.states if k.name == "distrib")
+
+    atol = vessel.solver_absolute_tolerances(SOLVER_DEFAULT_ATOL)
+
+    assert atol.shape == (collection.dim,)
+    np.testing.assert_array_equal(
+        atol[collection.slices[species_key]], SOLVER_DEFAULT_ATOL
+    )
+    np.testing.assert_array_equal(
+        atol[collection.slices[distrib_key]], OneDFVMMechanism.DEFAULT_ABS_TOL
+    )
+
+
+class _SolveIvpReached(Exception):
+    """Raised by the solve_ivp stand-in once it has seen its arguments."""
+
+
+def _atol_handed_to_solve_ivp(monkeypatch, backend):
+    """Start a SciPy solve of the warm crystallizer and capture its atol.
+
+    Parameters
+    ----------
+    monkeypatch : pytest.MonkeyPatch
+        Replaces ``solve_ivp`` for the calling test only.
+    backend : ScipyBackend
+        Backend to solve with.
+
+    Returns
+    -------
+    tuple
+        The vessel, and the ``atol`` the backend passed to ``solve_ivp``,
+        in each state's own units.
+    """
+    received = {}
+
+    def record_and_stop(*args, **kwargs):
+        received.update(kwargs)
+        raise _SolveIvpReached
+
+    monkeypatch.setattr("PharmaPy.IntegratorBackends.solve_ivp", record_and_stop)
+    vessel = _build_crystallizer(WARM_TEMP)
+    vessel.integrator = backend
+
+    with pytest.raises(_SolveIvpReached):
+        vessel.solve_unit(runtime=HANDOFF_RUNTIME, verbose=False)
+
+    return vessel, received["atol"]
+
+
+def test_scipy_backend_hands_the_declared_tolerances_to_solve_ivp(monkeypatch):
+    """The vessel's tolerance vector reaches solve_ivp unless atol is set."""
+    vessel, atol = _atol_handed_to_solve_ivp(monkeypatch, ScipyBackend())
+
+    np.testing.assert_array_equal(
+        atol, vessel.solver_absolute_tolerances(SOLVER_DEFAULT_ATOL)
+    )
+
+    # An explicit atol is the caller's choice for every state.
+    _, atol = _atol_handed_to_solve_ivp(
+        monkeypatch, ScipyBackend(options={"atol": EXPLICIT_ATOL})
+    )
+    np.testing.assert_array_equal(atol, EXPLICIT_ATOL)
 
 
 def _noise_around_zero():

@@ -1,0 +1,183 @@
+"""The batch crystallizer solved on CVode with the flowsheet case-study kinetics.
+
+Fixture: the cooling crystallizer of ``tests/Flowsheet``, charged with the
+reactor product and cooled from 313.15 to 278.15 K over 2 h on 35 geometric
+size classes. Nucleation starts about 20 min in, which is where CVode used to
+stop.
+
+Units: temp [K], conc [mol/L], vol [m**3], time [s], x_grid [um],
+crystal count [#/m**3 of slurry], L4,3 [um].
+"""
+
+import importlib.util
+import os
+
+import numpy as np
+import pytest
+
+from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
+from PharmaPy.IntegratorBackends import AssimuloBackend
+from PharmaPy.Interpolation import PiecewiseLagrange
+from PharmaPy.Kinetics import CrystKinetics
+from PharmaPy.Mechanisms import OneDFVMMechanism
+from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.ProcessControl_Refactored import SimpleTemperatureController
+from PharmaPy.Utilities import CoolingWater
+
+pytestmark = [
+    pytest.mark.assimulo,
+    pytest.mark.integration,
+    pytest.mark.slow,
+    pytest.mark.skipif(
+        importlib.util.find_spec("assimulo") is None,
+        reason="assimulo is not installed; CVode tests skipped",
+    ),
+]
+
+DATA_PATH = os.path.join(
+    os.path.dirname(__file__), "Flowsheet", "data", "compound_database.json"
+)
+
+# Case-study crystallization kinetics, as in tests/Flowsheet.
+SOLUBILITY = np.array([2.269e2, -1.88e0, 3.89e-3])  # c_sat = a + b*T + c*T**2 [kg/m**3], T [K]
+NUCL_PRIM = (3e8, 0, 3)  # k_p [#/m**3/s], E [J/mol], order [-]
+NUCL_SEC = (4.46e10, 0, 2, 1e-5)  # k_s [#/m**3/s], E [J/mol], orders [-]
+GROWTH = (5, 0, 1.32)  # k_g [um/s], E [J/mol], order [-]
+DISSOLUTION = (1, 0, 1)  # k_d [um/s], E [J/mol], order [-]
+
+# R01's product after 1 h at 313.15 K in the case study: A, B, C, D, solvent.
+FEED_CONC = np.array([0.00231, 0.1036, 0.1250, 0.1013, 0.0])  # [mol/L]
+FEED_TEMP = 313.15  # [K]
+FEED_VOL = 0.06  # [m**3]
+CRYSTAL_MASS_FRAC = [0.0, 0.0, 1.0, 0.0, 0.0]  # [-], pure C
+
+SIZE_GRID = np.geomspace(1, 1500, num=35)  # [um]
+COOLING_PROGRAM = np.array([[313.15, 308.0], [308.0, 295.0], [295.0, 278.15]])  # [K]
+RUNTIME = 7200.0  # [s]
+MAX_STEP = 60.0  # [s], the flowsheet tests' CVode step cap
+
+HEAT_TRANSFER_COEFF = 1e4  # [W/m**2/K], unused: the controller owns temperature
+VESSEL_DIAMETER = 0.4  # [m]
+UTILITY_MASS_FLOW = 1.0  # [kg/s]
+UTILITY_TEMP_IN = 283.15  # [K]
+
+# A nucleated batch here holds about 5e10 crystals per m**3; an empty or
+# barely started one stays decades below this.
+NUCLEATED_COUNT_FLOOR = 1e9  # [#/m**3]
+# CVode's default absolute tolerance, and an explicit one distinct from it,
+# both in each state's own units.
+CVODE_DEFAULT_ATOL = 1e-6
+EXPLICIT_ATOL = 1e-8
+
+
+def _build(integrator):
+    """Set up the case-study crystallizer, ready to solve.
+
+    Parameters
+    ----------
+    integrator : IntegratorBackend
+        Fresh backend for this vessel.
+
+    Returns
+    -------
+    tuple
+        The ``BatchCrystallizer`` and its ``OneDFVMMechanism``.
+    """
+    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC)
+    mechanism = OneDFVMMechanism(
+        solid,
+        target_components="C",
+        solvent_name="solvent",
+        x_grid=SIZE_GRID,
+        distrib_init=np.zeros_like(SIZE_GRID),
+    )
+    solid.mechanisms = mechanism
+
+    cooling = PiecewiseLagrange(RUNTIME, COOLING_PROGRAM).evaluate_poly
+    crystallizer = BatchCrystallizer(
+        integrator=integrator,
+        h_conv=HEAT_TRANSFER_COEFF,
+        diam=VESSEL_DIAMETER,
+        controller=SimpleTemperatureController(temp_func=cooling),
+    )
+    crystallizer.Phases = [
+        LiquidPhase(DATA_PATH, temp=FEED_TEMP, mole_conc=FEED_CONC.copy(),
+                    vol=FEED_VOL, name_solv="solvent"),
+        solid,
+    ]
+    crystallizer.CrystKinetics = CrystKinetics(
+        SOLUBILITY, nucl_prim=NUCL_PRIM, nucl_sec=NUCL_SEC, growth=GROWTH,
+        dissolution=DISSOLUTION,
+    )
+    crystallizer.Utility = CoolingWater(
+        mass_flow=UTILITY_MASS_FLOW, temp_in=UTILITY_TEMP_IN
+    )
+    return crystallizer, mechanism
+
+
+def _solve(integrator):
+    """Solve the case-study crystallizer and summarise its final crystals.
+
+    Parameters
+    ----------
+    integrator : IntegratorBackend
+        Fresh backend for this vessel.
+
+    Returns
+    -------
+    numpy.ndarray
+        Crystal count [#/m**3 of slurry] and L4,3 [um], shape ``(2,)``.
+    """
+    crystallizer, mechanism = _build(integrator)
+    time, _ = crystallizer.solve_unit(runtime=RUNTIME, verbose=False)
+    assert time[-1] == pytest.approx(RUNTIME)
+
+    density = np.asarray(crystallizer.result.distrib_solid0)[-1]  # [#/(um m**3)]
+    count = mechanism.integrate_over_size(density)  # [#/m**3]
+    third = mechanism.integrate_over_size(density * SIZE_GRID**3)  # [um**3/m**3]
+    fourth = mechanism.integrate_over_size(density * SIZE_GRID**4)  # [um**4/m**3]
+    return np.array([count, fourth / third])
+
+
+def test_cvode_integrates_through_nucleation_onset():
+    """With the flowsheet tests' step cap, CVode reaches the end of the batch."""
+    count, _ = _solve(AssimuloBackend(options={"maxh": MAX_STEP}))
+
+    assert count > NUCLEATED_COUNT_FLOOR
+
+
+def _compiled_solver(backend):
+    """Compile the case-study crystallizer on ``backend`` without solving.
+
+    Parameters
+    ----------
+    backend : AssimuloBackend
+        Fresh backend for this vessel.
+
+    Returns
+    -------
+    tuple
+        The crystallizer and the CVode solver the backend built for it.
+    """
+    crystallizer, _ = _build(backend)
+    crystallizer.compile_structure()
+    backend.compile_integrator(crystallizer, verbose=False)
+    return crystallizer, backend._solver
+
+
+def test_cvode_takes_the_declared_tolerances_unless_atol_is_set():
+    """CVode gets the vessel's tolerance vector; an explicit atol wins."""
+    crystallizer, solver = _compiled_solver(
+        AssimuloBackend(options={"maxh": MAX_STEP})
+    )
+
+    np.testing.assert_array_equal(
+        solver.atol, crystallizer.solver_absolute_tolerances(CVODE_DEFAULT_ATOL)
+    )
+
+    _, solver = _compiled_solver(
+        AssimuloBackend(options={"maxh": MAX_STEP, "atol": EXPLICIT_ATOL})
+    )
+
+    np.testing.assert_array_equal(solver.atol, EXPLICIT_ATOL)
+
