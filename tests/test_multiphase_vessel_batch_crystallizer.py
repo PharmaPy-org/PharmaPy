@@ -19,7 +19,7 @@ import pytest
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.DataClasses import PhaseRef
 from PharmaPy.Kinetics import CrystKinetics
-from PharmaPy.Mechanisms import OneDFVMMechanism
+from PharmaPy.Mechanisms import MomentsPopulationBalance, OneDFVMMechanism
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
 from PharmaPy.ProcessControl_Refactored import SimpleTemperatureController
 
@@ -653,3 +653,70 @@ def test_legacy_conversion_refuses_crystals_without_a_slurry_volume():
 
     with pytest.raises(ValueError, match="slurry volume is unknown"):
         solid.to_legacy()
+
+
+def _noise_around_zero():
+    """Return a near-empty population whose third moment is negative.
+
+    Returns
+    -------
+    numpy.ndarray
+        Number density [#/(um m**3)]: equal and opposite values in two
+        cells, the negative one at the larger size, the kind of residue an
+        integrator leaves within its absolute tolerance just as nucleation
+        starts.
+    """
+    noise = np.zeros(NUM_GRID)  # [#/(um m**3)]
+    noise[10] = 1.0e-5
+    noise[20] = -1.0e-5
+    return noise
+
+
+def test_zero_crystal_mass_empties_a_distribution_left_with_noise():
+    """Asking for no crystals gives an empty population, whatever the noise."""
+    vessel = _build_crystallizer(WARM_TEMP, distrib=_noise_around_zero())
+    mechanism = _mechanism(vessel)
+    noise = getattr(mechanism, mechanism.distribution_state_name)
+    assert mechanism.compute_third_moment(noise) < 0.0
+
+    mechanism.set_mass(0.0)
+
+    np.testing.assert_array_equal(
+        getattr(mechanism, mechanism.distribution_state_name), 0.0
+    )
+
+
+def test_zero_crystal_mass_empties_moments_left_with_noise():
+    """The moment form follows the same rule as the distribution."""
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=[0.0, 0.0, 1.0, 0.0, 0.0], temp=WARM_TEMP
+    )
+    mechanism = MomentsPopulationBalance(
+        owning_phase=solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        moments_init=np.array([1.0e-5, 0.0, 0.0, -1.0e-5]),  # [um**k/m**3]
+    )
+    solid.mechanisms = mechanism
+    vessel = BatchCrystallizer(
+        integrator=None,
+        h_conv=HEAT_TRANSFER_COEFF,
+        diam=VESSEL_DIAMETER,
+        controller=SimpleTemperatureController(temp_func=lambda time: WARM_TEMP),
+    )
+    vessel.Phases = [
+        LiquidPhase(DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC,
+                    temp=WARM_TEMP),
+        solid,
+    ]
+    vessel.CrystKinetics = CrystKinetics(
+        APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=NUCL_SEC,
+        growth=GROWTH, solubility_type="apelblat",
+        solubility_basis="mass_per_volume_solvent",
+    )
+
+    mechanism.set_mass(0.0)
+
+    np.testing.assert_array_equal(
+        getattr(mechanism, mechanism.moments_state_name), 0.0
+    )

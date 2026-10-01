@@ -1289,15 +1289,38 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             if len(value.params['growth'])>3:
                 self._growth_size_factor = (1 + value.params['growth'][4] * self.x_grid) ** value.params['growth'][3]
     def set_third_moment(self, target_m3):
+        """Rescale the distribution to a given third moment, keeping its shape.
 
+        Parameters
+        ----------
+        target_m3 : float
+            Third moment to reach [um**3/m3 slurry].
+
+        Raises
+        ------
+        ValueError
+            If a nonzero target is asked of a distribution whose third moment
+            is not positive, so there is no shape to rescale.
+
+        Notes
+        -----
+        A zero target empties the population. An integrator holds a
+        just-nucleating population only to its absolute tolerance, so the
+        distribution can carry small negative densities whose third moment is
+        negative; asking such a population for no crystals must give none,
+        not an error.
+        """
         distribution = getattr(self,self.distribution_state_name)
+
+        if target_m3 == 0:
+            setattr(self, self.distribution_state_name,
+                    np.zeros_like(distribution))  # [#/(um m3 slurry)]
+            return
 
         # target_m3 is a TRUE moment, so compare against the true state; the
         # ratio is then applied to the conditioned state, which is what is
         # actually stored.
         current_m3 = self.compute_third_moment(self.true_state(distribution))
-        if target_m3==0 and current_m3 == 0:
-            return
         if current_m3 <= 0:
             raise ValueError("Cannot scale a distribution with zero third moment.")
 
@@ -1616,6 +1639,26 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
                 * self._slurry_volume(self.true_state(moments)))
 
     def set_mass(self, value):
+        """Rescale the moments to a crystal mass, keeping their ratios.
+
+        Parameters
+        ----------
+        value : float
+            Crystal mass in the vessel [kg].
+
+        Raises
+        ------
+        ValueError
+            If fewer than four moments are carried, if the slurry volume is
+            unknown for a nonzero mass, or if a nonzero mass is asked of
+            moments whose third moment is not positive.
+
+        Notes
+        -----
+        With a slurry volume known, a zero mass empties the population, for
+        the reason given in ``OneDFVMMechanism.set_third_moment``. Without
+        one, a zero mass leaves the moments unchanged.
+        """
         moments = np.asarray(getattr(self, self.moments_state_name),
                              dtype=float)
 
@@ -1635,7 +1678,9 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         target_mu3 = value / (self.density * self.kv * 1e-18 * vol_slurry)
         current = self.true_state(moments)[3]
 
-        if target_mu3 == 0 and current == 0:
+        if target_mu3 == 0:
+            setattr(self, self.moments_state_name,
+                    np.zeros_like(moments))  # [um**k/m3 slurry]
             return
 
         if current <= 0:
