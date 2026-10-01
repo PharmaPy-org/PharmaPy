@@ -1147,15 +1147,46 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
     def to_legacy_state(self):
         """The distribution, spelled the way an old SolidPhase holds it.
 
-        x_grid and x_distrib are both in microns and distrib is a number
-        density in both stacks, so the arrays transfer unchanged. Passing
-        distrib_type='num' stops the old constructor from reinterpreting
-        them as a volume-percent distribution and rescaling.
+        Returns
+        -------
+        dict
+            Keyword arguments for ``PharmaPy.Phases.SolidPhase``:
+            ``x_distrib``, the size grid [um], shape ``(num_grid,)``;
+            ``distrib``, the total crystal count in the vessel per micron
+            [#/um], same shape; and ``kv``, the volume shape factor [-].
+
+        Raises
+        ------
+        ValueError
+            If the population is not empty but no slurry volume is known, so
+            the density cannot be turned into a count.
+
+        Notes
+        -----
+        This mechanism stores a number density per m3 of slurry
+        [#/(um m3)], but the old SolidPhase holds the total count in the
+        vessel [#/um]: its mass is kv * rho * mu_3 with no volume factor.
+        The slurry volume [m3] converts one into the other. Copying the array
+        unchanged handed the old Filter a 0.06 m3 batch's crystals as
+        1/0.06, about 17 times, their mass.
+
+        The caller builds the old phase with ``mass=0``, which makes it take
+        the array as a number distribution instead of rescaling it.
         """
+        density = np.asarray(getattr(self, self.distribution_state_name),
+                             dtype=float)  # [#/(um m3 slurry)]
+        vol_slurry = self._slurry_volume(self.true_state(density))  # [m3]
+
+        if vol_slurry <= 0 and np.any(density != 0):
+            raise ValueError(
+                'Cannot express the crystal distribution as a total count '
+                'for the pre-refactor SolidPhase: the slurry volume is '
+                'unknown. Attach the solid to a vessel with a liquid phase.')
+
         return {
-            'x_distrib': np.asarray(self.x_grid),
-            'distrib': np.asarray(getattr(self, self.distribution_state_name)),
-            'kv': self.kv,
+            'x_distrib': np.asarray(self.x_grid),  # [um]
+            'distrib': density * vol_slurry,  # [#/um], total in the vessel
+            'kv': self.kv,  # [-]
         }
 
     @classmethod

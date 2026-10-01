@@ -615,3 +615,41 @@ def test_nucleation_enters_the_grid_only_at_the_smallest_size_class():
         baseline_species[TARGET_INDEX],
         rtol=ALGEBRAIC_RTOL,
     )
+
+
+def test_legacy_conversion_hands_over_the_crystal_mass():
+    """The solid converts to an old SolidPhase holding the same crystal mass.
+
+    The mechanism stores a number density per m**3 of slurry, while the old
+    SolidPhase holds the total count in the vessel, so the conversion has to
+    multiply by the slurry volume. The seed is zeroed at the first and last
+    node, where the old trapezoid and the mechanism's rectangle rule would
+    otherwise weight the end cells differently.
+    """
+    seed = _seed_distribution()  # [#/(um m**3)]
+    seed[[0, -1]] = 0.0
+    vessel = _build_crystallizer(WARM_TEMP, distrib=seed)
+    solid = vessel.Phases.get_phase_from_ref(PhaseRef("solid", 0))
+    crystal_mass = float(solid.mass)  # [kg]
+
+    legacy = solid.to_legacy()
+
+    assert crystal_mass > 0.0
+    np.testing.assert_allclose(legacy.mass, crystal_mass, rtol=ALGEBRAIC_RTOL)
+
+
+def test_legacy_conversion_refuses_crystals_without_a_slurry_volume():
+    """A seeded solid that belongs to no vessel has no volume to count in."""
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=[0.0, 0.0, 1.0, 0.0, 0.0], temp=WARM_TEMP
+    )
+    solid.mechanisms = OneDFVMMechanism(
+        solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        x_grid=_size_grid(),
+        distrib_init=_seed_distribution(),
+    )
+
+    with pytest.raises(ValueError, match="slurry volume is unknown"):
+        solid.to_legacy()
