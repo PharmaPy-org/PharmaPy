@@ -1,0 +1,233 @@
+from __future__ import annotations
+from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
+from PharmaPy.Mechanisms import *
+from PharmaPy.DataClasses import *
+from PharmaPy.ProcessControl_Refactored import DefaultContinuousVesselVolume
+
+class _BaseCrystallizer(MultiPhaseVessel):
+    def __init__(self,*args,**kwargs):
+        super().__init__(*args,**kwargs)
+        
+    @property
+    def CrystKinetics(self):
+        raise AttributeError(
+            "CrystKinetics is a convenience initializer only. Modify self.phase_connections directly instead."
+            "Use phase_connections[ind].kinetics if the kinetics are desired."
+        )
+
+    @CrystKinetics.setter
+    def CrystKinetics(self, instance: pk.CrystKinetics|list):
+        ''' CrystKinetics is only a convenience initializer ONLY that assumes transfer between liquid1 and solid1 for each Crystkinetic in the list
+            and that those connections are always active. It also assumes that target_comp is the only species moving for that index
+            THIS CANNOT BE SET BEFORE PHASES
+        If any more complex behavior is needed, or if phases need to be set after this, the user should set phase_connections directly using a list of PhaseConnection objects'''
+        assert self._Phases is not None, 'Phases must be set before using the crystkinetics convenienve API. Otherwise, you must set phase_connections directly'
+        if not isinstance(instance,list) and not isinstance(instance,pk.CrystKinetics):
+            raise TypeError("CrystKinetics must be set by either a CrystKinetics object or a list of CrystKinetics objects")
+        
+        if not isinstance(instance,list):
+            instance = [instance]
+        self._CrystKinetics = instance
+        self._create_default_phase_connections()
+        self.nomenclature(overwrite=True)
+        self._post_CrystKinetics_setter()
+    def _create_default_phase_connections(self):
+        ''' Assumes everything occurs between the first liquid and the first solid phases
+        Assumes that whatever the target index is for that Crystkinetic, the massfrac is 100% that compound and 0 everything else
+        Only runs if phase_connections are not already set'''
+
+        if len(self.phase_connections)>0:
+            raise RuntimeError(
+                "phase_connections already defined. "
+                "Cannot use CrystKinetics convenience API."
+            )
+        connections = []
+        
+        for i,ck in enumerate(self._CrystKinetics):
+            solidphase_ref = PhaseRef('solid',0)
+            try:
+                solidphase=self.Phases.get_phase_from_ref(solidphase_ref)
+            except IndexError:
+                raise IndexError("The solid phase cannot be found, did you initialize the vessel with a solid phase?")
+            # Matched on the base class, not OneDFVMMechanism: a
+            # crystallizer discretised by moments carries a
+            # MomentsPopulationBalance, and hardcoding the FVM class
+            # silently returned None, so the moments form could not be
+            # constructed at all.
+            pbm = solidphase.get_mechanism(PopulationBalanceMechanism)
+
+            if pbm is None:
+                raise AttributeError(
+                    'The solid phase carries no population balance mechanism. '
+                    'Attach a OneDFVMMechanism or a MomentsPopulationBalance '
+                    'to it before setting CrystKinetics.')
+            pbm.liquid_phase_ref = PhaseRef("liquid",0)
+            # The population is a number density per m3 of SLURRY, so the
+            # mechanism needs the liquid to convert it into an inventory.
+            pbm.liquid_phase = self.Phases.get_phase_from_ref(
+                PhaseRef("liquid", 0))
+            pbm.owning_phase_ref = solidphase_ref
+            weights = pbm.fraction
+            if pbm._mechanism_kinetics is None:
+                try:
+                    ck.target_idx = pbm.target_ind[0]
+                    pbm.mechanism_kinetics=ck
+                except AttributeError:
+                    raise AttributeError("Your solid phase does not have kinetics in its mechanism. The solidphase you assign to the vessel must have a mechanism with kinetics or crystallization cannot occur")
+            reversible = ReversibleTransferMechanism(source_mechanism=pbm)
+            
+            if ck.supports(['growth','nucl_prim','nucl_sec']):
+                # liquid to solid because crystallization is valid
+                connection = PhaseConnection(source_phaseref=PhaseRef("liquid",0),
+                                             sink_phaseref=solidphase_ref,
+                                             kinetics=ck,
+                                             species_weights=weights,
+                                             active_condition=lambda source,sink:True,
+                                             mechanism=reversible.forward
+                                             )
+                connections.append(connection)
+            if ck.supports('dissolution'):
+                #solid to liquid because dissolution
+                connection = PhaseConnection(source_phaseref=PhaseRef("solid",0),
+                                             sink_phaseref=PhaseRef('liquid',0),
+                                             kinetics=ck,
+                                             species_weights=weights,
+                                             active_condition=lambda source,sink:True,
+                                             mechanism=reversible.reverse
+
+                                             )
+                connections.append(connection)
+        self.phase_connections = connections
+
+    def default_diff_states_from_phases(self):
+            """
+            Mark the default material state for every phase as differential.
+    
+            Unit operations that require different behavior should override this
+            method or modify `phase_states` after phase initialization.
+            """
+            # do nothing if the phases are already marked diff
+            if any(
+                state.state_type == "diff"
+                for phasestate in self.phase_states
+                for state in self.phase_states[phasestate.phaseref].states.values()
+            ):
+                return
+            for phasestatevar in self.phase_states:
+                if phasestatevar.state.name==self.basis and phasestatevar.phaseref == PhaseRef("liquid",0):
+                    phasestatevar.state.update_variable('state_type','diff')
+    def _post_CrystKinetics_setter(self):
+        "Place holder in case future children need special behavior"
+        pass
+    def configure_solver(self):
+        """Ask the integrator for a dense direct linear solver.
+
+        Notes
+        -----
+        Before nucleation the state does not change, so CVode lengthens its
+        step and can cross nucleation onset in one long step. With a 60 s
+        step cap, the unpreconditioned Krylov (SPGMR) solver requested
+        before then missed the final crystal count by more than 2 % on 12 of
+        33 case-study feeds (0.04 to 0.20 mol/L of C), by up to 106 %, and a
+        100 times tighter relative tolerance did not help. The dense solve
+        missed 2 of the 33, by at most 5 %. With a 10 s cap both came within
+        1 % of SciPy LSODA on every feed, so the step is the root cause and
+        dense is the more forgiving choice, not a cure. Each dense Jacobian
+        costs one right-hand side evaluation per state, which is affordable
+        at the grids used here: 800 size classes solve in about 16 s. Asking
+        the backend rather than its solver keeps this independent of the
+        integrator; one with no such choice ignores the request.
+
+        The cap is the integrator's ``maxh`` option: 1 s in AssimuloBackend
+        unless given other options, 10 s in the flowsheet tests.
+        """
+        self.integrator.set_linear_solver("dense")
+    def _post_set_phases(self):
+        super()._post_set_phases()
+        
+        
+
+
+
+class BatchCrystallizer(_BaseCrystallizer):
+
+    oper_mode = "Batch"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+
+
+class SemiBatchCrystallizer(_BaseCrystallizer):
+
+    oper_mode = "Semibatch"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+
+
+class ContinuousCrystallizer(_BaseCrystallizer):
+
+    oper_mode = "Continuous"
+
+    def __init__(
+        self,
+        controller=None,
+        **kwargs
+    ):
+
+        # Constructed per instance; a default argument would be shared by
+        # every ContinuousCrystallizer in the session.
+        if controller is None:
+            controller = DefaultContinuousVesselVolume()
+
+        super().__init__(
+            controller=controller,
+            **kwargs
+        )
+
+
+    def configure_default_connections(self):
+
+        if len(self.outlet_connections)>0:
+            return
+
+
+        stream = self.Phases.to_stream()
+
+        mappings=[]
+
+        counts={}
+
+        for phase in self.Phases:
+
+            phase_type = phase.phase_family.lower()
+
+            idx = counts.get(
+                phase_type,
+                0
+            )
+
+            counts[phase_type]=idx+1
+
+
+            ref = PhaseRef(
+                phase_type,
+                idx
+            )
+
+            mappings.append(
+                PhaseMapping(
+                    source_phaseref=ref,
+                    sink_phaseref=ref
+                )
+            )
+
+
+        self.outlet_connections=[
+            StreamConnection(
+                stream=stream,
+                phase_mappings=mappings
+            )
+        ]

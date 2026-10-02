@@ -183,13 +183,12 @@ class ThermoPhysicalManager:
     def __init__(self, path_data):
 
         props_dict = ParseDatabase(path_data)
-        self.__dict__ = props_dict
+        self.__dict__.update(props_dict)
         self.name_species = props_dict['name_species']
 
         self.num_species = len(self.name_species)
 
         self.path_data = path_data
-
         # UNIFAC
         if 'unifac_groups' in props_dict:
             rk, qk, a_mat, b_mat, c_mat = self.get_UNIFACParams()
@@ -1287,3 +1286,24 @@ class ThermoPhysicalManager:
             return np.squeeze(gamma)
         else:
             return gamma
+    def get_state_dict(self, state_collection):
+        """
+        Export only the variables described by a StateCollection.
+
+        Parameters
+        ----------
+        state_collection : StateCollection
+            Collection describing which variables belong to the phase state.
+
+        Returns
+        -------
+        dict
+            Keyword arguments suitable for updatePhase().
+        """
+
+        updates = {}
+
+        for state in state_collection.states.values():
+            updates[state.name] = getattr(self, state.name)
+
+        return updates
