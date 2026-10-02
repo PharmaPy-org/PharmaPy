@@ -1593,17 +1593,6 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
     mass basis, so the mass-basis path here is unproven.
     """
 
-    # Absolute integration tolerances on the moments [um**k/m3 slurry] are the
-    # moments N * L**k of N crystals per m3 of slurry, all of size L.
-    # N is OneDFVMMechanism.DEFAULT_ABS_TOL integrated over one 1 um size
-    # class, and L sits inside the 1-1500 um range the flowsheet tests
-    # resolve. A numerical design choice, checked with CVode and a dense
-    # linear solver on a cooled case-study batch and an isothermal 278 K one:
-    # crystal count within 0.1 % and 1e-5 of SciPy LSODA respectively, and
-    # within 0.1 % for tolerances 100 times tighter or looser.
-    DEFAULT_ABS_TOL_NUMBER = 1e4  # [#/m3 slurry]
-    DEFAULT_ABS_TOL_SIZE = 100.0  # [um]
-
     def __init__(
         self,
         owning_phase,
@@ -1645,9 +1634,17 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         moments_state_name : str, optional
             Name of the moments state. Defaults to ``'mu_n'``.
         abs_tol : float or array-like, optional
-            Absolute integration tolerance per moment [um**k/m3 slurry].
-            Defaults to ``DEFAULT_ABS_TOL_NUMBER *
-            DEFAULT_ABS_TOL_SIZE**k``.
+            Absolute integration tolerance per moment [um**k/m3 slurry], a
+            scalar or one value per moment. None, the default, keeps the
+            integrator's own tolerance.
+
+        Notes
+        -----
+        Unlike ``OneDFVMMechanism``, the moments declare no tolerance of
+        their own. Secondary nucleation switches on once the third moment is
+        positive, so the onset must be resolved near zero. A tolerance scaled
+        to the final moments let CVode hold the third moment just below zero
+        on a leaner case-study feed, and that batch never crystallized.
         """
         super().__init__(
             owning_phase=owning_phase,
@@ -1678,10 +1675,6 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         # meaning two different things.
         self.output_states = [state for state in self.output_states
                               if state.name != moments_state_name]
-
-        if abs_tol is None:
-            abs_tol = (self.DEFAULT_ABS_TOL_NUMBER
-                       * self.DEFAULT_ABS_TOL_SIZE ** np.arange(self.num_mom))  # [um**k/m3]
 
         self.solver_states = (
             StateVariable(

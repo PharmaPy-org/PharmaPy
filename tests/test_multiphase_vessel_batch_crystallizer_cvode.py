@@ -4,7 +4,7 @@ Fixture: the cooling crystallizer of ``tests/Flowsheet``, charged with the
 reactor product and cooled from 313.15 to 278.15 K over 2 h on 35 geometric
 size classes. Nucleation starts about 20 min in, which is where CVode used to
 stop. An independent integrator, SciPy LSODA, is the reference, on this feed
-and on two with less product C.
+and on two with less product C. One test solves the moment form instead.
 
 Units: temp [K], conc [mol/L], vol [m**3], time [s], x_grid [um],
 crystal count [#/m**3 of slurry], L4,3 [um].
@@ -20,7 +20,7 @@ from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.IntegratorBackends import AssimuloBackend, ScipyBackend
 from PharmaPy.Interpolation import PiecewiseLagrange
 from PharmaPy.Kinetics import CrystKinetics
-from PharmaPy.Mechanisms import OneDFVMMechanism
+from PharmaPy.Mechanisms import MomentsPopulationBalance, OneDFVMMechanism
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
 from PharmaPy.ProcessControl_Refactored import SimpleTemperatureController
 from PharmaPy.Utilities import CoolingWater
@@ -54,6 +54,8 @@ FEED_VOL = 0.06  # [m**3]
 CRYSTAL_MASS_FRAC = [0.0, 0.0, 1.0, 0.0, 0.0]  # [-], pure C
 
 SIZE_GRID = np.geomspace(1, 1500, num=35)  # [um]
+# mu_0..mu_3: the third moment carries secondary nucleation and crystal mass.
+NUM_MOMENTS = 4
 COOLING_PROGRAM = np.array([[313.15, 308.0], [308.0, 295.0], [295.0, 278.15]])  # [K]
 RUNTIME = 7200.0  # [s]
 MAX_STEP = 60.0  # [s], the flowsheet tests' CVode step cap
@@ -78,12 +80,15 @@ REFERENCE_RTOL = 1e-8  # [-]
 # solver overcounted the crystals by 50 and 61 %, while on the case-study
 # feed it happened to agree.
 LEANER_PRODUCT_CONC = (0.095, 0.115)  # [mol/L]
+# Leaner feed on which the moment form never crystallized when its moments
+# carried tolerances scaled to their final values.
+LEAN_MOMENTS_PRODUCT_CONC = 0.095  # [mol/L]
 # Dense CVode and LSODA agree to about 1e-5 on all three feeds. 1e-3 leaves
 # headroom across platforms and stays far below the Krylov errors.
 AGREEMENT_RTOL = 1e-3  # [-]
 
 
-def _build(integrator, feed_conc=FEED_CONC):
+def _build(integrator, feed_conc=FEED_CONC, moments=False):
     """Set up the case-study crystallizer, ready to solve.
 
     Parameters
@@ -93,20 +98,31 @@ def _build(integrator, feed_conc=FEED_CONC):
     feed_conc : numpy.ndarray, optional
         Feed concentrations of A, B, C, D and solvent [mol/L], shape
         ``(5,)``. Defaults to ``FEED_CONC``.
+    moments : bool, optional
+        Carry the population as its first ``NUM_MOMENTS`` moments instead
+        of the size distribution. Defaults to False.
 
     Returns
     -------
     tuple
-        The ``BatchCrystallizer`` and its ``OneDFVMMechanism``.
+        The ``BatchCrystallizer`` and its population balance mechanism.
     """
     solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC)
-    mechanism = OneDFVMMechanism(
-        solid,
-        target_components="C",
-        solvent_name="solvent",
-        x_grid=SIZE_GRID,
-        distrib_init=np.zeros_like(SIZE_GRID),
-    )
+    if moments:
+        mechanism = MomentsPopulationBalance(
+            owning_phase=solid,
+            target_components="C",
+            solvent_name="solvent",
+            moments_init=np.zeros(NUM_MOMENTS),
+        )
+    else:
+        mechanism = OneDFVMMechanism(
+            solid,
+            target_components="C",
+            solvent_name="solvent",
+            x_grid=SIZE_GRID,
+            distrib_init=np.zeros_like(SIZE_GRID),
+        )
     solid.mechanisms = mechanism
 
     cooling = PiecewiseLagrange(RUNTIME, COOLING_PROGRAM).evaluate_poly
@@ -157,6 +173,31 @@ def _solve(integrator, feed_conc=FEED_CONC):
     third = mechanism.integrate_over_size(density * SIZE_GRID**3)  # [um**3/m**3]
     fourth = mechanism.integrate_over_size(density * SIZE_GRID**4)  # [um**4/m**3]
     return np.array([count, fourth / third])
+
+
+def _solve_moments(integrator, feed_conc):
+    """Solve the crystallizer in moment form and return its final moments.
+
+    Parameters
+    ----------
+    integrator : IntegratorBackend
+        Fresh backend for this vessel.
+    feed_conc : numpy.ndarray
+        Feed concentrations of A, B, C, D and solvent [mol/L], shape
+        ``(5,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Crystal count [#/m**3 of slurry] and third moment
+        [um**3/m**3 of slurry], shape ``(2,)``.
+    """
+    crystallizer, _ = _build(integrator, feed_conc, moments=True)
+    time, _ = crystallizer.solve_unit(runtime=RUNTIME, verbose=False)
+    assert time[-1] == pytest.approx(RUNTIME)
+
+    moments = np.asarray(crystallizer.result.mu_n_solid0)[-1]  # [um**k/m**3]
+    return moments[[0, 3]]
 
 
 def test_cvode_integrates_through_nucleation_onset():
@@ -211,6 +252,24 @@ def test_cvode_matches_an_independent_integrator(product_conc):
     feed_conc[PRODUCT_INDEX] = product_conc
     cvode = _solve(AssimuloBackend(options={"maxh": MAX_STEP}), feed_conc)
     reference = _solve(ScipyBackend(
+        method="LSODA", options={"maxh": MAX_STEP, "rtol": REFERENCE_RTOL}
+    ), feed_conc)
+
+    assert reference[0] > NUCLEATED_COUNT_FLOOR
+    np.testing.assert_allclose(cvode, reference, rtol=AGREEMENT_RTOL)
+
+
+def test_cvode_crystallizes_a_lean_feed_in_moment_form():
+    """The moment form nucleates on a lean feed and agrees with LSODA.
+
+    With tolerances scaled to the final moments, CVode let the third moment
+    sit just below zero, where secondary nucleation is off, and the batch
+    never crystallized.
+    """
+    feed_conc = FEED_CONC.copy()  # [mol/L]
+    feed_conc[PRODUCT_INDEX] = LEAN_MOMENTS_PRODUCT_CONC
+    cvode = _solve_moments(AssimuloBackend(options={"maxh": MAX_STEP}), feed_conc)
+    reference = _solve_moments(ScipyBackend(
         method="LSODA", options={"maxh": MAX_STEP, "rtol": REFERENCE_RTOL}
     ), feed_conc)
 
