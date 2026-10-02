@@ -12,7 +12,7 @@ runs the same source equations and operating inputs through the shared
 rate-reconciliation mechanism, with its own forward notebook and outputs.
 It tests preservation of this experimental agreement without refitting.
 
-Open `workflow.ipynb` from the repository or example folder and use Run All. The six commented steps load inputs, build native reactors, simulate, tabulate, plot, and export. `inputs/` contains the F10 configuration; `inputs/F11/` contains the second case and mechanism, sharing `inputs/thermo.json`. Change `INPUT_DIRS` to select configurations. The notebook reads no reference measurements and performs no comparison analysis.
+Open `workflow.ipynb` from the repository or example folder and use Run All. The six commented steps load inputs, build native reactors, simulate, tabulate, plot, and export. `inputs/` contains the F10 configuration; `inputs/F11/` contains the second case and mechanism, sharing `inputs/thermo.json`. Change `INPUT_DIRS` to select configurations. The notebook reads no reference measurements and performs no comparison analysis. `inputs/observations.json` declares the measured biomass, glucose and acetate fields of `reference/F10.json` and `F11.json`; `predict_measurements` returns the matching predictions at each field's own sampling times (see the [user guide](../../../doc/online_docs/bioreactors/USER_GUIDE.md#4-predict-measured-fields)).
 
 ## Configuration and native execution
 

@@ -100,7 +100,35 @@ Affine and hybrid provider implementations belong to WP3.2 and are not included.
 The registration interface is retained for later substitution without changing
 reactor balances.
 
-## 4. Verify before scientific use
+## 4. Predict measured fields
+
+A measurement declaration (for example
+`examples/bioreactors/ecoli_ye_fed_batch/inputs/observations.json`) names each
+measured field, the phase species it measures, `quantity: "concentration"`, the
+reported unit (such as `g/L` or `mmol/L`), the source-file `time_key` and
+`value_key`, and `event_side`. At a scheduled event time the solution holds the
+state before and after the event; `pre` selects the first, `post` the second.
+
+```python
+observations = read_observations(declaration, reference["measurements"])
+histories = assembly.solve(report_times=sampling_times(observations))
+prediction = predict_measurements(assembly, histories, declaration, observations)
+```
+
+Each field keeps its own sampling grid and source order. Times are in seconds and
+values use the declared unit; concentrations are species inventory divided by the
+recorded liquid volume. `report_times` adds the sampling times to the native
+grid, so predictions come from accepted solver states rather than interpolation.
+Adaptive SciPy steps are unchanged by reporting. Fixed-step grids define the
+numerical method, so their sampling times must already lie on the grid.
+Missing observations are omitted from the source, never encoded as NaN.
+
+`prediction["time_s"][field]` and `prediction["values"][field]` match the per-field
+`x_data`/`y_data` entries of the keyed `ParameterEstimation` interface on `master`
+(#238). This branch's base predates that interface, and no experiment or
+measurement object hierarchy is defined here (#346).
+
+## 5. Verify before scientific use
 
 Run `python -m pytest -q -p no:cacheprovider -o pythonpath=. tests/Bioreactor` in
 the documented Python 3.11 environment. Tests select headless plotting themselves.

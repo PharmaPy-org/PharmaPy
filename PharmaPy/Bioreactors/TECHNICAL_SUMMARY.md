@@ -125,8 +125,10 @@ the checkout; this is a verification procedure, not a separate runtime API.
 
 F10/F11 is the selected baseline. Its feed-volume interpretation still needs
 domain review, and oxygen needs an explicit state or a defensible applicability
-statement. A shared WP1 state-to-observation adapter and continuous/chemostat
-qualification remain future work. WP3.2 affine/hybrid implementations and WP3.3
+statement. Measured-field predictions for F10/F11 come from
+`predict_measurements` at exact sampling times (see the user guide); adoption of
+the shared #351 provenance record and the #346 experiment objects remains open.
+Continuous/chemostat qualification remains future work. WP3.2 affine/hybrid implementations and WP3.3
 calibration/design are excluded. A successful forward run does not close those
 acceptance gaps. Source observations in `reference/F10.json` and `F11.json` remain;
 notebook outputs and historical published comparison figures are not distributed.

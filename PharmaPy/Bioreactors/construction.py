@@ -664,6 +664,50 @@ def _feed_composition(event):
     return status
 
 
+def _report_grid(time_grid, report_times, fixed_step):
+    """Merge requested report times into the native output grid.
+
+    Parameters
+    ----------
+    time_grid : ndarray
+        Native reporting grid [s], strictly increasing.
+    report_times : array_like or None
+        Additional absolute reporting times [s], such as measurement sampling
+        times. Order and repetition are irrelevant.
+    fixed_step : bool
+        True when the integrator is ``FixedStepBackend``, whose grid defines the
+        numerical method rather than only the reported samples.
+
+    Returns
+    -------
+    ndarray
+        Strictly increasing grid [s]. Times within ``8 eps max(1, |t|)`` of an
+        existing grid point reuse that point, matching the event-time merge in
+        ``NativeBioreactorAssembly.solve``.
+
+    Raises
+    ------
+    ValueError
+        A report time is nonfinite or outside the grid, or, for fixed-step
+        propagation, does not coincide with a grid point. Inserting a point
+        there would change the step sequence and therefore the solution.
+    """
+    if report_times is None:
+        return time_grid
+    times = np.asarray(report_times, dtype=float).reshape(-1)  # [s]
+    if not np.isfinite(times).all():
+        raise ValueError("report times must be finite")
+    tolerance = 8. * np.finfo(float).eps * np.maximum(1., np.abs(times))  # [s]; 8 ulps covers unit-conversion roundoff
+    if np.any(times < time_grid[0] - tolerance) or np.any(times > time_grid[-1] + tolerance):
+        raise ValueError("report times must lie within the simulated time grid")
+    nearest = np.abs(times[:, None] - time_grid[None, :]).min(axis=1)  # [s]
+    new = np.unique(times[nearest > tolerance])  # [s]
+    if fixed_step and new.size:
+        raise ValueError("fixed-step report times must coincide with the time grid; "
+                         "change numerics.step or use the scipy backend")
+    return np.union1d(time_grid, new)
+
+
 @dataclass
 class NativeBioreactorAssembly:
     """Hold a native reactor and the input-declared schedule used to solve it.
@@ -872,23 +916,30 @@ class NativeBioreactorAssembly:
             "Reaction dependencies are structural possibilities, not proof of active flux limitation.")
         return report
 
-    def solve(self, *, verbose=False):
+    def solve(self, *, verbose=False, report_times=None):
         """Execute scheduled operations between native reactor solves.
 
         Parameters
         ----------
         verbose : bool, optional
             Print solver and audit messages. Default False.
+        report_times : array_like, optional
+            Extra absolute reporting times [s], such as measurement sampling
+            times, merged into the native grid. Adaptive SciPy steps are not
+            changed by reporting; fixed-step grids must already contain them.
 
         Returns
         -------
         tuple
-            Native results, one per interval between scheduled events.
+            Native results, one per interval between scheduled events. A time
+            equal to an event time appears at the end of one result (pre-event)
+            and the start of the next (post-event).
 
         Raises
         ------
         ValueError
-            Complete inputs are required and an addition has unknown composition.
+            Complete inputs are required and an addition has unknown
+            composition, or ``report_times`` are invalid (see ``_report_grid``).
 
         Notes
         -----
@@ -901,10 +952,12 @@ class NativeBioreactorAssembly:
             raise ValueError("complete feed compositions are required; unknown or unspecified additions remain")
         if verbose and audit["incomplete_additions"]:
             print("Incomplete feed composition: only declared solutes will be added.")
+        time_grid = _report_grid(self.time_grid, report_times,
+                                 isinstance(self.unit.integrator, FixedStepBackend))  # [s]
         if not self.unit.integrator._compiled:
             self.unit.compile_integrator(verbose=False)
         if not self.events:
-            self.unit.solve_unit(time_grid=self.time_grid, verbose=verbose)
+            self.unit.solve_unit(time_grid=time_grid, verbose=verbose)
             return (self.unit.result,)
         scheduled = sorted(
             ((_event_time_seconds(event, self.event_time_unit), index, event)
@@ -914,20 +967,20 @@ class NativeBioreactorAssembly:
         canonical = None
         for index, (time, order, event) in enumerate(scheduled):
             tolerance = 8. * np.finfo(float).eps * max(1., abs(time))  # [s]; 8 ulps covers unit-conversion roundoff
-            for endpoint in (self.time_grid[0], self.time_grid[-1]):
+            for endpoint in (time_grid[0], time_grid[-1]):
                 if abs(time - endpoint) <= tolerance:
                     time = float(endpoint)
             if canonical is None or time - canonical > tolerance:
                 canonical = time
             scheduled[index] = (canonical, order, event)
         scheduled = [(time, event) for time, _, event in sorted(scheduled)]
-        final_time = float(self.time_grid[-1])
+        final_time = float(time_grid[-1])
         scheduled = [(time, event) for time, event in scheduled
-                     if self.time_grid[0] <= time <= final_time]
+                     if time_grid[0] <= time <= final_time]
         if not scheduled:
-            self.unit.solve_unit(time_grid=self.time_grid, verbose=verbose)
+            self.unit.solve_unit(time_grid=time_grid, verbose=verbose)
             return (self.unit.result,)
-        boundaries = sorted({float(self.time_grid[0]), final_time,
+        boundaries = sorted({float(time_grid[0]), final_time,
                              *(time for time, _ in scheduled)})
         histories = []
         for start, end in zip(boundaries[:-1], boundaries[1:]):
@@ -941,9 +994,9 @@ class NativeBioreactorAssembly:
                             self.carrier_species,
                         )
             tolerance = 8. * np.finfo(float).eps * max(1., abs(start), abs(end))  # [s]; 8 ulps covers unit-conversion roundoff
-            grid = np.r_[start, self.time_grid[
-                (self.time_grid > start + tolerance) &
-                (self.time_grid < end - tolerance)], end]
+            grid = np.r_[start, time_grid[
+                (time_grid > start + tolerance) &
+                (time_grid < end - tolerance)], end]
             self.unit.solve_unit(time_grid=grid, verbose=verbose)
             histories.append(self.unit.result)
         return tuple(histories)
