@@ -6,6 +6,7 @@ root. Run against a non-editable install, this also checks that the
 package-data globs in pyproject.toml pick the files up.
 """
 
+import importlib
 import pathlib
 
 import pytest
@@ -30,3 +31,20 @@ def test_runtime_data_ships_inside_the_package(relative_path):
 
 def test_modeling_object_checks_read_the_packaged_file():
     assert CheckModule.root == PACKAGE_DATA
+
+
+@pytest.mark.parametrize("module_name", [
+    "PharmaPy.Bioreactors",
+    "PharmaPy.Metabolic.pathways",
+    "PharmaPy.Metabolic.closures.reconciled",
+])
+def test_bioreactor_subpackages_ship_with_the_native_package(module_name):
+    """Check subpackage discovery in source and non-editable installations.
+
+    Parameters
+    ----------
+    module_name : str
+        Required public builder or metabolic implementation module.
+    """
+    module = importlib.import_module(module_name)
+    assert pathlib.Path(module.__file__).is_relative_to(PACKAGE_DATA.parent)

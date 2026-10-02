@@ -34,3 +34,12 @@ The only integrator this installs is scipy's. Unit operations built on `MultiPha
   ```
 
 To get a development install with every backend, clone the [GitHub repository](https://github.com/PharmaPy-org/PharmaPy) and follow `install_instructions.txt`. It sets up a conda environment that includes Assimulo and installs PharmaPy in editable mode.
+
+## WP3.1 native bioreactors
+
+See [the bioreactor examples](examples/bioreactors/README.md) for batch and fed-batch
+models, reduced-pathway dFBA, and rate reconciliation using native PharmaPy vessels.
+The selected baseline is E. coli yeast-extract fed-batch F10/F11.
+[Scope and limitations](PharmaPy/Bioreactors/TECHNICAL_SUMMARY.md) distinguish
+forward-model qualification from remaining measurement, oxygen and chemostat work.
+Generated outputs and published comparison figures are excluded.

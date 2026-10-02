@@ -1,5 +1,6 @@
 import numpy as np
 from abc import ABC, abstractmethod
+from functools import partial
 from scipy.integrate import solve_ivp
 from PharmaPy._assimulo import (CVode, Explicit_Problem, IDA,
                                 Implicit_Problem)
@@ -413,13 +414,22 @@ class AssimuloDAEBackend(IntegratorBackend):
         "sparse": "SPARSE",
     }
 
-    def __init__(self, options={'maxh': 1}):
+    def __init__(self, options=None):
 
+        """Store IDA options.
+
+        Parameters
+        ----------
+        options : dict, optional
+            IDA solver attributes. Defaults to ``{'maxh': 1}``, the previous
+            default maximum step [s]; a copy is stored so that callers and
+            instances never share one mutable default.
+        """
         super().__init__()
 
         self._problem = None
         self._solver = None
-        self.options = options
+        self.options = {"maxh": 1} if options is None else dict(options)
 
         self.eval_sens = False
         self.jac_v_prod = False
@@ -460,21 +470,26 @@ class AssimuloDAEBackend(IntegratorBackend):
         return residual
 
     def initial_derivatives(self, unit, states_init):
-        """
-        Consistent yd0: f(y0) on differential rows, zero on algebraic ones.
+        """Consistent yd0: f(y0) on differential rows, zero on algebraic ones.
 
         IDA only needs the differential entries to be right; the algebraic
-        entries of yd never enter the residual.
+        entries of yd never enter the residual. The vessel evaluates them with
+        ``differential_only=True`` so no algebraic constraint is evaluated at a
+        possibly inconsistent initial point.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Compiled unit.
+        states_init : ndarray
+            Packed initial states [native state units].
+
+        Returns
+        -------
+        ndarray
+            Initial derivatives [state units/s], zero on algebraic rows.
         """
-
-        algebraic = unit.solver_state_collection.algebraic_mask
-
-        values = np.asarray(
-            unit.unit_model(time=unit.elapsed_time, states=states_init),
-            dtype=float,
-        )
-
-        return np.where(algebraic, 0.0, values)
+        return unit.create_solver_init_derivatives(states_init)
 
     def compile_integrator(
             self,
@@ -486,9 +501,35 @@ class AssimuloDAEBackend(IntegratorBackend):
             any_event=True,
     ):
 
-        if eval_sens:
+        """Build the IDA problem and solver for one unit.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Unit with at least one algebraic state.
+        eval_sens, jac_v_prod : bool, optional
+            Not supported; must be False.
+        options : dict, optional
+            Per-call IDA attributes. They are applied after the instance options,
+            so a per-call value overrides the instance default.
+        verbose : bool, optional
+            Print solver output.
+        any_event : bool, optional
+            Register the unit's state events.
+
+        Returns
+        -------
+        ndarray
+            Packed initial solver states [native state units].
+
+        Raises
+        ------
+        NotImplementedError
+            Sensitivities or Jacobian-vector products are requested.
+        """
+        if eval_sens or jac_v_prod:
             raise NotImplementedError(
-                "AssimuloDAEBackend does not compute sensitivities."
+                "AssimuloDAEBackend does not expose sensitivities or Jacobian-vector products."
             )
 
         self.eval_sens = eval_sens
@@ -526,7 +567,7 @@ class AssimuloDAEBackend(IntegratorBackend):
         solver = IDA(problem)
         solver.suppress_alg = True
 
-        for source in (options, self.options):
+        for source in (self.options, options):
             if not source:
                 continue
             for name, value in source.items():
@@ -1139,6 +1180,528 @@ class DiffeqpyBackend(IntegratorBackend):
                 out[ours] = int(value)
 
         return out
+
+
+def _compile_ode_backend(backend, unit, eval_sens, jac_v_prod, name):
+    """Initialize either ODE backend without changing its validation or reset order.
+
+    Parameters
+    ----------
+    backend : IntegratorBackend
+        ``SciPyBackend`` or ``FixedStepBackend`` being compiled.
+    unit : MultiPhaseVessel
+        Unit to integrate.
+    eval_sens, jac_v_prod : bool
+        Must be False; neither backend provides sensitivities.
+    name : str
+        Backend name for error messages.
+
+    Returns
+    -------
+    ndarray
+        Packed initial solver states [native state units].
+
+    Raises
+    ------
+    NotImplementedError
+        Sensitivities or Jacobian-vector products are requested.
+    """
+    if eval_sens or jac_v_prod:
+        raise NotImplementedError(f"{name} does not expose sensitivities")
+    backend.check_algebraic_support(unit)
+    unit.reset()
+    states = unit.create_solver_init_states()
+    unit.save_initial_solver_state(states, unit.elapsed_time)
+    backend._unit = unit
+    backend._compiled = True
+    return states
+
+
+def _inventory_rates(
+        time, states, *, constrained, boundary_tolerance, unit, rate_tolerance, active):
+    """Evaluate rates with exhausted pools held at their boundary.
+
+    Parameters
+    ----------
+    time : float
+        Absolute time [s].
+    states : ndarray
+        Packed states.
+
+    constrained : ndarray of int
+        Indices of states requiring nonnegative inventories.
+    boundary_tolerance : ndarray
+        Per-state depletion threshold [corresponding state units].
+    unit : MultiPhaseVessel
+        Native vessel supplying rates; its work buffer may be reused.
+    rate_tolerance : ndarray
+        Per-state stationary-rate threshold [state units/s].
+    active : set of int
+        Mutable set of currently exhausted state indices.
+
+    Returns
+    -------
+    ndarray
+        Rates [state units/s]; rates that would drive an active empty pool
+        negative are zero.
+    """
+    # Evaluate the boundary within the requested absolute error budget.
+    # Otherwise roundoff supply/uptake imbalance repeatedly releases an
+    # empty pool and exposes the discontinuous unconstrained kinetics.
+    boundary = constrained[states[constrained] <= .5 * boundary_tolerance[constrained]]
+    evaluation_state = states.copy()
+    evaluation_state[boundary] = 0.0
+    values = unit.unit_model(time, evaluation_state, limiter_dt=0.0)
+    replenishing = boundary[(states[boundary] > 0.0)
+                             & (values[boundary] > rate_tolerance[boundary])]
+    if replenishing.size:
+        # A real source may balance uptake below the boundary tolerance.
+        # Snapping that positive pool to zero creates an artificial switch.
+        evaluation_state[replenishing] = states[replenishing]
+        values = unit.unit_model(time, evaluation_state, limiter_dt=0.0)
+    stationary = boundary[abs(values[boundary]) <= rate_tolerance[boundary]]
+    values[stationary] = 0.0
+    for position in active:
+        if states[position] <= 0.0 and values[position] < 0.0:
+            values[position] = 0.0
+    return values
+
+
+def _inventory_jacobian(
+        time, states, *, rates, jacobian_step, jacobian_scale):
+    """Evaluate a forward-difference Jacobian with fixed relative steps.
+
+    Parameters
+    ----------
+    time : float
+        Absolute time [s].
+    states : ndarray
+        Packed states.
+
+    rates : callable
+        Boundary-aware rate evaluator [state units/s].
+    jacobian_step : float
+        Positive relative perturbation size [-].
+    jacobian_scale : ndarray
+        Positive minimum perturbation scales [state units].
+
+    Returns
+    -------
+    ndarray, shape (n_states, n_states)
+        ``d rates / d states`` [row-state units/(column-state units s)], with step
+        ``jacobian_step * max(|y|, jacobian_scale)``.
+    """
+    # Fixed relative perturbations avoid runaway adaptive probes
+    # when optimized rates contain solver-level numerical noise.
+    # Vessel rate evaluations may overwrite a shared work buffer.
+    baseline = np.array(rates(time, states), copy=True)  # [state units/s]
+    increments = jacobian_step * np.maximum(abs(states), jacobian_scale)  # [state units]
+    matrix = np.empty((len(states), len(states)))
+    for index, increment in enumerate(increments):
+        perturbed = states.copy()
+        perturbed[index] += increment
+        matrix[:, index] = (rates(time, perturbed) - baseline) / increment
+    return matrix
+
+
+def _inventory_boundary(
+        time, states, *, position, boundary_tolerance):
+    """Measure one constrained state's distance above its boundary tolerance.
+
+    Parameters
+    ----------
+    time : float
+        Absolute time [s].
+    states : ndarray
+        Packed states.
+    position : int
+        Constrained state index, bound when the event is constructed.
+
+    boundary_tolerance : ndarray
+        Per-state depletion threshold [corresponding state units].
+
+    Returns
+    -------
+    float
+        ``states[position] - boundary_tolerance[position]`` [state units];
+        a downward zero crossing ends the segment.
+    """
+    return states[position] - boundary_tolerance[position]
+
+
+class SciPyBackend(IntegratorBackend):
+    """Portable native ODE backend using SciPy's adaptive BDF integrator.
+
+    States flagged ``limit_negative_inventory`` are held at a depletion
+    boundary using terminal events: an event stops integration when
+    a pool reaches its boundary tolerance, the pool is set to zero, and the
+    solve restarts with uptake from that pool limited to actual supply. The
+    vessel's rate limiter is bypassed (``limiter_dt=0``) because the
+    boundaries replace it.
+
+    Parameters
+    ----------
+    options : dict, optional
+        ``solve_ivp`` options such as ``rtol`` [-], ``atol`` [state units] and
+        ``max_step`` [s], plus the paired ``jacobian_relative_step`` [-] and
+        ``jacobian_state_scale`` [state units] for a controlled
+        finite-difference Jacobian.
+    """
+
+    def __init__(self, options=None):
+        """Store solver options.
+
+        Parameters
+        ----------
+        options : dict, optional
+            ``solve_ivp`` and controlled-Jacobian options.
+        """
+        super().__init__()
+        self.options = {} if options is None else dict(options)
+        self._unit = None
+
+    def compile_integrator(self, unit, eval_sens=False, jac_v_prod=False,
+                           options=None, verbose=True, any_event=True):
+        """Reset the unit and record its initial solver state.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Unit to integrate.
+        eval_sens, jac_v_prod : bool, optional
+            Not supported; must be False.
+        options, verbose, any_event : object, optional
+            Accepted for interface compatibility; unused.
+
+        Returns
+        -------
+        ndarray
+            Packed initial states.
+        """
+        return _compile_ode_backend(self, unit, eval_sens, jac_v_prod, "SciPyBackend")
+
+    def solve(self, unit, runtime=None, time_grid=None, eval_sens=False,
+              jac_v_prod=False, verbose=True, options=None, any_event=True):
+        """Integrate the unit and store native results.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Unit to integrate.
+        runtime : float, optional
+            Duration [s]; used when ``time_grid`` is None.
+        time_grid : array_like, optional
+            Absolute reporting times [s].
+        eval_sens, jac_v_prod : bool, optional
+            Not supported.
+        verbose : bool, optional
+            Unused.
+        options : dict, optional
+            Per-call options overriding the instance options.
+        any_event : bool, optional
+            Unused.
+
+        Returns
+        -------
+        tuple of ndarray
+            ``(time, states)``: times [s] and packed states.
+        """
+        if not self._compiled or self._unit is not unit:
+            self.compile_integrator(unit, eval_sens, jac_v_prod, options,
+                                    verbose, any_event)
+        time, states = self.fast_solve(unit, runtime, time_grid, verbose,
+                                       options=options)
+        unit.retrieve_results(time, states)
+        return time, states
+
+    def fast_solve(self, unit, runtime=None, time_grid=None, verbose=True,
+                   options=None):
+        """Integrate with depletion boundaries and return the requested samples.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Compiled unit.
+        runtime : float, optional
+            Duration [s].
+        time_grid : array_like, optional
+            Absolute reporting times [s].
+        verbose : bool, optional
+            Unused.
+        options : dict, optional
+            Per-call options.
+
+        Returns
+        -------
+        tuple of ndarray
+            ``(times, states)`` at every requested time.
+
+        Raises
+        ------
+        RuntimeError
+            The backend is not compiled, SciPy fails, a requested time is missing,
+            or a constrained state falls below the legacy -1e-12 cutoff
+            [corresponding state units].
+        ValueError
+            Neither ``runtime`` nor ``time_grid`` is given, the Jacobian options
+            are unpaired or invalid, or a constrained initial state is negative.
+
+        Notes
+        -----
+        The boundary tolerance per state is ``min(atol, rtol |y0|)`` (``atol``
+        alone when ``y0 = 0``), with SciPy's defaults 1e-6 and 1e-3 when unset.
+        Rates within ``tolerance / runtime`` of zero at a boundary count as
+        stationary, so roundoff imbalance between supply and uptake cannot
+        repeatedly release an empty pool. Pools below half the tolerance are
+        evaluated at zero. The retained output policy sets constrained values
+        in [-1e-12, 0) to zero [corresponding state units]. This absolute
+        legacy cutoff is not a proven, scale-independent roundoff bound.
+        """
+        if not self._compiled:
+            raise RuntimeError("Integrator has not been compiled")
+        initial = unit.create_solver_init_states()
+        if time_grid is not None:
+            evaluation_times = np.asarray(time_grid, dtype=float)
+            final_time = float(evaluation_times[-1])
+        elif runtime is not None:
+            final_time = unit.elapsed_time + float(runtime)
+            evaluation_times = None
+        else:
+            raise ValueError("Either runtime or time_grid must be supplied")
+        solve_options = dict(self.options)
+        if options:
+            solve_options.update(options)
+        jacobian_step = solve_options.pop("jacobian_relative_step", None)
+        jacobian_scale = solve_options.pop("jacobian_state_scale", None)
+        if (jacobian_step is None) != (jacobian_scale is None):
+            raise ValueError("controlled Jacobian requires both relative step and state scale")
+        if jacobian_step is not None:
+            jacobian_step = float(jacobian_step)
+            jacobian_scale = np.broadcast_to(np.asarray(jacobian_scale, dtype=float), initial.shape)
+            if (not np.isfinite(jacobian_step) or jacobian_step <= 0.0
+                    or not np.isfinite(jacobian_scale).all() or np.any(jacobian_scale <= 0.0)):
+                raise ValueError("Jacobian step and state scales must be finite and positive")
+            if "jac" in solve_options:
+                raise ValueError("choose either a supplied Jacobian or controlled differences")
+        constrained = []
+        for key, state_slice in unit.solver_state_collection.slices.items():
+            state = unit.solver_state_collection.states[key]
+            if state.limit_negative_inventory:
+                constrained.extend(range(state_slice.start, state_slice.stop))
+        constrained = np.asarray(constrained, dtype=int)
+        if constrained.size and np.any(initial[constrained] < 0.0):
+            raise ValueError("initial constrained inventories must be nonnegative")
+
+        # Depletion events handle exhaustion; the legacy output correction
+        # below remains a separate, explicitly documented numerical policy.
+        absolute_tolerance = np.broadcast_to(solve_options.get('atol', 1e-6), initial.shape)
+        reference_state = abs(unit.solver_state_collection.pack(unit._initial_solver_state))  # [state units]
+        boundary_tolerance = np.where(reference_state > 0., np.minimum(
+            absolute_tolerance, solve_options.get('rtol', 1e-3) * reference_state), absolute_tolerance)
+        rate_tolerance = boundary_tolerance / (final_time - unit.elapsed_time)  # [state units/s]
+        active = {position for position in constrained if initial[position] == 0.0}
+
+        rates = partial(_inventory_rates,
+            constrained=constrained, boundary_tolerance=boundary_tolerance, unit=unit,
+            rate_tolerance=rate_tolerance, active=active)
+
+        if jacobian_step is not None:
+            jacobian = partial(_inventory_jacobian,
+                rates=rates, jacobian_step=jacobian_step, jacobian_scale=jacobian_scale)
+            solve_options["jac"] = jacobian
+
+        output_times = []
+        output_states = []
+        start_time = float(unit.elapsed_time)  # [s]
+        start_state = np.asarray(initial, dtype=float).copy()
+        while start_time < final_time:
+            start_rates = rates(start_time, start_state)
+            # Preserve the set object bound into the rate callback.
+            active.intersection_update(
+                position for position in tuple(active) if start_rates[position] <= 0.0)
+            candidates = [position for position in constrained
+                          if position not in active]
+            events = []
+            for position in candidates:
+                boundary = partial(_inventory_boundary,
+                    position=position, boundary_tolerance=boundary_tolerance)
+                boundary.terminal = True
+                boundary.direction = -1.0
+                events.append(boundary)
+
+            segment_times = None
+            if evaluation_times is not None:
+                segment_times = evaluation_times[
+                    (evaluation_times >= start_time) &
+                    (evaluation_times <= final_time)
+                ]
+                if segment_times.size == 0:
+                    segment_times = None
+            result = solve_ivp(
+                rates, (start_time, final_time), start_state, method="BDF",
+                t_eval=segment_times, events=events or None,
+                **solve_options,
+            )
+            if not result.success:
+                raise RuntimeError(f"SciPy integration failed: {result.message}")
+            # A boundary can end a segment before its first requested sample.
+            for time, state in zip(result.t, np.asarray(result.y).T):
+                if not output_times or time > output_times[-1]:
+                    output_times.append(float(time)); output_states.append(state.copy())
+
+            event_records = [
+                (times[0], candidates[index], result.y_events[index][0])
+                for index, times in enumerate(result.t_events or ()) if len(times)
+            ]
+            if not event_records:
+                break
+            event_time, position, event_state = min(event_records, key=lambda item: item[0])
+            event_state = np.asarray(event_state, dtype=float).copy()
+            event_state[position] = 0.0
+            active.add(position)
+            start_time = float(event_time)
+            start_state = event_state
+
+        times = np.asarray(output_times)
+        states = np.asarray(output_states)
+        if evaluation_times is not None and not np.array_equal(times, evaluation_times):
+            missing = evaluation_times[~np.isin(evaluation_times, times)]
+            raise RuntimeError(f"integration did not return requested times {missing.tolist()}")
+        if constrained.size and np.any(states[:, constrained] < -1e-12):
+            raise RuntimeError("integration violated a nonnegative inventory constraint")
+        states[:, constrained] = np.maximum(states[:, constrained], 0.0)
+        return times, states
+
+
+class FixedStepBackend(IntegratorBackend):
+    """Deterministic sequential propagation on a user-supplied native time grid.
+
+    Each step calls every mechanism's ``prepare_step(dt)``, evaluates the
+    unit with ``limiter_dt = dt``, applies an explicit Euler update, accepts
+    the completed state and updates the phases. Mechanisms such as
+    ``RateReconciledCulture`` use ``prepare_step`` to propagate populations
+    exactly over the step, so this is the numerical method those mechanisms
+    declare, not a generic explicit integrator.
+    """
+
+    def __init__(self):
+        """Create an uncompiled backend."""
+        super().__init__()
+        self._unit = None
+
+    def compile_integrator(self, unit, eval_sens=False, jac_v_prod=False,
+                           options=None, verbose=True, any_event=True):
+        """Reset the unit and record its initial solver state.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Unit to propagate.
+        eval_sens, jac_v_prod : bool, optional
+            Not supported; must be False.
+        options, verbose, any_event : object, optional
+            Accepted for interface compatibility; unused.
+
+        Returns
+        -------
+        ndarray
+            Packed initial states.
+        """
+        return _compile_ode_backend(self, unit, eval_sens, jac_v_prod, "FixedStepBackend")
+
+    def solve(self, unit, runtime=None, time_grid=None, eval_sens=False,
+              jac_v_prod=False, verbose=True, options=None, any_event=True):
+        """Propagate the unit and store native results.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Unit to propagate.
+        runtime : float, optional
+            Unused; a time grid is required.
+        time_grid : array_like
+            Strictly increasing absolute times [s].
+        eval_sens, jac_v_prod : bool, optional
+            Not supported.
+        verbose, options, any_event : object, optional
+            Unused.
+
+        Returns
+        -------
+        tuple of ndarray
+            ``(time, states)``.
+        """
+        if not self._compiled or self._unit is not unit:
+            self.compile_integrator(unit, eval_sens, jac_v_prod, options,
+                                    verbose, any_event)
+        time, states = self.fast_solve(unit, runtime, time_grid, verbose)
+        unit.retrieve_results(time, states)
+        return time, states
+
+    def fast_solve(self, unit, runtime=None, time_grid=None, verbose=True):
+        """Propagate on the supplied grid.
+
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Compiled unit.
+        runtime : float, optional
+            Unused.
+        time_grid : array_like
+            Strictly increasing absolute times [s].
+        verbose : bool, optional
+            Unused.
+
+        Returns
+        -------
+        tuple of ndarray
+            ``(times, states)`` on the grid.
+
+        Raises
+        ------
+        ValueError
+            The grid is missing, has fewer than two points or is not increasing.
+        RuntimeError
+            A constrained state falls below the legacy -1e-12 cutoff
+            [corresponding state units].
+
+        Notes
+        -----
+        Values in [-1e-12, 0) are set to zero [corresponding state units].
+        This retained absolute cutoff is not a proven roundoff bound.
+        """
+        if time_grid is None:
+            raise ValueError("FixedStepBackend requires an explicit time_grid")
+        times = np.asarray(time_grid, dtype=float)
+        if times.ndim != 1 or len(times) < 2 or np.any(np.diff(times) <= 0):
+            raise ValueError("time_grid must be a strictly increasing vector")
+        states = np.empty((len(times), unit.solver_state_collection.dim))
+        states[0] = unit.create_solver_init_states()
+        constrained = []
+        for key, state_slice in unit.solver_state_collection.slices.items():
+            if unit.solver_state_collection.states[key].limit_negative_inventory:
+                constrained.extend(range(state_slice.start, state_slice.stop))
+        for index, step in enumerate(np.diff(times)):
+            for process in unit.intraphase_processes:
+                prepare = getattr(process.mechanism, "prepare_step", None)
+                if prepare is not None:
+                    prepare(step)
+            rates = unit.unit_model(times[index], states[index], limiter_dt=step)
+            states[index + 1] = states[index] + step * rates
+            if constrained and np.any(states[index + 1, constrained] < -1e-12):
+                raise RuntimeError(
+                    "fixed-step propagation violated a nonnegative inventory constraint"
+                )
+            states[index + 1, constrained] = np.maximum(
+                states[index + 1, constrained], 0.0
+            )
+            # Fixed-step propagation accepts this state before the next closure.
+            completed = unit.complete_state(
+                unit.solver_state_collection.unpack(states[index + 1]),
+                times[index + 1],
+            )
+            unit.update_phases_from_state(completed)
+        return times, states
 
 
 class _ScipyStateEvent:

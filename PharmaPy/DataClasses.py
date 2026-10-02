@@ -211,10 +211,19 @@ class ResolvedPhaseTransfer:
     material_writes: list = field(default_factory=list)
 
     def scale(self, factor, basis):
+        """Scale an outlet consistently on its volume and species-flow bases.
 
-        self.species_flow *= factor
+        Parameters
+        ----------
+        factor : float
+            Common transfer multiplier [-].
+        basis : str
+            Native species basis, such as ``mass_j`` or ``mole_j``.
+        """
 
-        self.stream_phase.updatePhase(**{basis:self.species_flow})
+        self.vol_flow *= factor
+        self.stream_phase.updatePhase(vol_flow=self.vol_flow)
+        self.species_flow = getattr(self.stream_phase, basis + "_flow")
         
 @dataclass
 class ResolvedStreamConnection:
@@ -395,6 +404,18 @@ class StateCollection:
         if not self._compiled:
             self.compile()
         return self._material_keys
+
+    @property
+    def differential_mask(self):
+        """Identify differential entries in the compiled solver ordering.
+
+        Returns
+        -------
+        ndarray of bool
+            True for differential states, False for algebraic states.
+        """
+        return ~self.algebraic_mask
+
     def unpack(self, y):
         if not self._compiled:
             self.compile()

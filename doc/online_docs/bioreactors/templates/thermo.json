@@ -1,0 +1,18 @@
+{
+  "<species_id>": {
+    "formula": null,
+    "mw": null,
+    "t_crit": null,
+    "p_crit": null,
+    "cp_liq": [],
+    "cp_solid": [],
+    "rho_liq": null,
+    "rho_solid": null,
+    "visc_liq": [],
+    "p_vap": [],
+    "mol_vol": null,
+    "delta_hvap": null,
+    "tref_hvap": null,
+    "surf_tension": null
+  }
+}

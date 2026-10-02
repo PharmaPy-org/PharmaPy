@@ -55,10 +55,13 @@ Homepage = "https://github.com/PharmaPy-org/PharmaPy"
 Repository = "https://github.com/PharmaPy-org/PharmaPy"
 
 [tool.setuptools]
-packages = ["PharmaPy"]
 # Ship only the files named in package-data below. The implicit scan would
 # also flag PharmaPy/data and its folders as unlisted subpackages.
 include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["PharmaPy", "PharmaPy.*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 PharmaPy = ["data/*.json", "data/**/*.json", "data/**/*.csv"]
@@ -67,4 +70,5 @@ PharmaPy = ["data/*.json", "data/**/*.json", "data/**/*.csv"]
 testpaths = ["tests"]
 markers = [
     "unit: fast, self-contained unit tests",
+    "assimulo: optional Assimulo/SUNDIALS solver integration",
 ]

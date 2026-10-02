@@ -19,7 +19,7 @@ import PharmaPy._assimulo as assimulo_backend
 
 pytestmark = pytest.mark.unit
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 AFFECTED_MODULES = (
     "PharmaPy.Containers",
     "PharmaPy.Crystallizers",

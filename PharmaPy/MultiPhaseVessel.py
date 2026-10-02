@@ -1131,8 +1131,7 @@ class MultiPhaseVessel():
 
     def pack_state_rates(self, material_rates=None, global_rates=None,
                          algebraic_residuals=None):
-        """
-        Pack one vector the solver can consume.
+        """Pack one vector the solver can consume.
 
         Differential slots carry the derivative; algebraic slots carry the
         residual g(y), which must be zero at a consistent solution. Keeping
@@ -1147,6 +1146,26 @@ class MultiPhaseVessel():
         is optional because unit_model requests the energy balance on its
         own, in which case only global_rates is supplied and the material
         slots stay zero.
+
+        Parameters
+        ----------
+        material_rates : ndarray, optional
+            Packed material rates [native state units/s].
+        global_rates : dict, optional
+            Rates of states without an owning phase, such as temperature [K/s].
+        algebraic_residuals : dict, optional
+            Residual per algebraic state key, in each constraint's units.
+
+        Returns
+        -------
+        ndarray
+            Shared work buffer in solver ordering.
+
+        Raises
+        ------
+        KeyError
+            An algebraic state has no residual, or a differential state has no
+            rate while both rate sources are supplied.
         """
 
         buffer = self._solver_rate_buffer
@@ -1157,10 +1176,13 @@ class MultiPhaseVessel():
 
         for key in self.solver_state_collection.keys:
 
-            if algebraic_residuals is not None and key in algebraic_residuals:
-                buffer[solver_slices[key]] = np.asarray(
-                    algebraic_residuals[key]
-                ).reshape(-1)
+            if key in self.solver_state_collection.algebraic_keys:
+                if algebraic_residuals is not None:
+                    if key not in algebraic_residuals:
+                        raise KeyError(f"No algebraic residual was produced for {key}.")
+                    buffer[solver_slices[key]] = np.asarray(
+                        algebraic_residuals[key]
+                    ).reshape(-1)
                 continue
 
             if material_rates is not None and key in material_slices:
@@ -1180,7 +1202,7 @@ class MultiPhaseVessel():
             # packing error and still raises.
             if material_rates is not None and global_rates is not None:
                 raise KeyError(
-                    f"StateKey {key} not found in material_rates or "
+                    f"No differential rate: StateKey {key} not found in material_rates or "
                     "global_rates"
                 )
 
@@ -1210,7 +1232,35 @@ class MultiPhaseVessel():
 
         return completed_state
     def unit_model(self, time, states, params=None, sw=None,
-                    mat_bce=False, enrgy_bce=False,alg_bce=False, limiter_dt=None):
+                    mat_bce=False, enrgy_bce=False,alg_bce=False, limiter_dt=None,
+                    differential_only=False):
+        """Evaluate the vessel right-hand side in solver ordering.
+
+        Parameters
+        ----------
+        time : float
+            Absolute simulation time [s].
+        states : ndarray
+            Packed solver states [native state units].
+        params, sw : object, optional
+            Native solver arguments; unused here.
+        mat_bce, enrgy_bce : bool, optional
+            Return only material or only energy rates. Default False.
+        alg_bce : bool, optional
+            Return only the algebraic residual mapping. Default False.
+        limiter_dt : float, optional
+            Inventory-limiting horizon [s]; defaults to ``positivity_horizon``.
+            Zero or negative disables rate throttling.
+        differential_only : bool, optional
+            Skip algebraic constraints, used to initialize IDA derivatives.
+            Default False.
+
+        Returns
+        -------
+        ndarray or dict
+            Rates [state units/s] with algebraic residuals in their slots, or
+            the partial result requested by a ``*_bce`` flag.
+        """
         if not hasattr(self, "model_call_count"):
             self.model_call_count = 0
             self._timers={}
@@ -1256,7 +1306,7 @@ class MultiPhaseVessel():
         # carries a residual vector.
         algebraic_residuals = None
 
-        if self.has_algebraic_balance:
+        if self.has_algebraic_balance and not differential_only:
             t0 = perf_counter()
             algebraic_residuals = self.algebraic_balances(time, completed_state)
             self._timers['algebraic_balances_total'] = self._timers.get('algebraic_balances_total',0)+perf_counter()-t0
@@ -1709,6 +1759,53 @@ class MultiPhaseVessel():
         return self.solver_state_collection.pack(
             self.complete_state({},0))
 
+    def dae_residual(self, time, states, derivatives, sw=None):
+        """Combine differential balances and algebraic constraints for IDA.
+
+        Parameters
+        ----------
+        time : float
+            Absolute simulation time [s].
+        states : ndarray
+            Native packed solver states, in metadata-declared units.
+        derivatives : ndarray
+            State derivatives [native state units/s], in solver ordering.
+        sw : object, optional
+            Native event switches passed to the balance evaluator.
+
+        Returns
+        -------
+        ndarray
+            Differential entries are derivative minus rate [state units/s];
+            algebraic entries retain each constraint's declared units.
+
+        Raises
+        ------
+        KeyError
+            A declared solver state has no corresponding equation.
+        """
+        values = self.unit_model(time, states, sw=sw)
+        return np.where(self.solver_state_collection.algebraic_mask,
+                        values, derivatives - values)
+
+    def create_solver_init_derivatives(self, states=None):
+        """Initialize differential derivatives without evaluating constraints.
+
+        Parameters
+        ----------
+        states : ndarray, optional
+            Packed native initial states. Defaults to the current solver state.
+
+        Returns
+        -------
+        ndarray
+            Independent copy of differential rates [state units/s], with zero
+            algebraic entries because their derivatives do not enter IDA.
+        """
+        if states is None:
+            states = self.create_solver_init_states()
+        return self.unit_model(self.elapsed_time, states, differential_only=True).copy()
+
     def solve_unit(
         self,
         runtime=None,
@@ -1997,17 +2094,33 @@ class MultiPhaseVessel():
             completed_state,
             limiter_dt=1.0,
         ):
-        """
-        Compute one throttling factor per phase inventory.
+        """Compute one throttling factor per phase inventory.
 
         Inlet and intraphase terms are treated as fixed; cross-phase and
         outlet terms compete for whatever inventory is left over
         ``limiter_dt`` and share a single factor per phase, which keeps an
         outlet composition consistent with the phase it drains.
 
-        Returns ``None`` when nothing needs throttling, so the common case
-        costs one vectorized comparison and no allocation of scale vectors.
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions by source [native state units/s].
+        completed_state : dict
+            Native completed state.
+        limiter_dt : float, optional
+            Depletion horizon [s]. Zero or negative disables throttling.
+            Default 1.0.
+
+        Returns
+        -------
+        ndarray or None
+            Scale factors [-] per material entry, or None when nothing needs
+            throttling, so the common case costs one vectorized comparison and
+            no allocation of scale vectors.
         """
+
+        if limiter_dt <= 0.0:
+            return None
 
         contributions = buffer.contributions
 
@@ -2090,15 +2203,33 @@ class MultiPhaseVessel():
             completed_state,
             limiter_dt=1.0,
         ):
-        """
-        Throttle consuming contributions to keep phase inventories positive.
+        """Throttle consuming contributions to keep phase inventories positive.
 
         ``limiter_dt`` is the horizon over which depletion is anticipated.
         Phases and nonlinear mechanisms are not re-evaluated: each mechanism
         that drains a throttled phase is scaled down at both ends, so the
         transfer stays closed even while it is being limited.
 
-        Returns True when the limiter engaged.
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions, modified in place when throttled.
+        completed_state : dict
+            Native completed state.
+        limiter_dt : float, optional
+            Depletion horizon [s]. Default 1.0.
+
+        Returns
+        -------
+        bool
+            True when the limiter engaged.
+
+        Raises
+        ------
+        RuntimeError
+            Throttling transfers and outlets cannot keep an inventory above
+            -1e-12 over ``limiter_dt``, because the deficit comes from fixed inlet
+            or intraphase terms.
         """
 
         scales = self.calculate_scale(
@@ -2107,6 +2238,25 @@ class MultiPhaseVessel():
             limiter_dt=limiter_dt,
         )
 
+        predicted_rates = buffer.contributions.sum(axis=0)
+        if scales is not None:
+            for aux in buffer.aux[buffer.CROSSPHASE]:
+                writes = aux.get("material_writes", ())
+                factor = self._transfer_scale(scales, writes)
+                for material_slice, rate in writes:
+                    predicted_rates[material_slice] -= (1.0 - factor) * rate
+            for transfer in buffer.aux[buffer.OUTLET]:
+                material_slice = self._material_slice_by_phase.get(transfer.mapping.sink_phaseref)
+                if material_slice is not None:
+                    factor = scales[material_slice.start]
+                    predicted_rates[material_slice] += (1.0 - factor) * transfer.species_flow
+                    for state_slice, rate in transfer.material_writes:
+                        predicted_rates[state_slice] += (1.0 - factor) * rate
+        if limiter_dt > 0.0:
+            for key, state_slice in self._positivity_groups:
+                if np.any(completed_state[key] + limiter_dt * predicted_rates[state_slice] < -1e-12):
+                    raise RuntimeError("Inventory depletion cannot be corrected by transfer/outlet "
+                                       "scaling; reduce the integration step or constrain the mechanism.")
         if scales is None:
             return False
 
@@ -2132,13 +2282,20 @@ class MultiPhaseVessel():
         return factor
 
     def scale_crossphase_transfers(self, buffer, scales):
-        """
-        Scale each cross-phase mechanism down by a single factor.
+        """Scale each cross-phase mechanism down by a single factor.
 
         Both ends of a transfer move together, so throttling the source
         drain also throttles what arrives in the sink. Scaling the flat
         contribution rows independently would credit the sink with material
-        the source never gave up.
+        the source never gave up. The applied factor is recorded as
+        ``aux['transfer_scale']`` so the energy balance scales the same transfer.
+
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions, modified in place.
+        scales : ndarray
+            Scale factor per material entry [-].
         """
 
         row = buffer.contributions[buffer.CROSSPHASE]
@@ -2155,6 +2312,7 @@ class MultiPhaseVessel():
             if factor >= 1.0:
                 continue
 
+            aux["transfer_scale"] = factor
             for material_slice, rate in material_writes:
                 row[material_slice] -= (1.0 - factor) * rate
 
@@ -2183,7 +2341,6 @@ class MultiPhaseVessel():
                 row[mechanism_slice] += (1.0 - factor) * rate
 
             transfer.scale(factor, self.basis)
-            transfer.vol_flow *= factor
 
     def sum_material_contributions(self,contributions):
         return contributions.sum(axis=0)
@@ -2637,14 +2794,40 @@ class MultiPhaseVessel():
             time,
             completed_state
         ):
+        """Add every intraphase mechanism's rates to the contribution buffer.
+
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions; the intraphase row is filled.
+        time : float
+            Absolute simulation time [s].
+        completed_state : dict
+            Native completed state.
+
+        Notes
+        -----
+        Mechanisms that set ``requires_inlet_rates`` also receive
+        ``inlet_rates``: a copy of the inlet contributions to their own phase's
+        material states [native state units/s], so inventory feasibility can count
+        actual supply.
+        """
         for process in self.intraphase_processes:
             phase = self.phase_states.get_phase(process.phaseref)
 
+            inputs = {}
+            if getattr(process.mechanism, 'requires_inlet_rates', False):
+                inputs['inlet_rates'] = {
+                    key: buffer.contributions[buffer.INLET, state_slice].copy()
+                    for key, state_slice in self.solver_state_collection.material_slices.items()
+                    if key.phaseref == process.phaseref
+                }
             intraphase_result = process.mechanism.get_solver_state_rates(
                 process=process,
                 phase=phase,
                 time=time,
-                completed_state=completed_state
+                completed_state=completed_state,
+                **inputs
             )
 
             for state_key,rate in intraphase_result.state_rates.items():
@@ -2666,6 +2849,24 @@ class MultiPhaseVessel():
 
         # temp = completed_state["temp"]
 
+        """Add every active cross-phase mechanism's rates to the contribution buffer.
+
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions; the cross-phase row is filled and each
+            mechanism's aux records ``material_writes`` and an initial
+            ``transfer_scale`` of 1.0.
+        time : float
+            Absolute simulation time [s].
+        completed_state : dict
+            Native completed state.
+
+        Raises
+        ------
+        RuntimeError
+            A mechanism writes to a phase that is not in the vessel.
+        """
         for connection in self.phase_connections:
 
             source_phase = self.phase_states.get_phase(connection.source_phaseref)
@@ -2717,6 +2918,7 @@ class MultiPhaseVessel():
             self._timers['crossphase_contributions'] = self._timers.get('crossphase_contributions',0)+perf_counter()-t0
 
             crossphase_result.aux["material_writes"] = material_writes
+            crossphase_result.aux["transfer_scale"] = 1.0
 
             buffer.aux[buffer.CROSSPHASE].append(crossphase_result.aux)
     
@@ -2852,9 +3054,22 @@ class MultiPhaseVessel():
             completed_state
         ):
         
+        """Add cross-phase heat generation, scaled like the material transfer.
+
+        Parameters
+        ----------
+        contributions : dict
+            Energy contributions by source [W]; ``'crossphase'`` is updated.
+        aux : list of dict
+            Cross-phase auxiliary records, including ``transfer_scale`` [-].
+        time : float
+            Absolute simulation time [s].
+        completed_state : dict
+            Native completed state.
+        """
         for crossphase in aux:
             connection = crossphase['connection']
-            contributions['crossphase'] += connection.mechanism.get_heat_generation(aux=crossphase,
+            contributions['crossphase'] += crossphase.get('transfer_scale', 1.0) * connection.mechanism.get_heat_generation(aux=crossphase,
                                                              completed_state=completed_state,
                                                              time=time)
     def add_intraphase_energy_terms(self,
@@ -3068,13 +3283,17 @@ class MultiPhaseVessel():
         #backward compatibility
         return self.Phases.num_species
     def create_pseudo(self):
-        """
-        Create an independent vessel for replaying an accepted solver
-        trajectory.
+        """Create an independent vessel for replaying an accepted solver trajectory.
 
         The pseudo vessel contains the model structure, phases, mechanisms,
         connections, and controller, but does not contain the integrator or
-        other runtime solver objects.
+        other runtime solver objects. Numerical work buffers and timers are
+        recreated empty.
+
+        Returns
+        -------
+        MultiPhaseVessel
+            Reset replay copy of this vessel.
         """
 
         pseudo = object.__new__(type(self))
@@ -3091,6 +3310,9 @@ class MultiPhaseVessel():
             "derivatives",
             "elapsed_time",
             "outlet_conditions",
+            "_material_contributions",
+            "_solver_rate_buffer",
+            "_timers",
         }
 
         for name, value in self.__dict__.items():
@@ -3105,6 +3327,16 @@ class MultiPhaseVessel():
 
         # The pseudo is not an integratable vessel.
         pseudo.integrator = None
+
+        # Replay receives fresh numerical work buffers; accepted-step auxiliary
+        # diagnostics from the live solve are intentionally not copied.
+        pseudo._material_contributions = MaterialContributionBuffer(
+            pseudo.solver_state_collection.material_dim
+        )
+        pseudo._solver_rate_buffer = np.empty(
+            pseudo.solver_state_collection.dim
+        )
+        pseudo._timers = {}
 
         pseudo.reset()
 

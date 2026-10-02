@@ -87,3 +87,12 @@ refactor_old_cryst_test.py
 # Python packaging (python -m build)
 build/
 dist/
+
+# Local WP3.1 planning and generated artifacts
+/AGENTS.md
+/baseline_rules.md
+/organized_tasks.md
+/WP3_1_SCOPE_CLASSIFICATION.md
+__pycache__/
+.pytest_cache/
+/examples/bioreactors/**/outputs/
