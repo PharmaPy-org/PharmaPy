@@ -1828,7 +1828,12 @@ class MultiPhaseVessel():
 
         Handing these to the integrator lets it locate a regime change by
         root-finding and restart cleanly there, instead of discovering it by
-        failing steps. That is what makes a small maxh unnecessary.
+        failing steps. It does not make a step cap (maxh) unnecessary. Before
+        nucleation nothing in a crystallizer changes, so the integrator
+        lengthens its step, and the newborn population sits below its
+        absolute tolerance, where the error test cannot see it. The step can
+        then cross the burst whole: on the case-study crystallizer a 60 s cap
+        miscounted the crystals on some feeds and a 10 s cap did not.
         """
 
         if not self.emit_events:

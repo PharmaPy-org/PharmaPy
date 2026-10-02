@@ -91,6 +91,15 @@ if BACKEND not in BACKENDS:
         % (BACKEND, sorted(BACKENDS))
     )
 
+# Longest integrator step, for every unit in this module. Before nucleation
+# nothing in a crystallizer changes, so the integrator stretches its step to
+# this cap and then crosses the nucleation burst in one step. At 60 s that
+# miscounted the crystals on lean case-study feeds by up to 106 % (Krylov)
+# and 101 % (legacy, dense). At 10 s no solver in either stack was more than
+# 2 % from SciPy LSODA on any of the 33 feeds tried (0.04 to 0.20 mol/L of
+# C). See test_multiphase_vessel_batch_crystallizer_cvode.py.
+MAX_STEP = 10.0  # [s]
+
 
 def make_integrator():
     """A fresh backend for one vessel.
@@ -100,7 +109,7 @@ def make_integrator():
     instance would recompile over each other.
     """
 
-    return BACKENDS[BACKEND](options={'maxh': 60})
+    return BACKENDS[BACKEND](options={'maxh': MAX_STEP})
 
 # Same chemistry and kinetics as tests/Flowsheet/flowsheet_tests.py, so any
 # difference is attributable to the unit implementations rather than the model.
@@ -234,7 +243,7 @@ def test_stage1_all_old():
 
     run_kwargs = quiet({
         'R01': {'runtime': TIME_R01},
-        'CR01': {'runtime': TIME_CR01, 'sundials_opts': {'maxh': 60}},
+        'CR01': {'runtime': TIME_CR01, 'sundials_opts': {'maxh': MAX_STEP}},
         'F01': {'runtime': None, 'deltaP': DELTA_P},
     })
     flst.SolveFlowsheet(kwargs_run=run_kwargs, verbose=False)
@@ -995,9 +1004,8 @@ CRYST_FEED = np.array([0.00231, 0.1036, 0.1250, 0.1013, 0.0])  # [mol/L]
 # 0 vs 1 um. On this fixture that moves the crystallized mass by 0.15 %,
 # the crystal count by 0.74 % and L4,3 by 0.11 %; each bound is about three
 # times that or more. The legacy unit solves with CVode's Krylov linear
-# solver, which on this feed agrees with a dense solve to about 1e-5 but
-# overcounts the crystals by about 60 % on some leaner feeds, so check the
-# legacy solve first before changing CRYST_FEED.
+# solver, which relies on the MAX_STEP cap: at 60 s it overcounted the
+# crystals by up to 86 % on leaner feeds.
 LEGACY_MASS_RTOL = 5e-3     # [-]
 LEGACY_COUNT_RTOL = 2e-2    # [-]
 LEGACY_SIZE_RTOL = 5e-3     # [-]
@@ -1014,7 +1022,7 @@ def _legacy_crystallizer_summary():
                     vol=VOL_INIT, name_solv='solvent'),
         SolidPhase(PATH, x_distrib=X_GR, distrib=np.zeros_like(X_GR),
                    mass_frac=MASSFRAC_SOLID))
-    unit.solve_unit(runtime=TIME_CR01, sundials_opts={'maxh': 60},
+    unit.solve_unit(runtime=TIME_CR01, sundials_opts={'maxh': MAX_STEP},
                     verbose=False)
 
     result = unit.result
