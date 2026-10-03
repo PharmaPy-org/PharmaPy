@@ -123,8 +123,10 @@ the checkout; this is a verification procedure, not a separate runtime API.
 
 ## Remaining acceptance work
 
-F10/F11 is the selected baseline. Its feed-volume interpretation still needs
-domain review.
+F10/F11 is the selected baseline. The source workbook identifies the nominal
+profile and logged additions as the same glucose feed; the current one-counted
+solution-volume inputs are retained. The nominal/logged dose discrepancy still
+requires experimental clarification. See the [source audit and oxygen limits](../../examples/bioreactors/ecoli_ye_fed_batch/README.md#feed-volume-source-audit).
 
 Direct F10/F11 kinetics report source Eq. 19 oxygen demand through optional
 native algebraic output fields. No dissolved-oxygen inventory, transfer/control

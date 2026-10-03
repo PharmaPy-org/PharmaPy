@@ -43,7 +43,7 @@ Use optional `inlet` identifiers for multiple concurrent feeds. `recipe.time_uni
 Source: Schröder-Kleeberg et al. (2025), [Modelling of Escherichia coli Batch and Fed-Batch Processes in Semi-Defined Yeast Extract Media](https://doi.org/10.3390/bioengineering12101081). Parameters come from [supplement S3](https://mdpi-res.com/d_attachment/bioengineering/bioengineering-12-01081/article_deploy/bioengineering-12-01081-s001.zip), sheet `3L`, column `GSF_YE_Paper_FedBatch`. Initial states, processed measurements, and operating histories come from the authors' [saved F10/F11 simulations](https://git.tu-berlin.de/bvt-htbd/public/schroeder-kleeberg_2024_ye_model). The reference files retain those processed measurements, including their 0.37 biomass conversion, rather than mixing them with the differently processed supplementary figure spreadsheet.
 
 - Acetate production has the positive sign implied by the source's definition of net production; the printed balance has an inconsistent sign.
-- Scheduled feed adds 0.1725 L containing 103.5 g glucose per run. The saved source also applies most recorded feed volumes as nutrient-free dilution. That second volume contribution is excluded here.
+- Scheduled feed adds 0.1725 L containing 103.5 g glucose per run. The saved source volume history is consistent with also applying most logged glucose-feed volumes as nutrient-free dilution. That second volume contribution is excluded here.
 - Base additions and samples remain separate. Final volumes are 1.1061 L (F10) and 1.1008 L (F11).
 - Stock density 1.336 kg/L and base density 1 kg/L are declared assumptions affecting carrier mass, not prescribed feed volume or glucose dose. Base is modeled as a nutrient-free addition, without ionic chemistry. Evaporation is omitted.
 - The configured BDF Jacobian perturbations avoid a failure near depletion. Absolute tolerance is 1e-15 in native solver units because the initial biomass inventory is only 7.4e-8 kg; relative tolerance is 1e-10. These are numerical settings, not fitted biological coefficients.
@@ -72,20 +72,45 @@ Run the independent numerical checks with:
 MPLBACKEND=Agg python -m pytest tests/Bioreactor/test_bioreactor_ecoli_ye.py -q
 ```
 
-## Feed interpretation: pending domain review
+## Feed-volume source audit
 
-| Interpretation | Treatment | Consequence |
-| --- | --- | --- |
-| Current inputs | Each declared glucose feed contributes its glucose and solution volume once; base and samples remain separate. | F10/F11 final volumes 1.1061/1.1008 L; F10 biomass RMSE about 1.79 g/L. |
-| Authors’ saved simulation | Most recorded feed volumes also enter as nutrient-free dilution. | Approximately 10% larger final volume; source F10 biomass RMSE about 1.46 g/L. |
+The authors' repository at revision `c8d18b53105f695af0d99ee0126544a623b6ff65`
+identifies `Feed` as `Cumulated_feed_volume_glucose`. Its original
+`ExpData/3L_cultivation/Generic_Excel_Sheet_GSF_F10F11.xlsx` labels the two
+channels **Glu (Feed [V])** and **Glu (Profile)**. Base and samples occupy
+separate columns; the saved acid and medium additions are empty. The extracted
+[operating records](reference/operating_records.json) preserve these original
+observations and their source identity.
 
-The chosen interpretation follows the declared feed dose (103.5 g glucose in
-0.1725 L solution) and avoids counting that solution volume twice. However, the
-saved source may encode an additional real liquid contribution not distinguished
-in the available declarations. Better curve agreement alone cannot decide this.
-The source-comparison calculation is retained in the test suite; interpretation remains
-**pending domain review**. Neither inputs nor trajectories were retuned in response
-to this review. A source-matching scenario is not silently substituted.
+This evidence identifies two descriptions of the same glucose feed, rather than
+a documented second liquid addition. The current inputs already count the
+nominal glucose profile's solution volume once. No feed or carbon-kinetics
+parameters were changed by this audit.
+
+| Quantity over the modeled 26.5 h | F10 | F11 |
+| --- | ---: | ---: |
+| Nominal profile integral, glucose [g] | 103.5 | 103.5 |
+| Nominal solution volume at 600 g/L [L] | 0.1725 | 0.1725 |
+| Sum of logged glucose-feed additions [L] | 0.125374 | 0.125524 |
+| Separate base additions [L] | 0.0696 | 0.0643 |
+| Samples removed [L] | 0.136 | 0.136 |
+| Current final liquid volume [L] | 1.1061 | 1.1008 |
+| Historical saved simulation final volume [L] | 1.217926 | 1.216519 |
+
+The historical final-volume excess is consistent with including most logged
+feed additions a second time. The actual source simulator is an external
+`ecoli_sim_and_pe` submodule whose code was unavailable for this audit; this is
+an inference from input identities and saved volume histories, not a source-code
+trace. The recorded induction addition occurs at the endpoint of this
+pre-induction model and is not added to improve agreement.
+
+**The nominal profile and logged dose still disagree.** The 103.5 g value is the
+configured profile integral, not proof of the experimentally delivered dose.
+An experiment owner must resolve that discrepancy before claiming a validated
+actual-feed reconstruction. Adding both volumes or selecting the interpretation
+with lower biomass RMSE would not resolve it. The retained scenario reproduces
+the nominal source-model feed schedule without duplicate dilution.
+
 ## Oxygen uptake and its limits
 
 The direct F10/F11 mechanisms now report the paper's Eq. 19 oxygen demand using
