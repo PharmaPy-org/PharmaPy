@@ -128,10 +128,34 @@ Missing observations are omitted from the source, never encoded as NaN.
 (#238). This branch's base predates that interface, and no experiment or
 measurement object hierarchy is defined here (#346).
 
-## 5. Verify before scientific use
+## 5. Report algebraic kinetic quantities
+
+Configured kinetics accept optional `model.kinetics.reported_rates` entries:
+
+```json
+"reported_rates": {
+  "oxygen_uptake": {
+    "rule": "oxygen_uptake",
+    "unit": "g/(L h)",
+    "basis": "g oxygen per litre of liquid per hour"
+  }
+}
+```
+
+The named rule must exist and any replacement rate provider must return it with
+its declared unit. This registers a native postprocessed field (for example
+`oxygen_uptake_liquid0`); it does not add a material source or solver state.
+Values use the declared reporting unit without implicit conversion. Equations
+must therefore match their units and basis, just as for other rule expressions.
+Omitting `reported_rates` preserves existing behavior. The direct F10/F11
+examples use this to calculate published oxygen demand; they do not model a
+dissolved-oxygen inventory or oxygen-control dynamics.
+
+## 6. Verify before scientific use
 
 Run `python -m pytest -q -p no:cacheprovider -o pythonpath=. tests/Bioreactor` in
 the documented Python 3.11 environment. Tests select headless plotting themselves.
 For a new process, assess inventory/constraint residuals, time-step/tolerance
 refinement, rate-provider domain coverage and independent measurements. Numerical
 verification, approximation accuracy and biological validation are different claims.
+

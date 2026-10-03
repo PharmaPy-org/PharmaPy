@@ -49,7 +49,7 @@ KINETIC_FIELDS = (
     "degradation_mappings", "product_mapping", "constants", "condition_bounds",
     "flux_basis",
 )
-DIRECT_FIELDS = ('rule_graph', 'species_mass_rates', 'rate_unit', 'constants')
+DIRECT_FIELDS = ('rule_graph', 'species_mass_rates', 'rate_unit', 'constants', 'reported_rates')
 RECONCILIATION_FIELDS = tuple(key for key in CULTURE_FIELDS if key not in KINETIC_FIELDS)
 STATE_V2_FIELDS = (
     "species", "biomass_kg", "viable_cells_million", "dead_cells_million",

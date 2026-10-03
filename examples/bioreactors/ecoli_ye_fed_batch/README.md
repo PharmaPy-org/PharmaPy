@@ -86,3 +86,31 @@ in the available declarations. Better curve agreement alone cannot decide this.
 The source-comparison calculation is retained in the test suite; interpretation remains
 **pending domain review**. Neither inputs nor trajectories were retuned in response
 to this review. A source-matching scenario is not silently substituted.
+## Oxygen uptake and its limits
+
+The direct F10/F11 mechanisms now report the paper's Eq. 19 oxygen demand using
+native algebraic outputs: `specific_oxygen_uptake_liquid0` [g O2/(gDW h)] and
+`oxygen_uptake_liquid0` [g O2/(L h)]. The latter is specific demand multiplied
+by biomass concentration. This implements Eq. 19 as printed; it does not
+establish an independently closed elemental/respiratory balance. The notebook exports both alongside the existing
+carbon trajectories. Reconciliation inputs are unchanged.
+
+The oxygen yields come from S3, sheet `3L`, column `GSF_YE_Paper_FedBatch`:
+1.067, 1.067 and 1.163 g O2/g substrate for glucose, acetate and yeast extract.
+Carbon contents come from S3 `Constants`, `LabScale`: biomass 0.041,
+glucose/acetate 1/30 and yeast extract 0.0364 C-mol/g. Equations, coefficients,
+units and output bases are explicit mechanism inputs. Reported rates add no
+integrated state and do not change the carbon balances.
+
+This is a demand calculation, **not dissolved-oxygen or oxygen-control
+validation**. The source model's Eq. 20 also requires oxygen transfer and its
+Eq. 21 a sensor response. We have not qualified those transfer/controller
+assumptions for this reproduction. A fixed transfer coefficient would not by
+itself establish the actual variable-agitation response. The original
+[processed oxygen observations](reference/oxygen_observations.json) fall to
+2% and 5.1% air saturation in F10/F11 despite the nominal 30% control target;
+therefore we do not assume oxygen was always nonlimiting. Sensor readings
+alone do not establish the magnitude of growth limitation. A dynamic oxygen
+inventory and limitation feedback remain unqualified until their required
+transfer/control evidence is established.
+

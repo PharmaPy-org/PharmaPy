@@ -230,14 +230,15 @@ class ConfiguredRates(Mechanism):
     model : Mapping
         ``rule_graph``, ``species_mass_rates`` (species -> rule) and
         ``rate_unit`` (volumetric, such as ``'mmol/(L h)'``); optional
-        ``constants``.
+        ``constants`` and ``reported_rates`` (native output name -> rule, unit,
+        basis). Reported rates are algebraic diagnostics, not material sources.
     parameters : Mapping[str, float]
         Flattened named parameters.
     conditions : Mapping[str, float]
         Declared operating conditions.
     rate_provider : Mapping, optional
-        Alternative provider declaration; it must return the same outputs in
-        ``rate_unit``.
+        Alternative provider declaration; it must return material sources in
+        ``rate_unit`` and diagnostics in their respective declared units.
     """
 
     def __init__(self, phase, model, parameters, conditions, *, rate_provider=None):
@@ -267,7 +268,15 @@ class ConfiguredRates(Mechanism):
         self.conditions = dict(conditions)
         self.definition = SimpleNamespace(rule_graph=model['rule_graph'],
                                           parameters=parameters, constants=model.get('constants', {}))
-        _validate_graph(self.definition, () if rate_provider is not None else model['species_mass_rates'].values())
+        self.reported_rates = dict(model.get('reported_rates', {}))
+        for name, entry in self.reported_rates.items():
+            if (not isinstance(name, str) or not name.isidentifier()
+                    or not isinstance(entry, dict) or set(entry) != {'rule', 'unit', 'basis'}
+                    or any(not isinstance(value, str) or not value for value in entry.values())):
+                raise ValueError('reported_rates require named rule, unit and physical basis')
+        rules = (*model['species_mass_rates'].values(),
+                 *(entry['rule'] for entry in self.reported_rates.values()))
+        _validate_graph(self.definition, () if rate_provider is not None else rules)
         self.outputs = dict(model['species_mass_rates'])
         if not set(self.outputs) <= set(phase.name_species):
             raise ValueError('Rate outputs must map phase species to declared rules.')
@@ -276,11 +285,90 @@ class ConfiguredRates(Mechanism):
         self.last_solution = None
 
         units = {name: model['rate_unit'] for name in self.outputs.values()}
+        for entry in self.reported_rates.values():
+            if entry['rule'] in units and units[entry['rule']] != entry['unit']:
+                raise ValueError('a rule cannot have conflicting source and reported units')
+            units[entry['rule']] = entry['unit']
         declaration = rate_provider if rate_provider is not None else {
             'type': 'rule-graph', 'output_units': units}
         self.rate_provider = build_rate_provider(declaration, self.definition, tuple(units))
         self.expected_rate_units = units
         self.last_provider_result = None
+
+    def _evaluate_rates(self, phase):
+        """Evaluate declared sources and diagnostics at one native phase state.
+
+        Parameters
+        ----------
+        phase : LiquidPhase
+            Current phase; concentration [kg/m3], volume [m3], weights [g/mol].
+
+        Returns
+        -------
+        RateProviderResult
+            Finite named rates in exactly the declared units and physical bases.
+
+        Raises
+        ------
+        ValueError
+            Provider units do not match the declared outputs.
+        """
+        snapshot = SimpleNamespace(concentrations_mmol_l=dict(zip(
+            phase.name_species, BioreactorUnitConverter.convert(
+                phase.mass_conc, 'kg/m3', 'mmol/L', molecular_weight_g_mol=phase.mw))),
+            volume_l=BioreactorUnitConverter.convert(phase.vol, 'm3', 'L'))
+        result = self.rate_provider.evaluate(snapshot, self.conditions)
+        if dict(result.units) != self.expected_rate_units:
+            raise ValueError('provider output units disagree with configured volumetric rates')
+        return result
+
+    def add_output_state_variables(self, state_collection, overwrite=False, *, process):
+        """Register optional rate diagnostics through native output-state hooks.
+
+        Parameters
+        ----------
+        state_collection : StateCollection
+            Native output collection; solver states are not modified.
+        overwrite : bool, optional
+            Native duplicate-key policy. Defaults to False.
+        process : IntraPhaseProcess
+            Owner supplying the phase reference.
+        """
+        for name, entry in self.reported_rates.items():
+            state_collection.add(StateVariable(
+                name, 1, entry['unit'], state_type='post', phaseref=process.phaseref,
+                compute_value=self.compute_reported_rate), overwrite)
+
+    def compute_reported_rate(self, state_var, time, completed_state, context, **kwargs):
+        """Evaluate a diagnostic on the replay vessel's accepted phase state.
+
+        Parameters
+        ----------
+        state_var : StateVariable
+            Native output field with declared units and phase identity.
+        time : float
+            Reporting time [s]; phase state has already been reconstructed.
+        completed_state : Mapping
+            Accepted native state; the replay context has applied it to phases.
+        context : MultiPhaseVessel
+            Native result-replay vessel, never the live solve's phase.
+        **kwargs
+            Native output context (resolved flows and operating conditions).
+
+        Returns
+        -------
+        float
+            Algebraic rate in the field's declared unit/basis. This is not an
+            integrated oxygen inventory or a prediction of oxygen limitation.
+
+        Raises
+        ------
+        ValueError
+            Provider values or units are invalid.
+        """
+        phase = context.phase_states.get_phase(state_var.phaseref)
+        result = self._evaluate_rates(phase)
+        return result.rates[self.reported_rates[state_var.name]['rule']]
 
     def get_overrides(self, name=None):
         """Declare that no phase property hooks are replaced.
@@ -330,13 +418,7 @@ class ConfiguredRates(Mechanism):
         ValueError
             The provider returns units other than the configured rate unit.
         """
-        snapshot = SimpleNamespace(concentrations_mmol_l=dict(zip(
-            phase.name_species, BioreactorUnitConverter.convert(
-                phase.mass_conc, 'kg/m3', 'mmol/L', molecular_weight_g_mol=phase.mw))),
-            volume_l=BioreactorUnitConverter.convert(phase.vol, 'm3', 'L'))
-        result = self.rate_provider.evaluate(snapshot, self.conditions)
-        if dict(result.units) != self.expected_rate_units:
-            raise ValueError('provider output units disagree with configured volumetric rates')
+        result = self._evaluate_rates(phase)
         self.last_provider_result = result
         rates = result.rates
         mass_rates = np.array([rates[self.outputs[n]] if n in self.outputs else 0.  # [kg/s]

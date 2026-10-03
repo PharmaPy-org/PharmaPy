@@ -25,7 +25,10 @@
       "Y_XYEF_A": 0.5557,
       "Y_XYEF_B": 0.168,
       "Y_XA": 0.4,
-      "Y_AS": 0.667
+      "Y_AS": 0.667,
+      "Y_OS": 1.067,
+      "Y_OA": 1.067,
+      "Y_OYE": 1.163
     },
     "corrections": {}
   },
@@ -377,6 +380,207 @@
               }
             ]
           }
+        },
+        {
+          "identifier": "mu_s",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "subtract",
+                "args": [
+                  {
+                    "ref": "q_ox"
+                  },
+                  {
+                    "parameter": "coefficients.qm"
+                  }
+                ]
+              },
+              {
+                "parameter": "coefficients.Y_XSem"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "mu_ac",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "ref": "q_ac"
+              },
+              {
+                "parameter": "coefficients.Y_XA"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "mu_ye",
+          "expression": {
+            "op": "add",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "ref": "q_a"
+                  },
+                  {
+                    "parameter": "coefficients.Y_XYEF_A"
+                  }
+                ]
+              },
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "ref": "q_b"
+                  },
+                  {
+                    "parameter": "coefficients.Y_XYEF_B"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "q_oxygen",
+          "expression": {
+            "op": "add",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "coefficients.Y_OS"
+                  },
+                  {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "ref": "q_ox"
+                      },
+                      {
+                        "op": "multiply",
+                        "args": [
+                          {
+                            "ref": "mu_s"
+                          },
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "constant": "Cx"
+                              },
+                              {
+                                "constant": "Cs"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "coefficients.Y_OA"
+                  },
+                  {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "ref": "q_ac"
+                      },
+                      {
+                        "op": "multiply",
+                        "args": [
+                          {
+                            "ref": "mu_ac"
+                          },
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "constant": "Ca"
+                              },
+                              {
+                                "constant": "Cs"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "coefficients.Y_OYE"
+                  },
+                  {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "op": "add",
+                        "args": [
+                          {
+                            "ref": "q_a"
+                          },
+                          {
+                            "ref": "q_b"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "multiply",
+                        "args": [
+                          {
+                            "ref": "mu_ye"
+                          },
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "constant": "Cye"
+                              },
+                              {
+                                "constant": "Cs"
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "oxygen_uptake",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "ref": "q_oxygen"
+              },
+              {
+                "ref": "biomass"
+              }
+            ]
+          }
         }
       ],
       "species_mass_rates": {
@@ -386,7 +590,25 @@
         "fraction_a": "rate_fraction_a",
         "fraction_b": "rate_fraction_b"
       },
-      "rate_unit": "g/(L h)"
+      "rate_unit": "g/(L h)",
+      "constants": {
+        "Cx": 0.041,
+        "Cs": 0.03333333333333333,
+        "Ca": 0.03333333333333333,
+        "Cye": 0.0364
+      },
+      "reported_rates": {
+        "specific_oxygen_uptake": {
+          "rule": "q_oxygen",
+          "unit": "g/(gDW h)",
+          "basis": "g O2 per g dry biomass per hour"
+        },
+        "oxygen_uptake": {
+          "rule": "oxygen_uptake",
+          "unit": "g/(L h)",
+          "basis": "g O2 per liquid litre per hour"
+        }
+      }
     },
     "reconciliation": {
       "reconciliation_policy": null
@@ -1159,5 +1381,5 @@
     "product_g": null,
     "integral": null
   },
-  "$comment": "Direct source kinetics: S3, 3L, GSF_YE_Paper_FedBatch. Acetate source sign corrected. Profile interpreted as g glucose/h, divided by 600 g/L; source volume slopes confirm this. Logged feed volumes are NOT a second feed. Biomass and yeast fractions use formal 1 g/mol bookkeeping bases. Isothermal; oxygen is not validated. Feed density 1.336 kg/L is a declared stock-density assumption; it affects carrier mass, not the configured additive volume or nutrient feed."
+  "$comment": "Direct source kinetics: S3, 3L, GSF_YE_Paper_FedBatch. Acetate source sign corrected. Profile interpreted as g glucose/h, divided by 600 g/L; source volume slopes confirm this. Logged feed volumes are NOT a second feed. Biomass and yeast fractions use formal 1 g/mol bookkeeping bases. Isothermal. Oxygen uptake follows paper Eq. 19 and S3 coefficients, as an algebraic native output; dissolved oxygen, transfer/control and oxygen-limited feedback are not predicted. No nonlimiting-oxygen claim is made. Source-workbook glucose Feed [V] and Profile describe the same feed, not separate liquids; see README source audit. Feed density 1.336 kg/L is a declared stock-density assumption; it affects carrier mass, not the configured additive volume or nutrient feed."
 }

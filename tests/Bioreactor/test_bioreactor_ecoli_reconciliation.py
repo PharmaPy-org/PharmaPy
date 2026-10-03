@@ -37,6 +37,14 @@ def reconciled_runs(tmp_path_factory):
 
 
 def test_frozen_forward_campaign(reconciled_runs, native_runs):
+    """Preserve carbon parameters and trajectories across the two mechanisms.
+
+    Parameters
+    ----------
+    reconciled_runs, native_runs : dict
+        Notebook campaigns with native histories and concentrations [g/L].
+        Direct-only oxygen yields [g O2/g substrate] do not enter carbon rates.
+    """
     report = {'scope': 'experimental reproduction through reconciliation; no refitting',
               'elapsed_seconds': reconciled_runs['elapsed_seconds'], 'runs': {}}
     report['input_sha256'] = {str(p.relative_to(EXAMPLE)): sha256(p.read_bytes()).hexdigest()
@@ -51,7 +59,12 @@ def test_frozen_forward_campaign(reconciled_runs, native_runs):
                             if c['recipe']['name'] == run)
         source_case, source = next((c, m) for c, m in native_runs['configurations']
                                   if c['recipe']['name'] == run)
-        assert config['parameters'] == source['parameters']
+        carbon_parameters = deepcopy(source['parameters'])
+        oxygen_yields = {name: carbon_parameters['coefficients'].pop(name)
+                         for name in ('Y_OS', 'Y_OA', 'Y_OYE')}
+        # S3 3L/FedBatch diagnostic yields [g O2/g substrate].
+        assert oxygen_yields == {'Y_OS': 1.067, 'Y_OA': 1.067, 'Y_OYE': 1.163}
+        assert config['parameters'] == carbon_parameters
         assert config['state']['species'] == source['state']['species']
         assert config['recipes'] == source['recipes']
         assert case['numerics'] == source_case['numerics']

@@ -1108,7 +1108,7 @@ def build_bioreactor(case, definition, thermo_path):
         _require_keys(definition, {'mechanism', 'model', 'parameters', 'recipes', 'state'},
                       'configured kinetic input', {'rate_provider'})
         _require_keys(definition['model'], {'rule_graph', 'species_mass_rates', 'rate_unit'},
-                      'configured kinetics', {'constants'})
+                      'configured kinetics', {'constants', 'reported_rates'})
         phase = _phase(thermo_path, mass_kg, state['species']['amounts'], None,
                        carrier_species, temperature_k, amount_unit=state['species']['unit'])
     else:

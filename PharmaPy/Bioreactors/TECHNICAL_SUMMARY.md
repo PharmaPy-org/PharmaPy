@@ -124,8 +124,14 @@ the checkout; this is a verification procedure, not a separate runtime API.
 ## Remaining acceptance work
 
 F10/F11 is the selected baseline. Its feed-volume interpretation still needs
-domain review, and oxygen needs an explicit state or a defensible applicability
-statement. Measured-field predictions for F10/F11 come from
+domain review.
+
+Direct F10/F11 kinetics report source Eq. 19 oxygen demand through optional
+native algebraic output fields. No dissolved-oxygen inventory, transfer/control
+validation or oxygen-limitation feedback is claimed. The recorded DOT excursions
+prevent assuming universally nonlimiting oxygen from the controller target alone.
+
+Measured-field predictions for F10/F11 come from
 `predict_measurements` at exact sampling times (see the user guide); adoption of
 the shared #351 provenance record and the #346 experiment objects remains open.
 Continuous/chemostat qualification remains future work. WP3.2 affine/hybrid implementations and WP3.3
