@@ -2,12 +2,13 @@
 
 Each core example supplies `inputs/case.json`, `inputs/mechanism.json`,
 `inputs/thermo.json`, a forward `workflow.ipynb`. Running a notebook generates local CSV/PNG/SVG outputs; generated files are not distributed.
-The shared path is `build_bioreactor -> native BatchReactor/SemiBatchReactor -> solve_unit`.
+The shared path is `build_bioreactor -> native BatchReactor/SemiBatchReactor/ContinuousReactor -> solve_unit`.
 
 See the concise [configuration and provider guide](../../doc/online_docs/bioreactors/USER_GUIDE.md).
 
 | Example | Purpose |
 | --- | --- |
+| [Generic chemostat](generic_chemostat/README.md) | Synthetic Monod equilibrium, dilution and washout, with interchangeable kinetic routes. |
 | [Generic batch](generic_batch/README.md) | Small configurable batch with analytical checks. |
 | [Generic fed-batch](generic_fed_batch/README.md) | Feed events, dilution and material accounting. Synthetic reconciliation benchmarks are maintained separately in the test fixtures. |
 | [Batch E. coli](batch_ecoli_dfba/README.md) | Reduced-pathway optimization and qualitative diauxic growth reproduction. |
@@ -22,7 +23,7 @@ select experiments. Their exports overwrite the configured output paths.
 `case.operation.volume_policy` selects native mass/density volume or the declared
 working-volume basis. Both execute through native reactors. Working-volume
 supports declared continuous inlets, additions and well-mixed samples; continuous
-outlets/perfusion and unmanaged connections remain unsupported. Configure rate
+well-mixed outlets are supported in continuous mode. Perfusion and unmanaged connections remain unsupported. Configure rate
 units and biological conversion properties explicitly; the converter cannot infer
 missing cell mass, feed composition or biological coefficients.
 
@@ -62,7 +63,7 @@ biological predictivity. Published figures and historical generated evidence are
 
 ## Empty optional input slots
 
-The four core examples are isothermal liquid-phase simulations. Their
+The core examples are isothermal liquid-phase simulations. Their
 `thermo.json` files retain molecular weights (`mw`) and liquid densities
 (`rho_liq`), which native construction and balances use. Unused property arrays
 (including `cp_liq` and `p_vap`) are `[]`; unused scalar/text properties are `null`.

@@ -1,8 +1,8 @@
 """Construct input-declared biological processes with native PharmaPy objects.
 
 ``build_bioreactor`` converts generic mappings into a ``LiquidPhase``, a
-biological ``Mechanism``, and a native ``BatchReactor`` or
-``SemiBatchReactor``. Scheduled material operations are applied between
+biological ``Mechanism``, and a native ``BatchReactor``,
+``SemiBatchReactor`` or ``ContinuousReactor``. Scheduled material operations are applied between
 ordinary native ``solve_unit`` calls.
 """
 
@@ -18,10 +18,10 @@ from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef
 from PharmaPy.IntegratorBackends import FixedStepBackend, SciPyBackend
 from PharmaPy.Metabolic import MetabolicNetworkDefinition
 from PharmaPy.Phases_Refactored import LiquidPhase
-from PharmaPy.Reactors_Refactored import BatchReactor, SemiBatchReactor
+from PharmaPy.Reactors_Refactored import BatchReactor, SemiBatchReactor, ContinuousReactor
 from PharmaPy.Streams_Refactored import LiquidStream
 
-from .mechanisms import ConfiguredRates, PathwayMetabolism, RateReconciledCulture, WorkingVolume
+from .mechanisms import ConfiguredRates, PathwayMetabolism, RateReconciledCulture, WorkingVolume, DeclaredStreamDensity
 from .input_format import normalize_forward_inputs
 from .BioreactorUnitConverter import BioreactorUnitConverter
 
@@ -29,6 +29,7 @@ from .BioreactorUnitConverter import BioreactorUnitConverter
 _TIME_FACTORS = BioreactorUnitConverter.TIME
 _REACTORS = {
     "batch": BatchReactor,
+    "continuous": ContinuousReactor,
     "fed-batch": SemiBatchReactor,
     "semibatch": SemiBatchReactor,
 }
@@ -714,7 +715,7 @@ class NativeBioreactorAssembly:
 
     Attributes
     ----------
-    unit : BatchReactor or SemiBatchReactor
+    unit : BatchReactor, SemiBatchReactor or ContinuousReactor
         Native reactor.
     phase : LiquidPhase
         Reactor liquid phase.
@@ -771,14 +772,14 @@ class NativeBioreactorAssembly:
         Raises
         ------
         ValueError
-            The reactor is not fed-batch, the flow is negative, the inlet name is
+            The reactor does not support continuous inlets, the flow is negative, the inlet name is
             invalid, solutes are unknown, or the composition exceeds the declared
             density or disagrees with the native volume.
         """
         _require_keys(event, {'time', 'event_type', 'volume_l_h'}, 'flow event',
                       {'inlet', 'concentrations_mmol_l', 'density_kg_l', 'composition'})
-        if not isinstance(self.unit, SemiBatchReactor):
-            raise ValueError('continuous feed requires fed-batch operation')
+        if not isinstance(self.unit, (SemiBatchReactor, ContinuousReactor)):
+            raise ValueError('continuous feed requires fed-batch or continuous operation')
         flow = BioreactorUnitConverter.convert(event['volume_l_h'], 'L/h', 'm3/s')  # [m3/s]
         if flow < 0.:
             raise ValueError('inlet flow must be nonnegative')
@@ -802,6 +803,8 @@ class NativeBioreactorAssembly:
             conc[names.index(self.carrier_species)] = density - conc.sum()
             stream = LiquidStream(self.thermo_path, mass_flow=density*flow,
                                   mass_frac=conc/density, temp=self.phase.temp)
+            if isinstance(self.unit, ContinuousReactor) and self.phase.get_mechanism(WorkingVolume) is not None:
+                stream.mechanisms = [DeclaredStreamDensity(density)]
             if (self.phase.get_mechanism(WorkingVolume) is None
                     and not np.isclose(stream.vol_flow, flow, rtol=1e-10, atol=1e-15)):
                 raise ValueError('inlet density disagrees with native volume; supply consistent properties or select working-volume')
@@ -1127,11 +1130,19 @@ def build_bioreactor(case, definition, thermo_path):
         raise ValueError("volume_policy must be native or working-volume")
     mechanisms = [mechanism]
     if policy == "working-volume":
-        mechanisms.append(WorkingVolume(phase, initial_volume_l / 1000.))
+        mechanisms.append(WorkingVolume(phase, initial_volume_l / 1000., allow_outlets=mode == "continuous"))
     phase.mechanisms = mechanisms
     unit = _REACTORS[mode](integrator=_integrator(case["numerics"]),
                            isothermal=True)
     unit.Phases = phase
+    if mode == 'continuous':
+        # Only requesting metabolic mechanisms receive signed outlet rates.
+        mechanism.requires_outlet_rates = bool(getattr(mechanism, 'requires_inlet_rates', False))
+        unit.controller.target_volume = phase.vol  # [m3]; explicit, reproducible level target
+        if policy == 'working-volume':
+            outlet = LiquidStream(thermo_path, mass_flow=0., mass_frac=phase.mass_frac, temp=phase.temp)
+            outlet.mechanisms = [DeclaredStreamDensity(phase.mass / phase.vol, PhaseRef('liquid', 0))]
+            unit.Outlet = outlet
     unit.intraphase_processes = [
         IntraPhaseProcess(PhaseRef("liquid", 0), item) for item in mechanisms
     ]

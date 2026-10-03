@@ -149,6 +149,9 @@ print(assembly.diagnostics(histories))
 Schema 1 and unversioned inputs remain accepted. Existing equations, solver
 settings, and material increments are preserved unless the user changes them.
 
+Set `operation.mode: "continuous"` for the native chemostat with a well-mixed
+outlet and initial-volume target. See the generic chemostat example.
+
 Named `flow` events configure piecewise-constant continuous inlets; zero flow
 stops the named inlet. `sample` events withdraw well-mixed liquid and its extensive
 biological inventories. These use the same builder for the three mechanism

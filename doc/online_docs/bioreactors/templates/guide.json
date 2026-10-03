@@ -4,7 +4,8 @@
     "modes": [
       "batch",
       "fed-batch",
-      "semibatch"
+      "semibatch",
+      "continuous"
     ],
     "mechanisms": [
       "pathway-lp",
@@ -117,7 +118,7 @@
     "numerics.optional": "Leave tolerances, maximum_step and Jacobian settings null if not used by the selected backend. See populated examples for supported numerical choices.",
     "operation": "Mass kg; density kg/L; volume unit m3, L, mL or uL; temperature K (null retains native 298.15 K). Initial mass must equal declared volume times density. Temperature is isothermal, not a new temperature-dependent kinetic law.",
     "recipe.name": "Must match a key under mechanism.recipes.",
-    "operation.volume_policy": "native (default): phase mass/thermodynamic density. working-volume: initial_volume is held between scheduled additions and increases with their additive solution volumes. Uses native mechanism states and property hooks. No continuous streams, withdrawals, phase connections, thermal expansion or inferred biomass volume. Does not establish elemental/mass closure. Initial mass/volume/density consistency remains required.",
+    "operation.volume_policy": "native (default): phase mass/thermodynamic density. working-volume: initial_volume integrates declared inlet and enabled well-mixed outlet volume flows, plus scheduled additions/samples. Uses native mechanism states and property hooks. Continuous mode enables native volume-controlled withdrawal; perfusion, unmanaged phase connections, thermal expansion and inferred biomass volume are unsupported. Does not establish elemental/mass closure. Initial mass/volume/density consistency remains required.",
     "recipe.time_unit": "Optional unit for numeric recipe times (s, min, h, day); defaults to numerics.step.unit. Explicit time quantities with value/unit override this default."
   },
   "state_fields": {
@@ -374,7 +375,7 @@
       }
     },
     "basis": "Continuous inlet concentrations and density describe the complete solution. For discrete feeds declare volume_basis=solution for complete-solution volume; the legacy default carrier adds solute volume separately.",
-    "volume": "working-volume integrates the sum of declared inlet flows. Native volume requires feed density consistent with configured thermophysical properties. Outlets, perfusion and phase connections are not supported by working-volume.",
+    "volume": "working-volume integrates declared inlet flows minus native well-mixed outlet flow in continuous mode. Native volume requires feed density consistent with configured thermophysical properties. Perfusion and unmanaged phase connections remain unsupported.",
     "sampling": "Well-mixed withdrawal removes phase species and declared extensive biological states proportionally; exposure integrals are unchanged."
   },
   "reconciliation_scaling": {

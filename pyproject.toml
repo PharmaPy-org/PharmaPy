@@ -70,5 +70,6 @@ PharmaPy = ["data/*.json", "data/**/*.json", "data/**/*.csv"]
 testpaths = ["tests"]
 markers = [
     "unit: fast, self-contained unit tests",
+    "integration: native component and solver integration tests",
     "assimulo: optional Assimulo/SUNDIALS solver integration",
 ]

@@ -211,3 +211,30 @@ For a new process, assess inventory/constraint residuals, time-step/tolerance
 refinement, rate-provider domain coverage and independent measurements. Numerical
 verification, approximation accuracy and biological validation are different claims.
 
+## Continuous culture
+
+Set `operation.mode` to `continuous` to build the native `ContinuousReactor`.
+Existing named flow events specify sterile or nutrient-containing inlets, in the
+same units used for fed-batch. The native volume controller targets the initial
+liquid volume, with a well-mixed outlet. At that target, total outlet flow equals
+total inlet flow. With no flow, there is no imposed dilution.
+
+Phase species and separate biomass, cells and product inventories leave with the
+liquid. Exposure integrals do not. For pathway and reconciliation mechanisms,
+finite-step feasibility includes signed outlet withdrawals before accepting
+metabolic fluxes. An exact minimum transport limiter applies only to mechanisms
+requesting outlet rates, so an exactly feasible withdrawal is not smoothed down.
+Other mechanisms retain the upstream limiter. Infeasible fluxes and failed
+integration remain errors; this does not implement cell retention or perfusion.
+
+`working-volume` enables additive inlet/outlet volume accounting and explicit
+solution-density hooks on native streams. `native` retains native mass/density
+volume. Samples and boluses change volume immediately; the native controller
+then relaxes toward its initial target when inlet flow permits. Constant-volume analytical chemostat
+formulas apply at the target with balanced continuous flows.
+
+See [generic chemostat](../../../examples/bioreactors/generic_chemostat/README.md)
+for source inputs and a notebook. Its configured and pathway models encode the
+same Monod law and are checked against analytical dilution, yield balance,
+positive equilibrium and washout. Reconciliation receives the same transport
+contract; this is not experimental validation of a continuous biological model.

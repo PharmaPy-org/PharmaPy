@@ -23,12 +23,13 @@ def test_bioreactor_package_exposes_only_forward_workflows():
 
 
 def test_only_declared_examples_are_present():
+    """Keep only the documented forward examples, including the chemostat."""
     folders = sorted(path.name for path in EXAMPLES.iterdir() if path.is_dir() and not path.name.startswith("__"))
-    assert folders == ["batch_ecoli_dfba", "ecoli_ye_fed_batch", "generic_batch", "generic_fed_batch"]
+    assert folders == ["batch_ecoli_dfba", "ecoli_ye_fed_batch", "generic_batch", "generic_chemostat", "generic_fed_batch"]
 
 
 @pytest.mark.parametrize('name', ['batch_ecoli_dfba', 'ecoli_ye_fed_batch',
-                                  'generic_batch', 'generic_fed_batch'])
+                                  'generic_batch', 'generic_chemostat', 'generic_fed_batch'])
 def test_core_examples_have_forward_inputs_and_outputs(name, tmp_path):
     """Execute the exported client using disposable output storage.
 

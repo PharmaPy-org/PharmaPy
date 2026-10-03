@@ -34,13 +34,105 @@ from .inventory import InventoryAvailability, LinearInventoryAvailability
 from .rate_providers import RateProviderResult, build_rate_provider
 
 
+class DeclaredStreamDensity(Mechanism):
+    """Use an explicit solution density through native stream property hooks.
+
+    Inlet density is fixed. For a working-volume outlet, density is the current
+    vessel species mass divided by its liquid volume. No stream solver state is
+    introduced, and biological inventories remain separate from phase species.
+    """
+
+    def __init__(self, density: float, source_phase=None):
+        """Declare a fixed inlet or state-dependent outlet density.
+
+        Parameters
+        ----------
+        density : float
+            Initial solution density [kg/m3].
+        source_phase : PhaseRef, optional
+            Vessel phase whose working-volume state sets outlet density.
+
+        Raises
+        ------
+        ValueError
+            Density is nonfinite or nonpositive.
+        """
+        super().__init__()
+        if not np.isfinite(density) or density <= 0.:
+            raise ValueError('stream density must be finite and positive')
+        self.density = float(density)  # [kg/m3]
+        self.source_phase = source_phase
+
+    def get_overrides(self):
+        """Return the native density hook.
+
+        Returns
+        -------
+        dict
+            Density property override; volume/flow setters remain native.
+        """
+        return {'density': self.get_density}
+
+    def get_density(self) -> float:
+        """Return the current stream density.
+
+        Returns
+        -------
+        float
+            Solution density [kg/m3].
+        """
+        return self.density
+
+    def update_state(self, completed_state, **kwargs):
+        """Refresh an outlet from accepted/trial vessel state before resolution.
+
+        Parameters
+        ----------
+        completed_state : Mapping
+            Native phase species mass [kg] and working volume [m3].
+        **kwargs
+            Native callback context, unused for a prescribed inlet density.
+        """
+        if self.source_phase is not None:
+            volume = float(np.asarray(completed_state[StateKey('working_volume', self.source_phase)]).item())  # [m3]
+            mass = np.asarray(completed_state[StateKey('mass_j', self.source_phase)]).sum()  # [kg]
+            self.density = mass / volume  # [kg/m3]; same concentration basis as the vessel
+
+
+def biological_outlet_contributions(self, stream_phase, vessel_phase, amount, completed_state):
+    """Withdraw separately tracked, well-mixed biological inventories.
+
+    Parameters
+    ----------
+    self : Mechanism
+        Biological mechanism declaring extensive_states; exposure integrals are
+        intentionally excluded from material withdrawal.
+    stream_phase, vessel_phase : LiquidPhase
+        Resolved stream and its source liquid, respectively.
+    amount : float
+        Resolved volumetric outlet flow [m3/s].
+    completed_state : Mapping
+        Native accepted/trial material inventories, in their declared units.
+
+    Returns
+    -------
+    dict
+        Positive outgoing inventory rates [state unit/s], subtracted by the
+        native vessel and scaled together with the outlet if limiting engages.
+    """
+    dilution = amount / vessel_phase.vol  # [1/s]
+    return {key: dilution * completed_state[key] for key in self.solver_state_keys
+            if key.name in self.extensive_states}
+
+
 class WorkingVolume(Mechanism):
     """Additive liquid volume through native phase hooks and declared inlet flows.
 
     Replaces the phase's density-based volume with an integrated working-volume
-    state, ``dV/dt = sum(inlet volume flows)``. Scheduled feeds and samples
-    change the volume between solves. Assumes ideal additive mixing; outlets
-    and phase connections are rejected because no withdrawal volume is modeled.
+    state, ``dV/dt = sum(inlet volume flows) - sum(outlet volume flows)``.
+    Scheduled feeds and samples change volume between solves. Assumes ideal
+    additive mixing. Outlets require explicit opt-in; unmanaged phase
+    connections remain unsupported.
 
     Parameters
     ----------
@@ -50,7 +142,7 @@ class WorkingVolume(Mechanism):
         Initial working volume [m3].
     """
 
-    def __init__(self, phase, volume):
+    def __init__(self, phase, volume, *, allow_outlets=False):
         """Attach the working-volume state to a native phase.
 
         Parameters
@@ -59,6 +151,8 @@ class WorkingVolume(Mechanism):
             Owning native phase.
         volume : float
             Initial working volume [m3].
+        allow_outlets : bool, optional
+            Enable native well-mixed withdrawal, default False.
 
         Raises
         ------
@@ -67,6 +161,7 @@ class WorkingVolume(Mechanism):
         """
         super().__init__()
         self.owning_phase = phase
+        self.allow_outlets = bool(allow_outlets)
         self.inlet_connections = ()
         self.volume_rate = 0.  # [m3/s]
         self.set_volume(volume)
@@ -188,14 +283,33 @@ class WorkingVolume(Mechanism):
         Raises
         ------
         ValueError
-            The unit's inlets differ from the declared flows, or it has outlet or
-            phase connections, or the updated volume is invalid.
+            The unit's inlets differ from the declared flows, outlets lack opt-in,
+            phase connections are present, or the updated volume is invalid.
         """
-        if unit is not None and (tuple(unit.inlet_connections) != self.inlet_connections or unit.outlet_connections
+        if unit is not None and (tuple(unit.inlet_connections) != self.inlet_connections or (unit.outlet_connections and not self.allow_outlets)
                                  or unit.phase_connections):
-            raise ValueError("working-volume requires declared inlet flows and no outlet or phase connections")
+            raise ValueError("working-volume requires declared inlet flows, enabled outlets and no phase connections")
         super().update_state(completed_state, **kwargs)
         self.set_volume(self.working_volume)
+
+    def get_outlet_contributions(self, stream_phase, vessel_phase, amount, completed_state):
+        """Remove the resolved outlet volume through the native material buffer.
+
+        Parameters
+        ----------
+        stream_phase, vessel_phase : LiquidPhase
+            Resolved outlet and owning liquid phase.
+        amount : float
+            Outgoing flow [m3/s]; any limiter scales this with species withdrawal.
+        completed_state : Mapping
+            Native state, unused because volume withdrawal equals outlet flow.
+
+        Returns
+        -------
+        dict
+            Working-volume withdrawal [m3/s] when outlets are enabled.
+        """
+        return {self.solver_state_keys[0]: amount} if self.allow_outlets else {}
 
     def get_solver_state_rates(self, **kwargs):
         """Return the working-volume derivative.
@@ -459,6 +573,8 @@ class PathwayMetabolism(Mechanism):
         Operating conditions passed to the provider.
     """
 
+    get_outlet_contributions = biological_outlet_contributions
+
     extensive_states = ('biomass_kg',)
 
     requires_inlet_rates = True
@@ -505,8 +621,8 @@ class PathwayMetabolism(Mechanism):
         if not isinstance(definition, PathwayModelDefinition):
             raise TypeError("definition must be a PathwayModelDefinition or mapping")
         biomass_kg = float(biomass_kg)
-        if not np.isfinite(biomass_kg) or biomass_kg <= 0.0:
-            raise ValueError("biomass_kg must be finite and positive")
+        if not np.isfinite(biomass_kg) or biomass_kg < 0.0:
+            raise ValueError("biomass_kg must be finite and nonnegative")
 
         self.unit_converter = BioreactorUnitConverter(flux_time_unit=flux_time_unit, flux_basis=flux_basis)
         self.model = ConfiguredPathwayModel(definition, exchange_scale=self.unit_converter.exchange_scale)
@@ -628,13 +744,15 @@ class PathwayMetabolism(Mechanism):
             Native completed state; supplies ``biomass_kg`` [kgDW].
         **kwargs
             ``inlet_rates`` maps the phase ``mass_j`` key to inlet mass rates
-            [kg/s], counted as actual supply in inventory constraints.
+            [kg/s], counted as actual supply in inventory constraints. Optional
+            signed ``outlet_rates`` use the same mapping and reserve withdrawal.
 
         Returns
         -------
         TransferResult
             Species mass rates [kg/s], biomass rate [kgDW/s], and the pathway
-            solution and rate-provider result in ``aux``.
+            solution and rate-provider result in ``aux``. Zero biomass returns no
+            metabolic source or LP solution; physical gas transfer remains active.
 
         Raises
         ------
@@ -671,10 +789,26 @@ class PathwayMetabolism(Mechanism):
             index = self.model.state_names.index(transfer['species'])
             transfer_rates[index] += (transfer['kla_per_s']  # [mol/s]
                 * (transfer['saturation_mol_m3'] - concentrations[transfer['species']]) * volume)
+        if biomass == 0.:
+            # A sterile culture has no metabolic source; declared physical gas
+            # transfer remains active. Do not divide by biomass or invent cells.
+            species_rate = np.zeros(phase.num_species)  # [kg/s]
+            species_rate[indices] = transfer_rates * np.asarray(phase.mw)[indices] / 1000.
+            self.last_solution = None
+            self.last_provider_result = None
+            return TransferResult(
+                state_rates={StateKey('mass_j', phase_ref): species_rate,
+                             StateKey('biomass_kg', phase_ref): 0.},
+                aux={'population_status': 'absent', 'pathway_solution': None},
+                net_mass_rate=float(species_rate.sum()))
         inlet_mass = kwargs.get('inlet_rates', {}).get(StateKey('mass_j', phase_ref),
                                                       np.zeros(phase.num_species))
         supply = self.unit_converter.convert(np.asarray(inlet_mass)[indices], 'kg', 'mol',  # [mol/s]
                                              molecular_weight_g_mol=np.asarray(phase.mw)[indices])
+        outlet_mass = kwargs.get('outlet_rates', {}).get(StateKey('mass_j', phase_ref),
+                                                       np.zeros(phase.num_species))  # [kg/s], signed withdrawal
+        supply += self.unit_converter.convert(np.asarray(outlet_mass)[indices], 'kg', 'mol',
+                                              molecular_weight_g_mol=np.asarray(phase.mw)[indices])  # [mol/s]
         source_matrix = (self.model.source_matrix * self.unit_converter.exchange_scale  # [mol/s per flux unit]
                          * biomass * self.unit_converter.per_second)
         if self._step_s:
@@ -757,6 +891,8 @@ class RateReconciledCulture(Mechanism):
     target_floor : float, optional
         Legacy residual floor in network coordinates.
     """
+
+    get_outlet_contributions = biological_outlet_contributions
 
     requires_inlet_rates = True
     extensive_states = ('viable_cells_million', 'dead_cells_million', 'product_g')
@@ -1183,7 +1319,8 @@ class RateReconciledCulture(Mechanism):
             Native completed state with the population, product and IVCD states.
         **kwargs
             ``inlet_rates`` maps the phase ``mass_j`` key to inlet mass rates
-            [kg/s], counted as supply in inventory constraints.
+            [kg/s], counted as supply in inventory constraints. Optional signed
+            ``outlet_rates`` reserve withdrawal on the same species/basis.
 
         Returns
         -------
@@ -1245,6 +1382,10 @@ class RateReconciledCulture(Mechanism):
                                                       np.zeros(phase.num_species))
         supply = self.unit_converter.convert(inlet_mass, 'kg', 'mmol',  # [mmol/day]
                                              molecular_weight_g_mol=phase.mw) * self.definition.constants['seconds_per_day']
+        outlet_mass = kwargs.get('outlet_rates', {}).get(StateKey('mass_j', phase_ref),
+                                                       np.zeros(phase.num_species))  # [kg/s], signed withdrawal
+        supply += self.unit_converter.convert(outlet_mass, 'kg', 'mmol',
+                    molecular_weight_g_mol=phase.mw) * self.definition.constants['seconds_per_day']  # [mmol/day]
         solution = self._solve(exchange_fluxes, self._availability(
             phase, rules, values, matrix, other, supply))
         self.previous_solution = solution

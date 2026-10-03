@@ -3,7 +3,7 @@
 ## Architecture and model selection
 
 `case.json + mechanism.json + thermo.json → build_bioreactor → native phase +
-mechanism + BatchReactor/SemiBatchReactor → solve_unit → DynamicResult`.
+mechanism + BatchReactor/SemiBatchReactor/ContinuousReactor → solve_unit → DynamicResult`.
 
 Biological identities, coefficients, networks and operating schedules belong in
 user inputs. Mechanisms supply source terms and population states through native
@@ -74,9 +74,8 @@ reconciled models use `model.kinetics.rule_graph` and explicit output mappings.
 ## Balances and numerics
 
 Native extensive inventories obey inlet − outlet + transport + biological source
-balances; concentrations follow from amounts and volume. Supported batch/fed-batch
-operations include scheduled feeds, well-mixed sampling and declared working
-volume. Reduced pathways couple biomass to optimized growth. Reconciliation
+balances; concentrations follow from amounts and volume. Supported operations include batch/fed-batch feeds and sampling, declared
+working volume, and continuous culture through the native volume controller. Reduced pathways couple biomass to optimized growth. Reconciliation
 supports biomass/cell normalization, growth/product mappings, kinetic mortality,
 network constraints and finite-step inventory feasibility without post-solve
 consumption clipping. Unweighted, relative-regularized and unit-scaled objective
@@ -104,13 +103,14 @@ and biomass composition must be accounted for explicitly.
 
 | Example | Evidence and limitations |
 | --- | --- |
+| Generic chemostat | Analytical Monod equilibrium and washout; synthetic qualification, not experimental validation. |
 | Generic batch/fed-batch | Synthetic pathways, feeds/sampling and reconciliation qualification. |
 | Batch E. coli | Qualitative diauxic-growth reproduction, not independent quantitative validation. |
 | Fed-batch E. coli F10/F11 | Direct/reconciled source-configured reproduction and measured trends; quantitative discrepancies and source feed-accounting interpretation remain. |
 
 Historical culture fixtures are test data. Source-calibrated E. coli reproduction
 is not prospective validation. Generality means configurable supported homogeneous
-batch/fed-batch families, not all organisms, network sizes or spatial models;
+batch/fed-batch and synthetic chemostat families, not all organisms, network sizes or spatial models;
 new regimes require biological specification and qualification. The relationship
 library neither fits missing parameters nor introduces a new validity-domain engine.
 This forward package does not deliver WP3.3 estimation/design workflows.
@@ -140,15 +140,21 @@ preserves input snapshots, solver settings, source observations and optional
 native state/algebraic fields for replay. The shared #346 object API remains
 pending upstream; correlated weights and sparse-Jacobian work (#237/#236) are
 not implemented here. This forward adapter does not close all of #351.
-Continuous/chemostat qualification remains future work. WP3.2 affine/hybrid implementations and WP3.3
-calibration/design are excluded. A successful forward run does not close those
-acceptance gaps. Source observations in `reference/F10.json` and `F11.json` remain;
-notebook outputs and historical published comparison figures are not distributed.
 
-## Shared-core integration retained from the reference branch
+Synthetic chemostat dilution, Monod equilibrium and washout are qualified through
+`ContinuousReactor`. This does not establish experimental continuous-culture
+predictivity or implement selective cell retention/perfusion. WP3.2 affine/hybrid
+implementations and WP3.3 calibration/design are excluded. A successful forward
+run does not close those acceptance gaps. Original observations remain in
+`reference/`; generated evidence, notebook outputs and historical published
+comparison figures are not distributed.
+
+## Shared-core integration
 
 | Shared change | Why WP3.1 needs it | Verification |
 | --- | --- | --- |
+| Requested outlet rates and exact finite-step transport limit | Reserve withdrawal before metabolic feasibility; avoid smoothing down an exactly feasible outlet. Default assembly/limiting remains unchanged. | Chemostat depletion, volume and failure checks. |
+| Owned SciPy derivative arrays | Native buffers are reused; copying prevents later evaluations overwriting retained derivatives. | Aliasing regression, analytical CSTR balances and upstream backend tests. |
 | Inlet rates passed only to requesting mechanisms | Feasibility includes incoming material rather than treating a supplied empty pool as unavailable. | Reconciliation supply and operating-transition cases. |
 | Explicit depletion checks and limiter bypass | Fixed-step infeasibility is reported; adaptive depletion events provide the configured boundary policy. | Material-rate limiting and small-pool tests. |
 | Paired transfer and outlet scaling | Species, working volume and transferred heat use the same accepted transfer amount. | `test_material_rate_limiting.py`. |
@@ -159,11 +165,11 @@ notebook outputs and historical published comparison figures are not distributed
 | Deferred mechanism annotations | Preserves annotation import compatibility with the declared Python minimum. | Import tests; the current numerical environment is Python 3.11. |
 | Recursive package discovery | Installed distributions include `Bioreactors` and `Metabolic`. | Non-editable wheel package-data/import checks outside the checkout. |
 | Explicit callback binding | Module-level reconciliation and inventory callbacks replace nested definitions while retaining bounds, scales and mutable depletion state. | Reconciliation regressions, small-pool tests and the complete fallback suite. |
-| Optional IDA test marker | New IDA integration checks can be selected separately from the core lane. | Three explicit `assimulo` tests; existing upstream tests are unchanged. |
+| Optional IDA test marker | New IDA integration checks can be selected separately from the core lane. | Explicit `assimulo` tests including native continuous dilution; existing upstream tests are unchanged. |
 
 The unrelated crystallizer annotation edit is excluded. Backend consolidation
-remains deferred under the compatibility-first decision. `SciPyBackend` retains
-its reference numerical behavior; upstream `ScipyBackend` remains unchanged.
+remains deferred under the compatibility-first decision. `SciPyBackend` now copies native derivative buffers to preserve the solver callback
+contract; upstream `ScipyBackend` remains unchanged. Consolidation is not included.
 
 The D4 trial exposed a numerical-policy conflict: the reference adaptive backend
 rounds negative output residues in its accepted numerical band to zero, while the

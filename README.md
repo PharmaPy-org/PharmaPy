@@ -37,9 +37,9 @@ To get a development install with every backend, clone the [GitHub repository](h
 
 ## WP3.1 native bioreactors
 
-See [the bioreactor examples](examples/bioreactors/README.md) for batch and fed-batch
+See [the bioreactor examples](examples/bioreactors/README.md) for batch, fed-batch and synthetic chemostat
 models, reduced-pathway dFBA, and rate reconciliation using native PharmaPy vessels.
 The selected baseline is E. coli yeast-extract fed-batch F10/F11.
 [Scope and limitations](PharmaPy/Bioreactors/TECHNICAL_SUMMARY.md) distinguish
-forward-model qualification from remaining measurement, oxygen and chemostat work.
+forward-model qualification from remaining shared-record integration and scientific-review work.
 Generated outputs and published comparison figures are excluded.

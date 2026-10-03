@@ -1242,8 +1242,8 @@ def _inventory_rates(
     Returns
     -------
     ndarray
-        Rates [state units/s]; rates that would drive an active empty pool
-        negative are zero.
+        Owned rates [state units/s], independent of subsequent vessel evaluations;
+        rates that would drive an active empty pool negative are zero.
     """
     # Evaluate the boundary within the requested absolute error budget.
     # Otherwise roundoff supply/uptake imbalance repeatedly releases an
@@ -1251,14 +1251,15 @@ def _inventory_rates(
     boundary = constrained[states[constrained] <= .5 * boundary_tolerance[constrained]]
     evaluation_state = states.copy()
     evaluation_state[boundary] = 0.0
-    values = unit.unit_model(time, evaluation_state, limiter_dt=0.0)
+    # SciPy retains derivatives across calls; the native vessel reuses its buffer.
+    values = unit.unit_model(time, evaluation_state, limiter_dt=0.0).copy()
     replenishing = boundary[(states[boundary] > 0.0)
                              & (values[boundary] > rate_tolerance[boundary])]
     if replenishing.size:
         # A real source may balance uptake below the boundary tolerance.
         # Snapping that positive pool to zero creates an artificial switch.
         evaluation_state[replenishing] = states[replenishing]
-        values = unit.unit_model(time, evaluation_state, limiter_dt=0.0)
+        values = unit.unit_model(time, evaluation_state, limiter_dt=0.0).copy()
     stationary = boundary[abs(values[boundary]) <= rate_tolerance[boundary]]
     values[stationary] = 0.0
     for position in active:
