@@ -111,6 +111,49 @@ actual-feed reconstruction. Adding both volumes or selecting the interpretation
 with lower biomass RMSE would not resolve it. The retained scenario reproduces
 the nominal source-model feed schedule without duplicate dilution.
 
+### Stock-basis hypothesis (pending experiment-owner confirmation)
+
+One explanation for the dose discrepancy is that the stock was 60 % glucose by
+mass at the declared 1.336 kg/L, i.e. 0.60 x 1336 = 801.6 g/L, rather than the
+published 600 g/L. The `Profile` channel is a glucose mass rate [g/h]
+(4.8 g/h / 600 g/L = 0.008 L/h, the configured first flow), so each logged
+half-hour `Feed` volume can be compared with the volume the profile implies
+under either basis:
+
+| F10 interval [h] | Logged [mL] | At 600 g/L [mL] | At 801.6 g/L [mL] |
+| --- | ---: | ---: | ---: |
+| 18.675-19.175 | 9.81 | 12.38 | 9.26 |
+| 20.175-23.675 | 13.10 | 17.40 | 13.03 |
+| 24.175-24.675 | 13.62 | 18.00 | 13.47 |
+| 25.175-25.675 | 13.32 | 18.00 | 13.47 |
+| All 14 logged intervals (16.175-26.175) | 125.37 | 170.88 | 127.90 |
+
+F11 behaves the same (125.52 mL logged; 170.89 and 127.91 mL predicted). Steady
+intervals agree within 1-2 % at 801.6 g/L, while 600 g/L is about 33 % high
+throughout. The first, ramp and last intervals deviate more, consistent with
+actual pump transitions (pause near 20.08 h, final reduction near 25.82 h)
+differing from the nominal schedule.
+
+This is not yet a confirmed correction:
+
+- The 1.336 kg/L density is a declared assumption without a cited source. For
+  reference, tabulated pure glucose solutions are about 1.22 kg/L at 50 % w/w
+  (20 °C), and 600 g/L corresponds to roughly 49 % w/w; 1.336 kg/L fits neither
+  basis well unless it was measured.
+- If the logger recorded feed mass and converted it with 1.336 kg/L, the logged
+  volumes would match 801.6 g/L whatever the true stock concentration.
+- An unlabelled workbook flow of 36 alongside a 21.6 g/h profile does not
+  discriminate: 36 g/h solution at 60 % w/w and 36 mL/h at 0.600 g/mL both give
+  21.6 g/h glucose.
+
+Sensitivity (not an adopted input): keeping the glucose mass-rate profile and
+1.336 kg/L, and scaling each flow by 600/801.6, lowers the glucose-feed volume
+to 129.12 mL and the final volume to 1.0627 L (F10) and 1.0574 L (F11).
+Predictions at the measurement times rise by at most 3.6 %; RMSE changes from
+1.79 to 2.06 g/L (biomass), 1.87 to 1.94 (glucose) and 0.107 to 0.116 (acetate)
+for F10, and similarly for F11. The published coefficients were calibrated under
+the authors' feed accounting, so fit quality cannot decide the stock basis.
+
 ## Oxygen uptake and its limits
 
 The direct F10/F11 mechanisms now report the paper's Eq. 19 oxygen demand using
