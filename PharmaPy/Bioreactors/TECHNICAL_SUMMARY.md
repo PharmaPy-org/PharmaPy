@@ -131,9 +131,13 @@ native algebraic output fields. No dissolved-oxygen inventory, transfer/control
 validation or oxygen-limitation feedback is claimed. The recorded DOT excursions
 prevent assuming universally nonlimiting oxygen from the controller target alone.
 
-Measured-field predictions for F10/F11 come from
-`predict_measurements` at exact sampling times (see the user guide); adoption of
-the shared #351 provenance record and the #346 experiment objects remains open.
+`predict_measurements` supplies exact-time concentration predictions. The plain
+JSON forward-record adapter adopts #351 identity, ordering, units, source and
+parameter provenance requirements without replacing the existing arrays. It
+preserves input snapshots, solver settings, source observations and optional
+native state/algebraic fields for replay. The shared #346 object API remains
+pending upstream; correlated weights and sparse-Jacobian work (#237/#236) are
+not implemented here. This forward adapter does not close all of #351.
 Continuous/chemostat qualification remains future work. WP3.2 affine/hybrid implementations and WP3.3
 calibration/design are excluded. A successful forward run does not close those
 acceptance gaps. Source observations in `reference/F10.json` and `F11.json` remain;

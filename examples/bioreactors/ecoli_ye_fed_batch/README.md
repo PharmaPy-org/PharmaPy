@@ -114,3 +114,16 @@ alone do not establish the magnitude of growth limitation. A dynamic oxygen
 inventory and limitation feedback remain unqualified until their required
 transfer/control evidence is established.
 
+## Forward provenance
+
+[inputs/provenance.json](inputs/provenance.json) records source revisions,
+transformation history, sharing conditions, parameter units/bases and reported
+source bounds. It explicitly distinguishes the authors' fitted coefficients
+from this unfitted forward reproduction. Source estimation settings are retained
+as metadata, not silently converted into statistical weights.
+
+The [forward-record guide](../../../doc/online_docs/bioreactors/USER_GUIDE.md#5-save-and-reload-forward-provenance)
+shows how to snapshot inputs, observations, predictions and native fields and
+reload them for another solve. Generated records belong in temporary or ignored
+output directories. This adopts the forward provenance requirements of #351;
+it does not implement the pending shared Experiment/Measurement API (#346).

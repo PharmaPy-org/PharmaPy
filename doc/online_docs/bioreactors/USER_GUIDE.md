@@ -128,7 +128,59 @@ Missing observations are omitted from the source, never encoded as NaN.
 (#238). This branch's base predates that interface, and no experiment or
 measurement object hierarchy is defined here (#346).
 
-## 5. Report algebraic kinetic quantities
+## 5. Save and reload forward provenance
+
+`make_record`, `write_record`, `read_record` and `record_observations` use plain
+versioned JSON dictionaries. They adopt the forward portion of
+[WP1 #351](https://github.com/PharmaPy-org/PharmaPy/issues/351), without creating
+a competing Experiment/Measurement hierarchy (#346). The upstream contracts
+were inspected at `431e9bf12db13321d75e9e354efe6a50c28b8c6f`.
+
+Use the F10/F11 `inputs/provenance.json` as a populated metadata template.
+With the case, mechanism, thermo and observation dictionaries already loaded:
+
+```python
+from PharmaPy.Bioreactors import (
+    make_record, write_record, read_record, record_observations,
+    native_output_fields,
+)
+
+record = make_record(
+    "F10", case, mechanism, thermo, declaration, reference["measurements"],
+    provenance=manifest["provenance"],
+    parameter_metadata=manifest["parameter_metadata"],
+    model_revision=revision,  # Actual code revision; identify local changes explicitly.
+    predictions=prediction,
+    native_outputs=native_output_fields(assembly.unit, histories),
+)
+write_record(record, output_dir / "forward-record.json")
+loaded = read_record(output_dir / "forward-record.json")
+observations = record_observations(loaded)
+```
+
+For replay, write `loaded["inputs"]["thermo"]` as JSON to a temporary file,
+pass that path plus `loaded["inputs"]["case"]` and `["mechanism"]` to
+`build_bioreactor`, and solve with `sampling_times(observations)`. Use the stored
+observation declaration for `predict_measurements`. No executable code is
+embedded or fetched by the record reader.
+
+Explicit field/parameter orders survive JSON key sorting. Every scalar model
+parameter needs a unit, physical basis and bounds, or a reason bounds are
+unspecified. Source search bounds are provenance, not new solver constraints.
+Hashes detect changed input snapshots and observations; they are content checks,
+not authentication. Each measured field retains its own finite sample vector,
+time in seconds and declared unit. Missing samples are omitted. Native output
+records preserve segment boundaries, component identities, shapes, phase and
+state/algebraic kind; no undeclared quality attribute is invented.
+
+No local fit is performed (`fitted_values: null`). Published coefficient origins
+and source error/weight settings remain metadata; the adapter does not infer
+covariance, apply weights or resolve #236/#237. `record_observations` returns the
+existing `time_s`/`values`/`units` mappings. On upstream's keyed estimation API,
+use the same explicit experiment order for outer dictionaries and field order
+for nested arrays. This MPVR base does not contain that newer estimation API.
+
+## 6. Report algebraic kinetic quantities
 
 Configured kinetics accept optional `model.kinetics.reported_rates` entries:
 
@@ -151,7 +203,7 @@ Omitting `reported_rates` preserves existing behavior. The direct F10/F11
 examples use this to calculate published oxygen demand; they do not model a
 dissolved-oxygen inventory or oxygen-control dynamics.
 
-## 6. Verify before scientific use
+## 7. Verify before scientific use
 
 Run `python -m pytest -q -p no:cacheprovider -o pythonpath=. tests/Bioreactor` in
 the documented Python 3.11 environment. Tests select headless plotting themselves.
