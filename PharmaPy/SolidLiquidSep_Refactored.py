@@ -39,7 +39,7 @@ from PharmaPy.DataClasses import IntraPhaseProcess, OperatingKey
 from PharmaPy.DataClasses import PhaseMapping, PhaseRef, StateEvent
 from PharmaPy.DataClasses import StateKey, StateVariable, StreamConnection
 from PharmaPy.DataClasses import TransferResult
-from PharmaPy.Mechanisms import Mechanism
+from PharmaPy.Mechanisms import Mechanism, PopulationBalanceMechanism
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.ProcessControl_Refactored import Controller
 
@@ -187,7 +187,9 @@ class Filter(_BaseSolidLiquidSep):
     resist_medium : float, optional
         Filter medium resistance [1/m].
     slurry_div : float, optional
-        Divides the charge across several filtration cycles.
+        Divides the charge into this many equal filtration cycles. As in
+        `SolidLiquidSep.Filter`, the simulated time is that of one cycle;
+        the whole charge is still filtered (the cycles run side by side).
     """
 
     oper_mode = "Batch"
@@ -245,6 +247,14 @@ class Filter(_BaseSolidLiquidSep):
         liquid = self.Phases.get_phase_from_ref(PhaseRef("liquid", 0))
         solid = self.Phases.get_phase_from_ref(PhaseRef("solid", 0))
 
+        # The crystals are counted per m3 of slurry, so their population
+        # balance needs this filter's liquid to turn that into an inventory.
+        # A crystallizer wires it in its CrystKinetics setter, which a filter
+        # never calls, so without this the cake's crystal mass read zero.
+        pbm = solid.get_mechanism(PopulationBalanceMechanism)
+        if pbm is not None:
+            pbm.liquid_phase = liquid
+
         epsilon = solid.getPorosity(diam_filter=self.station_diam)
         dens_sol = solid.getDensity()
 
@@ -278,10 +288,30 @@ class Filter(_BaseSolidLiquidSep):
         self.dens_liq = liquid.getDensity()
         self.visc_liq = liquid.getViscosityMix()
 
-        # The run ends when this much liquid has been expressed: what is left
-        # is held in the cake pores and no pressure drop will remove it.
+        # The run ends when this much liquid has been expressed from one
+        # cycle: what is left is held in the cake pores and no pressure drop
+        # will remove it.
         self.mass_crit = vol_filtrate * self.dens_liq
-        self.mass_liquid_init = vol_liq_slur * self.dens_liq
+
+        # The vessel holds the WHOLE charge, so the filtrate is counted
+        # against all of its liquid (filtrate_mass divides it back into one
+        # cycle). Counting it against one cycle's liquid, as before, made the
+        # filtrate negative for slurry_div > 1 and the filter never drained.
+        self.mass_liquid_init = vol_liq_slur * self.dens_liq * self.slurry_div
+
+        # Slurry and crystal volume of the whole charge, to keep the crystal
+        # count when the liquid around the crystals drains (see
+        # conserve_cake_crystals). Taken from the population balance itself,
+        # whose quadrature the crystal mass uses, rather than from
+        # solid.moments (a trapezoid rule that differs by a few % on coarse
+        # grids).
+        self._vol_slurry_init = self._vol_crystals = None
+        if pbm is not None and pbm.flow_state_name is not None:
+            state = pbm.true_state(
+                np.asarray(getattr(pbm, pbm.flow_state_name), dtype=float))
+            self._vol_slurry_init = pbm.slurry_volume_from(liquid, state)
+            self._vol_crystals = (pbm.solid_volume_fraction(state)
+                                  * self._vol_slurry_init)
 
         self._filtration_ready = True
 
@@ -290,14 +320,14 @@ class Filter(_BaseSolidLiquidSep):
     # ------------------------------------------------------------------
 
     def filtrate_mass(self, completed_state):
-        """Cumulative filtrate, as the liquid the vessel no longer holds."""
+        """Cumulative filtrate of one cycle, from the liquid the vessel no longer holds."""
 
         held = np.sum(
             np.asarray(completed_state[StateKey("mass_j", PhaseRef("liquid", 0))],
                        dtype=float)
         )
 
-        return self.mass_liquid_init - held
+        return (self.mass_liquid_init - held) / self.slurry_div
 
     def filtrate_mass_flow(self, completed_state):
         """
@@ -318,9 +348,13 @@ class Filter(_BaseSolidLiquidSep):
         return self.deltaP / self.visc_liq / (cake_term + filt_term)
 
     def filtrate_volumetric_flow(self, completed_state):
-        """The controller sets a volumetric draw; the model gives a mass one."""
+        """The controller sets a volumetric draw; the model gives a mass one.
 
-        return self.filtrate_mass_flow(completed_state) / self.dens_liq
+        Darcy's law gives the rate of one cycle; the vessel drains all
+        `slurry_div` cycles of its charge at once.
+        """
+
+        return self.slurry_div * self.filtrate_mass_flow(completed_state) / self.dens_liq
 
     # ------------------------------------------------------------------
     # Vessel hooks
@@ -424,7 +458,41 @@ class Filter(_BaseSolidLiquidSep):
         self.timeProf = np.asarray(time)
         self.massProf = np.asarray(solver_states)
 
+        self.conserve_cake_crystals()
+
         return result
+
+    def conserve_cake_crystals(self):
+        """
+        Keep the crystals of the cake when the liquid around them drains.
+
+        The population is a number density per m3 of slurry and is not a
+        solver state here (a filter neither creates nor destroys crystals),
+        so as the filtrate leaves, the same density over the smaller slurry
+        volume would describe fewer crystals. Rescaling it by
+        V_slurry,initial / (V_liquid,final + V_crystals) keeps the count, and
+        with it the crystal mass the cake hands on.
+        """
+
+        vol_crystals = getattr(self, "_vol_crystals", None)
+
+        if not vol_crystals:
+            return
+
+        liquid = self.Phases.get_phase_from_ref(PhaseRef("liquid", 0))
+        solid = self.Phases.get_phase_from_ref(PhaseRef("solid", 0))
+        pbm = solid.get_mechanism(PopulationBalanceMechanism)
+
+        if pbm is None or pbm.flow_state_name is None:
+            return
+
+        pbm.liquid_phase = liquid
+        factor = self._vol_slurry_init / (float(liquid.vol) + vol_crystals)
+        state = np.asarray(getattr(pbm, pbm.flow_state_name), dtype=float)
+        setattr(pbm, pbm.flow_state_name, state * factor)
+
+        # Only once per charge: a second call must not rescale again.
+        self._vol_crystals = None
 
 
 class DeliquoringMechanism(Mechanism):

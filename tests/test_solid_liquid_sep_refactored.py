@@ -173,6 +173,78 @@ def test_filter_offers_both_outlets():
     assert outlet["filtrate"] is not None
 
 
+def solved_filter(vol_liquid=VOL_LIQUID, mass=MASS_SOLID, slurry_div=1,
+                  num_nodes=200):
+    """A refactored filter on one charge, solved on the scipy backend.
+
+    Returns the unit, its filtration time [s] and the liquid it held at the
+    start and at the end [kg].
+    """
+
+    x_grid = size_grid(num_nodes)
+    _, solid = legacy_phases(x_grid, mass=mass, vol_liquid=vol_liquid)
+    vol_slurry = vol_liquid + solid.vol
+
+    new_liquid, new_solid = refactored_phases(
+        x_grid, vol_slurry, solid.getDensity(), mass=mass,
+        vol_liquid=vol_liquid)
+
+    unit = Filter(FILT_DIAM, deltaP=DELTA_P, alpha=ALPHA,
+                  resist_medium=RESIST_MEDIUM, slurry_div=slurry_div,
+                  integrator=ScipyBackend())
+    unit.Phases = [new_liquid, new_solid]
+
+    time, _ = unit.solve_unit(runtime=1e4, verbose=False)
+    held = unit.result.mass_j_liquid0.sum(axis=1)  # [kg]
+
+    return unit, float(np.asarray(time)[-1]), held[0], held[-1]
+
+
+def test_filter_slurry_div_reports_one_cycle():
+    """A charge split into N cycles takes as long as one N-th of it alone.
+
+    The whole charge is still filtered, so it yields N times the filtrate.
+    The vessel used to count the filtrate against one cycle's liquid while
+    holding all of it, so for N > 1 no filtrate ever left.
+    """
+
+    _, time_div, start_div, end_div = solved_filter(
+        vol_liquid=2 * VOL_LIQUID, mass=2 * MASS_SOLID, slurry_div=2)
+    _, time_one, start_one, end_one = solved_filter()
+
+    np.testing.assert_allclose(time_div, time_one, rtol=1e-3)
+    np.testing.assert_allclose(start_div - end_div, 2 * (start_one - end_one),
+                               rtol=1e-3)
+
+
+def test_filter_cake_keeps_its_crystals():
+    """Draining the liquid leaves the crystal mass of the cake unchanged.
+
+    The crystals are counted per m**3 of slurry, so the cake's population
+    balance must follow the filter's liquid and keep the crystal count as
+    that liquid leaves; before, the cake reported no crystals at all.
+    """
+
+    x_grid = size_grid(200)
+    _, solid = legacy_phases(x_grid)
+    new_liquid, new_solid = refactored_phases(
+        x_grid, VOL_LIQUID + solid.vol, solid.getDensity())
+
+    unit = Filter(FILT_DIAM, deltaP=DELTA_P, alpha=ALPHA,
+                  resist_medium=RESIST_MEDIUM, integrator=ScipyBackend())
+    unit.Phases = [new_liquid, new_solid]
+    unit.compile_structure()
+    mass_before = unit.Phases.Solids[0].mass  # [kg]
+
+    unit.solve_unit(runtime=1e4, verbose=False)
+    held = unit.result.mass_j_liquid0.sum(axis=1)  # [kg]
+    cake_solid = unit.Outlet["cake"].Solids[0]
+
+    assert held[-1] < 0.2 * held[0]  # anti-vacuity: most of the liquid has left
+    np.testing.assert_allclose(mass_before, MASS_SOLID, rtol=1e-2)
+    np.testing.assert_allclose(cake_solid.mass, mass_before, rtol=1e-9)
+
+
 # ---------------------------------------------------------------------------
 # Deliquoring
 # ---------------------------------------------------------------------------
