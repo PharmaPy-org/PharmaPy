@@ -34,6 +34,11 @@ class MultiPhaseVessel():
     # PharmaPy: 'Batch', 'Semibatch', 'Continuous'.
     oper_mode = None
 
+    # Whether mechanism states carried per unit volume (a crystal population
+    # per m3 of slurry) are diluted as the vessel volume changes. See
+    # add_dilution_terms; the crystallizers switch it on.
+    dilutes_intensive_states = False
+
     def __init__(self,integrator=None,temp_ref=273.15,
      isothermal=False, reset_states=False, controller=None, h_conv=0, 
       state_events={},
@@ -2521,7 +2526,56 @@ class MultiPhaseVessel():
             resolved_outlets,
         )
         self._timers['add_outlet_terms'] = self._timers.get('add_outlet_terms',0)+perf_counter()-t0
+
+        if self.dilutes_intensive_states:
+            self.add_dilution_terms(
+                buffer,
+                completed_state,
+                resolved_inlets,
+                resolved_outlets,
+            )
         return buffer
+
+    def add_dilution_terms(
+            self,
+            buffer:MaterialContributionBuffer,
+            completed_state,
+            resolved_inlets,
+            resolved_outlets,
+        ):
+        """Dilute per-volume mechanism states as the vessel volume changes.
+
+        A population carried per m3 of slurry is diluted by every inflow,
+        including a feed with no crystals, which never reaches the solid
+        phase's inlet hook. The rate of volume change is taken as the
+        difference between the volumetric inflow and outflow.
+        """
+        vol_in = sum(transfer.vol_flow or 0.0
+                     for connection in resolved_inlets
+                     for transfer in connection)
+        vol_out = sum(transfer.vol_flow or 0.0
+                      for connection in resolved_outlets
+                      for transfer in connection)
+        net_vol_flow = vol_in - vol_out
+
+        if not net_vol_flow:
+            return
+
+        for phase in self.Phases.Phases:
+            for mechanism in getattr(phase, 'mechanisms', None) or ():
+
+                state_rates = mechanism.get_dilution_contributions(
+                    net_vol_flow, completed_state)
+
+                for state_key, value in state_rates.items():
+
+                    state_slice = self.solver_state_collection.material_slices.get(state_key)
+
+                    if state_slice is not None:
+                        buffer.contributions[
+                            buffer.INLET,
+                            state_slice,
+                        ] += value
     
     def add_inlet_terms(
             self,

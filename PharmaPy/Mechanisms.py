@@ -185,6 +185,14 @@ class Mechanism:
         completed_state,
     ):
         return {}
+
+    def get_dilution_contributions(self, net_vol_flow, completed_state):
+        """Rate of change of an intensive state as the vessel volume changes.
+
+        Only mechanisms whose state is a density per unit volume need it.
+        """
+        return {}
+
     def get_events(self,unit):
         return []
 
@@ -1080,19 +1088,31 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         if not amount:
             return {}
 
-        vol = getattr(vessel_phase, 'vol', 0.0) or 0.0
-
-        if vol <= 0:
-            return {}
-
         density = self._inlet_population_density(stream_phase)
 
         if density is None:
             return {}
 
-        # Intensive state, so this is the MSMPR form directly:
-        #     dn/dt = (Q/vol) * (n_in - n)
-        return {self._flow_state_key(): (amount / vol) * density}
+        # 'amount' is the WHOLE slurry flow of the feed (MultiPhaseVessel.
+        # add_inlet_terms), so it is divided by the vessel's SLURRY volume,
+        # not by the volume of the solid phase that owns this mechanism (the
+        # crystal volume). Dividing by the latter overstated the crystal
+        # inflow by 1/phi, and gave none at all into a vessel without
+        # crystals yet. Intensive state, so this is the MSMPR form directly:
+        #     dn/dt = (Q/V_slurry) * (n_in - n)
+        key = self._flow_state_key()
+        state = completed_state.get(key)
+
+        if state is None:
+            state = getattr(self, self.flow_state_name)
+
+        vol_slurry = self._slurry_volume(
+            self.true_state(np.asarray(state, dtype=float)))
+
+        if vol_slurry <= 0:
+            return {}
+
+        return {key: (amount / vol_slurry) * density}
 
     def get_outlet_contributions(self, stream_phase, vessel_phase, amount,
                                  completed_state):
@@ -1115,6 +1135,36 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             state = getattr(self, self.flow_state_name)
 
         return {key: (amount / vol) * np.asarray(state, dtype=float)}
+
+    def get_dilution_contributions(self, net_vol_flow, completed_state):
+        """Dilution of the population as the slurry volume changes.
+
+        The state n is per m3 of slurry, so from d(n V)/dt = Q_in n_in - Q_out n
+
+            dn/dt = (Q_in n_in - Q_out n) / V  -  n (dV/dt) / V
+
+        The inlet and outlet hooks give the first term. This one is the
+        second, with dV/dt = Q_in - Q_out (``net_vol_flow``). It vanishes in
+        an MSMPR whose volume is held, but in a semibatch crystallizer fed
+        with liquid it is what keeps the growing volume from multiplying the
+        crystal mass.
+        """
+        if not net_vol_flow:
+            return {}
+
+        key = self._flow_state_key()
+        state = completed_state.get(key)
+
+        if state is None:
+            state = getattr(self, self.flow_state_name)
+
+        state = np.asarray(state, dtype=float)
+        vol_slurry = self._slurry_volume(self.true_state(state))
+
+        if vol_slurry <= 0:
+            return {}
+
+        return {key: -(net_vol_flow / vol_slurry) * state}
 
 
 class OneDFVMMechanism(PopulationBalanceMechanism):
@@ -1460,15 +1510,38 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             if len(value.params['growth'])>3:
                 self._growth_size_factor = (1 + value.params['growth'][4] * self.x_grid) ** value.params['growth'][3]
     def set_third_moment(self, target_m3):
+        """Rescale the distribution to a given third moment, keeping its shape.
 
+        Parameters
+        ----------
+        target_m3 : float
+            Third moment to reach [um**3/m3 slurry].
+
+        Raises
+        ------
+        ValueError
+            If a nonzero target is asked of a distribution whose third moment
+            is not positive, so there is no shape to rescale.
+
+        Notes
+        -----
+        A zero target empties the population. An integrator holds a
+        just-nucleating population only to its absolute tolerance, so the
+        distribution can carry small negative densities whose third moment is
+        negative; asking such a population for no crystals must give none,
+        not an error.
+        """
         distribution = getattr(self,self.distribution_state_name)
+
+        if target_m3 == 0:
+            setattr(self, self.distribution_state_name,
+                    np.zeros_like(distribution))  # [#/(um m3 slurry)]
+            return
 
         # target_m3 is a TRUE moment, so compare against the true state; the
         # ratio is then applied to the conditioned state, which is what is
         # actually stored.
         current_m3 = self.compute_third_moment(self.true_state(distribution))
-        if target_m3==0 and current_m3 == 0:
-            return
         if current_m3 <= 0:
             raise ValueError("Cannot scale a distribution with zero third moment.")
 
@@ -1802,6 +1875,26 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
                 * self._slurry_volume(self.true_state(moments)))
 
     def set_mass(self, value):
+        """Rescale the moments to a crystal mass, keeping their ratios.
+
+        Parameters
+        ----------
+        value : float
+            Crystal mass in the vessel [kg].
+
+        Raises
+        ------
+        ValueError
+            If fewer than four moments are carried, if the slurry volume is
+            unknown for a nonzero mass, or if a nonzero mass is asked of
+            moments whose third moment is not positive.
+
+        Notes
+        -----
+        With a slurry volume known, a zero mass empties the population, for
+        the reason given in ``OneDFVMMechanism.set_third_moment``. Without
+        one, a zero mass leaves the moments unchanged.
+        """
         moments = np.asarray(getattr(self, self.moments_state_name),
                              dtype=float)
 
@@ -1821,7 +1914,9 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         target_mu3 = value / (self.density * self.kv * 1e-18 * vol_slurry)
         current = self.true_state(moments)[3]
 
-        if target_mu3 == 0 and current == 0:
+        if target_mu3 == 0:
+            setattr(self, self.moments_state_name,
+                    np.zeros_like(moments))  # [um**k/m3 slurry]
             return
 
         if current <= 0:

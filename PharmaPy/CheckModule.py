@@ -50,6 +50,12 @@ def check_modeling_objects(uo, instance_name=None):
 
     missing_obj = []
     for obj in modeling_objs:
+        # Vessels built on MultiPhaseVessel store their feeds in
+        # inlet_connections; their Inlet is a write-only convenience setter,
+        # so reading it always raises and hasattr alone reports it missing.
+        if obj == 'Inlet' and getattr(uo, 'inlet_connections', None):
+            continue
+
         if not hasattr(uo, obj) or getattr(uo, obj) is None:
             missing_obj.append(obj)
 
