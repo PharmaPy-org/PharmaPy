@@ -5,31 +5,14 @@ Created on Wed May 27 10:12:13 2020
 @author: dcasasor
 """
 
-from typing import Optional
+from typing import Optional, Union
 from numpy.typing import ArrayLike
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
-from PharmaPy.Interpolation import NewtonInterpolation
+from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Results import DynamicResult
 
-from scipy.interpolate import CubicSpline
 import numpy as np
-
-
-def Interpolation(t_data, y_data, time, newton=True, num_points=3):
-    idx_time = np.argmin(abs(time - t_data))
-
-    idx_lower = max(0, idx_time - 1)
-    idx_upper = min(len(t_data) - 1, idx_lower + num_points)
-
-    t_interp = t_data[idx_lower:idx_upper]
-    y_interp = y_data[idx_lower:idx_upper]
-
-    # Newton interpolation (quadratic, three points)
-    interp = NewtonInterpolation(t_interp, y_interp)
-    y_target = interp.evalPolynomial(time)
-
-    return y_target
 
 
 class BatchToFlowConnector:
@@ -180,29 +163,39 @@ class LiquidStream(LiquidPhase):
         dynamic_object.controllable = self.controllable
         dynamic_object.parent_instance = self
 
-    def InterpolateInputs(self, time):
-        if isinstance(time, (float, int)):
-            # Assume steady state for extrapolation
-            time = min(time, self.time_upstream[-1])
+    def InterpolateInputs(
+            self, time: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        """Interpolate the stored upstream array profile at given times.
 
-            y_interpol = Interpolation(self.time_upstream, self.y_inlet,
-                                       time,
-                                       num_points=self.num_interpolation_points)
-        else:
-            interpol = CubicSpline(self.time_upstream, self.y_inlet)
-            flags_interpol = time > self.time_upstream[-1]
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Evaluation time [s], scalar or shape (num_times,) in any order.
 
-            if any(flags_interpol):
-                time_interpol = time[~flags_interpol]
-                y_interp = interpol(time_interpol)
+        Returns
+        -------
+        float or numpy.ndarray
+            Upstream values in the units and state order of ``y_inlet``,
+            which holds time on its first axis with shape
+            (num_upstream_times,) or (num_upstream_times, num_states).
+            Scalar time removes the time axis; array time gives
+            (num_times,) or (num_times, num_states) in query order.
 
-                y_extrapol = np.tile(y_interp[-1],
-                                     (sum(flags_interpol), 1))
-                y_interpol = np.vstack((y_interp, y_extrapol))
-            else:
-                y_interpol = interpol(time)
+        Notes
+        -----
+        Delegates to :func:`PharmaPy.Connections.interpolate_inputs` with
+        ``time_upstream`` [s]. Scalar time uses local Newton interpolation
+        over ``num_interpolation_points`` nodes and array time uses a cubic
+        spline. Times after ``time_upstream[-1]`` hold the final upstream
+        sample; earlier times extrapolate.
+        """
+        kwargs_interp = {}
+        if np.ndim(time) == 0:
+            # CubicSpline has no node-count option; only Newton takes one.
+            kwargs_interp['num_points'] = self.num_interpolation_points
 
-        return y_interpol
+        return interpolate_inputs(time, self.time_upstream, self.y_inlet,
+                                  **kwargs_interp)
 
     def updatePhase(self, concentr: Optional[ArrayLike] = None,
                     mass_conc: Optional[ArrayLike] = None,

@@ -25,8 +25,8 @@ def interpolate_inputs(time: Union[float, np.ndarray],
     Parameters
     ----------
     time : float or numpy.ndarray
-        Evaluation time [s], scalar or an ascending array of shape
-        (num_times,).
+        Evaluation time [s], scalar or an array of shape (num_times,) in any
+        order.
     t_inlet : float or numpy.ndarray
         Upstream times [s], shape (num_upstream_times,); a scalar represents
         one sample and requires exactly one row in ``y_inlet``.
@@ -43,7 +43,8 @@ def interpolate_inputs(time: Union[float, np.ndarray],
     -------
     scalar or numpy.ndarray
         Interpolated values in the input units. Scalar time removes the time
-        axis; array time replaces it with the requested time axis.
+        axis; array time replaces it with the requested time axis, whose rows
+        follow the caller's query order.
 
     Raises
     ------
@@ -54,8 +55,10 @@ def interpolate_inputs(time: Union[float, np.ndarray],
     -----
     A single upstream sample is constant for all scalar or array times.
     Multi-point profiles use local Newton interpolation for scalar time and
-    cubic splines for array time; values beyond the final time hold the actual
-    endpoint. Earlier times extrapolate, so callers requiring measured support
+    cubic splines for array time; values at or beyond the final time are the
+    final upstream sample ``y_inlet[-1]`` (in a floating dtype), not a
+    polynomial evaluation that could lose it to round-off or node-window
+    choice. Earlier times extrapolate, so callers requiring measured support
     must validate the beginning of their evaluation interval.
     """
     t_inlet = np.atleast_1d(t_inlet)  # [s], scalar times represent one sample
@@ -70,27 +73,23 @@ def interpolate_inputs(time: Union[float, np.ndarray],
             y_inlet[0], (len(time),) + np.shape(y_inlet)[1:]).copy()
 
     if np.ndim(time) == 0:
-        # Assume steady state for extrapolation
-        time = min(time, t_inlet[-1])
+        if time >= t_inlet[-1]:
+            # Steady-state hold: return the measured terminal sample itself;
+            # astype copies an array row and keeps 1-D profiles scalar.
+            samples = np.asarray(y_inlet)
+            return samples[-1].astype(np.result_type(samples.dtype, np.float64))
 
         y_interp = local_newton_interpolation(time, t_inlet, y_inlet,
                                               **kwargs_interp_fn)
     else:
+        time = np.asarray(time)  # [s], caller query order
         interpol = CubicSpline(t_inlet, y_inlet, **kwargs_interp_fn)
-        flags_extrapol = time > t_inlet[-1]
+        flags_hold = time >= t_inlet[-1]
 
-        if any(flags_extrapol):
-            time_interpol = time[~flags_extrapol]
-            y_interp = interpol(time_interpol)
-
-            if y_inlet.ndim == 1:
-                y_extrap = np.tile(interpol(t_inlet[-1]), sum(flags_extrapol))
-                y_interp = np.concatenate((y_interp, y_extrap))
-            else:
-                y_extrap = np.tile(interpol(t_inlet[-1]), (sum(flags_extrapol), 1))
-                y_interp = np.vstack((y_interp, y_extrap))
-        else:
-            y_interp = interpol(time)
+        # Evaluate rows in place so the output keeps the query order, then
+        # write the final upstream sample at and after the end of support.
+        y_interp = interpol(np.minimum(time, t_inlet[-1]))
+        y_interp[flags_hold] = y_inlet[-1]
 
     return y_interp
 
