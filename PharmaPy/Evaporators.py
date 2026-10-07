@@ -1491,7 +1491,9 @@ class Evaporator:
             the previous terminal state and advance absolute time by runtime.
             With ``stop_at_maxvol=False``, an inlet stopped by the liquid
             volume event remains stopped on continuation, and the absolute
-            stop time [s] is kept in ``inlet_stop_time``. ``reset()`` or a
+            stop time [s] is kept in ``inlet_stop_time``. If the solver
+            raises, both are restored to their values before this call, as
+            the failed segment's results are not retained. ``reset()`` or a
             new public ``Phases`` assignment re-enables the inlet and clears
             that time.
         verbose : bool, optional
@@ -1584,8 +1586,14 @@ class Evaporator:
                 if name == 'time_limit':
                     solver.report_continuously = True
 
-        # Solve
-        time, states, sdot = solver.simulate(final_time, ncp_list=time_grid)
+        # Solve. Event handling may shut the inlet mid-solve, but only
+        # retrieve_results keeps results, so a failed solve restores the mode.
+        inlet_mode = (self.allow_flow, self.inlet_stop_time)  # (bool, [s])
+        try:
+            time, states, sdot = solver.simulate(final_time, ncp_list=time_grid)
+        except BaseException:
+            self.allow_flow, self.inlet_stop_time = inlet_mode
+            raise
 
         self.retrieve_results(time, states)
 

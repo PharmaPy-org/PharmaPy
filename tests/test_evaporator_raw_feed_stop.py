@@ -43,6 +43,8 @@ SOLVER_OPTIONS = {'rtol': 1e-8, 'atol': 1e-10}  # [-], [native state units]
 # [-], relative root-surface allowance, as Evaporator's sqrt(eps) volume check
 VOLUME_RTOL = np.sqrt(np.finfo(float).eps)
 SUM_RTOL = 1e-10  # [-], roundoff of trapezoidal sums of constant flows
+# [s], after the volume event (about 0.68 s) and well before SEGMENT
+CONTROL_FAILURE_TIME = 1.0
 
 
 @pytest.fixture
@@ -131,9 +133,39 @@ def inlet_record(simulation):
     return table.iloc[0]
 
 
-@pytest.mark.parametrize('dynamic', [False, True], ids=['static', 'dynamic'])
-def test_raw_feed_stops_when_volume_event_shuts_inlet(thermo_path, dynamic):
-    pytest.importorskip('assimulo')
+def temperature_control(law):
+    """Wrap a feed-temperature law in a real DynamicInput.
+
+    Parameters
+    ----------
+    law : callable
+        Feed temperature [K] as a function of absolute time [s].
+
+    Returns
+    -------
+    DynamicInput
+        Control of the inlet ``temp`` field only.
+    """
+    control = DynamicInput()
+    control.add_variable('temp', law)
+    return control
+
+
+def make_flowsheet(thermo_path, control=None):
+    """Build a one-unit flowsheet with a nearly full semibatch evaporator.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic binary thermodynamic JSON path.
+    control : DynamicInput, optional
+        Inlet DynamicInlet; omit for a static feed.
+
+    Returns
+    -------
+    SimulationExec
+        Flowsheet ``{'EV': []}`` whose unit has a FEED_FLOW [mol/s] inlet.
+    """
     unit = Evaporator(DRUM_VOLUME, pressure=PRESSURE, stop_at_maxvol=False)
     unit.Phases = LiquidPhase(
         thermo_path, temp=TEMPERATURE, pres=PRESSURE,
@@ -141,15 +173,23 @@ def test_raw_feed_stops_when_volume_event_shuts_inlet(thermo_path, dynamic):
     unit.Utility = CoolingWater(mass_flow=1.0, temp_in=UTILITY_TEMP)  # [kg/s], [K]
     inlet = LiquidStream(thermo_path, temp=TEMPERATURE, pres=PRESSURE,
                          mole_flow=FEED_FLOW, mole_frac=FRACTIONS)
-    if dynamic:
-        control = DynamicInput()
-        control.add_variable('temp', feed_temperature)
-        inlet.DynamicInlet = control
+    inlet.DynamicInlet = control
     unit.Inlet = inlet
     simulation = SimulationExec(thermo_path, {'EV': []})
     simulation.EV = unit
-    run = {'EV': {'runtime': SEGMENT, 'verbose': False,
-                  'sundials_opts': dict(SOLVER_OPTIONS)}}
+    return simulation
+
+
+RUN = {'EV': {'runtime': SEGMENT, 'verbose': False}}
+
+
+@pytest.mark.parametrize('dynamic', [False, True], ids=['static', 'dynamic'])
+def test_raw_feed_stops_when_volume_event_shuts_inlet(thermo_path, dynamic):
+    pytest.importorskip('assimulo')
+    control = temperature_control(feed_temperature) if dynamic else None
+    simulation = make_flowsheet(thermo_path, control)
+    unit = simulation.EV
+    run = {'EV': dict(RUN['EV'], sundials_opts=dict(SOLVER_OPTIONS))}
 
     simulation.SolveFlowsheet(kwargs_run=run, verbose=False)
     event_time = first_event_time(unit)  # [s]
@@ -176,3 +216,58 @@ def test_raw_feed_stops_when_volume_event_shuts_inlet(thermo_path, dynamic):
     unit.reset()
     assert unit.inlet_stop_time is None
     assert unit.allow_flow
+
+
+def test_failed_solve_after_volume_event_keeps_inlet_open(thermo_path):
+    """Restore the inlet mode when IDA fails after the event shut the inlet.
+
+    The feed-temperature law raises after CONTROL_FAILURE_TIME, past the
+    volume event, so IDA fails deterministically without retaining results.
+    Replacing it with a working law, the retried solve must feed until its
+    own event, with totals matching the independently located event.
+    """
+    sundials = pytest.importorskip('assimulo.solvers.sundials')
+
+    def failing_temperature(time):
+        """Return TEMPERATURE [K] until the controller fails.
+
+        Parameters
+        ----------
+        time : float
+            Absolute time [s].
+
+        Returns
+        -------
+        float
+            Feed temperature [K].
+
+        Raises
+        ------
+        RuntimeError
+            After CONTROL_FAILURE_TIME [s].
+        """
+        if time > CONTROL_FAILURE_TIME:
+            raise RuntimeError('feed temperature controller failed')
+        return TEMPERATURE
+
+    simulation = make_flowsheet(
+        thermo_path, temperature_control(failing_temperature))
+    unit = simulation.EV
+    run = {'EV': dict(RUN['EV'], sundials_opts=dict(SOLVER_OPTIONS))}
+
+    with pytest.raises(sundials.IDAError, match='residual function failed'):
+        simulation.SolveFlowsheet(kwargs_run=run, verbose=False)
+
+    assert unit.allow_flow
+    assert unit.inlet_stop_time is None
+    assert unit.elapsed_time == 0
+    assert not hasattr(unit, 'result')
+
+    unit.Inlet.DynamicInlet = temperature_control(feed_temperature)
+    simulation.SolveFlowsheet(kwargs_run=run, verbose=False)
+    event_time = first_event_time(unit)  # [s]
+
+    assert 0 < event_time < CONTROL_FAILURE_TIME
+    assert unit.inlet_stop_time == pytest.approx(event_time, rel=SUM_RTOL)
+    assert inlet_record(simulation)['moles'] == pytest.approx(
+        FEED_FLOW * event_time, rel=SUM_RTOL)
