@@ -177,32 +177,124 @@ def get_remaining_states(dict_states_in, stream, inlets, time):
     return di_out
 
 
-def get_inputs_new(time, stream, dict_states_in, **kwargs_interp):
-    """
-    Get inputs based on stream(s) object and names of inlet states
+def _map_dynamic_inputs(dynamic_inputs: dict, dict_states_in: dict) -> dict:
+    """Assign stream-level dynamic fields to the declared inlet groups.
 
     Parameters
     ----------
-    time : float
-        evaluation time [s].
-    stream : PharmaPy.Stream
-        stream object.
-    names_in : dict
-        dictionary with names of inlet states to the destination unit operation
-        as keys and dimension of the state as values.
+    dynamic_inputs : dict
+        Field names mapped to the values returned by
+        ``DynamicInput.evaluate_inputs``, in the units and shapes produced by
+        each control callable (for example volumetric flow [m**3/s] or
+        liquid mass concentrations [kg/m**3]).
+    dict_states_in : dict
+        Destination inlet layout: group keys (``'Inlet'`` for stream-level
+        fields, or a phase name such as ``'Liquid_1'``) mapped to containers
+        of the field names declared for that group.
+
+    Returns
+    -------
+    dict
+        One entry per layout group, in layout order. Each value holds the
+        dynamic fields assigned to that group in their original order and
+        with the unchanged values, so no unit or basis conversion occurs.
+
+    Raises
+    ------
+    ValueError
+        If a dynamic field is declared in more than one group, or if it is
+        declared in none and the layout has no ``'Inlet'`` group.
+
+    Notes
+    -----
+    A field declared by exactly one group is assigned to that group. A field
+    declared by no group is assigned to ``'Inlet'``, which reproduces the
+    established single-group behaviour where every dynamic field is passed
+    through under ``'Inlet'``. A stream-level ``DynamicInput`` keys its
+    fields by plain name only, so a name shared by several groups (for
+    example ``temp`` declared for both ``'Inlet'`` and ``'Liquid_1'``) cannot
+    be attributed to one of them; it is rejected instead of being copied to
+    every group or overwriting one group's value with another's.
+    """
+    mapped = {group: {} for group in dict_states_in}
+
+    for name, value in dynamic_inputs.items():
+        groups = [group for group, names in dict_states_in.items()
+                  if name in names]
+
+        if len(groups) > 1:
+            raise ValueError(
+                f"DynamicInput field '{name}' is declared by several inlet "
+                f"groups {groups} of the destination unit; a stream-level "
+                "DynamicInput cannot identify which one it controls. Remove "
+                f"the '{name}' control or use a destination whose inlet "
+                "layout declares it once.")
+        elif groups:
+            target = groups[0]
+        elif 'Inlet' in dict_states_in:
+            target = 'Inlet'
+        else:
+            raise ValueError(
+                f"DynamicInput field '{name}' is not declared by any inlet "
+                f"group {list(dict_states_in)} of the destination unit, and "
+                "the layout has no 'Inlet' group to receive stream-level "
+                "fields.")
+
+        mapped[target][name] = value
+
+    return mapped
+
+
+def get_inputs_new(time: Union[float, np.ndarray], stream: object,
+                   dict_states_in: dict, **kwargs_interp) -> dict:
+    """Resolve a destination unit's inlet fields from one stream.
+
+    Parameters
+    ----------
+    time : float or numpy.ndarray
+        Evaluation time [s], scalar or shape (num_times,).
+    stream : PharmaPy stream
+        Inlet stream. Its ``DynamicInlet``, connected upstream profile
+        (``y_upstream``/``y_inlet``/``time_upstream``) or static attributes
+        supply the values, in that order of precedence.
+    dict_states_in : dict
+        Destination inlet layout: group keys mapped to dictionaries of
+        declared field names and their dimensions. ``'Inlet'`` (or any key
+        containing ``'inlet'``) holds stream-level fields read from
+        ``stream``; other keys name a phase attribute of ``stream`` such as
+        ``'Liquid_1'``, whose static fields are read from that phase.
     **kwargs_interp : keyword arguments
-        arguments to be passed to the particular interpolation function.
+        Arguments for the interpolation of connected upstream profiles
+        only. They are not supported with a ``DynamicInlet``, whose
+        ``evaluate_inputs`` accepts the evaluation time alone.
 
     Returns
     -------
     inputs : dict
-        dictionary with states.
+        One entry per layout group, each mapping field names to values in the
+        units and basis of their source (for example [m**3/s], [K],
+        [kg/m**3]). Fields absent from every source are zero-filled.
 
+    Raises
+    ------
+    ValueError
+        If a ``DynamicInlet`` field cannot be assigned to exactly one layout
+        group (see Notes).
+
+    Notes
+    -----
+    ``DynamicInput`` fields are keyed by plain field name. Each one is
+    assigned to the single layout group that declares it; fields declared
+    by no group go to ``'Inlet'``, so single-group ``{'Inlet': ...}``
+    layouts receive every dynamic field exactly as before. A name declared
+    by several groups is rejected rather than duplicated or overwritten.
+    Declared fields that no control supplies keep their static values from
+    the stream (``'Inlet'``) or from the corresponding phase.
     """
 
     if stream.DynamicInlet is not None:
         inputs = stream.DynamicInlet.evaluate_inputs(time, **kwargs_interp)
-        inputs = {'Inlet': inputs}
+        inputs = _map_dynamic_inputs(inputs, dict_states_in)
 
     elif stream.y_upstream is not None and stream.time_upstream is not None:
         t_inlet = stream.time_upstream

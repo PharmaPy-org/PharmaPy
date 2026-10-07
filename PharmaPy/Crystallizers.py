@@ -594,10 +594,14 @@ class _BaseCryst:
         upstream SI moment profile (also reported by FVM crystallizers) and
         interpolate it with the other inlet fields. Explicitly converted or
         dynamic mu_n values take precedence; the original stream is unchanged.
-        Other inlet fields do not suppress the moment fallback. For moment-mode
-        slurry feeds, dynamic concentration overrides belong to Liquid_1;
-        omitted dynamic fields retain static moments, liquid concentration,
-        flow and temperature without modifying the stream. Multiple evaluation
+        Other inlet fields do not suppress the moment fallback. For moment and
+        1D-FVM slurry feeds, dynamic concentration overrides belong to
+        Liquid_1; omitted dynamic fields retain the static population (moments
+        or distribution), liquid concentration, flow and temperature without
+        modifying the stream. A dynamic Liquid_1 composition enters the species
+        balances only: unit_model evaluates inlet density and enthalpy, and the
+        Semibatch liquid-volume balance, from the stream's static Liquid_1
+        composition. Multiple evaluation
         times broadcast the fallback to (num_times, num_moments);
         a single evaluation time retains shape (num_moments,). The downstream
         model uses the lowest num_distr moment orders. Extra feed orders are
@@ -934,6 +938,10 @@ class _BaseCryst:
         representation must not overwrite the independently integrated state.
         Jacket derivatives are flattened individually so scalar and length-one
         thermal rates retain the tank-then-jacket state order.
+        Slurry-feed inlet densities [kg/m**3] and enthalpy [J/m**3] come from
+        the Inlet stream's static phase compositions. A dynamic Liquid_1
+        mass_conc from get_inputs therefore changes the species balances but
+        not these properties or the Semibatch liquid-volume balance.
         """
         di_states = unpack_states(states, self.dim_states, self.name_states)
 
