@@ -46,6 +46,38 @@ Assimulo test job is intentionally informational and independent of that
 two-platform matrix, so failures in the external solver stack do not block core
 tests and its Linux signal is still reported if another platform fails.
 
+## Real cyipopt parameter-estimation tests
+
+The optional optimizer regressions exercise real IPOPT solves for correlated
+GLS, staggered observations with three sensitivity modes, and bootstrap fit
+preservation. A second module checks the public `SimulationExec` handoff with
+a real CVode reactor, including an active parameter bound. Expected values come
+from independent normal equations and the analytic first-order reaction.
+
+Use a separate conda-forge environment; the core and locked Assimulo environments
+deliberately do not install cyipopt. This manual environment is not locked:
+
+```bash
+conda create -n pharmapy-ipopt -c conda-forge python=3.11 numpy=1.26.4 \
+    cyipopt=1.7.0 assimulo=3.4.3 scipy matplotlib pandas pytest pip
+conda activate pharmapy-ipopt
+python -m pip install -e . --no-deps
+python -c "import cyipopt, assimulo; print(cyipopt.__version__, cyipopt.IPOPT_VERSION, assimulo.__version__)"
+python -m pytest tests/test_paramestim_cyipopt.py tests/test_simexec_cyipopt.py -v
+```
+
+NumPy 1.26.4 satisfies the Assimulo 3.4.3 binary's NumPy constraint. The first
+module needs only cyipopt; the second requires both cyipopt and Assimulo. Each
+module skips at collection when its backend is absent, preserving the core
+missing-dependency lane. Existing CI does not install cyipopt, so run this
+explicit command when changing the IPOPT estimation path. Headless machines can
+set `MPLBACKEND=Agg` and `QT_QPA_PLATFORM=offscreen` for these plotting imports.
+
+MCR's scalar-gradient and post-solve result-assembly defects remain tracked in
+[#240](https://github.com/PharmaPy-org/PharmaPy/issues/240#issuecomment-6040658764).
+These tests cover ordinary `ParameterEstimation`; they do not encode known MCR
+failures as expected success or certify MCR/IPOPT fitting.
+
 ## Parameter-estimation workshop regression
 
 Run the solved parameter-estimation notebook in fresh kernels from both supported

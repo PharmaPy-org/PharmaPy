@@ -437,6 +437,9 @@ class Mixer:
             Solids without either a size distribution or a size grid are
             unsupported.
             The message identifies the differing quantity and inlet index.
+            Also raised if any inlet carries a non-empty ``DynamicInlet``,
+            which this static path cannot evaluate; the message names the
+            zero-based inlet index.
 
         Notes
         -----
@@ -458,9 +461,16 @@ class Mixer:
         deferred: the mixer keeps attached masses authoritative, but Slurry
         enthalpy weights phases by moment-derived fractions, so inconsistent
         solids cannot be mixed conservatively.
-        Profiled multiphase mixing remains outside this static path
-        (https://github.com/PharmaPy-org/PharmaPy/issues/221).
+        Profiled and dynamic multiphase Mixer inputs are unsupported: this
+        path reads static phase values only.
         """
+        for index, inlet in enumerate(self.Inlets):
+            dynamic = getattr(inlet, 'DynamicInlet', None)
+            if dynamic is not None and getattr(dynamic, 'controls', {}):
+                raise ValueError(
+                    f'Mixer inlet {index} has DynamicInlet controls, but dynamic '
+                    'multiphase Mixer inputs are unsupported and would be '
+                    'ignored; remove the DynamicInlet or mix liquid-only streams.')
 
         timeseries_flag = []
 
@@ -904,12 +914,17 @@ class Mixer:
         ValueError
             If a multi-sample liquid inlet's time window does not overlap the
             chosen grid or starts after that grid begins. The message names
-            the zero-based inlet index and both windows [s].
+            the zero-based inlet index and both windows [s]. With a solids
+            inlet, also if :meth:`get_inputs_solids` rejects the inlets,
+            including any inlet with non-empty ``DynamicInlet`` controls.
 
         Notes
         -----
         The first connected liquid inlet with more than one sample supplies
-        the evaluation grid [s]. Single-sample inlets are constant feeds: they
+        the evaluation grid [s]. In a ``SimulationExec`` flowsheet, inlets
+        are connected in the execution order of this unit's predecessors
+        (see ``PharmaPy.Connections.topological_bfs``). Single-sample
+        inlets are constant feeds: they
         neither select the grid nor restrict its time window. Other connected
         inlets must overlap the grid and cover its beginning. Endpoint
         comparisons allow ``sqrt(machine epsilon) * grid span`` [s] as a

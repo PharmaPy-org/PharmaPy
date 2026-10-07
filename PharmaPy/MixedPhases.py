@@ -9,27 +9,60 @@ from collections.abc import Sequence
 from typing import Union
 
 from PharmaPy.Phases import classify_phases
-from PharmaPy.Interpolation import NewtonInterpolation
+from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Commons import trapezoidal_rule
+from PharmaPy.Interpolation import local_newton_interpolation
+
+import warnings
 
 import numpy as np
 from scipy.optimize import newton
-from scipy.interpolate import CubicSpline
+
+# [-], node count of the deprecated three-point Newton helper below
+DEPRECATED_INTERPOLATION_NODES = 3
+
 
 def Interpolation(t_data, y_data, time):
-    idx_time = np.argmin(abs(time - t_data))
+    """Interpolate a profile with a local three-point Newton polynomial.
 
-    idx_lower = max(0, idx_time - 1)
-    idx_upper = idx_lower + 3
+    Parameters
+    ----------
+    t_data : numpy.ndarray
+        Sample times [s], ascending, shape (num_samples,).
+    y_data : numpy.ndarray
+        Samples with time on the first axis, shape (num_samples,) or
+        (num_samples, num_states), in their own units.
+    time : float
+        Query time [s].
 
-    t_interp = t_data[idx_lower:idx_upper]
-    y_interp = y_data[idx_lower:idx_upper]
+    Returns
+    -------
+    float or numpy.ndarray
+        Interpolated value in the units of ``y_data``, shape () or
+        (num_states,).
 
-    interp = NewtonInterpolation(t_interp, y_interp)
+    Warns
+    -----
+    DeprecationWarning
+        Always. Use :func:`PharmaPy.Connections.interpolate_inputs` for
+        connected inlet profiles, or
+        :func:`PharmaPy.Interpolation.local_newton_interpolation`.
 
-    y_target = interp.evalPolynomial(time)
+    Notes
+    -----
+    Deprecated. Delegates to
+    :func:`PharmaPy.Interpolation.local_newton_interpolation` with three
+    nodes, which keeps a full three-node window at the end of the profile;
+    earlier releases used two nodes there.
+    """
+    warnings.warn(
+        "PharmaPy.MixedPhases.Interpolation is deprecated; use "
+        "PharmaPy.Connections.interpolate_inputs for connected inlet profiles "
+        "or PharmaPy.Interpolation.local_newton_interpolation.",
+        DeprecationWarning, stacklevel=2)
 
-    return y_target
+    return local_newton_interpolation(
+        time, t_data, y_data, num_points=DEPRECATED_INTERPOLATION_NODES)
 
 
 def energy_balance(inst, mass_str):
@@ -568,27 +601,33 @@ class SlurryStream(Slurry):
         self.temp = energy_balance(self, 'mass_flow')
         self.solid_conc = self.getSolidsConcentr(basis='mass')
 
-    def InterpolateInputs(self, time):
-        if isinstance(time, (float, int)):
-            time = min(time, self.time_upstream[-1])
+    def InterpolateInputs(
+            self, time: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        """Interpolate the stored upstream array profile at given times.
 
-            y_interpol = Interpolation(self.time_upstream, self.y_inlet,
-                                       time)
-        else:
-            interpol = CubicSpline(self.time_upstream, self.y_inlet)
-            flags_interpol = time > self.time_upstream[-1]
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Evaluation time [s], scalar or shape (num_times,) in any order.
 
-            if any(flags_interpol):
-                time_interpol = time[~flags_interpol]
-                y_interp = interpol(time_interpol)
+        Returns
+        -------
+        float or numpy.ndarray
+            Upstream slurry values in the units and state order of
+            ``y_inlet``, which holds time on its first axis with shape
+            (num_upstream_times,) or (num_upstream_times, num_states).
+            Scalar time removes the time axis; array time gives
+            (num_times,) or (num_times, num_states) in query order.
 
-                y_extrapol = np.tile(y_interp[-1],
-                                     (sum(flags_interpol), 1))
-                y_interpol = np.vstack((y_interp, y_extrapol))
-            else:
-                y_interpol = interpol(time)
-
-        return y_interpol
+        Notes
+        -----
+        Delegates to :func:`PharmaPy.Connections.interpolate_inputs` with
+        ``time_upstream`` [s], using its default three-node local Newton
+        interpolation for scalar time and a cubic spline for array time.
+        Times after ``time_upstream[-1]`` hold the final upstream sample;
+        earlier times extrapolate.
+        """
+        return interpolate_inputs(time, self.time_upstream, self.y_inlet)
 
     def evaluate_inputs(self, time):
         if self.DynamicInlet is None:

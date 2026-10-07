@@ -6,6 +6,8 @@ Created on Thu Nov 14 15:10:19 2019
 @author: dcasasor
 """
 
+import copy
+
 import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
@@ -344,44 +346,124 @@ class StatisticsClass:
 
         return samples, conc_bootstrap, fig, axis
 
-    def get_bootsamples(self, num_samples, fix_initial=False):
+    def _observed_columns(self, ind):
+        """Return the observation mask of one experiment's residual columns.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``x_data`` order.
+
+        Returns
+        -------
+        numpy.ndarray
+            Boolean array with the shape of ``self.residuals[ind]``,
+            ``(n_times, n_columns)``: True where the residual belongs to an
+            observation, False at unobserved entries of staggered grids.
+
+        Raises
+        ------
+        ValueError
+            If a ``MultipleCurveResolution`` mask does not match the
+            residual columns.
+
+        Notes
+        -----
+        ``ParameterEstimation`` stores None (all observed) or a
+        ``(n_times, n_measured)`` array. ``MultipleCurveResolution`` stores a
+        dictionary of per-row masks keyed ``'spectra'`` and, optionally,
+        ``'non_spectra'``; its residual columns hold every spectral channel
+        followed by every non-spectral state (``get_global_analysis``), so
+        each column takes the row mask of its group; the channel count comes
+        from ``spectra_tot`` and the state count from ``measured_ind``.
         """
-        Create bootstrap datasets using the y's predicted with the converged
-        parameters. The final prediction error is sampled with replacement
-        and used to generate artificial datasets, wich are all subjected to
-        optimization by the bootstrap_params method below
+        residual = self.residuals[ind]
+        x_mask = self.inst.x_masks[ind]
+        if x_mask is None:
+            return np.ones(residual.shape, dtype=bool)
+
+        if not isinstance(x_mask, dict):
+            return np.asarray(x_mask, dtype=bool)
+
+        num_columns = {
+            'spectra': self.inst.spectra_tot.shape[1],  # wavelengths
+            'non_spectra': len(self.inst.measured_ind.get('non_spectra', [])),
+        }
+        columns = []
+        for key in ('spectra', 'non_spectra'):
+            if key in x_mask:
+                columns += ([np.asarray(x_mask[key], dtype=bool)]
+                            * num_columns[key])
+
+        if len(columns) != residual.shape[1]:
+            raise ValueError(
+                f"Observation masks of experiment {ind} describe "
+                f"{len(columns)} residual columns, but the residuals have "
+                f"{residual.shape[1]}")
+
+        return np.column_stack(columns)
+
+    def get_bootsamples(self, num_samples, fix_initial=False):
+        """Create residual-bootstrap datasets around the fitted responses.
+
+        For each experiment and measured state, the residuals at observed
+        model-grid entries are resampled with replacement and subtracted from
+        the fitted responses at those entries. The datasets are fitted by
+        ``bootstrap_params``.
 
         Parameters
         ----------
         num_samples : int
-            number of bootstrap samples.
+            Number of bootstrap datasets.
         fix_initial : bool, optional
-            If True, the initial y values are subjected to error.
-            The default is False.
+            If True, the first model-grid row keeps its fitted value and is
+            excluded from the resampled residual pool. The default is False.
 
         Returns
         -------
-        y_boot : list of lists
-            each internal list contains num_samples datasets of dimension
-            n_x x n_states for each experimental dataset provided
+        y_boot : list of lists of numpy.ndarray
+            One list per experiment, in ``x_data`` order, of ``num_samples``
+            arrays with shape ``(n_times, n_measured)``: model-grid rows and
+            measured-state (``measured_ind``) columns, in the measured
+            states' units. Unobserved entries of staggered observation grids
+            are NaN.
 
+        Notes
+        -----
+        Each state's resampling pool holds only its observed residuals
+        (model minus data, in that state's unit). Unobserved entries of
+        staggered grids have zero residual by construction; drawing them
+        would add phantom zero errors and shrink the bootstrap spread. Each
+        state is resampled independently, so correlations between
+        measurement errors of different states are not reproduced. Without
+        observation masks the random draws equal those of earlier releases.
+        ``_observed_columns`` documents the mask layouts, including those of
+        ``MultipleCurveResolution``.
         """
-        # Remember that multiple datasets are allowed
-
         y_boot = []
         for ind in range(self.inst.num_datasets):  # datasets
+            # (n_measured, n_times) [measured-state units]
             residual = self.residuals[ind].T
             y_nominal = self.y_nominal[ind].T
+            observed_by_state = self._observed_columns(ind).T
 
             y_states = []
-            for res, y in zip(residual, y_nominal):  # states
-                resid = res[fix_initial:]
+            for res, y, observed in zip(residual, y_nominal,
+                                        observed_by_state):  # states
+                observed = observed[fix_initial:]
+                # [measured-state unit], observed entries only
+                resid = res[fix_initial:][observed]
 
-                boots = np.random.choice(resid,
-                                         size=(num_samples, len(resid)),
-                                         replace=True)
+                # [measured-state unit]; NaN where the state is unobserved
+                y_generated = np.full((num_samples, len(observed)), np.nan)
+                if resid.size > 0:
+                    # [measured-state unit], resampled observed residuals
+                    boots = np.random.choice(resid,
+                                             size=(num_samples, len(resid)),
+                                             replace=True)
 
-                y_generated = y[fix_initial:] - boots
+                    y_generated[:, observed] = (
+                        y[fix_initial:][observed] - boots)
 
                 if fix_initial:
                     y_generated = np.insert(y_generated, 0, y[0], axis=1)
@@ -394,6 +476,114 @@ class StatisticsClass:
 
         return y_boot
 
+    def _isolated_estimator(self):
+        """Return a shallow copy of the estimator safe to evaluate and fit.
+
+        Returns
+        -------
+        ParameterEstimation
+            Copy sharing the model callable, its arguments, the data layout
+            and the weighting with ``self.inst``, but owning every container
+            that ``optimize_fn`` or the objective callback modify in place.
+
+        Notes
+        -----
+        ``optimize_fn`` and its callbacks rebind estimator attributes
+        (``y_data``, ``params_convg``, ``info_opt``, ``resid_runs``,
+        ``y_model``, ``covar_params`` and others), so rebinding them on the
+        copy leaves the original fit untouched. The exceptions, which are
+        modified in place, are the iteration histories ``params_iter`` and
+        ``objfun_iter`` (appended to while they are lists; ``objfun_iter``
+        stays a list after ``optimize_fn(store_iter=False)``), the cache
+        ``_observed_roots``, and the solver options, which ``optimize_fn``
+        writes into and which callers pass as a separate copy. The copy gets
+        its own lists and cache. Model callables and their arguments are
+        shared, not copied, so models that close over external objects keep
+        working.
+        """
+        estimator = copy.copy(self.inst)
+        for name in ('params_iter', 'objfun_iter'):
+            history = getattr(estimator, name, None)
+            if isinstance(history, list):
+                setattr(estimator, name, list(history))
+
+        roots = getattr(estimator, '_observed_roots', None)
+        if isinstance(roots, dict):
+            estimator._observed_roots = dict(roots)
+
+        return estimator
+
+    def _fit_bootstrap_sample(self, y_sample: list) -> np.ndarray:
+        """Fit one bootstrap dataset without modifying the fitted estimator.
+
+        Parameters
+        ----------
+        y_sample : list of numpy.ndarray
+            One generated dataset per experiment, in ``x_data`` order, with
+            the layout of ``get_bootsamples``: shape ``(n_times,
+            n_measured)``, measured-state columns in the states' units.
+
+        Returns
+        -------
+        numpy.ndarray
+            Optimized parameters, shape ``(num_params,)``, in the model's
+            parameter units.
+
+        Raises
+        ------
+        Exception
+            Whatever ``optimize_fn`` raises for this dataset.
+
+        Notes
+        -----
+        The fit runs on ``_isolated_estimator()``, and the solver receives a
+        copy of the options because ``optimize_fn`` writes keys into it.
+        """
+        estimator = self._isolated_estimator()
+        estimator.y_data = y_sample  # [measured-state units]
+
+        options = self.inst.optim_options
+        params, _, _ = estimator.optimize_fn(
+            method=self.inst.opt_method,
+            verbose=False, store_iter=False,
+            optim_options=None if options is None else dict(options))
+
+        return params  # [model-parameter units]
+
+    def _restore_model_state(self) -> None:
+        """Re-evaluate the model at the accepted parameters.
+
+        Bootstrap refits share the estimator's model callable. A stateful
+        callable, such as a ``SimulationExec`` unit operation, is left at its
+        last bootstrap evaluation; this re-evaluates the model at the
+        accepted ``params_convg``, matching the final refresh that
+        ``optimize_fn`` performs after an LM fit. (After an IPOPT fit, whose
+        last model calls are finite-difference perturbations, the callable
+        ends at the accepted parameters rather than at that perturbed point.)
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        Exception
+            Whatever the model raises at the accepted parameters.
+
+        Notes
+        -----
+        The objective is evaluated on ``_isolated_estimator()``, so every
+        attribute it rebinds or appends to (residuals, predictions,
+        sensitivities, histories) belongs to the copy and the estimator
+        stays unchanged. Nothing is evaluated when the estimator has no
+        accepted parameters (``params_convg``).
+        """
+        accepted = getattr(self.inst, 'params_convg', None)  # [param units]
+        if accepted is None:
+            return
+
+        self._isolated_estimator().get_objective(accepted, True)
+
     def bootstrap_params(self, num_samples: int = 100) -> np.ndarray:
         """Estimate parameters for residual-bootstrap response samples.
 
@@ -405,23 +595,43 @@ class StatisticsClass:
         Returns
         -------
         numpy.ndarray
-            Estimated parameters with shape ``(num_samples, num_params)`` and
-            the physical units configured for each model parameter. A row is
-            NaN when the optimizer encounters a singular linear system.
+            Estimated parameters with shape ``(num_samples, num_params)``:
+            one row per bootstrap dataset in sampling order, columns in the
+            order of the optimized parameters (``name_params``), in the
+            physical units configured for each model parameter. A row is NaN
+            when the optimizer encounters a singular linear system.
 
         Warns
         -----
         RuntimeWarning
             If ``optimize_fn`` raises ``numpy.linalg.LinAlgError``; the warning
             includes the sample index and original diagnostic.
+            Also if a sample's exception propagates and the model then fails
+            at the accepted parameters; the sample's exception is still
+            raised, also when warnings are turned into errors (the report is
+            then dropped).
 
         Raises
         ------
         Exception
-            Any optimizer exception other than ``numpy.linalg.LinAlgError``.
+            Any optimizer exception other than ``numpy.linalg.LinAlgError``,
+            or a model error while restoring the accepted parameters after all
+            samples were processed.
 
         Notes
         -----
+        Each dataset is fitted on an isolated copy of the estimator (see
+        ``_fit_bootstrap_sample``), so the estimator keeps its observations,
+        accepted parameters, residuals, predictions, solver information and
+        covariance, also when a sample fails or an exception propagates. The
+        only state this method changes is ``boot_params`` and
+        ``num_samples`` on this ``StatisticsClass``, after all samples are
+        fitted. A stateful model callback, such as a ``SimulationExec`` unit
+        operation, is shared with the copies; ``_restore_model_state`` returns
+        it to the accepted parameters after the samples, also when a sample's
+        exception propagates. A keyboard interrupt or other
+        ``BaseException`` aborts at once without that evaluation.
+
         The package's Levenberg-Marquardt implementation uses
         ``numpy.linalg.solve`` and ``numpy.linalg.inv``. Their documented
         Exception type, rather than origin, defines recovery. Any
@@ -443,31 +653,47 @@ class StatisticsClass:
             (num_samples, self.inst.num_params))  # [model-parameter units]
 
         tic = time.time()  # [s]
-        for ind in range(num_samples):
-            # Update bootstraped data for all the experimental runs
-            self.inst.y_data = [
-                y[ind] for y in y_samples]  # [response-dependent units]
+        try:
+            for ind in range(num_samples):
+                # Bootstrapped data for all the experimental runs
+                y_sample = [y[ind] for y in y_samples]  # [response units]
 
-            # Optimize
+                # Optimize
+                try:
+                    params = self._fit_bootstrap_sample(
+                        y_sample)  # [model-parameter units]
+                except np.linalg.LinAlgError as exc:
+                    warnings.warn(
+                        "Bootstrap optimization failed for sample {}: "
+                        "{}".format(ind, exc),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    params = [np.nan] * self.inst.num_params  # [param units]
+
+                # Store
+                boot_params[ind] = params
+        except Exception as error:
+            # Restore shared model state, but never mask the sample error.
             try:
-                params, _, _ = self.inst.optimize_fn(
-                    method=self.inst.opt_method,
-                    verbose=False, store_iter=False,
-                    optim_options=self.inst.optim_options
-                )  # [model-parameter units]
-            except np.linalg.LinAlgError as exc:
-                warnings.warn(
-                    "Bootstrap optimization failed for sample {}: {}".format(
-                        ind, exc),
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                params = [
-                    np.nan] * self.inst.num_params  # [model-parameter units]
+                self._restore_model_state()
+            except Exception as refresh_error:
+                try:
+                    warnings.warn(
+                        "Could not restore the model at the accepted "
+                        "parameters after bootstrap sample {} failed: "
+                        "{}".format(ind, refresh_error),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                except Exception:
+                    # A warnings filter set to 'error' turns the report into
+                    # an exception; the sample's error still takes priority.
+                    pass
+            raise error
+        # Interrupts (BaseException) propagate without further model runs.
 
-            # Store
-            boot_params[ind] = params
-
+        self._restore_model_state()
         toc = time.time()  # [s]
 
         self.boot_params = boot_params  # [model-parameter units]

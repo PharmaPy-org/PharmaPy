@@ -24,6 +24,65 @@ instead of appending earlier fits. The accepted LM :code:`info['x']`,
 the extra reporting evaluation. Objective-history recording follows the usual
 callback behavior, including duplicate removal with :code:`store_iter=True`.
 
+:code:`weight_matrix` is the measurement-error covariance of the measured
+states. Residuals are weighted by the lower Cholesky factor of its inverse (the
+precision) in measured-state order. Earlier versions permuted the precision
+whenever its LDL factorization pivoted, which some correlated covariances
+require; such fits now give different estimates and covariances. Diagonal
+covariances, and correlated ones that needed no pivoting, are unchanged.
+:code:`weight_matrix` must be a finite, square, positive-definite covariance.
+Indefinite matrices, which earlier versions accepted with NaN weights, now
+raise :code:`numpy.linalg.LinAlgError` at construction; non-square or
+non-finite ones raise :code:`ValueError`.
+
+With staggered observation grids (per-state sampling times in :code:`x_data`),
+unobserved model-grid entries now contribute zero residual and zero
+sensitivity, whether the Jacobian comes from :code:`jac_fun`, from
+sensitivities returned by the model, or from finite differences. Earlier
+versions kept sensitivities at unobserved entries, so their parameter
+covariances and confidence intervals overstated the information in the data.
+:code:`info['fun']` and :code:`info['jac']` keep their model-grid layout, with
+those entries equal to zero. Under a correlated :code:`weight_matrix`, a
+sample row that observes only some states is weighted by the marginal precision
+of those states, the inverse of their covariance block, rather than the
+corresponding block of the full precision. The residual bootstrap
+(:code:`StatisticsClass.get_bootsamples` and :code:`bootstrap_params`) draws
+each state's errors only from its observed residuals and leaves unobserved
+entries of the generated datasets as NaN. Without staggered grids the draws are
+unchanged.
+
+:code:`MultipleCurveResolution` applies the same rules to non-spectral states
+measured at fewer times than the spectra: their unobserved entries have zero
+weighted residual and zero sensitivity for model-returned and
+finite-difference Jacobians, and partially observed rows use the marginal
+precision. Its :code:`weight_matrix` has one row and column per spectral
+channel followed by one per non-spectral state and is the covariance of the
+measurement errors. Spectral residuals are data minus prediction while
+non-spectral residuals are model minus data, so correlations between spectral
+and non-spectral columns are applied with the sign this implies. Its
+finite-difference Jacobian previously had the opposite sign of the residual
+derivative (so Levenberg-Marquardt steps were rejected), and its model-returned
+Jacobian had that sign for non-spectral states; both now equal the derivative
+of the weighted residuals. Spectra must still be recorded at every model-grid
+time of an experiment.
+
+:code:`StatisticsClass.bootstrap_params` returns the bootstrap estimates, one row
+per generated dataset, and stores them in :code:`boot_params`. Each dataset is
+fitted on an isolated copy of the estimator. The estimator's observations,
+accepted parameters, residuals, predictions, solver information, covariance and
+solver options are therefore unchanged afterwards, including when a sample fit
+fails. Earlier versions left the last bootstrap dataset in :code:`y_data` and
+the last refit in the fitted outputs. Afterwards the model is evaluated once
+more at :code:`params_convg`, on a copy of the estimator. This returns a
+stateful model callback, such as a :code:`SimulationExec` unit operation, to
+the accepted parameters, also when a sample's exception propagates. A model
+that can no longer be evaluated at the accepted parameters is an error: if
+that evaluation fails after all samples were processed, its error is raised.
+If a sample's exception is already propagating, that exception is raised and
+the restore failure is reported as a :code:`RuntimeWarning`, which is dropped
+when warnings are turned into errors. A keyboard interrupt aborts without the
+extra evaluation.
+
 Liquid heat capacity
 ====================
 
@@ -67,6 +126,36 @@ The positional arguments remain pressure [Pa], temperature [K], phase, and basis
 Vapor concentrations use the same ideal-gas basis: :code:`mole_conc = mole_frac * pres / (R * temp) / 1000` [mol/L] and :code:`mass_conc = mole_conc * mw` [kg/m**3], with molecular weights [g/mol]. The last array axis is species; pressure and temperature profiles broadcast over preceding axes. Concentration inputs specify composition, while the equation of state fixes total concentration. A zero-amount vapor retains these intensive properties.
 
 UNIQUAC data without :code:`qip` use :code:`qi` locally and emit a warning once per property object. This fallback assumes the ordinary surface parameter also describes the modified residual term; systems requiring special parameters, including relevant water/alcohol models, should provide :code:`qip` explicitly. The fallback does not create a :code:`qip` attribute, so callers can still detect missing data.
+
+Connected inlet interpolation
+=============================
+
+Connected inlet profiles are interpolated by :code:`PharmaPy.Connections.interpolate_inputs`, which :code:`LiquidStream.InterpolateInputs` and :code:`SlurryStream.InterpolateInputs` (used, for example, by :code:`DynamicCollector`) now share. At and after the last upstream time, scalar and array queries return the final upstream sample itself, and array queries are evaluated in the caller's order, also when unsorted. Earlier releases differed near and after the end of the profile. For scalar queries, :code:`LiquidStream.InterpolateInputs` held the second-to-last sample for queries closest to or after the last upstream time and used a two-point window ending at the second-to-last sample for queries closest to the second-to-last time, while :code:`SlurryStream.InterpolateInputs` returned the final sample at and after the last time but used a two-point window for queries closest to it. For array queries, :code:`interpolate_inputs` kept in-support rows in the caller's order but moved queries after the last upstream time to the end; the stream methods also moved them, filled them with the value of the last in-support query instead of the final sample, and raised :code:`IndexError` when every query was after the last upstream time. Newton interpolation of integer-valued profiles now keeps fractional results. The module-level :code:`PharmaPy.Streams.Interpolation` and :code:`PharmaPy.MixedPhases.Interpolation` helpers of v1.0.0 remain as deprecated aliases that emit :code:`DeprecationWarning`; they now evaluate a full local Newton window (as :code:`PharmaPy.Interpolation.local_newton_interpolation`) near the end of the profile. Use :code:`interpolate_inputs` for connected inlet profiles.
+
+Connected flow conversions
+==========================
+
+Connected dynamic flows are converted between volume [m**3/s], mass [kg/s] and molar [mol/s] bases with each sample's own composition and, for vapor streams, each sample's temperature at the stored pressure. This applies in both directions: volume to mass or molar flow, and mass or molar flow to volume. Liquid density is the ideal-mixing value of the database pure-component densities, which are temperature-independent constants, so liquid conversions depend on composition only; concentration profiles contribute only their fractions. Earlier releases applied the source stream's stored final-state density to every volume-to-mass or volume-to-molar sample, so converted flows differ whenever the upstream composition varies over time; dynamic vapor conversions to volume flow also differ when the upstream temperature varies. Static sources are unchanged. A mass-concentration profile [kg/m**3] requested as mass fractions now yields mass fractions [-] only; earlier releases returned both mass and mole fractions, which downstream units could not consume. Dynamic conversions require a single-phase liquid or vapor stream: slurry profiles, whose densities are per phase, and unsupported composition bases now raise an error instead of returning unphysical flows. A dynamic sample whose composition is exactly zero, such as a stopped feed, converts to zero flow; non-finite samples propagate as NaN.
+
+These conversions, like static raw-material rows, relate volume and amount through the ideal-mixing density. Dynamic raw-material accounting (below) instead reports concentration times volume flow as consumed by concentration-based species balances. The two agree only when the concentrations close the ideal-mixing density, for example for a :code:`LiquidStream` built from concentrations with :code:`name_solv`.
+
+Dynamic raw-material accounting
+===============================
+
+See also *Connected flow conversions* above for how concentration-based accounting relates to ideal-mixing density conversions.
+
+:code:`GetRawMaterials` and the raw-feed rows of :code:`GetStreamTable` account a continuous raw inlet with a :code:`DynamicInlet` as the feed the receiving unit actually consumed. At each of the unit's result times, the accounted feed holds the controlled fields and the static stream values of the other inlet fields the unit declares, exactly as the unit reads them: for integrating units each result time is evaluated separately, as during integration, so control callables need not accept arrays, while a :code:`Mixer` feed is evaluated once on the mixer's whole time grid, as the mixer does. Totals are trapezoidal integrals over those times. Units hold different fields: :code:`DynamicCollector` liquid feeds consume :code:`mass_flow` [kg/s], :code:`mass_frac` and :code:`temp`; evaporators, dynamic distillation and dynamic extraction consume :code:`mole_flow` [mol/s], :code:`mole_frac` and :code:`temp`; CSTR, semibatch and plug-flow reactors consume :code:`vol_flow` [m**3/s], :code:`mole_conc` [mol/L] and :code:`temp`. A composition-only control therefore holds the mass flow for a collector, the molar flow for an evaporator, and the volume flow for a reactor. Species amounts are the consumed concentration times the volume flow, or the consumed fractions times the consumed flow (a volume flow is converted with the density of each sample's composition and temperature). Samples whose composition is exactly zero, such as a stopped feed, contribute no material; non-finite values are not dropped and make the totals NaN. Slurry feeds of crystallizers and collectors consume :code:`vol_flow`, liquid :code:`mass_conc` [kg/m**3] and a population (:code:`mu_n` [m**n/m**3] or :code:`distrib` [#/m**3/um]); the liquid receives :code:`vol_flow * (1 - kv * mu_3) * mass_conc` and the crystals :code:`vol_flow * kv * mu_3` times the solid density, split by the static solid composition. Both phases report the consumed slurry temperature, and their rows follow the order of the slurry's :code:`Phases`, as for static feeds. Reported fractions are averaged with the flow on the accounting basis, so fraction times total equals each species' integrated amount; the consumed temperature is reported as is when constant and otherwise as its mass-flow-weighted average on both bases; pressure is the static value because no unit consumes inlet pressure. Dynamic rows report amounts and volume but no flow rates.
+
+A control on a field the receiving unit does not consume would change the reported totals without changing the simulation, so it raises :code:`ValueError` naming the field and the fields the unit consumes. So does a :code:`DynamicInlet` attached to a phase of a slurry inlet, which no unit reads (attach the DynamicInput to the slurry itself), a population control on a single-phase stream, and a dynamic feed to a continuous unit that declares no inlet layout (for example :code:`ContinuousExtractor`), and a dynamic slurry feed to a unit that does not consume its volume flow, liquid concentration and population (for example :code:`ContinuousHoldup`). Earlier releases raised :code:`KeyError` unless a mass or molar flow was controlled and always reported the static composition. Cases that previously returned totals and now raise include: flow-controlled feeds whose DynamicInput also, or only, controls a field the unit does not consume (for example a :code:`mass_flow` or :code:`mole_flow` control on a slurry or reactor feed, or a :code:`mole_frac` control on a reactor feed); slurry feeds controlling :code:`mass_frac` or other unconsumed fields; phase-level DynamicInlets; and feeds controlling two flows. Totals also change for composition-controlled feeds and for feeds to units that do not consume :code:`mass_flow`, and the reported temperature of feeds controlling both flow and temperature is now the consumed, mass-flow-weighted value instead of the static stream temperature. The undocumented :code:`SimulationExec.get_dynamic_raw_inputs` helper, which split a mixed inlet's dynamic flow by static phase fractions, has been removed because that split contradicts the consumed feed; it was never part of a tagged release. Use :code:`GetRawMaterials(totals=False)` for per-phase records.
+
+An :code:`Evaporator` with :code:`stop_at_maxvol=False` shuts its inlet when the liquid reaches 95% of the drum volume, keeps it shut on continuation, and records the absolute event time in :code:`inlet_stop_time` [s]; :code:`reset()` or a new :code:`Phases` assignment clears it. Raw-material accounting stops both dynamic and static feeds of such a unit there: dynamic totals integrate over the result times before the stop and end at the stop time, and static totals multiply the flow by the fed duration. Earlier releases kept accounting the feed after the inlet was shut, including over continuations.
+
+A :code:`Mixer` that mixes a slurry or cake reads static phase values only, so an inlet with non-empty :code:`DynamicInlet` controls raises :code:`ValueError` naming the inlet; profiled and dynamic multiphase :code:`Mixer` inputs are unsupported. Earlier releases silently ignored such controls.
+
+Flowsheet execution order
+=========================
+
+:code:`SimulationExec` runs the units of a flowsheet graph in a reproducible topological order that does not depend on :code:`PYTHONHASHSEED`. Units without predecessors start in the order the graph declares them; afterwards, a unit joins a first-in, first-out queue when its last predecessor has run, and the successors of a unit are considered in the order of its successor list. Successor lists must therefore be ordered sequences such as lists; sets raise :code:`TypeError`. Each unit transfers its outlet to its successors right after it runs, so a :code:`Mixer` receives its inlets in the execution order of its predecessors, and a continuous liquid :code:`Mixer` takes its evaluation grid from the first of them with more than one sample. This equals declaration order when all predecessors are sources, but not in general: for :code:`{'S1': ['P'], 'P': ['M'], 'S2': ['M'], 'M': []}` the order is :code:`S1, S2, P, M`, so :code:`M` receives the :code:`S2` inlet before the :code:`P` inlet. Earlier releases could execute independent units, and hence feed a mixer, in a different order in each Python process. Recycles are not supported: a graph with a cycle, including a unit listed as its own successor, raises :code:`PharmaPyNonImplementedError` naming the units on or downstream of the recycle. Units that appear only as successors count toward this check; earlier releases compared the scheduled units with the graph keys alone and could silently skip recycle units. Printing a :code:`SimulationResult` shows :code:`A --> B --> C` only when the units form one connected directed path; otherwise it lists one :code:`source --> destination` line per connection, in declaration order, and the bare name of each unconnected unit, instead of joining the execution order with arrows.
 
 Crystallizer initialization
 ===========================
@@ -172,6 +261,8 @@ Crystallizer feeds and steady state
 :code:`Slurry.Phases` rejects phase-only initialization with zero combined liquid and solid volume before normalizing moments or distributions. Supply a positive phase inventory first; a positive liquid inventory with zero crystals remains supported. Empty-slurry temperature initialization is not defined.
 
 Moment-mode crystallizers accept static slurry moments and connected upstream moment profiles on the slurry-volume basis [m**n/m**3]. Connections from FVM crystallizers retain the reported moment history, rather than applying the final population at every time. Explicitly converted inlet moments retain precedence. The inlet must supply all moment orders required by the destination; extra higher orders are ignored, and missing orders raise an explanatory error.
+
+A :code:`DynamicInput` attached to a slurry feed (:code:`Inlet.DynamicInlet`) keys its controls by plain field name. Each control is routed to the inlet group that declares it: for MSMPR and Semibatch crystallizers, :code:`vol_flow` [m**3/s], :code:`temp` [K], :code:`mu_n` [m**n/m**3] or :code:`distrib` [#/m**3/um] belong to the slurry inlet, and :code:`mass_conc` [kg/m**3] belongs to its :code:`Liquid_1` phase. Values are used as supplied, without unit or basis conversion. Declared fields without a control keep their static stream or phase values, and the stream itself is not modified. Controls that the unit does not declare are passed through with the slurry-inlet fields and ignored, as for single-phase feeds. A field name declared by more than one group cannot be attributed to one of them and raises :code:`ValueError`. A dynamic :code:`Liquid_1` :code:`mass_conc` enters the species balances only: for moment and 1D-FVM feeds alike, the inlet liquid density and the feed enthalpy, and the Semibatch liquid-volume balance, are still evaluated from the feed stream's static :code:`Liquid_1` composition. Earlier releases raised :code:`KeyError: 'Liquid_1'` for dynamic 1D-FVM slurry feeds.
 
 Finite-radius FVM nucleation requires :code:`rad_zero` [um] to match the first size-grid point within floating-point roundoff. Legacy :code:`rad_zero=0` remains supported with positive-start grids. Moment-mode analytical Jacobians are restricted to prescribed-temperature Batch crystallization with zero-radius nuclei and :code:`mass_conc` kinetics. The built-in kinetic model and unit impurity factor assumptions also apply; unsupported operating modes, FVM, finite radii, and other concentration bases raise before solver construction.
 

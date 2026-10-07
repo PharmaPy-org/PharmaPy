@@ -7,7 +7,7 @@ Created on Mon Oct 28 15:35:48 2019
 """
 
 import numpy as np
-from scipy.linalg import inv, ldl
+from scipy.linalg import cholesky, solve_triangular
 from itertools import cycle
 from typing import Callable, Optional, Sequence
 
@@ -209,6 +209,97 @@ def _experiment_arguments(data, count: int, names: Optional[list],
                 f"arguments; offending experiments: {invalid!r}. "
                 "Use (value,) for a single positional argument.")
     return values
+
+
+def _measurement_precision_root(weight_matrix) -> np.ndarray:
+    """Build the root that applies the measurement precision to residuals.
+
+    Parameters
+    ----------
+    weight_matrix : array_like
+        Measurement-error covariance of the measured states, shape
+        ``(n_measured, n_measured)``, with rows and columns in measured-state
+        (``measured_ind`` and ``y_data`` column) order. Entry ``(i, j)`` has
+        the unit ``u_i * u_j``, where ``u_i`` is the unit of measured state
+        ``i`` (the standard-deviation unit of its measurement error). It must
+        be symmetric positive definite; only its lower triangle is read.
+
+    Returns
+    -------
+    precision_root : numpy.ndarray
+        Lower-triangular Cholesky factor ``S`` of the precision
+        ``P = inv(weight_matrix)``, shape ``(n_measured, n_measured)``, with
+        ``S @ S.T == P`` in the same measured-state order and a positive
+        diagonal, which makes it unique. Row ``i`` carries unit ``1/u_i`` and
+        columns are dimensionless, so entry ``(i, j)`` has unit ``1/u_i``.
+        Raw residual rows ``r``, shape ``(n_times, n_measured)``, are weighted
+        as ``r @ S``: whitened component ``j`` combines measured states
+        ``i >= j`` and is dimensionless, and the sum of squared weighted
+        residuals equals ``sum_k r_k @ P @ r_k`` over sample rows ``k``.
+
+    Raises
+    ------
+    ValueError
+        If ``weight_matrix`` is not a square two-dimensional array or contains
+        non-finite entries.
+    numpy.linalg.LinAlgError
+        If ``weight_matrix`` is not positive definite. ``LinAlgError`` is a
+        ``ValueError`` subclass.
+
+    Notes
+    -----
+    The factor of ``P`` is obtained without forming ``P``. With the exchange
+    (order-reversal) matrix ``J``, the Cholesky factorization
+    ``J @ weight_matrix @ J = R.T @ R`` (``R`` upper triangular) gives the
+    reverse Cholesky factorization ``weight_matrix = U @ U.T`` with
+    ``U = (J @ R @ J).T`` upper triangular. Then
+    ``P = inv(U).T @ inv(U)``, so ``S = inv(U).T`` is lower triangular with
+    ``S @ S.T = P``; a triangular solve supplies ``inv(U)``. The weighted
+    rows ``r @ S = (inv(U) @ r.T).T`` are whitened residuals, with identity
+    covariance when ``weight_matrix`` is the measurement-error covariance.
+    A diagonal matrix of variances gives reciprocal standard deviations on
+    the diagonal of ``S``.
+
+    This equals the root ``L @ sqrt(D)`` of an unpivoted LDL factorization
+    ``P = L @ D @ L.T``, which earlier releases stored whenever that
+    factorization needed no pivoting, so those per-entry weighted residuals
+    and Jacobian rows are preserved. Cholesky needs no pivoting for a
+    symmetric positive-definite matrix; indexing a pivoted LDL factor by its
+    permutation instead replaced ``P`` by ``P[perm][:, perm]`` (issue #237).
+    """
+    weight_matrix = np.asarray(weight_matrix, dtype=float)
+    if weight_matrix.ndim != 2 or (
+            weight_matrix.shape[0] != weight_matrix.shape[1]):
+        raise ValueError(
+            "weight_matrix must be a square two-dimensional measurement-error "
+            "covariance with one row and column per measured state; got "
+            f"shape {weight_matrix.shape}")
+    if not np.all(np.isfinite(weight_matrix)):
+        raise ValueError("weight_matrix entries must be finite")
+
+    # Entry (i, j) in [u_(n-1-i) * u_(n-1-j)]: states in reversed order.
+    reversed_covariance = weight_matrix[::-1, ::-1]
+    try:
+        # Upper triangular; reversed_covariance = reversed_chol.T @
+        # reversed_chol. Column j carries [u_(n-1-j)]. The upper triangle of
+        # reversed_covariance is the lower triangle of weight_matrix.
+        reversed_chol = cholesky(reversed_covariance, lower=False,
+                                 check_finite=False)
+    except np.linalg.LinAlgError as error:
+        raise np.linalg.LinAlgError(
+            "weight_matrix must be a symmetric positive-definite "
+            "measurement-error covariance; its Cholesky factorization failed "
+            f"({error})") from error
+
+    # Upper triangular; weight_matrix = chol_upper @ chol_upper.T. Row i
+    # carries [u_i]; columns are dimensionless.
+    chol_upper = reversed_chol[::-1, ::-1].T
+    # inv(chol_upper), upper triangular; column i carries [1/u_i].
+    chol_upper_inv = solve_triangular(
+        chol_upper, np.eye(weight_matrix.shape[0]), lower=False,
+        check_finite=False)
+
+    return chol_upper_inv.T
 
 
 def get_masked_ydata(y_list, masks, assign_missing=None, merge=True):
@@ -416,10 +507,19 @@ class ParameterEstimation:
             parametric jacobian, in the corresponding parameter units.
             The default is None.
         weight_matrix : numpy array, optional
-            array with dimension N_meas x N_meas, indicating weighting
-            factors for the measured states. A typical choice is a
-            diagonal matrix of experimental state variances.
-            The default is None.
+            Symmetric positive-definite measurement-error covariance with
+            dimension N_meas x N_meas. Rows and columns follow the measured
+            states in ``measured_ind`` (``y_data`` column) order, and entry
+            (i, j) has the product of the units of measured states i and j.
+            Residuals are weighted by its inverse (the precision), so the
+            objective is ``1/2 * sum_k r_k @ inv(weight_matrix) @ r_k`` over
+            sample rows ``r_k`` of model minus data. A typical choice is a
+            diagonal matrix of experimental state variances; correlated
+            covariances are supported. Only the lower triangle is read.
+            Sample rows with unobserved states (staggered ``x_data``
+            grids) are weighted by the marginal precision
+            ``inv(weight_matrix[o][:, o])`` of their observed states ``o``.
+            The default is None, which uses the dimensionless identity.
         name_params : list of str, optional
             list with parameter names. The default is None.
         name_states : list of str, optional
@@ -434,12 +534,15 @@ class ParameterEstimation:
         ------
         ValueError
             If experiment mappings disagree, experiment counts differ, no
-            experiments are supplied, or an observation/callback mapping
-            has multiple experiment keys while ``x_data`` is unnamed.
+            experiments are supplied, an observation/callback mapping
+            has multiple experiment keys while ``x_data`` is unnamed, or
+            ``weight_matrix`` is not a finite square two-dimensional array.
         TypeError
             If ``y_data`` is None, positional arguments are not iterable, or
             keyword arguments are not a dictionary. Positional errors identify
             experiment keys or, for unnamed experiments, zero-based positions.
+        numpy.linalg.LinAlgError
+            If ``weight_matrix`` is not positive definite.
 
         Notes
         -----
@@ -548,11 +651,22 @@ class ParameterEstimation:
         self.num_data = num_data
 
         if weight_matrix is None:
-            weight_matrix = np.eye(len(self.measured_ind))
+            weight_matrix = np.eye(len(self.measured_ind))  # [-]
 
-        l, d, perm = ldl(inv(weight_matrix))
-
-        self.sigma_inv = np.dot(l[perm], d**0.5)
+        # Lower triangular; row i in [1/u_i] for measured state unit u_i,
+        # columns [-]. sigma_inv @ sigma_inv.T equals inv(weight_matrix) in
+        # measured-state order.
+        self.sigma_inv = _measurement_precision_root(weight_matrix)
+        # [u_i * u_j], validated above; source of the marginal precision
+        # roots of partially observed sample rows. A private copy, because
+        # those roots are built lazily and must match sigma_inv even if the
+        # caller later reuses or mutates its array.
+        self._measurement_covariance = np.array(weight_matrix, dtype=float,
+                                                copy=True)
+        # Observed-state pattern (tuple of bool) -> lower root of
+        # inv(weight_matrix[observed][:, observed]): row i [1/u_i] for the
+        # i-th observed state, columns [-]; filled on first use.
+        self._observed_roots = {}
 
         # --------------- Parameters
         self.num_params_total = len(param_seed)
@@ -613,6 +727,84 @@ class ParameterEstimation:
         self.y_model = []
 
         self.method = None
+
+    def _weight_sample_rows(self, values: np.ndarray,
+                            x_mask: Optional[np.ndarray]) -> np.ndarray:
+        """Whiten residual-like values sample row by sample row.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            Raw residuals, shape ``(n_times, n_measured)``, or their parameter
+            sensitivities, shape ``(n_times, n_params, n_measured)``. The last
+            axis follows measured-state (``measured_ind``) order; entries have
+            the measured state's unit, divided by the parameter unit for
+            sensitivities.
+        x_mask : numpy.ndarray or None
+            Observation mask, shape ``(n_times, n_measured)``, True where the
+            state was measured at that model time. None means every state was
+            measured at every model time.
+
+        Returns
+        -------
+        numpy.ndarray
+            Weighted values with the shape of ``values``. For each sample row
+            with observed states ``o``, entries ``o`` are
+            ``values[k, ..., o] @ S_o``, where ``S_o`` is the lower Cholesky
+            factor of ``inv(weight_matrix[o][:, o])``; unobserved entries are
+            exactly zero. Units are those of ``values`` divided by the
+            measured state's unit (dimensionless for residuals weighted by a
+            covariance in squared state units).
+
+        Notes
+        -----
+        Whitening the zero-filled full row with ``sigma_inv`` would instead
+        apply the conditional precision ``P[o][:, o]`` of the full precision
+        ``P = inv(weight_matrix)``, which exceeds the marginal precision of
+        the observed states when they are correlated with unobserved ones,
+        and would leave sensitivities of unobserved entries in the Jacobian.
+        With a diagonal ``weight_matrix`` both precisions coincide and the
+        weighted values equal ``values @ sigma_inv`` with unobserved entries
+        zeroed. Fully observed rows use ``sigma_inv`` itself, so estimates
+        without staggered grids are unchanged.
+        """
+        num_measured = values.shape[-1]
+        if x_mask is None:
+            # [value unit / u_i]: whitened values of every row.
+            weighted = np.dot(values.reshape(-1, num_measured), self.sigma_inv)
+            return weighted.reshape(values.shape)
+
+        # [value unit / u_i]; rows without observations stay zero.
+        weighted = np.zeros_like(values, dtype=float)
+        patterns, pattern_of_row = np.unique(x_mask, axis=0,
+                                             return_inverse=True)
+        for pattern_index, observed in enumerate(patterns):
+            if not observed.any():
+                continue
+
+            if observed.all():
+                root = self.sigma_inv  # rows [1/u_i], columns [-]
+            else:
+                key = tuple(observed.tolist())
+                if key not in self._observed_roots:
+                    marginal_covariance = self._measurement_covariance[
+                        np.ix_(observed, observed)]  # [u_i * u_j]
+                    self._observed_roots[key] = _measurement_precision_root(
+                        marginal_covariance)
+                # Rows [1/u_i] for the observed states, columns [-].
+                root = self._observed_roots[key]
+
+            rows = np.flatnonzero(pattern_of_row.ravel() == pattern_index)
+            observed_values = values[rows][..., observed]  # [value unit]
+            # [value unit / u_i], whitened observed entries.
+            block = np.dot(observed_values.reshape(-1, observed.sum()), root)
+
+            weighted_rows = weighted[rows]
+            weighted_rows[..., observed] = block.reshape(
+                observed_values.shape)
+            weighted[rows] = weighted_rows
+
+        return weighted
 
     def select_sens(self, sens_ordered, num_states, times=None):
 
@@ -676,8 +868,12 @@ class ParameterEstimation:
         set_self : bool, optional
             If True, store the latest model outputs, raw residuals in model
             units as ``residuals`` with shape ``(sum_times, n_measured)`` in
-            data-major order, and ``sigma_inv``-weighted residuals flattened
-            state-major as ``weighted_residuals``. The default is True.
+            data-major order, and the row-whitened residuals flattened
+            state-major as ``weighted_residuals``: fully observed sample rows
+            are weighted by ``sigma_inv``, partially observed rows by the root
+            of ``inv(weight_matrix[o][:, o])`` for their observed states
+            ``o``, and unobserved entries are zero (see
+            ``_weight_sample_rows``). The default is True.
 
         Returns
         -------
@@ -690,6 +886,15 @@ class ParameterEstimation:
             dimensionless [-] when ``weight_matrix`` holds measurement
             variances in squared state units. The objective has the squared
             unit of ``r``.
+
+        Notes
+        -----
+        With staggered observation grids, unobserved model-grid entries keep
+        their positions in ``r`` but are exactly zero, and each partially
+        observed sample row is weighted by the marginal precision of its
+        observed states (see ``_weight_sample_rows``), so the objective is
+        ``1/2 * sum_k r_ok @ inv(weight_matrix[o_k][:, o_k]) @ r_ok`` over the
+        observed residuals ``r_ok`` of each sample row.
 
         """
         # Store parameter values
@@ -740,9 +945,10 @@ class ParameterEstimation:
             resid_runs.append(resid_run)
 
         # [measured-state unit / weight_matrix unit**0.5]; [-] only with
-        # state-variance weights.
-        weighted_residuals = [np.dot(resid, self.sigma_inv)
-                              for resid in resid_runs]
+        # state-variance weights. Unobserved entries are exactly zero.
+        weighted_residuals = [self._weight_sample_rows(resid, x_mask)
+                              for resid, x_mask in zip(resid_runs,
+                                                       self.x_masks)]
 
         if len(sens_second) > 0:
             self.sens_second = sens_second
@@ -804,6 +1010,14 @@ class ParameterEstimation:
             squared state units; ``get_objective`` documents the residual
             units.
 
+        Notes
+        -----
+        Analytical (``jac_fun`` or model-returned) and finite-difference
+        model sensitivities are weighted row by row exactly like the
+        residuals. Columns of unobserved model-grid entries are therefore
+        zero and contribute no information to ``jac @ jac.T`` or to the
+        parameter covariance.
+
         """
 
         if not out_array and (
@@ -834,13 +1048,27 @@ class ParameterEstimation:
             raw_sens = self.sens_second
 
         weighted_sens = []
-        for sensit, x_model in zip(raw_sens, self.x_model):
+        for sensit, x_model, x_mask in zip(raw_sens, self.x_model,
+                                           self.x_masks):
             sensit = self.select_sens(sensit, self.num_model_states)
 
+            # (n_params * n_times, n_measured), parameter-major rows; this
+            # also accepts the legacy one-state (1, n_times) jac_fun layout.
             sens_by_y = reorder_sens(sensit)
-
-            weighted = np.dot(sens_by_y, self.sigma_inv)
-            weighted = reorder_sens(weighted, num_rows=len(x_model))
+            num_measured = sens_by_y.shape[1]
+            # (n_times, n_params, n_measured) [state unit / parameter unit]
+            sens_by_row = sens_by_y.reshape(
+                -1, len(x_model), num_measured).transpose(1, 0, 2)
+            # Same row weighting as the residuals, so unobserved entries have
+            # zero sensitivity and the result is the Jacobian of the
+            # weighted residuals returned by get_objective.
+            # (n_times, n_params, n_measured) [weighted residual unit /
+            # parameter unit]
+            weighted = self._weight_sample_rows(sens_by_row, x_mask)
+            # (n_measured * n_times, n_params), same units; state-major rows
+            # (state, time) matching the residual vector.
+            weighted = weighted.transpose(2, 0, 1).reshape(
+                -1, weighted.shape[1])
 
             weighted_sens.append(weighted)
 
@@ -879,8 +1107,12 @@ class ParameterEstimation:
         Returns
         -------
         dict
-            ``fun`` contains the ``sigma_inv``-weighted residuals, model
-            output minus data, in the basis of the measured states. Each
+            ``fun`` contains the row-whitened residuals of
+            ``get_objective``, model output minus data, in the basis of the
+            measured states: ``sigma_inv`` weights fully observed sample
+            rows, the root of ``inv(weight_matrix[o][:, o])`` weights rows
+            observing only states ``o``, and unobserved entries are zero
+            (see ``_weight_sample_rows``). Each
             entry's unit is its measured state's unit divided by the square
             root of the matching ``weight_matrix`` unit. With the default
             identity ``weight_matrix`` each entry keeps its measured state's
@@ -945,7 +1177,9 @@ class ParameterEstimation:
             ``(num_params, len(info['fun']))``; each entry has its ``fun``
             entry's unit divided by the matching parameter unit.
             With staggered measurement grids, columns include unobserved
-            model-grid entries, so their count can exceed ``num_data_total``.
+            model-grid entries, so their count can exceed ``num_data_total``;
+            those entries of ``info['fun']`` and columns of ``info['jac']``
+            are exactly zero, so they add no residual or information.
             LM additionally supplies its accepted ``x`` and solver diagnostics.
 
         Raises
@@ -1398,6 +1632,65 @@ class MultipleCurveResolution(ParameterEstimation):
                  jac_fun=None, dx_finitediff=None,
                  measured_ind=None, non_spectral_ind=None, weight_matrix=None,
                  name_params=None, name_states=None):
+        """Create a multivariate curve resolution (MCR) estimator.
+
+        Parameters
+        ----------
+        func : callable
+            Model ``func(params, x, reord_sens=False, *args, **kwargs)``
+            returning states, shape ``(n_times, n_states)`` in model units,
+            or ``(states, sensitivities)`` with sensitivities of shape
+            ``(n_params, n_times, n_states)``.
+        param_seed : array-like
+            Parameter seed in the units required by ``func``.
+        time_data : numpy.ndarray, list or dict
+            Times per experiment [s]; for non-spectral states measured at
+            other times, a dictionary per experiment with ``'spectra'`` and
+            ``'non_spectra'`` time arrays, as for ``ParameterEstimation``.
+        y_spectra : numpy.ndarray, list or dict
+            Absorbance spectra, shape ``(n_times, n_lambda)`` [-], or per
+            experiment a dictionary with ``'spectra'`` and
+            ``'non_spectra'`` observations (model state units).
+        mult_penalty : float, optional
+            Weight of the penalty ``mult_penalty * sum(min(eps, 0)**2)`` on
+            negative pure-component absorptivities ``eps``, added to the
+            objective; units of the objective per squared absorptivity unit
+            (absorbance per concentration unit). The default 1 is a scaling
+            assumption, not a calibrated value.
+        global_analysis : bool, optional
+            Resolve one set of absorptivities for all experiments.
+        args_fun, kwargs_fun, optimize_flags, jac_fun, dx_finitediff,
+        name_params, name_states : optional
+            As for ``ParameterEstimation``.
+        measured_ind : list or dict
+            States resolved from the spectra, or a dictionary with
+            ``'spectra'`` and optional ``'non_spectra'`` state indices.
+        non_spectral_ind : optional
+            Unused; kept for call compatibility.
+        weight_matrix : numpy.ndarray, optional
+            Measurement-error covariance (data minus truth) of the residual
+            columns: every spectral channel followed by every non-spectral
+            state, shape ``(n_lambda + n_non, n_lambda + n_non)``. Entry
+            ``(i, j)`` has the product of the units of columns ``i`` and
+            ``j``: absorbance [-] for spectral channels, the model-state
+            unit for non-spectral states. The default is the identity.
+
+        Raises
+        ------
+        ValueError
+            If a spectra dictionary lacks ``'spectra'`` or ``weight_matrix``
+            does not match the residual columns, besides the
+            ``ParameterEstimation`` input errors.
+
+        Notes
+        -----
+        Spectral residuals are data minus prediction and non-spectral ones
+        model minus data, so the residual covariance is
+        ``D @ weight_matrix @ D`` with ``D = diag(+1 spectral, -1
+        non-spectral``); ``sigma_inv`` and the marginal roots of partially
+        observed rows are built for it. Block-diagonal weights are
+        unaffected.
+        """
 
         super().__init__(func, param_seed, time_data, y_spectra, measured_ind,
                          args_fun, kwargs_fun, optimize_flags, jac_fun,
@@ -1442,14 +1735,74 @@ class MultipleCurveResolution(ParameterEstimation):
         if 'non_spectra' in self.measured_ind:
             self.has_non = True
 
+        num_lambda = y_spectral[0]['spectra'].shape[1]  # [-], channels
+        num_non = len(self.measured_ind.get('non_spectra', []))  # [-]
+        size_sigma = num_lambda + num_non  # [-], residual columns
         if weight_matrix is None:
-            size_sigma = y_spectral[0]['spectra'].shape[1]
-            size_sigma += len(self.measured_ind.get('non_spectra', []))
-
             self.sigma_inv = np.eye(size_sigma)
+            self._measurement_covariance = np.eye(size_sigma)  # [-]
+        else:
+            if self._measurement_covariance.shape != (size_sigma,
+                                                      size_sigma):
+                raise ValueError(
+                    "weight_matrix must have one row and column per spectral "
+                    f"channel ({num_lambda}) followed by one per non-spectral "
+                    f"state ({num_non}); got shape "
+                    f"{self._measurement_covariance.shape}")
+            # Spectral residuals are data minus prediction, non-spectral
+            # ones model minus data. weight_matrix is the covariance of the
+            # measurement errors, so the residual covariance is
+            # D @ weight_matrix @ D with D = diag(+1 spectral, -1
+            # non-spectral); D @ sigma_inv @ D is its lower precision root.
+            # Block-diagonal weights are unchanged.
+            residual_signs = np.concatenate(
+                (np.ones(num_lambda), -np.ones(num_non)))  # [-]
+            sign_flip = np.outer(residual_signs, residual_signs)  # [-]
+            self.sigma_inv = self.sigma_inv * sign_flip
+            self._measurement_covariance = (
+                self._measurement_covariance * sign_flip)
+        # Marginal roots must follow the residual-column covariance above.
+        self._observed_roots = {}
 
         self.projection_kwargs = {}
         self.mult_penalty = mult_penalty
+
+    def _residual_observation_mask(self) -> Optional[np.ndarray]:
+        """Return the observation mask of the stacked MCR residual columns.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Boolean array, shape ``(sum(len_spectra), n_lambda + n_non)``:
+            rows are model-grid times of all experiments in ``x_data``
+            order, columns every spectral channel followed by every
+            non-spectral state, True where the entry was measured. None when
+            every entry was measured.
+
+        Notes
+        -----
+        A dictionary mask stores one row mask per group (``'spectra'``,
+        ``'non_spectra'``), shared by the group's columns. Unobserved
+        non-spectral entries have zero residual (``get_global_analysis``)
+        and, through this mask, zero weighted residual and sensitivity.
+        """
+        num_lambda = self.spectra_tot.shape[1]  # [-]
+        num_non = len(self.measured_ind.get('non_spectra', []))  # [-]
+        blocks = []
+        for num_rows, x_mask in zip(self.len_spectra, self.x_masks):
+            if isinstance(x_mask, dict):
+                columns = [np.asarray(x_mask['spectra'], dtype=bool)]
+                columns *= num_lambda
+                if num_non:
+                    columns += ([np.asarray(x_mask['non_spectra'],
+                                            dtype=bool)] * num_non)
+                blocks.append(np.column_stack(columns))
+            else:
+                blocks.append(np.ones((num_rows, num_lambda + num_non),
+                                      dtype=bool))
+
+        mask = np.vstack(blocks)
+        return None if mask.all() else mask
 
     def get_sens_projection(self, c_target, c_plus, sens_states):
         eye = np.eye(c_target.shape[0])
@@ -1475,6 +1828,27 @@ class MultipleCurveResolution(ParameterEstimation):
         return absorbance.T.ravel()
 
     def get_gradient(self, params, out_array=False):
+        """Return the Jacobian of the weighted MCR residuals or a gradient.
+
+        Parameters
+        ----------
+        params : array_like
+            Optimized parameters in the model's units.
+        out_array : bool, optional
+            If True, return the weighted-residual Jacobian for LM;
+            otherwise the scalar-objective gradient. The default is False.
+
+        Returns
+        -------
+        numpy.ndarray
+            With ``out_array``, shape ``(n_params, n_data)``: derivatives of
+            the weighted residuals of ``get_objective`` (column-major over
+            residual columns and stacked times) per parameter unit, from
+            finite differences or from model-returned sensitivities.
+            Unobserved non-spectral entries are zero. Otherwise the
+            objective gradient from finite differences, shape
+            ``(n_params,)``.
+        """
         raw_sens = []
         if self.sens_second is None:
             pick_p = np.where(self.map_variable)[0]
@@ -1489,18 +1863,10 @@ class MultipleCurveResolution(ParameterEstimation):
             weighted_sens = jac_fun(self.get_objective, params, args=args,
                                     dx=self.dx_fd, pick_x=pick_p)
 
-            # if self.opt_method == 'LM':
-
-            #     num_times_total, num_lambda = self.spectra_tot.shape
-            #     num_non_spectral = len(self.measured_ind.get('non_spectra', []))
-            #     num_cols = num_lambda + num_non_spectral
-
-            #     sens = raw_sens.reshape(-1, num_cols, num_times_total)
-            #     sens = np.transpose(sens, (0, 2, 1))
-
-            #     weighted_sens = sens @ self.sigma_inv  # TODOÑ I think this is not necessary
-            # else:
-            #     weighted_sens = raw_sens
+            if out_array:
+                # Finite differences of the weighted residual are already
+                # its Jacobian, (n_data, n_params); LM needs no sign change.
+                return weighted_sens.T
 
         else:
             raw_sens = self.sens_second
@@ -1513,25 +1879,30 @@ class MultipleCurveResolution(ParameterEstimation):
                                                     **self.projection_kwargs)
 
             n_par, n_times, n_lambda = sens_spectra.shape
+            x_mask = self._residual_observation_mask()
             if self.has_non:
                 sens_regular = sens_tot[:, :, self.measured_ind['non_spectra']]
 
-                all_sens = np.concatenate((sens_spectra, sens_regular), axis=2)
+                # weighted_sens holds minus the residual derivative (it is
+                # negated below): the spectral residual is data minus
+                # prediction, the non-spectral one model minus data.
+                all_sens = np.concatenate((sens_spectra, -sens_regular),
+                                          axis=2)
 
-                weighted_all = all_sens @ self.sigma_inv
+                # (n_par, n_times, n_columns); rows whitened like the
+                # residuals, unobserved entries zero.
+                weighted_all = self._weight_sample_rows(
+                    all_sens.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
 
                 weighted_sp = flatten_spectral_sens(weighted_all[:, :, :n_lambda])
                 weighted_reg = flatten_spectral_sens(weighted_all[:, :, n_lambda:])
 
                 weighted_sens = np.vstack((weighted_sp, weighted_reg))
-
-                # sens_regular = flatten_spectral_sens(sens_regular)
-
-                # sens = np.vstack([sens_spectra, sens_regular])
             else:
                 sens = sens_spectra
 
-                weighted_sens = sens @ self.sigma_inv
+                weighted_sens = self._weight_sample_rows(
+                    sens.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
                 weighted_sens = flatten_spectral_sens(weighted_sens)
 
         if out_array:
@@ -1540,6 +1911,28 @@ class MultipleCurveResolution(ParameterEstimation):
             return weighted_sens[0]
 
     def get_global_analysis(self, params):
+        """Resolve all experiments with one set of absorptivities.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Full parameter vector in the model's units.
+
+        Returns
+        -------
+        y_runs : list of numpy.ndarray
+            Predicted spectra per experiment, ``(n_times, n_lambda)`` [-].
+        resid_runs : list of numpy.ndarray
+            Raw residuals per experiment, ``(n_times, n_lambda + n_non)``:
+            spectral data minus prediction [-], then non-spectral model
+            minus data (zero where unobserved) in model units.
+        weighted_resid : numpy.ndarray
+            Row-whitened residuals flattened column-major, shape
+            ``(n_data,)`` (see ``_weight_sample_rows``); unobserved entries
+            are zero.
+        absorptivity_pure : numpy.ndarray
+            Least-squares absorptivities, ``(n_spectral_states, n_lambda)``.
+        """
         c_runs = []
         states_non = []
         sens_states = []
@@ -1597,7 +1990,11 @@ class MultipleCurveResolution(ParameterEstimation):
         if self.has_non:
             residuals = np.hstack((residuals, resid_non))
 
-        weighted_resid = np.dot(residuals, self.sigma_inv)
+        # Row-wise whitening: sigma_inv for fully observed rows, the
+        # marginal precision root for partially observed rows, zero for
+        # unobserved entries (ParameterEstimation._weight_sample_rows).
+        weighted_resid = self._weight_sample_rows(
+            residuals, self._residual_observation_mask())
 
         trim_y = np.cumsum(self.len_spectra)[:-1]
 

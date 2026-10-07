@@ -28,6 +28,26 @@ def local_newton_interpolation(time, t_data, y_data, num_points=3):
 
 
 class NewtonInterpolation:
+    """Newton divided-difference polynomial through all supplied nodes.
+
+    Parameters
+    ----------
+    x_data : numpy.ndarray
+        Distinct abscissae, shape (num_nodes,), in the units of the
+        independent variable (for example time [s]).
+    y_data : array_like
+        Samples at ``x_data``, shape (num_nodes,) for a scalar field or
+        (num_nodes, num_fields) for a vector field; arrays, lists, tuples,
+        and nested sequences are accepted. Their units carry over to the
+        evaluated polynomial.
+
+    Notes
+    -----
+    The polynomial has degree ``num_nodes - 1`` and reproduces ``y_data`` at
+    every node. Coefficients are stored in a floating dtype so integer
+    samples keep fractional results; ``y_data`` itself is not modified.
+    """
+
     def __init__(self, x_data, y_data):
 
         self.x_data = x_data
@@ -36,15 +56,31 @@ class NewtonInterpolation:
         self.coeff = self.__getCoefficients()
 
     def __getCoefficients(self):
-        """
-        x: list or np array contanining x data points
-        y: list or np array contanining y data points
+        """Compute the Newton divided-difference coefficients.
+
+        Returns
+        -------
+        numpy.ndarray
+            Coefficients with the shape of ``y_data``: (num_nodes,) for a
+            scalar field or (num_nodes, num_fields) for a vector field. Row
+            ``k`` has the units of ``y_data`` divided by the ``k``-th power
+            of the ``x_data`` units. The dtype is the floating promotion of
+            ``y_data``, so integer samples do not truncate the quotients.
+
+        Notes
+        -----
+        ``y_data`` is copied and is not modified.
         """
 
         n = len(self.x_data)
         x = self.x_data
 
-        a = np.copy(self.y_data)
+        # Divided differences are quotients; a floating buffer keeps their
+        # fractional part when the samples are integers. Promote the sample
+        # dtype, not the samples, so sequences are not read as dtype specs;
+        # astype always copies, leaving the caller's data untouched.
+        samples = np.asarray(self.y_data)
+        a = samples.astype(np.result_type(samples.dtype, np.float64))
 
         if a.ndim == 1:
             for k in range(1, n):
