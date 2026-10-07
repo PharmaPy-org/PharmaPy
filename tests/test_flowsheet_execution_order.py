@@ -432,6 +432,24 @@ def test_simulation_exec_accepts_successor_only_units(flowsheet, order):
 
 
 @pytest.mark.unit
+def test_successor_only_mixer_sink_solves_and_transfers_nothing():
+    """Solve a Mixer that appears only as a successor (no adjacency entry)."""
+    sim = SimulationExec(THERMO_PATH, flowsheet={'R01': ['MIX'], 'R02': ['MIX']})
+    for name, times in SOURCE_TIMES.items():
+        setattr(sim, name, _publish_source(
+            THERMO_PATH, times, SOURCE_FLOWS[name], SOURCE_TEMPS[name]))
+    sim.MIX = Mixer()
+
+    sim.SolveFlowsheet(pick_units=['MIX'], verbose=False)
+
+    assert len(sim.connections) == len(SOURCE_TIMES)
+    np.testing.assert_array_equal(sim.MIX.result.time, SOURCE_TIMES['R01'])
+    total_flow = SOURCE_FLOWS['R01'] + SOURCE_FLOWS['R02']  # [kg/s]
+    np.testing.assert_allclose(sim.MIX.result.mass_flow, total_flow,
+                               rtol=FLOW_RTOL)
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize('graph, execution_names, expected', [
     # Execution order misses a unit (recycle C) and joins A, E and B.
     ({'A': ['B'], 'C': ['C'], 'E': []}, ['A', 'E', 'B'],

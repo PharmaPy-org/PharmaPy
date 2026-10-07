@@ -92,7 +92,7 @@ class SimulationExec:
         # Outputs
         self.StreamTable = None
 
-        self.uos_instances = {}  # TODO: check this under the new graph implem
+        self.uos_instances = {}
         self.oper_mode = []
 
         if isinstance(flowsheet, dict):
@@ -120,7 +120,8 @@ class SimulationExec:
         Parameters
         ----------
         name : str
-            Name of the source unit operation in the flowsheet graph.
+            Name of the source unit operation in the flowsheet graph. A
+            successor-only unit has no adjacency entry and no successors.
         connections : dict
             Mapping used to store generated Connection objects. The mapping is
             updated in place.
@@ -136,7 +137,8 @@ class SimulationExec:
             Next available connection counter after transfers are created.
 
         """
-        for uo_next in self.graph[name]:
+        # Successor-only units are graph nodes without an adjacency entry.
+        for uo_next in self.graph.get(name, ()):
             if pick_units is not None and uo_next not in pick_units:
                 continue
 
@@ -1073,12 +1075,18 @@ class SimulationExec:
         -----
         At every result time the accounted feed is the one the unit consumes:
         controlled fields from the DynamicInput and the static stream or
-        phase values of the other fields the unit declares.
+        phase values of the other fields the unit declares. A unit that
+        records an ``inlet_stop_time`` [s] (an ``Evaporator`` whose volume
+        event shut its inlet) consumes no feed afterwards, so the accounted
+        times end there: result times before it, then the stop time itself.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
 
         time = np.atleast_1d(np.asarray(uo.result.time, dtype=float))  # [s]
+        stop_time = getattr(uo, 'inlet_stop_time', None)  # [s], absolute
+        if stop_time is not None:
+            time = np.append(time[time < stop_time], stop_time)  # [s]
         layout = self._declared_inlet_layout(uo)
         consumed = [name for group in layout.values() for name in group]
         probe_time = time if self._evaluates_full_grid(uo) else float(time[0])
@@ -1131,7 +1139,10 @@ class SimulationExec:
         -----
         Continuous raw inlets with a ``DynamicInlet`` are accounted from the
         feed the unit consumes at each of its result times. Batch and static
-        continuous records are read from the stream's stored state.
+        continuous records are read from the stream's stored state; static
+        continuous totals are the flow times the fed duration. Both stop at
+        a unit's recorded ``inlet_stop_time`` [s], set by an ``Evaporator``
+        with ``stop_at_maxvol=False`` when its volume event shuts the inlet.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -1194,7 +1205,12 @@ class SimulationExec:
                         stream_data[name_stream] = {'moles': total}
                         fields += ['mole_frac']
                 else:
-                    time = uo.result.time[-1] - uo.result.time[0]  # [s]
+                    start_time = uo.result.time[0]  # [s]
+                    end_time = uo.result.time[-1]  # [s]
+                    stop_time = getattr(uo, 'inlet_stop_time', None)  # [s]
+                    if stop_time is not None:
+                        end_time = min(end_time, stop_time)  # [s], inlet shut
+                    time = end_time - start_time  # [s], fed duration
                     if basis == 'mass':
                         flow = stream.mass_flow  # [kg/s]
                         total = flow*time  # [kg]
@@ -1296,6 +1312,8 @@ class SimulationExec:
         Continuous raw inlets with a ``DynamicInlet`` are accounted from the
         feed the receiving unit consumes at each of its result times and
         integrated with the trapezoidal rule; see :meth:`get_raw_inlets`.
+        Continuous raw feed stops at a unit's recorded ``inlet_stop_time``
+        [s], such as an ``Evaporator`` inlet shut by its volume event.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")

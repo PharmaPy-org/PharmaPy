@@ -719,6 +719,7 @@ class Evaporator:
 
         self.elapsed_time = 0
         self.allow_flow = True
+        self.inlet_stop_time = None  # [s], absolute; set when the volume event shuts the inlet
 
         self.outputs = None
 
@@ -749,6 +750,7 @@ class Evaporator:
         self.profiles_runs = []
         self.outputs = None
         self.allow_flow = True
+        self.inlet_stop_time = None  # [s], the new charge is fed until an event
         for name in ('result', 'Outlet', 'heat_profile', 'is_supercritic'):
             self.__dict__.pop(name, None)
 
@@ -1421,8 +1423,30 @@ class Evaporator:
 
         return np.array(events)
 
-    def __handle_event(self, solver, event_info):
-        # pass
+    def __handle_event(self, solver, event_info) -> None:
+        """Terminate on user events or apply the liquid-volume event action.
+
+        Parameters
+        ----------
+        solver : assimulo.solvers.IDA
+            Running solver; ``solver.t`` is the absolute event time [s].
+        event_info : tuple
+            Assimulo event information; ``event_info[0]`` holds one sign
+            change indicator [-] per user event, then the volume event.
+
+        Raises
+        ------
+        TerminateSimulation
+            If a user event fires in its configured direction, or the
+            volume event fires with ``stop_at_maxvol=True``.
+
+        Notes
+        -----
+        With ``stop_at_maxvol=False`` the volume event shuts the inlet for
+        the rest of the charge. The first such event records its absolute
+        time in ``inlet_stop_time`` [s]; raw-material accounting stops the
+        feed there. Later crossings of the volume limit leave it unchanged.
+        """
         state_event = event_info[0]
 
         for ind, val in enumerate(state_event[:-1]):
@@ -1450,6 +1474,8 @@ class Evaporator:
             if self.stop_at_maxvol:
                 raise TerminateSimulation
             else:
+                if self.allow_flow:
+                    self.inlet_stop_time = float(solver.t)  # [s], absolute
                 self.allow_flow = False
 
     def solve_unit(self, runtime: float, verbose: bool = True,
@@ -1464,8 +1490,10 @@ class Evaporator:
             Duration of this simulation segment [s]. Continuations retain
             the previous terminal state and advance absolute time by runtime.
             With ``stop_at_maxvol=False``, an inlet stopped by the liquid
-            volume event remains stopped on continuation. ``reset()`` or a
-            new public ``Phases`` assignment re-enables it.
+            volume event remains stopped on continuation, and the absolute
+            stop time [s] is kept in ``inlet_stop_time``. ``reset()`` or a
+            new public ``Phases`` assignment re-enables the inlet and clears
+            that time.
         verbose : bool, optional
             if True, integrator statistics will be displayed after the model
             is solved. The default is True.
