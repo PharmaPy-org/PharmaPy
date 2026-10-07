@@ -30,6 +30,10 @@ precision) in measured-state order. Earlier versions permuted the precision
 whenever its LDL factorization pivoted, which some correlated covariances
 require; such fits now give different estimates and covariances. Diagonal
 covariances, and correlated ones that needed no pivoting, are unchanged.
+:code:`weight_matrix` must be a finite, square, positive-definite covariance.
+Indefinite matrices, which earlier versions accepted with NaN weights, now
+raise :code:`numpy.linalg.LinAlgError` at construction; non-square or
+non-finite ones raise :code:`ValueError`.
 
 With staggered observation grids (per-state sampling times in :code:`x_data`),
 unobserved model-grid entries now contribute zero residual and zero
@@ -46,6 +50,21 @@ corresponding block of the full precision. The residual bootstrap
 each state's errors only from its observed residuals and leaves unobserved
 entries of the generated datasets as NaN. Without staggered grids the draws are
 unchanged.
+
+:code:`MultipleCurveResolution` applies the same rules to non-spectral states
+measured at fewer times than the spectra: their unobserved entries have zero
+weighted residual and zero sensitivity for model-returned and
+finite-difference Jacobians, and partially observed rows use the marginal
+precision. Its :code:`weight_matrix` has one row and column per spectral
+channel followed by one per non-spectral state and is the covariance of the
+measurement errors. Spectral residuals are data minus prediction while
+non-spectral residuals are model minus data, so correlations between spectral
+and non-spectral columns are applied with the sign this implies. Its
+finite-difference Jacobian previously had the opposite sign of the residual
+derivative (so Levenberg-Marquardt steps were rejected), and its model-returned
+Jacobian had that sign for non-spectral states; both now equal the derivative
+of the weighted residuals. Spectra must still be recorded at every model-grid
+time of an experiment.
 
 :code:`StatisticsClass.bootstrap_params` returns the bootstrap estimates, one row
 per generated dataset, and stores them in :code:`boot_params`. Each dataset is

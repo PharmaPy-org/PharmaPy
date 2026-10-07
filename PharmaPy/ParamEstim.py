@@ -1632,6 +1632,59 @@ class MultipleCurveResolution(ParameterEstimation):
                  jac_fun=None, dx_finitediff=None,
                  measured_ind=None, non_spectral_ind=None, weight_matrix=None,
                  name_params=None, name_states=None):
+        """Create a multivariate curve resolution (MCR) estimator.
+
+        Parameters
+        ----------
+        func : callable
+            Model ``func(params, x, reord_sens=False, *args, **kwargs)``
+            returning states, shape ``(n_times, n_states)`` in model units,
+            or ``(states, sensitivities)`` with sensitivities of shape
+            ``(n_params, n_times, n_states)``.
+        param_seed : array-like
+            Parameter seed in the units required by ``func``.
+        time_data : numpy.ndarray, list or dict
+            Times per experiment [s]; for non-spectral states measured at
+            other times, a dictionary per experiment with ``'spectra'`` and
+            ``'non_spectra'`` time arrays, as for ``ParameterEstimation``.
+        y_spectra : numpy.ndarray, list or dict
+            Absorbance spectra, shape ``(n_times, n_lambda)`` [-], or per
+            experiment a dictionary with ``'spectra'`` and
+            ``'non_spectra'`` observations (model state units).
+        mult_penalty : float, optional
+            Weight of the penalty on negative pure-component absorptivities.
+        global_analysis : bool, optional
+            Resolve one set of absorptivities for all experiments.
+        args_fun, kwargs_fun, optimize_flags, jac_fun, dx_finitediff,
+        name_params, name_states : optional
+            As for ``ParameterEstimation``.
+        measured_ind : list or dict
+            States resolved from the spectra, or a dictionary with
+            ``'spectra'`` and optional ``'non_spectra'`` state indices.
+        non_spectral_ind : optional
+            Unused; kept for call compatibility.
+        weight_matrix : numpy.ndarray, optional
+            Measurement-error covariance (data minus truth) of the residual
+            columns: every spectral channel followed by every non-spectral
+            state, shape ``(n_lambda + n_non, n_lambda + n_non)``. The
+            default is the identity.
+
+        Raises
+        ------
+        ValueError
+            If a spectra dictionary lacks ``'spectra'`` or ``weight_matrix``
+            does not match the residual columns, besides the
+            ``ParameterEstimation`` input errors.
+
+        Notes
+        -----
+        Spectral residuals are data minus prediction and non-spectral ones
+        model minus data, so the residual covariance is
+        ``D @ weight_matrix @ D`` with ``D = diag(+1 spectral, -1
+        non-spectral``); ``sigma_inv`` and the marginal roots of partially
+        observed rows are built for it. Block-diagonal weights are
+        unaffected.
+        """
 
         super().__init__(func, param_seed, time_data, y_spectra, measured_ind,
                          args_fun, kwargs_fun, optimize_flags, jac_fun,
@@ -1676,14 +1729,74 @@ class MultipleCurveResolution(ParameterEstimation):
         if 'non_spectra' in self.measured_ind:
             self.has_non = True
 
+        num_lambda = y_spectral[0]['spectra'].shape[1]  # [-], channels
+        num_non = len(self.measured_ind.get('non_spectra', []))  # [-]
+        size_sigma = num_lambda + num_non  # [-], residual columns
         if weight_matrix is None:
-            size_sigma = y_spectral[0]['spectra'].shape[1]
-            size_sigma += len(self.measured_ind.get('non_spectra', []))
-
             self.sigma_inv = np.eye(size_sigma)
+            self._measurement_covariance = np.eye(size_sigma)  # [-]
+        else:
+            if self._measurement_covariance.shape != (size_sigma,
+                                                      size_sigma):
+                raise ValueError(
+                    "weight_matrix must have one row and column per spectral "
+                    f"channel ({num_lambda}) followed by one per non-spectral "
+                    f"state ({num_non}); got shape "
+                    f"{self._measurement_covariance.shape}")
+            # Spectral residuals are data minus prediction, non-spectral
+            # ones model minus data. weight_matrix is the covariance of the
+            # measurement errors, so the residual covariance is
+            # D @ weight_matrix @ D with D = diag(+1 spectral, -1
+            # non-spectral); D @ sigma_inv @ D is its lower precision root.
+            # Block-diagonal weights are unchanged.
+            residual_signs = np.concatenate(
+                (np.ones(num_lambda), -np.ones(num_non)))  # [-]
+            sign_flip = np.outer(residual_signs, residual_signs)  # [-]
+            self.sigma_inv = self.sigma_inv * sign_flip
+            self._measurement_covariance = (
+                self._measurement_covariance * sign_flip)
+        # Marginal roots must follow the residual-column covariance above.
+        self._observed_roots = {}
 
         self.projection_kwargs = {}
         self.mult_penalty = mult_penalty
+
+    def _residual_observation_mask(self) -> Optional[np.ndarray]:
+        """Return the observation mask of the stacked MCR residual columns.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Boolean array, shape ``(sum(len_spectra), n_lambda + n_non)``:
+            rows are model-grid times of all experiments in ``x_data``
+            order, columns every spectral channel followed by every
+            non-spectral state, True where the entry was measured. None when
+            every entry was measured.
+
+        Notes
+        -----
+        A dictionary mask stores one row mask per group (``'spectra'``,
+        ``'non_spectra'``), shared by the group's columns. Unobserved
+        non-spectral entries have zero residual (``get_global_analysis``)
+        and, through this mask, zero weighted residual and sensitivity.
+        """
+        num_lambda = self.spectra_tot.shape[1]  # [-]
+        num_non = len(self.measured_ind.get('non_spectra', []))  # [-]
+        blocks = []
+        for num_rows, x_mask in zip(self.len_spectra, self.x_masks):
+            if isinstance(x_mask, dict):
+                columns = [np.asarray(x_mask['spectra'], dtype=bool)]
+                columns *= num_lambda
+                if num_non:
+                    columns += ([np.asarray(x_mask['non_spectra'],
+                                            dtype=bool)] * num_non)
+                blocks.append(np.column_stack(columns))
+            else:
+                blocks.append(np.ones((num_rows, num_lambda + num_non),
+                                      dtype=bool))
+
+        mask = np.vstack(blocks)
+        return None if mask.all() else mask
 
     def get_sens_projection(self, c_target, c_plus, sens_states):
         eye = np.eye(c_target.shape[0])
@@ -1709,6 +1822,27 @@ class MultipleCurveResolution(ParameterEstimation):
         return absorbance.T.ravel()
 
     def get_gradient(self, params, out_array=False):
+        """Return the Jacobian of the weighted MCR residuals or a gradient.
+
+        Parameters
+        ----------
+        params : array_like
+            Optimized parameters in the model's units.
+        out_array : bool, optional
+            If True, return the weighted-residual Jacobian for LM;
+            otherwise the scalar-objective gradient. The default is False.
+
+        Returns
+        -------
+        numpy.ndarray
+            With ``out_array``, shape ``(n_params, n_data)``: derivatives of
+            the weighted residuals of ``get_objective`` (column-major over
+            residual columns and stacked times) per parameter unit, from
+            finite differences or from model-returned sensitivities.
+            Unobserved non-spectral entries are zero. Otherwise the
+            objective gradient from finite differences, shape
+            ``(n_params,)``.
+        """
         raw_sens = []
         if self.sens_second is None:
             pick_p = np.where(self.map_variable)[0]
@@ -1723,18 +1857,10 @@ class MultipleCurveResolution(ParameterEstimation):
             weighted_sens = jac_fun(self.get_objective, params, args=args,
                                     dx=self.dx_fd, pick_x=pick_p)
 
-            # if self.opt_method == 'LM':
-
-            #     num_times_total, num_lambda = self.spectra_tot.shape
-            #     num_non_spectral = len(self.measured_ind.get('non_spectra', []))
-            #     num_cols = num_lambda + num_non_spectral
-
-            #     sens = raw_sens.reshape(-1, num_cols, num_times_total)
-            #     sens = np.transpose(sens, (0, 2, 1))
-
-            #     weighted_sens = sens @ self.sigma_inv  # TODOÑ I think this is not necessary
-            # else:
-            #     weighted_sens = raw_sens
+            if out_array:
+                # Finite differences of the weighted residual are already
+                # its Jacobian, (n_data, n_params); LM needs no sign change.
+                return weighted_sens.T
 
         else:
             raw_sens = self.sens_second
@@ -1747,25 +1873,30 @@ class MultipleCurveResolution(ParameterEstimation):
                                                     **self.projection_kwargs)
 
             n_par, n_times, n_lambda = sens_spectra.shape
+            x_mask = self._residual_observation_mask()
             if self.has_non:
                 sens_regular = sens_tot[:, :, self.measured_ind['non_spectra']]
 
-                all_sens = np.concatenate((sens_spectra, sens_regular), axis=2)
+                # weighted_sens holds minus the residual derivative (it is
+                # negated below): the spectral residual is data minus
+                # prediction, the non-spectral one model minus data.
+                all_sens = np.concatenate((sens_spectra, -sens_regular),
+                                          axis=2)
 
-                weighted_all = all_sens @ self.sigma_inv
+                # (n_par, n_times, n_columns); rows whitened like the
+                # residuals, unobserved entries zero.
+                weighted_all = self._weight_sample_rows(
+                    all_sens.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
 
                 weighted_sp = flatten_spectral_sens(weighted_all[:, :, :n_lambda])
                 weighted_reg = flatten_spectral_sens(weighted_all[:, :, n_lambda:])
 
                 weighted_sens = np.vstack((weighted_sp, weighted_reg))
-
-                # sens_regular = flatten_spectral_sens(sens_regular)
-
-                # sens = np.vstack([sens_spectra, sens_regular])
             else:
                 sens = sens_spectra
 
-                weighted_sens = sens @ self.sigma_inv
+                weighted_sens = self._weight_sample_rows(
+                    sens.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
                 weighted_sens = flatten_spectral_sens(weighted_sens)
 
         if out_array:
@@ -1774,6 +1905,28 @@ class MultipleCurveResolution(ParameterEstimation):
             return weighted_sens[0]
 
     def get_global_analysis(self, params):
+        """Resolve all experiments with one set of absorptivities.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Full parameter vector in the model's units.
+
+        Returns
+        -------
+        y_runs : list of numpy.ndarray
+            Predicted spectra per experiment, ``(n_times, n_lambda)`` [-].
+        resid_runs : list of numpy.ndarray
+            Raw residuals per experiment, ``(n_times, n_lambda + n_non)``:
+            spectral data minus prediction [-], then non-spectral model
+            minus data (zero where unobserved) in model units.
+        weighted_resid : numpy.ndarray
+            Row-whitened residuals flattened column-major, shape
+            ``(n_data,)`` (see ``_weight_sample_rows``); unobserved entries
+            are zero.
+        absorptivity_pure : numpy.ndarray
+            Least-squares absorptivities, ``(n_spectral_states, n_lambda)``.
+        """
         c_runs = []
         states_non = []
         sens_states = []
@@ -1831,7 +1984,11 @@ class MultipleCurveResolution(ParameterEstimation):
         if self.has_non:
             residuals = np.hstack((residuals, resid_non))
 
-        weighted_resid = np.dot(residuals, self.sigma_inv)
+        # Row-wise whitening: sigma_inv for fully observed rows, the
+        # marginal precision root for partially observed rows, zero for
+        # unobserved entries (ParameterEstimation._weight_sample_rows).
+        weighted_resid = self._weight_sample_rows(
+            residuals, self._residual_observation_mask())
 
         trim_y = np.cumsum(self.len_spectra)[:-1]
 

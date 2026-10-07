@@ -295,7 +295,21 @@ def test_weight_root_reproduces_precision_in_measured_state_order(
     observations = np.outer(TIME_S, np.arange(1, num_states + 1))  # [mol/L]
 
     def linear_states(params, time_s):
-        """Return ``params[0] * t * j`` for states j = 1..n [mol/L]."""
+        """Return linearly accumulating concentrations of n states.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Rate, shape ``(1,)`` [mol/L/s].
+        time_s : numpy.ndarray
+            Times, shape ``(n_times,)`` [s].
+
+        Returns
+        -------
+        numpy.ndarray
+            ``params[0] * t * j`` for states j = 1..n, shape
+            ``(n_times, n)`` [mol/L].
+        """
         return params[0] * np.outer(time_s, np.arange(1, num_states + 1))
 
     estimator = ParamEstim.ParameterEstimation(
@@ -356,7 +370,21 @@ def test_weight_root_is_lower_cholesky_factor_of_precision(
     observations = np.outer(TIME_S, np.arange(1, num_states + 1))  # [mol/L]
 
     def linear_states(params, time_s):
-        """Return ``params[0] * t * j`` for states j = 1..n [mol/L]."""
+        """Return linearly accumulating concentrations of n states.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Rate, shape ``(1,)`` [mol/L/s].
+        time_s : numpy.ndarray
+            Times, shape ``(n_times,)`` [s].
+
+        Returns
+        -------
+        numpy.ndarray
+            ``params[0] * t * j`` for states j = 1..n, shape
+            ``(n_times, n)`` [mol/L].
+        """
         return params[0] * np.outer(time_s, np.arange(1, num_states + 1))
 
     estimator = ParamEstim.ParameterEstimation(
