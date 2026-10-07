@@ -352,26 +352,40 @@ def test_mixed_phase_raw_inlet_is_decomposed_by_phase(data_path):
 
 
 def test_dynamic_mixed_phase_raw_inlet_splits_total_flow_by_phase(data_path):
-    """Dynamic mixed inlets split rather than duplicate their total flow."""
+    """Dynamic slurry feeds split rather than duplicate their volume flow.
+
+    The receiving collector consumes the slurry volume flow, liquid mass
+    concentration and population (issue #260), so the controlled slurry flow
+    is divided between liquid and crystals by the fixture's solid volume
+    fraction rather than integrated once per phase.
+    """
     slurry = _slurry_stream(data_path)
-    phase_fractions = np.array([
-        phase.mass_flow / slurry.mass_flow for phase in slurry.Phases
-    ])  # [-]
+    solid_volume_fraction = 0.25  # [-], _slurry_stream target kv * mu_3
+    # [kg/m**3], ideal mixing of the fixture's A/B mass fractions with the
+    # rho_liq and rho_solid of A (1230) and B (864.7) in pfr_test_pure_comp.json
+    liquid_density = 1 / (0.8 / 1230.0 + 0.2 / 864.7)
+    solid_density = 1 / (0.1 / 1230.0 + 0.9 / 864.7)
+    slurry_flow = 4.0e-3  # [m**3/s], controlled constant slurry volume flow
     dynamic_inlet = DynamicInput()
     dynamic_inlet.add_variable(
-        "mass_flow",
-        lambda time: np.full_like(time, 4.0, dtype=float),  # [kg/s]
+        "vol_flow",
+        lambda time: np.full_like(time, slurry_flow, dtype=float),  # [m**3/s]
     )
     slurry.DynamicInlet = dynamic_inlet
     simulation = _sim_with_inlet(data_path, slurry)
 
     raw_materials = simulation.GetRawMaterials(basis="mass", totals=False)
 
-    expected_phase_mass = np.sort(4.0 * 10.0 * phase_fractions)  # [kg]
+    duration = 10.0  # [s], _sim_with_inlet default horizon
+    expected_phase_mass = np.sort([
+        slurry_flow * duration * (1 - solid_volume_fraction) * liquid_density,
+        slurry_flow * duration * solid_volume_fraction * solid_density,
+    ])  # [kg]
     assert len(raw_materials) == 2
     np.testing.assert_allclose(
         np.sort(raw_materials["mass"].to_numpy()),
         expected_phase_mass,
+        rtol=1e-12,  # [-], algebraic round-off allowance
     )
 
 

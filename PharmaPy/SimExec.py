@@ -11,7 +11,8 @@ from PharmaPy.ThermoModule import ThermoPhysicalManager
 from PharmaPy.ParamEstim import ParameterEstimation, MultipleCurveResolution
 from PharmaPy.StatsModule import StatisticsClass
 
-from PharmaPy.Connections import Connection, convert_str_flowsheet, topological_bfs
+from PharmaPy.Connections import (Connection, convert_str_flowsheet,
+                                  get_inputs_new, topological_bfs)
 from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_object
 
@@ -20,6 +21,40 @@ from PharmaPy.CheckModule import check_modeling_objects
 
 import time
 from typing import Optional, Sequence, Union
+
+# Consumed inlet fields used to account dynamic raw feeds, in the order a
+# layout's flow and composition are selected.
+RAW_FLOW_FIELDS = ('mass_flow', 'mole_flow', 'vol_flow')  # [kg/s], [mol/s], [m**3/s]
+# [-], [-], [kg/m**3], [mol/L]
+RAW_COMPOSITION_FIELDS = ('mass_frac', 'mole_frac', 'mass_conc', 'mole_conc')
+RAW_POPULATION_FIELDS = ('mu_n', 'distrib')  # [m**n/m**3], [#/m**3/um]
+GRAMS_PER_KILOGRAM = 1000.0  # [g/kg], exact; relates mw [g/mol] to [kg/mol]
+LITERS_PER_CUBIC_METER = 1000.0  # [L/m**3], exact; mole_conc [mol/L] to [mol/m**3]
+THIRD_MOMENT_ORDER = 3  # [-], index of mu_3 [m**3/m**3] in moments ordered from n = 0
+
+
+def _broadcast_samples(value, shape: tuple) -> np.ndarray:
+    """Return a writable float copy of ``value`` broadcast to sample shape.
+
+    Parameters
+    ----------
+    value : float or array_like
+        Scalar or per-sample value in its own physical units, for example a
+        constant control result or a static stream attribute.
+    shape : tuple of int
+        Target shape, (num_times,) or (num_times, num_species).
+
+    Returns
+    -------
+    numpy.ndarray
+        Float array of ``shape`` in the units of ``value``.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` cannot be broadcast to ``shape``.
+    """
+    return np.array(np.broadcast_to(np.asarray(value, dtype=float), shape))
 
 
 class SimulationExec:
@@ -531,61 +566,489 @@ class SimulationExec:
 
         return out
 
-    def get_dynamic_raw_inputs(self, inlet, stream, time):
-        """Evaluate dynamic raw-material inputs for one stream or phase.
+    def _consumed_inlet_fields(self, uo, inlet, time: np.ndarray) -> tuple:
+        """Evaluate the inlet fields a receiving unit consumes.
 
         Parameters
         ----------
+        uo : object
+            Receiving unit operation.
         inlet : object
-            Raw inlet object. It may be a single stream or a mixed phase.
+            Raw inlet stream or mixed (slurry) inlet of ``uo``.
+        time : numpy.ndarray
+            Result times of ``uo`` [s], shape (num_times,).
+
+        Returns
+        -------
+        fields : dict
+            Consumed field values from every inlet group, merged by name, in
+            the units and basis the unit reads: flows [kg/s], [mol/s] or
+            [m**3/s], fractions [-], ``mass_conc`` [kg/m**3], ``mole_conc``
+            [mol/L], ``temp`` [K], ``mu_n`` [m**n/m**3] or ``distrib``
+            [#/m**3/um]. Time is on the first axis: scalar fields have shape
+            (num_times,), and composition and population fields
+            (num_times, num_entries), including a single species.
+        consumed : list of str
+            Field names declared by the unit's inlet layout, in layout order.
+
+        Raises
+        ------
+        ValueError
+            If the unit declares no inlet layout.
+
+        Notes
+        -----
+        ``DynamicCollector`` and the continuous crystallizers are evaluated
+        through their own input methods (``get_inputs_new`` and
+        ``get_inputs``), which add the slurry moment and liquid
+        concentration fallbacks they consume. Other units are evaluated
+        with :func:`PharmaPy.Connections.get_inputs_new` on their declared
+        layout (``states_in_dict``, ``dict_states_in`` or ``states_dict``),
+        exactly as in their own input evaluation. Integrating units evaluate
+        each result time separately as a scalar, as during integration, so
+        their control callables need not accept arrays; every sampled value
+        is copied before the next evaluation and the samples are stacked. A
+        ``Mixer`` evaluates its inlets once on its whole time grid, so its
+        feed is evaluated the same way (see :meth:`_evaluates_full_grid`).
+        """
+        from PharmaPy.Containers import DynamicCollector
+        from PharmaPy.Crystallizers import _BaseCryst
+
+        layout = None
+        for attribute in ('states_in_dict', 'dict_states_in', 'states_dict'):
+            layout = getattr(uo, attribute, None)
+            if isinstance(layout, dict):
+                break
+        else:
+            raise ValueError(
+                f"Unit {type(uo).__name__} declares no inlet layout "
+                "(states_in_dict, dict_states_in or states_dict), so the feed "
+                "it consumes from a DynamicInlet cannot be accounted; remove "
+                "the DynamicInlet from its raw inlet.")
+
+        num_times = len(time)
+        vector_fields = RAW_COMPOSITION_FIELDS + RAW_POPULATION_FIELDS
+        consumed = [name for group in layout.values() for name in group]
+
+        if self._evaluates_full_grid(uo):
+            grouped = get_inputs_new(time, inlet, layout)
+            dims = {name: dim for group in layout.values()
+                    for name, dim in group.items()}
+            fields = {}
+            for group in grouped.values():
+                for name, value in group.items():
+                    value = np.asarray(value, dtype=float)
+                    if name in vector_fields:
+                        fields[name] = np.broadcast_to(
+                            value.reshape(-1, dims[name]),
+                            (num_times, dims[name])).copy()
+                    else:
+                        fields[name] = np.broadcast_to(
+                            value.reshape(-1), (num_times,)).copy()
+
+            return fields, consumed
+
+        samples = []
+        for sample_time in time:  # [s], one scalar evaluation per result time
+            if isinstance(uo, DynamicCollector):
+                grouped = uo.get_inputs_new(float(sample_time))
+            elif isinstance(uo, _BaseCryst):
+                grouped = uo.get_inputs(float(sample_time))
+            else:
+                grouped = get_inputs_new(float(sample_time), inlet, layout)
+
+            # Copy every value: a control may reuse and mutate one buffer.
+            samples.append({name: np.array(value, dtype=float)
+                            for group in grouped.values()
+                            for name, value in group.items()})
+
+        fields = {}
+        for name in samples[0]:
+            stacked = np.stack([np.asarray(sample[name], dtype=float)
+                                for sample in samples])  # time on axis 0
+            if name in vector_fields:
+                fields[name] = stacked.reshape(num_times, -1)
+            elif stacked.size == num_times:
+                fields[name] = stacked.reshape(num_times)
+            else:
+                fields[name] = stacked
+
+        return fields, consumed
+
+    @staticmethod
+    def _evaluates_full_grid(uo) -> bool:
+        """Report whether a unit evaluates its inlets on its whole time grid.
+
+        Parameters
+        ----------
+        uo : object
+            Receiving unit operation.
+
+        Returns
+        -------
+        bool
+            True for ``Mixer``, whose ``solve_unit`` evaluates every inlet
+            once on the connected grid [s] (array time); False for units that
+            evaluate scalar times during integration.
+        """
+        from PharmaPy.Containers import Mixer
+
+        return isinstance(uo, Mixer)
+
+    @staticmethod
+    def _dynamic_record(stream, species_mass, species_moles, vol_flow, temp,
+                        time, basis, composition_controlled,
+                        static_temp) -> dict:
+        """Integrate per-sample species flows into one raw-material record.
+
+        Parameters
+        ----------
         stream : object
-            Stream or phase currently being accounted.
-        time : ndarray
-            Simulation time grid [s].
+            Stream or phase supplying static ``pres`` [Pa] and fractions [-]
+            for uncontrolled fields.
+        species_mass, species_moles : numpy.ndarray
+            Consumed species flows [kg/s] and [mol/s], shape
+            (num_times, num_species).
+        vol_flow : numpy.ndarray
+            Consumed volume flow [m**3/s], shape (num_times,).
+        temp : numpy.ndarray
+            Consumed temperature [K], shape (num_times,).
+        time : numpy.ndarray
+            Result times [s], shape (num_times,).
+        basis : {'mass', 'mole'}
+            Accounting basis.
+        composition_controlled : bool
+            Whether a DynamicInput controls the composition.
+        static_temp : float
+            Static temperature of the consumed inlet [K], reported when the
+            consumed temperature varies but no material is fed.
 
         Returns
         -------
         dict
-            Dynamic input profiles. Flow entries are [kg/s], [mol/s], or
-            [m**3/s] according to their key; temperature is [K] and pressure is
-            [Pa].
+            ``mass`` [kg] or ``moles`` [mol], ``vol`` [m**3], ``temp`` [K],
+            ``pres`` [Pa], then ``mass_frac`` or ``mole_frac`` [-], shape
+            (num_species,).
 
         Notes
         -----
-        If a mixed phase owns a single dynamic inlet profile, the total dynamic
-        flow is split by each phase's steady flow fraction [-]. This preserves
-        the total mixed feed instead of integrating the full mixed profile once
-        for every phase.
+        Amounts are trapezoidal integrals over ``time``. A controlled
+        composition is reported as integrated species amounts over the total
+        on the accounting basis, else as the static fractions. The consumed
+        temperature is reported as is when constant, otherwise as its
+        mass-flow-weighted average on both bases, or ``static_temp`` when
+        the fed mass is zero.
         """
-        if getattr(stream, 'DynamicInlet', None) is not None:
-            return stream.DynamicInlet.evaluate_inputs(time)
+        if basis == 'mass':
+            amount_name, frac_name = 'mass', 'mass_frac'
+            basis_flow = species_mass  # [kg/s], per species
+        else:
+            amount_name, frac_name = 'moles', 'mole_frac'
+            basis_flow = species_moles  # [mol/s], per species
 
-        inputs = inlet.DynamicInlet.evaluate_inputs(time)
-        if stream is inlet:
-            return inputs
+        species_total = trapezoidal_rule(time, basis_flow)  # [kg] or [mol]
+        total = np.sum(species_total)  # [kg] or [mol]
+        mass_flow = species_mass.sum(axis=1)  # [kg/s]
+        total_mass = trapezoidal_rule(time, mass_flow)  # [kg]
 
-        scaled = {}
-        flow_fields = ('mass_flow', 'mole_flow', 'vol_flow')
-        for field in flow_fields:
-            if field not in inputs:
-                continue
+        record = {amount_name: total,  # [kg] or [mol]
+                  'vol': trapezoidal_rule(time, vol_flow)}  # [m**3]
+        if np.all(temp == temp[0]):
+            record['temp'] = temp[0]  # [K], constant consumed temperature
+        elif total_mass != 0:
+            record['temp'] = trapezoidal_rule(
+                time, mass_flow * temp) / total_mass  # [K]
+        else:
+            record['temp'] = static_temp  # [K]
+        record['pres'] = stream.pres  # [Pa], no unit consumes inlet pressure
+        if composition_controlled and total != 0:
+            record[frac_name] = species_total / total  # [-]
+        else:
+            record[frac_name] = getattr(stream, frac_name)  # [-]
 
-            inlet_flow = getattr(inlet, field, 0)
-            stream_flow = getattr(stream, field, 0)
-            if inlet_flow == 0:
-                flow_fraction = 0
+        return record
+
+    def _account_dynamic_stream(self, stream, fields: dict, controlled: list,
+                                time: np.ndarray, basis: str) -> dict:
+        """Account a single-phase raw stream from its consumed fields.
+
+        Parameters
+        ----------
+        stream : LiquidStream, VaporStream, SolidStream or similar
+            Raw stream; supplies ``mw`` [g/mol], ``frac_to_frac``,
+            ``getDensity`` and static values.
+        fields : dict
+            Consumed fields; see :meth:`_consumed_inlet_fields`.
+        controlled : list of str
+            Fields controlled by the stream's DynamicInput.
+        time : numpy.ndarray
+            Result times [s], shape (num_times,).
+        basis : {'mass', 'mole'}
+            Accounting basis.
+
+        Returns
+        -------
+        dict
+            Raw-material record; see :meth:`_dynamic_record`.
+
+        Raises
+        ------
+        ValueError
+            If the unit consumes no flow, or a population field is controlled.
+
+        Notes
+        -----
+        The consumed flow and composition define the species flows: a
+        concentration with a volume flow gives ``Q c`` directly; otherwise
+        the composition is expressed as fractions (concentrations
+        normalized) and multiplied by the mass or molar flow, or by the
+        volume flow times the density of each sample's composition and
+        temperature. Volume is the consumed volume flow, or mass flow over
+        that density. Without a consumed composition, the static mass
+        fractions are used. Samples whose composition is exactly zero, such
+        as a stopped feed, contribute no material and no volume; non-finite
+        values propagate to the totals rather than being dropped.
+        """
+        population = [name for name in controlled if name in RAW_POPULATION_FIELDS]
+        if population:
+            raise ValueError(
+                f"DynamicInput controls {population} on the single-phase raw "
+                f"stream '{get_name_object(stream)}', which carries no crystal "
+                "population; remove those controls.")
+
+        flow_name = next((name for name in RAW_FLOW_FIELDS if name in fields), None)
+        if flow_name is None:
+            # Defensive guard: every current unit with a declared continuous
+            # inlet layout consumes one of RAW_FLOW_FIELDS.
+            raise ValueError(
+                f"The unit fed by '{get_name_object(stream)}' consumes no inlet "
+                f"flow ({list(RAW_FLOW_FIELDS)}), so its dynamic feed cannot be "
+                "accounted; remove the DynamicInlet from this raw inlet.")
+        comp_name = next((name for name in RAW_COMPOSITION_FIELDS
+                          if name in fields), 'mass_frac')
+
+        num_times = len(time)
+        molar_mass = np.asarray(stream.mw, dtype=float)  # [g/mol]
+        sample_shape = (num_times,)
+        composition_shape = (num_times, len(molar_mass))
+        flow = _broadcast_samples(fields[flow_name], sample_shape)
+        # [kg/s], [mol/s] or [m**3/s], per flow_name
+        composition = _broadcast_samples(
+            fields.get(comp_name, getattr(stream, comp_name)), composition_shape)
+        # [-], [kg/m**3] or [mol/L], per comp_name
+        temp = _broadcast_samples(fields.get('temp', stream.temp),
+                                  sample_shape)  # [K]
+
+        if flow_name == 'vol_flow' and comp_name == 'mass_conc':
+            species_mass = flow[:, np.newaxis] * composition  # [kg/s]
+            species_moles = species_mass * GRAMS_PER_KILOGRAM / molar_mass  # [mol/s]
+        elif flow_name == 'vol_flow' and comp_name == 'mole_conc':
+            species_moles = (flow[:, np.newaxis] * composition
+                             * LITERS_PER_CUBIC_METER)  # [mol/s]
+            species_mass = species_moles * molar_mass / GRAMS_PER_KILOGRAM  # [kg/s]
+        else:
+            # Rows whose composition is exactly zero (a stopped feed) keep
+            # zero fractions and contribute nothing; any other row, including
+            # a non-finite one, is normalized so invalid values stay visible.
+            row_total = composition.sum(axis=1)  # [-], [kg/m**3] or [mol/L]
+            fed = ~np.all(composition == 0, axis=1)
+            fractions = np.zeros_like(composition)  # [-]
+            fractions[fed] = composition[fed] / row_total[fed, np.newaxis]
+            converted = np.zeros_like(composition)  # [-], other basis
+            if comp_name in ('mole_frac', 'mole_conc'):
+                mole_frac = fractions  # [-]
+                if fed.any():
+                    converted[fed] = stream.frac_to_frac(mole_frac=mole_frac[fed])
+                mass_frac = converted  # [-]
             else:
-                flow_fraction = stream_flow / inlet_flow  # [-]
+                mass_frac = fractions  # [-]
+                if fed.any():
+                    converted[fed] = stream.frac_to_frac(mass_frac=mass_frac[fed])
+                mole_frac = converted  # [-]
 
-            scaled[field] = inputs[field] * flow_fraction
+            density = np.zeros(num_times)  # [kg/m**3], zero for unfed rows
+            if fed.any():
+                density[fed] = _broadcast_samples(stream.getDensity(
+                    mass_frac=mass_frac[fed], temp=temp[fed]),
+                    (np.count_nonzero(fed),))  # [kg/m**3]
 
-        for field in ('temp', 'pres'):
-            if field in inputs:
-                scaled[field] = inputs[field]
+            if flow_name == 'mole_flow':
+                species_moles = flow[:, np.newaxis] * mole_frac  # [mol/s]
+                species_mass = species_moles * molar_mass / GRAMS_PER_KILOGRAM
+                # [kg/s]
+            else:
+                if flow_name == 'vol_flow':
+                    mass_flow = flow * density  # [kg/s]
+                else:
+                    mass_flow = flow  # [kg/s]
+                species_mass = mass_flow[:, np.newaxis] * mass_frac  # [kg/s]
+                species_moles = species_mass * GRAMS_PER_KILOGRAM / molar_mass
+                # [mol/s]
 
-        return scaled
+        if flow_name == 'vol_flow':
+            vol_flow = flow  # [m**3/s]
+        else:
+            vol_flow = np.divide(species_mass.sum(axis=1), density,
+                                 out=np.zeros(num_times),
+                                 where=density != 0)  # [m**3/s], NaN propagates
 
-    def get_raw_inlets(self, uo, basis='mass'):
+        return self._dynamic_record(
+            stream, species_mass, species_moles, vol_flow, temp, time, basis,
+            composition_controlled=any(name in controlled
+                                       for name in RAW_COMPOSITION_FIELDS),
+            static_temp=stream.temp)
+
+    def _account_dynamic_slurry(self, slurry, fields: dict, consumed: list,
+                                controlled: list, time: np.ndarray,
+                                basis: str) -> dict:
+        """Account the liquid and solid phases of a dynamic slurry feed.
+
+        Parameters
+        ----------
+        slurry : SlurryStream
+            Raw slurry inlet with ``Liquid_1`` and ``Solid_1`` phases.
+        fields : dict
+            Consumed fields; see :meth:`_consumed_inlet_fields`.
+        consumed : list of str
+            Field names the receiving unit declares.
+        controlled : list of str
+            Fields controlled by the slurry's DynamicInput.
+        time : numpy.ndarray
+            Result times [s], shape (num_times,).
+        basis : {'mass', 'mole'}
+            Accounting basis.
+
+        Returns
+        -------
+        dict
+            Records keyed by liquid and solid phase name; see
+            :meth:`_dynamic_record`.
+
+        Raises
+        ------
+        ValueError
+            If the unit does not consume the slurry volume flow, liquid
+            ``mass_conc`` and a population (``mu_n`` or ``distrib``).
+
+        Notes
+        -----
+        The solid volume fraction is ``kv * mu_3`` [-], with ``mu_3``
+        [m**3/m**3] taken from the controlled population field, else from
+        consumed moments, else from the consumed distribution on the solid
+        phase's size grid. Liquid species flows are
+        ``Q (1 - kv mu_3) mass_conc`` [kg/s], as in the crystallizer feed
+        balance; solid flow is ``Q kv mu_3`` times the solid density
+        [kg/m**3] of the static solid composition, split by the static solid
+        mass fractions. Both phases report the consumed slurry temperature,
+        and records follow the order of ``slurry.Phases``.
+        """
+        populations = [name for name in RAW_POPULATION_FIELDS if name in fields]
+        if ('vol_flow' not in fields or 'mass_conc' not in fields
+                or not populations):
+            raise ValueError(
+                f"The unit consumes {consumed} from slurry feed "
+                f"'{get_name_object(slurry)}'; accounting a dynamic slurry "
+                "needs its vol_flow, liquid mass_conc and a population (mu_n "
+                "or distrib). Remove the DynamicInlet from this raw inlet.")
+
+        liquid, solid = slurry.Liquid_1, slurry.Solid_1
+        num_times = len(time)
+        sample_shape = (num_times,)
+        flow = _broadcast_samples(fields['vol_flow'], sample_shape)  # [m**3/s]
+        temp = _broadcast_samples(fields.get('temp', slurry.temp),
+                                  sample_shape)  # [K]
+        mass_conc = _broadcast_samples(
+            fields['mass_conc'], (num_times, len(liquid.mw)))  # [kg/m**3]
+
+        population = next((name for name in populations if name in controlled),
+                          populations[0])
+        population_values = np.asarray(fields[population], dtype=float)
+        # [m**n/m**3] for mu_n or [#/m**3/um] for distrib, time first
+        if population == 'mu_n':
+            third_moment = population_values[..., THIRD_MOMENT_ORDER]  # [m**3/m**3]
+        else:
+            distrib = _broadcast_samples(
+                population_values,
+                (num_times, population_values.shape[-1]))  # [#/m**3/um]
+            third_moment = np.ravel(solid.getMoments(
+                distrib=distrib, mom_num=THIRD_MOMENT_ORDER))  # [m**3/m**3]
+        solid_fraction = solid.kv * _broadcast_samples(
+            third_moment, sample_shape)  # [-]
+
+        liquid_vol_flow = flow * (1 - solid_fraction)  # [m**3/s]
+        liquid_mass = liquid_vol_flow[:, np.newaxis] * mass_conc  # [kg/s]
+        solid_vol_flow = flow * solid_fraction  # [m**3/s]
+        solid_mass = (solid_vol_flow * solid.getDensity())[:, np.newaxis] * \
+            np.asarray(solid.mass_frac, dtype=float)  # [kg/s]
+
+        # Per phase: species mass flows [kg/s] (num_times, num_species),
+        # phase volume flow [m**3/s] (num_times,), composition-controlled flag.
+        phase_flows = {id(liquid): (liquid_mass, liquid_vol_flow,
+                                    'mass_conc' in controlled),
+                       id(solid): (solid_mass, solid_vol_flow, False)}
+        records = {}
+        for phase in slurry.Phases:  # same row order as static records
+            species_mass, vol_flow, composition_controlled = phase_flows[id(phase)]
+            species_moles = (species_mass * GRAMS_PER_KILOGRAM
+                             / np.asarray(phase.mw, dtype=float))  # [mol/s]
+            records[get_name_object(phase)] = self._dynamic_record(
+                phase, species_mass, species_moles, vol_flow, temp, time,
+                basis, composition_controlled, static_temp=slurry.temp)
+
+        return records
+
+    def _account_dynamic_inlet(self, uo, inlet, basis: str) -> dict:
+        """Account a raw inlet whose DynamicInlet the receiving unit consumes.
+
+        Parameters
+        ----------
+        uo : object
+            Receiving unit operation with ``result.time`` [s].
+        inlet : object
+            Raw inlet stream or slurry with a ``DynamicInlet``.
+        basis : {'mass', 'mole'}
+            Accounting basis.
+
+        Returns
+        -------
+        dict
+            Records keyed by stream or phase name; see
+            :meth:`_dynamic_record`.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is invalid, the DynamicInput controls a field the
+            unit does not consume, or the consumed feed cannot be accounted.
+
+        Notes
+        -----
+        At every result time the accounted feed is the one the unit consumes:
+        controlled fields from the DynamicInput and the static stream or
+        phase values of the other fields the unit declares.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be either 'mass' or 'mole'")
+
+        time = np.atleast_1d(np.asarray(uo.result.time, dtype=float))  # [s]
+        probe_time = time if self._evaluates_full_grid(uo) else float(time[0])
+        controlled = list(inlet.DynamicInlet.evaluate_inputs(probe_time))
+        fields, consumed = self._consumed_inlet_fields(uo, inlet, time)
+        unconsumed = [name for name in controlled if name not in consumed]
+        if unconsumed:
+            raise ValueError(
+                f"DynamicInput on raw inlet '{get_name_object(inlet)}' controls "
+                f"{unconsumed}, which {type(uo).__name__} does not consume; it "
+                f"consumes {consumed}. Control only consumed fields.")
+
+        if inlet.__module__ == 'PharmaPy.MixedPhases':
+            return self._account_dynamic_slurry(inlet, fields, consumed,
+                                                controlled, time, basis)
+
+        return {get_name_object(inlet): self._account_dynamic_stream(
+            inlet, fields, controlled, time, basis)}
+
+    def get_raw_inlets(self, uo, basis: str = 'mass') -> dict:
         """Collect raw inlet data for a unit operation.
 
         Parameters
@@ -603,12 +1066,21 @@ class SimulationExec:
         dict
             Raw inlet records keyed first by inlet name and then by stream or
             phase name. Records include totals, composition fractions [-],
-            temperature [K], pressure [Pa], and volume [m**3].
+            temperature [K], pressure [Pa], and volume [m**3]. Static
+            continuous records also include their flow rates.
 
         Raises
         ------
         ValueError
-            If ``basis`` is not ``'mass'`` or ``'mole'``.
+            If ``basis`` is not ``'mass'`` or ``'mole'``, a phase of a mixed
+            raw inlet has its own ``DynamicInlet``, or a dynamic inlet cannot
+            be accounted (see :meth:`_account_dynamic_inlet`).
+
+        Notes
+        -----
+        Continuous raw inlets with a ``DynamicInlet`` are accounted from the
+        feed the unit consumes at each of its result times. Batch and static
+        continuous records are read from the stream's stored state.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -629,16 +1101,27 @@ class SimulationExec:
         raws = {key: val for key, val in inlets.items()
                 if val is not None and val.y_upstream is None}  # raw inlets
 
-        # inlets = [inlet for inlet in inlets
-        #           if inlet is not None and inlet.y_upstream is None]
-
         out = {}
 
         for name, inlet in raws.items():
             if inlet.__module__ == 'PharmaPy.MixedPhases':
                 streams = inlet.Phases
+                phase_controlled = [get_name_object(phase) for phase in streams
+                                    if getattr(phase, 'DynamicInlet', None)
+                                    is not None]
+                if phase_controlled:
+                    raise ValueError(
+                        f"Phases {phase_controlled} of raw inlet "
+                        f"'{get_name_object(inlet)}' have their own "
+                        "DynamicInlet, which no unit operation reads; attach "
+                        "the DynamicInput to the mixed inlet itself.")
             else:
                 streams = [inlet]
+
+            if (uo.oper_mode != 'Batch'
+                    and getattr(inlet, 'DynamicInlet', None) is not None):
+                out[name] = self._account_dynamic_inlet(uo, inlet, basis)
+                continue
 
             stream_data = {}
             for stream in streams:
@@ -659,8 +1142,7 @@ class SimulationExec:
                         total = stream.moles  # [mol]
                         stream_data[name_stream] = {'moles': total}
                         fields += ['mole_frac']
-                elif (getattr(stream, 'DynamicInlet', None) is None and
-                      getattr(inlet, 'DynamicInlet', None) is None):
+                else:
                     time = uo.result.time[-1] - uo.result.time[0]  # [s]
                     if basis == 'mass':
                         flow = stream.mass_flow  # [kg/s]
@@ -675,33 +1157,6 @@ class SimulationExec:
 
                         stream_data[name_stream] = {'moles': total}
                         fields += ['mole_frac', 'mole_flow', 'vol_flow']
-
-                else:
-                    time = uo.result.time  # [s]
-                    inputs = self.get_dynamic_raw_inputs(inlet, stream, time)
-
-                    if basis == 'mass':
-                        if 'mass_flow' in inputs:
-                            flow = inputs['mass_flow']  # [kg/s]
-                        else:
-                            flow = inputs['mole_flow'] * stream.mw_av / 1000  # [kg/s]
-
-                        total = trapezoidal_rule(time, flow)  # [kg]
-
-                        stream_data[name_stream] = {'mass': total}
-
-                        fields += ['mass_frac']
-
-                    elif basis == 'mole':
-                        if 'mole_flow' in inputs:
-                            flow = inputs['mole_flow']  # [mol/s]
-                        else:
-                            flow = inputs['mass_flow'] / stream.mw_av * 1000  # [mol/s]
-
-                        total = trapezoidal_rule(time, flow)  # [mol]
-
-                        stream_data[name_stream] = {'moles': total}
-                        fields += ['mole_frac']
 
                 vol = total / dens  # [m**3] or [L]
                 if basis == 'mole':
@@ -782,7 +1237,14 @@ class SimulationExec:
         Raises
         ------
         ValueError
-            If ``basis`` is not ``'mass'`` or ``'mole'``.
+            If ``basis`` is not ``'mass'`` or ``'mole'``, or a raw inlet's
+            dynamic controls cannot be accounted.
+
+        Notes
+        -----
+        Continuous raw inlets with a ``DynamicInlet`` are accounted from the
+        feed the receiving unit consumes at each of its result times and
+        integrated with the trapezoidal rule; see :meth:`get_raw_inlets`.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")

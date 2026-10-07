@@ -289,6 +289,11 @@ class SimulationResult:
         Continuous raw inlet amounts integrate over the receiving unit's
         reported duration. Instantaneous static mixers have zero duration and
         hence zero raw usage, while their flow-rate columns remain nonzero.
+        Raw rows come from ``GetRawMaterials(totals=False)``: inlets with a
+        ``DynamicInlet`` report the integrated feed the unit consumed, with
+        amounts, volume, fractions averaged with the basis flow, the consumed
+        temperature (mass-flow-weighted when it varies), static pressure,
+        and NaN flow-rate columns.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
