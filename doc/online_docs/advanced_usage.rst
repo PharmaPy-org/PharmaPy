@@ -68,6 +68,11 @@ Vapor concentrations use the same ideal-gas basis: :code:`mole_conc = mole_frac 
 
 UNIQUAC data without :code:`qip` use :code:`qi` locally and emit a warning once per property object. This fallback assumes the ordinary surface parameter also describes the modified residual term; systems requiring special parameters, including relevant water/alcohol models, should provide :code:`qip` explicitly. The fallback does not create a :code:`qip` attribute, so callers can still detect missing data.
 
+Connected flow conversions
+==========================
+
+Connected dynamic flows are converted between volume [m**3/s], mass [kg/s] and molar [mol/s] bases with each sample's own composition and, for vapor streams, each sample's temperature at the stored pressure. This applies in both directions: volume to mass or molar flow, and mass or molar flow to volume. Liquid density is the ideal-mixing value of the database pure-component densities, which are temperature-independent constants, so liquid conversions depend on composition only; concentration profiles contribute only their fractions. Earlier releases applied the source stream's stored final-state density to every volume-to-mass or volume-to-molar sample, so converted flows differ whenever the upstream composition varies over time; dynamic vapor conversions to volume flow also differ when the upstream temperature varies. Static sources are unchanged. A mass-concentration profile [kg/m**3] requested as mass fractions now yields mass fractions [-] only; earlier releases returned both mass and mole fractions, which downstream units could not consume. Dynamic conversions require a single-phase liquid or vapor stream: slurry profiles, whose densities are per phase, and unsupported composition bases now raise an error instead of returning unphysical flows.
+
 Crystallizer initialization
 ===========================
 
