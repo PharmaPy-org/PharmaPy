@@ -7,7 +7,7 @@ Created on Mon Oct 28 15:35:48 2019
 """
 
 import numpy as np
-from scipy.linalg import inv, ldl
+from scipy.linalg import cholesky, solve_triangular
 from itertools import cycle
 from typing import Callable, Optional, Sequence
 
@@ -209,6 +209,97 @@ def _experiment_arguments(data, count: int, names: Optional[list],
                 f"arguments; offending experiments: {invalid!r}. "
                 "Use (value,) for a single positional argument.")
     return values
+
+
+def _measurement_precision_root(weight_matrix) -> np.ndarray:
+    """Build the root that applies the measurement precision to residuals.
+
+    Parameters
+    ----------
+    weight_matrix : array_like
+        Measurement-error covariance of the measured states, shape
+        ``(n_measured, n_measured)``, with rows and columns in measured-state
+        (``measured_ind`` and ``y_data`` column) order. Entry ``(i, j)`` has
+        the unit ``u_i * u_j``, where ``u_i`` is the unit of measured state
+        ``i`` (the standard-deviation unit of its measurement error). It must
+        be symmetric positive definite; only its lower triangle is read.
+
+    Returns
+    -------
+    precision_root : numpy.ndarray
+        Lower-triangular Cholesky factor ``S`` of the precision
+        ``P = inv(weight_matrix)``, shape ``(n_measured, n_measured)``, with
+        ``S @ S.T == P`` in the same measured-state order and a positive
+        diagonal, which makes it unique. Row ``i`` carries unit ``1/u_i`` and
+        columns are dimensionless, so entry ``(i, j)`` has unit ``1/u_i``.
+        Raw residual rows ``r``, shape ``(n_times, n_measured)``, are weighted
+        as ``r @ S``: whitened component ``j`` combines measured states
+        ``i >= j`` and is dimensionless, and the sum of squared weighted
+        residuals equals ``sum_k r_k @ P @ r_k`` over sample rows ``k``.
+
+    Raises
+    ------
+    ValueError
+        If ``weight_matrix`` is not a square two-dimensional array or contains
+        non-finite entries.
+    numpy.linalg.LinAlgError
+        If ``weight_matrix`` is not positive definite. ``LinAlgError`` is a
+        ``ValueError`` subclass.
+
+    Notes
+    -----
+    The factor of ``P`` is obtained without forming ``P``. With the exchange
+    (order-reversal) matrix ``J``, the Cholesky factorization
+    ``J @ weight_matrix @ J = R.T @ R`` (``R`` upper triangular) gives the
+    reverse Cholesky factorization ``weight_matrix = U @ U.T`` with
+    ``U = (J @ R @ J).T`` upper triangular. Then
+    ``P = inv(U).T @ inv(U)``, so ``S = inv(U).T`` is lower triangular with
+    ``S @ S.T = P``; a triangular solve supplies ``inv(U)``. The weighted
+    rows ``r @ S = (inv(U) @ r.T).T`` are whitened residuals, with identity
+    covariance when ``weight_matrix`` is the measurement-error covariance.
+    A diagonal matrix of variances gives reciprocal standard deviations on
+    the diagonal of ``S``.
+
+    This equals the root ``L @ sqrt(D)`` of an unpivoted LDL factorization
+    ``P = L @ D @ L.T``, which earlier releases stored whenever that
+    factorization needed no pivoting, so those per-entry weighted residuals
+    and Jacobian rows are preserved. Cholesky needs no pivoting for a
+    symmetric positive-definite matrix; indexing a pivoted LDL factor by its
+    permutation instead replaced ``P`` by ``P[perm][:, perm]`` (issue #237).
+    """
+    weight_matrix = np.asarray(weight_matrix, dtype=float)
+    if weight_matrix.ndim != 2 or (
+            weight_matrix.shape[0] != weight_matrix.shape[1]):
+        raise ValueError(
+            "weight_matrix must be a square two-dimensional measurement-error "
+            "covariance with one row and column per measured state; got "
+            f"shape {weight_matrix.shape}")
+    if not np.all(np.isfinite(weight_matrix)):
+        raise ValueError("weight_matrix entries must be finite")
+
+    # Entry (i, j) in [u_(n-1-i) * u_(n-1-j)]: states in reversed order.
+    reversed_covariance = weight_matrix[::-1, ::-1]
+    try:
+        # Upper triangular; reversed_covariance = reversed_chol.T @
+        # reversed_chol. Column j carries [u_(n-1-j)]. The upper triangle of
+        # reversed_covariance is the lower triangle of weight_matrix.
+        reversed_chol = cholesky(reversed_covariance, lower=False,
+                                 check_finite=False)
+    except np.linalg.LinAlgError as error:
+        raise np.linalg.LinAlgError(
+            "weight_matrix must be a symmetric positive-definite "
+            "measurement-error covariance; its Cholesky factorization failed "
+            f"({error})") from error
+
+    # Upper triangular; weight_matrix = chol_upper @ chol_upper.T. Row i
+    # carries [u_i]; columns are dimensionless.
+    chol_upper = reversed_chol[::-1, ::-1].T
+    # inv(chol_upper), upper triangular; column i carries [1/u_i].
+    chol_upper_inv = solve_triangular(
+        chol_upper, np.eye(weight_matrix.shape[0]), lower=False,
+        check_finite=False)
+
+    return chol_upper_inv.T
 
 
 def get_masked_ydata(y_list, masks, assign_missing=None, merge=True):
@@ -416,10 +507,16 @@ class ParameterEstimation:
             parametric jacobian, in the corresponding parameter units.
             The default is None.
         weight_matrix : numpy array, optional
-            array with dimension N_meas x N_meas, indicating weighting
-            factors for the measured states. A typical choice is a
-            diagonal matrix of experimental state variances.
-            The default is None.
+            Symmetric positive-definite measurement-error covariance with
+            dimension N_meas x N_meas. Rows and columns follow the measured
+            states in ``measured_ind`` (``y_data`` column) order, and entry
+            (i, j) has the product of the units of measured states i and j.
+            Residuals are weighted by its inverse (the precision), so the
+            objective is ``1/2 * sum_k r_k @ inv(weight_matrix) @ r_k`` over
+            sample rows ``r_k`` of model minus data. A typical choice is a
+            diagonal matrix of experimental state variances; correlated
+            covariances are supported. Only the lower triangle is read.
+            The default is None, which uses the dimensionless identity.
         name_params : list of str, optional
             list with parameter names. The default is None.
         name_states : list of str, optional
@@ -434,12 +531,15 @@ class ParameterEstimation:
         ------
         ValueError
             If experiment mappings disagree, experiment counts differ, no
-            experiments are supplied, or an observation/callback mapping
-            has multiple experiment keys while ``x_data`` is unnamed.
+            experiments are supplied, an observation/callback mapping
+            has multiple experiment keys while ``x_data`` is unnamed, or
+            ``weight_matrix`` is not a finite square two-dimensional array.
         TypeError
             If ``y_data`` is None, positional arguments are not iterable, or
             keyword arguments are not a dictionary. Positional errors identify
             experiment keys or, for unnamed experiments, zero-based positions.
+        numpy.linalg.LinAlgError
+            If ``weight_matrix`` is not positive definite.
 
         Notes
         -----
@@ -548,11 +648,12 @@ class ParameterEstimation:
         self.num_data = num_data
 
         if weight_matrix is None:
-            weight_matrix = np.eye(len(self.measured_ind))
+            weight_matrix = np.eye(len(self.measured_ind))  # [-]
 
-        l, d, perm = ldl(inv(weight_matrix))
-
-        self.sigma_inv = np.dot(l[perm], d**0.5)
+        # Lower triangular; row i in [1/u_i] for measured state unit u_i,
+        # columns [-]. sigma_inv @ sigma_inv.T equals inv(weight_matrix) in
+        # measured-state order.
+        self.sigma_inv = _measurement_precision_root(weight_matrix)
 
         # --------------- Parameters
         self.num_params_total = len(param_seed)
