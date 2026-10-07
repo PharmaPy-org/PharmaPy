@@ -344,44 +344,124 @@ class StatisticsClass:
 
         return samples, conc_bootstrap, fig, axis
 
-    def get_bootsamples(self, num_samples, fix_initial=False):
+    def _observed_columns(self, ind):
+        """Return the observation mask of one experiment's residual columns.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``x_data`` order.
+
+        Returns
+        -------
+        numpy.ndarray
+            Boolean array with the shape of ``self.residuals[ind]``,
+            ``(n_times, n_columns)``: True where the residual belongs to an
+            observation, False at unobserved entries of staggered grids.
+
+        Raises
+        ------
+        ValueError
+            If a ``MultipleCurveResolution`` mask does not match the
+            residual columns.
+
+        Notes
+        -----
+        ``ParameterEstimation`` stores None (all observed) or a
+        ``(n_times, n_measured)`` array. ``MultipleCurveResolution`` stores a
+        dictionary of per-row masks keyed ``'spectra'`` and, optionally,
+        ``'non_spectra'``; its residual columns hold every spectral channel
+        followed by every non-spectral state (``get_global_analysis``), so
+        each column takes the row mask of its group; the channel count comes
+        from ``spectra_tot`` and the state count from ``measured_ind``.
         """
-        Create bootstrap datasets using the y's predicted with the converged
-        parameters. The final prediction error is sampled with replacement
-        and used to generate artificial datasets, wich are all subjected to
-        optimization by the bootstrap_params method below
+        residual = self.residuals[ind]
+        x_mask = self.inst.x_masks[ind]
+        if x_mask is None:
+            return np.ones(residual.shape, dtype=bool)
+
+        if not isinstance(x_mask, dict):
+            return np.asarray(x_mask, dtype=bool)
+
+        num_columns = {
+            'spectra': self.inst.spectra_tot.shape[1],  # wavelengths
+            'non_spectra': len(self.inst.measured_ind.get('non_spectra', [])),
+        }
+        columns = []
+        for key in ('spectra', 'non_spectra'):
+            if key in x_mask:
+                columns += ([np.asarray(x_mask[key], dtype=bool)]
+                            * num_columns[key])
+
+        if len(columns) != residual.shape[1]:
+            raise ValueError(
+                f"Observation masks of experiment {ind} describe "
+                f"{len(columns)} residual columns, but the residuals have "
+                f"{residual.shape[1]}")
+
+        return np.column_stack(columns)
+
+    def get_bootsamples(self, num_samples, fix_initial=False):
+        """Create residual-bootstrap datasets around the fitted responses.
+
+        For each experiment and measured state, the residuals at observed
+        model-grid entries are resampled with replacement and subtracted from
+        the fitted responses at those entries. The datasets are fitted by
+        ``bootstrap_params``.
 
         Parameters
         ----------
         num_samples : int
-            number of bootstrap samples.
+            Number of bootstrap datasets.
         fix_initial : bool, optional
-            If True, the initial y values are subjected to error.
-            The default is False.
+            If True, the first model-grid row keeps its fitted value and is
+            excluded from the resampled residual pool. The default is False.
 
         Returns
         -------
-        y_boot : list of lists
-            each internal list contains num_samples datasets of dimension
-            n_x x n_states for each experimental dataset provided
+        y_boot : list of lists of numpy.ndarray
+            One list per experiment, in ``x_data`` order, of ``num_samples``
+            arrays with shape ``(n_times, n_measured)``: model-grid rows and
+            measured-state (``measured_ind``) columns, in the measured
+            states' units. Unobserved entries of staggered observation grids
+            are NaN.
 
+        Notes
+        -----
+        Each state's resampling pool holds only its observed residuals
+        (model minus data, in that state's unit). Unobserved entries of
+        staggered grids have zero residual by construction; drawing them
+        would add phantom zero errors and shrink the bootstrap spread. Each
+        state is resampled independently, so correlations between
+        measurement errors of different states are not reproduced. Without
+        observation masks the random draws equal those of earlier releases.
+        ``_observed_columns`` documents the mask layouts, including those of
+        ``MultipleCurveResolution``.
         """
-        # Remember that multiple datasets are allowed
-
         y_boot = []
         for ind in range(self.inst.num_datasets):  # datasets
+            # (n_measured, n_times) [measured-state units]
             residual = self.residuals[ind].T
             y_nominal = self.y_nominal[ind].T
+            observed_by_state = self._observed_columns(ind).T
 
             y_states = []
-            for res, y in zip(residual, y_nominal):  # states
-                resid = res[fix_initial:]
+            for res, y, observed in zip(residual, y_nominal,
+                                        observed_by_state):  # states
+                observed = observed[fix_initial:]
+                # [measured-state unit], observed entries only
+                resid = res[fix_initial:][observed]
 
-                boots = np.random.choice(resid,
-                                         size=(num_samples, len(resid)),
-                                         replace=True)
+                # [measured-state unit]; NaN where the state is unobserved
+                y_generated = np.full((num_samples, len(observed)), np.nan)
+                if resid.size > 0:
+                    # [measured-state unit], resampled observed residuals
+                    boots = np.random.choice(resid,
+                                             size=(num_samples, len(resid)),
+                                             replace=True)
 
-                y_generated = y[fix_initial:] - boots
+                    y_generated[:, observed] = (
+                        y[fix_initial:][observed] - boots)
 
                 if fix_initial:
                     y_generated = np.insert(y_generated, 0, y[0], axis=1)

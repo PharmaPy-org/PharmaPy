@@ -24,6 +24,29 @@ instead of appending earlier fits. The accepted LM :code:`info['x']`,
 the extra reporting evaluation. Objective-history recording follows the usual
 callback behavior, including duplicate removal with :code:`store_iter=True`.
 
+:code:`weight_matrix` is the measurement-error covariance of the measured
+states. Residuals are weighted by the lower Cholesky factor of its inverse (the
+precision) in measured-state order. Earlier versions permuted the precision
+whenever its LDL factorization pivoted, which some correlated covariances
+require; such fits now give different estimates and covariances. Diagonal
+covariances, and correlated ones that needed no pivoting, are unchanged.
+
+With staggered observation grids (per-state sampling times in :code:`x_data`),
+unobserved model-grid entries now contribute zero residual and zero
+sensitivity, whether the Jacobian comes from :code:`jac_fun`, from
+sensitivities returned by the model, or from finite differences. Earlier
+versions kept sensitivities at unobserved entries, so their parameter
+covariances and confidence intervals overstated the information in the data.
+:code:`info['fun']` and :code:`info['jac']` keep their model-grid layout, with
+those entries equal to zero. Under a correlated :code:`weight_matrix`, a
+sample row that observes only some states is weighted by the marginal precision
+of those states, the inverse of their covariance block, rather than the
+corresponding block of the full precision. The residual bootstrap
+(:code:`StatisticsClass.get_bootsamples` and :code:`bootstrap_params`) draws
+each state's errors only from its observed residuals and leaves unobserved
+entries of the generated datasets as NaN. Without staggered grids the draws are
+unchanged.
+
 Liquid heat capacity
 ====================
 

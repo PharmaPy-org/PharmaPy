@@ -516,6 +516,9 @@ class ParameterEstimation:
             sample rows ``r_k`` of model minus data. A typical choice is a
             diagonal matrix of experimental state variances; correlated
             covariances are supported. Only the lower triangle is read.
+            Sample rows with unobserved states (staggered ``x_data``
+            grids) are weighted by the marginal precision
+            ``inv(weight_matrix[o][:, o])`` of their observed states ``o``.
             The default is None, which uses the dimensionless identity.
         name_params : list of str, optional
             list with parameter names. The default is None.
@@ -654,6 +657,16 @@ class ParameterEstimation:
         # columns [-]. sigma_inv @ sigma_inv.T equals inv(weight_matrix) in
         # measured-state order.
         self.sigma_inv = _measurement_precision_root(weight_matrix)
+        # [u_i * u_j], validated above; source of the marginal precision
+        # roots of partially observed sample rows. A private copy, because
+        # those roots are built lazily and must match sigma_inv even if the
+        # caller later reuses or mutates its array.
+        self._measurement_covariance = np.array(weight_matrix, dtype=float,
+                                                copy=True)
+        # Observed-state pattern (tuple of bool) -> lower root of
+        # inv(weight_matrix[observed][:, observed]): row i [1/u_i] for the
+        # i-th observed state, columns [-]; filled on first use.
+        self._observed_roots = {}
 
         # --------------- Parameters
         self.num_params_total = len(param_seed)
@@ -714,6 +727,84 @@ class ParameterEstimation:
         self.y_model = []
 
         self.method = None
+
+    def _weight_sample_rows(self, values: np.ndarray,
+                            x_mask: Optional[np.ndarray]) -> np.ndarray:
+        """Whiten residual-like values sample row by sample row.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            Raw residuals, shape ``(n_times, n_measured)``, or their parameter
+            sensitivities, shape ``(n_times, n_params, n_measured)``. The last
+            axis follows measured-state (``measured_ind``) order; entries have
+            the measured state's unit, divided by the parameter unit for
+            sensitivities.
+        x_mask : numpy.ndarray or None
+            Observation mask, shape ``(n_times, n_measured)``, True where the
+            state was measured at that model time. None means every state was
+            measured at every model time.
+
+        Returns
+        -------
+        numpy.ndarray
+            Weighted values with the shape of ``values``. For each sample row
+            with observed states ``o``, entries ``o`` are
+            ``values[k, ..., o] @ S_o``, where ``S_o`` is the lower Cholesky
+            factor of ``inv(weight_matrix[o][:, o])``; unobserved entries are
+            exactly zero. Units are those of ``values`` divided by the
+            measured state's unit (dimensionless for residuals weighted by a
+            covariance in squared state units).
+
+        Notes
+        -----
+        Whitening the zero-filled full row with ``sigma_inv`` would instead
+        apply the conditional precision ``P[o][:, o]`` of the full precision
+        ``P = inv(weight_matrix)``, which exceeds the marginal precision of
+        the observed states when they are correlated with unobserved ones,
+        and would leave sensitivities of unobserved entries in the Jacobian.
+        With a diagonal ``weight_matrix`` both precisions coincide and the
+        weighted values equal ``values @ sigma_inv`` with unobserved entries
+        zeroed. Fully observed rows use ``sigma_inv`` itself, so estimates
+        without staggered grids are unchanged.
+        """
+        num_measured = values.shape[-1]
+        if x_mask is None:
+            # [value unit / u_i]: whitened values of every row.
+            weighted = np.dot(values.reshape(-1, num_measured), self.sigma_inv)
+            return weighted.reshape(values.shape)
+
+        # [value unit / u_i]; rows without observations stay zero.
+        weighted = np.zeros_like(values, dtype=float)
+        patterns, pattern_of_row = np.unique(x_mask, axis=0,
+                                             return_inverse=True)
+        for pattern_index, observed in enumerate(patterns):
+            if not observed.any():
+                continue
+
+            if observed.all():
+                root = self.sigma_inv  # rows [1/u_i], columns [-]
+            else:
+                key = tuple(observed.tolist())
+                if key not in self._observed_roots:
+                    marginal_covariance = self._measurement_covariance[
+                        np.ix_(observed, observed)]  # [u_i * u_j]
+                    self._observed_roots[key] = _measurement_precision_root(
+                        marginal_covariance)
+                # Rows [1/u_i] for the observed states, columns [-].
+                root = self._observed_roots[key]
+
+            rows = np.flatnonzero(pattern_of_row.ravel() == pattern_index)
+            observed_values = values[rows][..., observed]  # [value unit]
+            # [value unit / u_i], whitened observed entries.
+            block = np.dot(observed_values.reshape(-1, observed.sum()), root)
+
+            weighted_rows = weighted[rows]
+            weighted_rows[..., observed] = block.reshape(
+                observed_values.shape)
+            weighted[rows] = weighted_rows
+
+        return weighted
 
     def select_sens(self, sens_ordered, num_states, times=None):
 
@@ -777,8 +868,12 @@ class ParameterEstimation:
         set_self : bool, optional
             If True, store the latest model outputs, raw residuals in model
             units as ``residuals`` with shape ``(sum_times, n_measured)`` in
-            data-major order, and ``sigma_inv``-weighted residuals flattened
-            state-major as ``weighted_residuals``. The default is True.
+            data-major order, and the row-whitened residuals flattened
+            state-major as ``weighted_residuals``: fully observed sample rows
+            are weighted by ``sigma_inv``, partially observed rows by the root
+            of ``inv(weight_matrix[o][:, o])`` for their observed states
+            ``o``, and unobserved entries are zero (see
+            ``_weight_sample_rows``). The default is True.
 
         Returns
         -------
@@ -791,6 +886,15 @@ class ParameterEstimation:
             dimensionless [-] when ``weight_matrix`` holds measurement
             variances in squared state units. The objective has the squared
             unit of ``r``.
+
+        Notes
+        -----
+        With staggered observation grids, unobserved model-grid entries keep
+        their positions in ``r`` but are exactly zero, and each partially
+        observed sample row is weighted by the marginal precision of its
+        observed states (see ``_weight_sample_rows``), so the objective is
+        ``1/2 * sum_k r_ok @ inv(weight_matrix[o_k][:, o_k]) @ r_ok`` over the
+        observed residuals ``r_ok`` of each sample row.
 
         """
         # Store parameter values
@@ -841,9 +945,10 @@ class ParameterEstimation:
             resid_runs.append(resid_run)
 
         # [measured-state unit / weight_matrix unit**0.5]; [-] only with
-        # state-variance weights.
-        weighted_residuals = [np.dot(resid, self.sigma_inv)
-                              for resid in resid_runs]
+        # state-variance weights. Unobserved entries are exactly zero.
+        weighted_residuals = [self._weight_sample_rows(resid, x_mask)
+                              for resid, x_mask in zip(resid_runs,
+                                                       self.x_masks)]
 
         if len(sens_second) > 0:
             self.sens_second = sens_second
@@ -905,6 +1010,14 @@ class ParameterEstimation:
             squared state units; ``get_objective`` documents the residual
             units.
 
+        Notes
+        -----
+        Analytical (``jac_fun`` or model-returned) and finite-difference
+        model sensitivities are weighted row by row exactly like the
+        residuals. Columns of unobserved model-grid entries are therefore
+        zero and contribute no information to ``jac @ jac.T`` or to the
+        parameter covariance.
+
         """
 
         if not out_array and (
@@ -935,13 +1048,27 @@ class ParameterEstimation:
             raw_sens = self.sens_second
 
         weighted_sens = []
-        for sensit, x_model in zip(raw_sens, self.x_model):
+        for sensit, x_model, x_mask in zip(raw_sens, self.x_model,
+                                           self.x_masks):
             sensit = self.select_sens(sensit, self.num_model_states)
 
+            # (n_params * n_times, n_measured), parameter-major rows; this
+            # also accepts the legacy one-state (1, n_times) jac_fun layout.
             sens_by_y = reorder_sens(sensit)
-
-            weighted = np.dot(sens_by_y, self.sigma_inv)
-            weighted = reorder_sens(weighted, num_rows=len(x_model))
+            num_measured = sens_by_y.shape[1]
+            # (n_times, n_params, n_measured) [state unit / parameter unit]
+            sens_by_row = sens_by_y.reshape(
+                -1, len(x_model), num_measured).transpose(1, 0, 2)
+            # Same row weighting as the residuals, so unobserved entries have
+            # zero sensitivity and the result is the Jacobian of the
+            # weighted residuals returned by get_objective.
+            # (n_times, n_params, n_measured) [weighted residual unit /
+            # parameter unit]
+            weighted = self._weight_sample_rows(sens_by_row, x_mask)
+            # (n_measured * n_times, n_params), same units; state-major rows
+            # (state, time) matching the residual vector.
+            weighted = weighted.transpose(2, 0, 1).reshape(
+                -1, weighted.shape[1])
 
             weighted_sens.append(weighted)
 
@@ -980,8 +1107,12 @@ class ParameterEstimation:
         Returns
         -------
         dict
-            ``fun`` contains the ``sigma_inv``-weighted residuals, model
-            output minus data, in the basis of the measured states. Each
+            ``fun`` contains the row-whitened residuals of
+            ``get_objective``, model output minus data, in the basis of the
+            measured states: ``sigma_inv`` weights fully observed sample
+            rows, the root of ``inv(weight_matrix[o][:, o])`` weights rows
+            observing only states ``o``, and unobserved entries are zero
+            (see ``_weight_sample_rows``). Each
             entry's unit is its measured state's unit divided by the square
             root of the matching ``weight_matrix`` unit. With the default
             identity ``weight_matrix`` each entry keeps its measured state's
@@ -1046,7 +1177,9 @@ class ParameterEstimation:
             ``(num_params, len(info['fun']))``; each entry has its ``fun``
             entry's unit divided by the matching parameter unit.
             With staggered measurement grids, columns include unobserved
-            model-grid entries, so their count can exceed ``num_data_total``.
+            model-grid entries, so their count can exceed ``num_data_total``;
+            those entries of ``info['fun']`` and columns of ``info['jac']``
+            are exactly zero, so they add no residual or information.
             LM additionally supplies its accepted ``x`` and solver diagnostics.
 
         Raises
