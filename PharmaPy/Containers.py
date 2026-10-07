@@ -909,7 +909,10 @@ class Mixer:
         Notes
         -----
         The first connected liquid inlet with more than one sample supplies
-        the evaluation grid [s]. Single-sample inlets are constant feeds: they
+        the evaluation grid [s]. In a ``SimulationExec`` flowsheet, inlets
+        are connected in the execution order of this unit's predecessors
+        (see ``PharmaPy.Connections.topological_bfs``). Single-sample
+        inlets are constant feeds: they
         neither select the grid nor restrict its time window. Other connected
         inlets must overlap the grid and cover its beginning. Endpoint
         comparisons allow ``sqrt(machine epsilon) * grid span`` [s] as a

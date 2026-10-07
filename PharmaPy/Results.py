@@ -5,6 +5,9 @@ Created on Mon Jun 13 11:38:23 2022
 @author: dcasasor
 """
 
+from collections import Counter
+from typing import List, Mapping, Sequence
+
 import numpy as np
 import pandas as pd
 
@@ -201,6 +204,64 @@ class DynamicResult:
         return out_str
 
 
+def _flowsheet_diagram_lines(graph: Mapping[str, Sequence[str]],
+                             execution_names: Sequence[str]) -> List[str]:
+    """Render the actual connections of a flowsheet graph as text lines.
+
+    Parameters
+    ----------
+    graph : mapping of str to sequence of str
+        Directed flowsheet adjacency in declaration order. Successors may be
+        any ordered sequence, such as a list, tuple or NumPy array; units
+        that appear only as successors have no outgoing connections.
+    execution_names : sequence of str
+        Unit names in execution order, as returned by
+        ``PharmaPy.Connections.topological_bfs``: every unit for an acyclic
+        graph, only the units scheduled before a cycle otherwise.
+
+    Returns
+    -------
+    list of str
+        A single ``'A --> B --> C'`` line, in execution order, when the graph
+        is exactly one connected directed path (including a single unit).
+        Otherwise one ``'source --> destination'`` line per graph edge,
+        including self-loops and edges of unscheduled units, in ``graph``
+        declaration order, with each unconnected unit's bare name at its
+        declaration position. Empty when there are no units.
+
+    Notes
+    -----
+    Edges and degrees are taken from ``graph``, not from the residual
+    counters of ``topological_bfs``. The linear form requires that the
+    execution order covers every graph node (keys and successors) and that
+    its consecutive pairs are exactly the graph's edges, so it never invents
+    a connection or hides a unit left unscheduled by a recycle.
+    """
+    edges = [(source, destination)
+             for source, successors in graph.items()
+             for destination in successors]
+    in_degree = Counter(destination for _, destination in edges)  # [-]
+    out_degree = Counter(source for source, _ in edges)  # [-]
+    nodes = set(graph).union(in_degree)
+
+    names = list(execution_names)
+    is_single_path = (len(names) > 0 and set(names) == nodes
+                      and len(edges) == len(names) - 1
+                      and set(zip(names, names[1:])) == set(edges))
+
+    if is_single_path:
+        return [' --> '.join(names)]
+
+    lines = []
+    for source, successors in graph.items():
+        lines.extend('{} --> {}'.format(source, destination)
+                     for destination in successors)
+        if out_degree[source] == 0 and in_degree[source] == 0:
+            lines.append(source)
+
+    return lines
+
+
 class SimulationResult:
     def __init__(self, sim):
         self.sim = sim
@@ -358,7 +419,16 @@ class SimulationResult:
 
         return stream_table
 
-    def __repr__(self):
+    def __repr__(self) -> str:
+        """Summarize the flowsheet connections and unit-operation models.
+
+        Returns
+        -------
+        str
+            Welcome banner, the flowsheet structure rendered by
+            ``_flowsheet_diagram_lines`` from the simulation graph, and the
+            per-unit table of equation counts, model types and classes.
+        """
         # Welcome message
         welcome = 'Welcome to PharmaPy'
         len_header = len(welcome) + 2
@@ -367,15 +437,12 @@ class SimulationResult:
         names_uos = self.sim.execution_names
         out = [lines, welcome, lines + '\n']
 
-        # Flowsheet ASCII diagram (if the graph is simple)
+        # Flowsheet ASCII diagram of the actual graph edges
         if names_uos is not None:
-            is_simple = all([a < 2 for a in list(self.sim.in_degree.values())])
+            flow_diagram = '\n'.join(
+                _flowsheet_diagram_lines(self.sim.graph, names_uos))
 
-            if is_simple:
-
-                flow_diagram = ' --> '.join(names_uos)
-
-                out += ['Flowsheet structure:', flow_diagram + '\n']
+            out += ['Flowsheet structure:', flow_diagram + '\n']
 
         # Include UOs table
         out_str = '\n'.join(out + self.out_uos)

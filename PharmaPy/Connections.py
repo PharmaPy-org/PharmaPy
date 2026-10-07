@@ -5,7 +5,8 @@ Created on Mon Mar  2 15:36:35 2020
 @author: dcasasor
 """
 
-from typing import Union
+from collections import deque
+from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
 from PharmaPy.NameAnalysis import NameAnalyzer, get_dict_states
 from PharmaPy.Interpolation import local_newton_interpolation
@@ -380,25 +381,77 @@ def get_inputs(time, uo, num_species, num_distr=0):
     return input_dict
 
 
-def topological_bfs(graph):
-    in_degree = {}
+def topological_bfs(graph: Mapping[str, Sequence[str]]
+                    ) -> Tuple[Dict[str, int], List[str]]:
+    """Order flowsheet units by deterministic first-in, first-out Kahn BFS.
+
+    Parameters
+    ----------
+    graph : mapping of str to sequence of str
+        Directed flowsheet adjacency. Keys are unit names in declaration
+        order; each value lists the unit's successors in an ordered sequence
+        such as a list. Units that appear only as successors are nodes too.
+
+    Returns
+    -------
+    in_degree : dict of str to int
+        Residual incoming-edge counters [-] keyed by every node, in order of
+        first appearance (each key, then its new successors). Counters are
+        decremented as predecessors are visited, so all are zero for an
+        acyclic graph; nonzero counters mark nodes on or downstream of a
+        cycle. They are not raw graph degrees.
+    path : list of str
+        Visited nodes in execution order. Shorter than the node count when
+        the graph contains a cycle.
+
+    Raises
+    ------
+    TypeError
+        If a successor collection is a set or frozenset, whose iteration
+        order depends on string hashing and would make execution order
+        irreproducible.
+
+    Notes
+    -----
+    Ready nodes leave a first-in, first-out queue. The queue is seeded with
+    the nodes without predecessors in ``graph`` key order. Visiting a node
+    decrements its successors' counters in that node's successor order, and
+    a successor joins the queue when its counter reaches zero, that is, after
+    its last predecessor is visited. The order is therefore independent of
+    ``PYTHONHASHSEED``.
+
+    ``SimulationExec`` executes units in ``path`` order and transfers each
+    unit's outlet to its successors right after it runs, so a ``Mixer``
+    receives its inlets in the execution order of its predecessors. That is
+    declaration order when all of them are seeded sources, but not in
+    general: for ``{'S1': ['P'], 'P': ['M'], 'S2': ['M'], 'M': []}`` the
+    order is ``S1, S2, P, M`` and ``M`` receives the ``S2`` inlet before the
+    ``P`` inlet although ``P`` is declared first.
+    """
+    in_degree = {}  # [-], incoming-edge counters
     for node, neighbors in graph.items():
+        if isinstance(neighbors, (set, frozenset)):
+            raise TypeError(
+                f"Successors of flowsheet unit {node!r} must be an ordered "
+                "sequence such as a list, not a set, so that execution order "
+                "is reproducible.")
+
         in_degree.setdefault(node, 0)
-        for n in neighbors:
-            in_degree[n] = in_degree.get(n, 0) + 1
+        for neighbor in neighbors:
+            in_degree[neighbor] = in_degree.get(neighbor, 0) + 1
 
     path = []
 
-    no_incoming = {node for node, count in in_degree.items() if count == 0}
+    ready = deque(node for node, count in in_degree.items() if count == 0)
 
-    while no_incoming:
-        v = no_incoming.pop()
-        path.append(v)
-        for adj in graph.get(v, []):
-            in_degree[adj] -= 1
+    while ready:
+        node = ready.popleft()
+        path.append(node)
+        for neighbor in graph.get(node, []):
+            in_degree[neighbor] -= 1
 
-            if in_degree[adj] == 0:
-                no_incoming.add(adj)
+            if in_degree[neighbor] == 0:
+                ready.append(neighbor)
 
     return in_degree, path
 

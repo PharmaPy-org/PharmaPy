@@ -59,6 +59,31 @@ def _broadcast_samples(value, shape: tuple) -> np.ndarray:
 
 class SimulationExec:
     def __init__(self, pure_path, flowsheet):
+        """Set up a flowsheet and its deterministic execution order.
+
+        Parameters
+        ----------
+        pure_path : str
+            Path to the pure-component thermophysical database (JSON).
+        flowsheet : dict of str to sequence of str, or str
+            Directed adjacency mapping each unit name to its successors, or
+            a linear ``'A --> B --> C'`` string.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If the graph contains a recycle, that is, if
+            ``PharmaPy.Connections.topological_bfs`` cannot schedule every
+            unit, including units that appear only as successors. The
+            message names the unscheduled units.
+        TypeError
+            If a successor collection is a set or frozenset.
+
+        Notes
+        -----
+        Units run in ``execution_names`` order, described in
+        ``PharmaPy.Connections.topological_bfs``.
+        """
 
         # Interfaces
         thermo_instance = ThermoPhysicalManager(pure_path)
@@ -78,9 +103,14 @@ class SimulationExec:
         self.graph = graph
         self.in_degree, self.execution_names = topological_bfs(graph)
 
-        if len(self.execution_names) < len(self.graph):
+        # Residual counters cover every node, including successor-only units.
+        if len(self.execution_names) < len(self.in_degree):
+            unscheduled = [name for name, count in self.in_degree.items()
+                           if count > 0]
             raise PharmaPyNonImplementedError(
-                "Provided flowsheet contains recycle stream(s)")
+                "Provided flowsheet contains recycle stream(s); units on or "
+                "downstream of a recycle cannot be scheduled: "
+                + ', '.join(unscheduled))
 
     def _transfer_to_neighbors(self, name: str, connections: dict, count: int,
                                pick_units: Optional[Sequence[str]] = None) -> int:
