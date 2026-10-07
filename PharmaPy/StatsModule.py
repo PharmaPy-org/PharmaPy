@@ -6,6 +6,8 @@ Created on Thu Nov 14 15:10:19 2019
 @author: dcasasor
 """
 
+import copy
+
 import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
@@ -474,6 +476,114 @@ class StatisticsClass:
 
         return y_boot
 
+    def _isolated_estimator(self):
+        """Return a shallow copy of the estimator safe to evaluate and fit.
+
+        Returns
+        -------
+        ParameterEstimation
+            Copy sharing the model callable, its arguments, the data layout
+            and the weighting with ``self.inst``, but owning every container
+            that ``optimize_fn`` or the objective callback modify in place.
+
+        Notes
+        -----
+        ``optimize_fn`` and its callbacks rebind estimator attributes
+        (``y_data``, ``params_convg``, ``info_opt``, ``resid_runs``,
+        ``y_model``, ``covar_params`` and others), so rebinding them on the
+        copy leaves the original fit untouched. The exceptions, which are
+        modified in place, are the iteration histories ``params_iter`` and
+        ``objfun_iter`` (appended to while they are lists; ``objfun_iter``
+        stays a list after ``optimize_fn(store_iter=False)``), the cache
+        ``_observed_roots``, and the solver options, which ``optimize_fn``
+        writes into and which callers pass as a separate copy. The copy gets
+        its own lists and cache. Model callables and their arguments are
+        shared, not copied, so models that close over external objects keep
+        working.
+        """
+        estimator = copy.copy(self.inst)
+        for name in ('params_iter', 'objfun_iter'):
+            history = getattr(estimator, name, None)
+            if isinstance(history, list):
+                setattr(estimator, name, list(history))
+
+        roots = getattr(estimator, '_observed_roots', None)
+        if isinstance(roots, dict):
+            estimator._observed_roots = dict(roots)
+
+        return estimator
+
+    def _fit_bootstrap_sample(self, y_sample: list) -> np.ndarray:
+        """Fit one bootstrap dataset without modifying the fitted estimator.
+
+        Parameters
+        ----------
+        y_sample : list of numpy.ndarray
+            One generated dataset per experiment, in ``x_data`` order, with
+            the layout of ``get_bootsamples``: shape ``(n_times,
+            n_measured)``, measured-state columns in the states' units.
+
+        Returns
+        -------
+        numpy.ndarray
+            Optimized parameters, shape ``(num_params,)``, in the model's
+            parameter units.
+
+        Raises
+        ------
+        Exception
+            Whatever ``optimize_fn`` raises for this dataset.
+
+        Notes
+        -----
+        The fit runs on ``_isolated_estimator()``, and the solver receives a
+        copy of the options because ``optimize_fn`` writes keys into it.
+        """
+        estimator = self._isolated_estimator()
+        estimator.y_data = y_sample  # [measured-state units]
+
+        options = self.inst.optim_options
+        params, _, _ = estimator.optimize_fn(
+            method=self.inst.opt_method,
+            verbose=False, store_iter=False,
+            optim_options=None if options is None else dict(options))
+
+        return params  # [model-parameter units]
+
+    def _restore_model_state(self) -> None:
+        """Re-evaluate the model at the accepted parameters.
+
+        Bootstrap refits share the estimator's model callable. A stateful
+        callable, such as a ``SimulationExec`` unit operation, is left at its
+        last bootstrap evaluation; this re-evaluates the model at the
+        accepted ``params_convg``, matching the final refresh that
+        ``optimize_fn`` performs after an LM fit. (After an IPOPT fit, whose
+        last model calls are finite-difference perturbations, the callable
+        ends at the accepted parameters rather than at that perturbed point.)
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        Exception
+            Whatever the model raises at the accepted parameters.
+
+        Notes
+        -----
+        The objective is evaluated on ``_isolated_estimator()``, so every
+        attribute it rebinds or appends to (residuals, predictions,
+        sensitivities, histories) belongs to the copy and the estimator
+        stays unchanged. Nothing is evaluated when the estimator has no
+        accepted parameters (``params_convg``).
+        """
+        accepted = getattr(self.inst, 'params_convg', None)  # [param units]
+        if accepted is None:
+            return
+
+        self._isolated_estimator().get_objective(accepted, True)
+
     def bootstrap_params(self, num_samples: int = 100) -> np.ndarray:
         """Estimate parameters for residual-bootstrap response samples.
 
@@ -485,23 +595,43 @@ class StatisticsClass:
         Returns
         -------
         numpy.ndarray
-            Estimated parameters with shape ``(num_samples, num_params)`` and
-            the physical units configured for each model parameter. A row is
-            NaN when the optimizer encounters a singular linear system.
+            Estimated parameters with shape ``(num_samples, num_params)``:
+            one row per bootstrap dataset in sampling order, columns in the
+            order of the optimized parameters (``name_params``), in the
+            physical units configured for each model parameter. A row is NaN
+            when the optimizer encounters a singular linear system.
 
         Warns
         -----
         RuntimeWarning
             If ``optimize_fn`` raises ``numpy.linalg.LinAlgError``; the warning
             includes the sample index and original diagnostic.
+            Also if a sample's exception propagates and the model then fails
+            at the accepted parameters; the sample's exception is still
+            raised, also when warnings are turned into errors (the report is
+            then dropped).
 
         Raises
         ------
         Exception
-            Any optimizer exception other than ``numpy.linalg.LinAlgError``.
+            Any optimizer exception other than ``numpy.linalg.LinAlgError``,
+            or a model error while restoring the accepted parameters after all
+            samples were processed.
 
         Notes
         -----
+        Each dataset is fitted on an isolated copy of the estimator (see
+        ``_fit_bootstrap_sample``), so the estimator keeps its observations,
+        accepted parameters, residuals, predictions, solver information and
+        covariance, also when a sample fails or an exception propagates. The
+        only state this method changes is ``boot_params`` and
+        ``num_samples`` on this ``StatisticsClass``, after all samples are
+        fitted. A stateful model callback, such as a ``SimulationExec`` unit
+        operation, is shared with the copies; ``_restore_model_state`` returns
+        it to the accepted parameters after the samples, also when a sample's
+        exception propagates. A keyboard interrupt or other
+        ``BaseException`` aborts at once without that evaluation.
+
         The package's Levenberg-Marquardt implementation uses
         ``numpy.linalg.solve`` and ``numpy.linalg.inv``. Their documented
         Exception type, rather than origin, defines recovery. Any
@@ -523,31 +653,47 @@ class StatisticsClass:
             (num_samples, self.inst.num_params))  # [model-parameter units]
 
         tic = time.time()  # [s]
-        for ind in range(num_samples):
-            # Update bootstraped data for all the experimental runs
-            self.inst.y_data = [
-                y[ind] for y in y_samples]  # [response-dependent units]
+        try:
+            for ind in range(num_samples):
+                # Bootstrapped data for all the experimental runs
+                y_sample = [y[ind] for y in y_samples]  # [response units]
 
-            # Optimize
+                # Optimize
+                try:
+                    params = self._fit_bootstrap_sample(
+                        y_sample)  # [model-parameter units]
+                except np.linalg.LinAlgError as exc:
+                    warnings.warn(
+                        "Bootstrap optimization failed for sample {}: "
+                        "{}".format(ind, exc),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                    params = [np.nan] * self.inst.num_params  # [param units]
+
+                # Store
+                boot_params[ind] = params
+        except Exception as error:
+            # Restore shared model state, but never mask the sample error.
             try:
-                params, _, _ = self.inst.optimize_fn(
-                    method=self.inst.opt_method,
-                    verbose=False, store_iter=False,
-                    optim_options=self.inst.optim_options
-                )  # [model-parameter units]
-            except np.linalg.LinAlgError as exc:
-                warnings.warn(
-                    "Bootstrap optimization failed for sample {}: {}".format(
-                        ind, exc),
-                    RuntimeWarning,
-                    stacklevel=2,
-                )
-                params = [
-                    np.nan] * self.inst.num_params  # [model-parameter units]
+                self._restore_model_state()
+            except Exception as refresh_error:
+                try:
+                    warnings.warn(
+                        "Could not restore the model at the accepted "
+                        "parameters after bootstrap sample {} failed: "
+                        "{}".format(ind, refresh_error),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                except Exception:
+                    # A warnings filter set to 'error' turns the report into
+                    # an exception; the sample's error still takes priority.
+                    pass
+            raise error
+        # Interrupts (BaseException) propagate without further model runs.
 
-            # Store
-            boot_params[ind] = params
-
+        self._restore_model_state()
         toc = time.time()  # [s]
 
         self.boot_params = boot_params  # [model-parameter units]

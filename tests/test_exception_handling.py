@@ -28,7 +28,7 @@ def _statistics_with_failing_model(error):
     Parameters
     ----------
     error : BaseException
-        Exception raised by the user-supplied model after the nominal fit.
+        Exception raised by the user-supplied model during bootstrap refits.
 
     Returns
     -------
@@ -36,7 +36,7 @@ def _statistics_with_failing_model(error):
         Production bootstrap-statistics object configured with a fitted
         :class:`ParameterEstimation` collaborator.
     """
-    failure_state = {"enabled": False}
+    failure_state = {"enabled": False, "accepted": None}
 
     def linear_model(params, time):
         """Evaluate a fitted linear concentration model or its failure path.
@@ -56,9 +56,13 @@ def _statistics_with_failing_model(error):
         Raises
         ------
         BaseException
-            Requested model failure after the nominal fit is complete.
+            Requested model failure at any rate other than the accepted one
+            once the nominal fit is complete.
         """
-        if failure_state["enabled"]:
+        # The accepted fit stays evaluable so bootstrap_params can restore
+        # the model there afterwards (#262); only refits fail.
+        if (failure_state["enabled"]
+                and not np.array_equal(params, failure_state["accepted"])):
             raise error
         return params[0] * time
 
@@ -81,6 +85,10 @@ def _statistics_with_failing_model(error):
         optim_options={"max_fun_eval": fit_evaluation_cap},
     )
     statistics = StatisticsClass(estimator)
+    # Refits start from the seed, 1.0 mol/L/s, not the accepted rate.
+    failure_state["accepted"] = estimator.params_convg.copy()  # [mol/L/s]
+    assert not np.array_equal(estimator.param_seed,
+                              failure_state["accepted"])
     failure_state["enabled"] = True
     return statistics
 

@@ -47,6 +47,23 @@ each state's errors only from its observed residuals and leaves unobserved
 entries of the generated datasets as NaN. Without staggered grids the draws are
 unchanged.
 
+:code:`StatisticsClass.bootstrap_params` returns the bootstrap estimates, one row
+per generated dataset, and stores them in :code:`boot_params`. Each dataset is
+fitted on an isolated copy of the estimator. The estimator's observations,
+accepted parameters, residuals, predictions, solver information, covariance and
+solver options are therefore unchanged afterwards, including when a sample fit
+fails. Earlier versions left the last bootstrap dataset in :code:`y_data` and
+the last refit in the fitted outputs. Afterwards the model is evaluated once
+more at :code:`params_convg`, on a copy of the estimator. This returns a
+stateful model callback, such as a :code:`SimulationExec` unit operation, to
+the accepted parameters, also when a sample's exception propagates. A model
+that can no longer be evaluated at the accepted parameters is an error: if
+that evaluation fails after all samples were processed, its error is raised.
+If a sample's exception is already propagating, that exception is raised and
+the restore failure is reported as a :code:`RuntimeWarning`, which is dropped
+when warnings are turned into errors. A keyboard interrupt aborts without the
+extra evaluation.
+
 Liquid heat capacity
 ====================
 
