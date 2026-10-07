@@ -345,3 +345,20 @@ def test_lm_fit_minimizes_marginal_gls(model, weight_key):
     for factor in (1 - MINIMUM_PROBE, 1 + MINIMUM_PROBE):
         neighbour, _ = _marginal_gls(fitted * factor, covariance)
         assert neighbour > at_fit
+
+
+@pytest.mark.parametrize('size', [2, 4])
+def test_weight_matrix_must_match_residual_columns(size):
+    """Two spectral channels and one tracer need a 3 x 3 weight matrix."""
+    data = _data()
+    x_data = {name: {'spectra': time_s, 'non_spectra': time_s[rows]}
+              for name, (time_s, rows) in SCHEDULES.items()}
+    y_data = {name: {'spectra': spectra, 'non_spectra': tracer}
+              for name, (spectra, tracer) in data.items()}
+    with pytest.raises(ValueError, match=(
+            r'one row and column per spectral channel \(2\) followed by '
+            r'one per non-spectral state \(1\)')):
+        MultipleCurveResolution(
+            model_with_sensitivities, TRIAL_RATE, x_data, y_data,
+            measured_ind={'spectra': [0, 1], 'non_spectra': [2]},
+            weight_matrix=np.eye(size), name_states=['A', 'B', 'tracer'])

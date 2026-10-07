@@ -1652,7 +1652,11 @@ class MultipleCurveResolution(ParameterEstimation):
             experiment a dictionary with ``'spectra'`` and
             ``'non_spectra'`` observations (model state units).
         mult_penalty : float, optional
-            Weight of the penalty on negative pure-component absorptivities.
+            Weight of the penalty ``mult_penalty * sum(min(eps, 0)**2)`` on
+            negative pure-component absorptivities ``eps``, added to the
+            objective; units of the objective per squared absorptivity unit
+            (absorbance per concentration unit). The default 1 is a scaling
+            assumption, not a calibrated value.
         global_analysis : bool, optional
             Resolve one set of absorptivities for all experiments.
         args_fun, kwargs_fun, optimize_flags, jac_fun, dx_finitediff,
@@ -1666,8 +1670,10 @@ class MultipleCurveResolution(ParameterEstimation):
         weight_matrix : numpy.ndarray, optional
             Measurement-error covariance (data minus truth) of the residual
             columns: every spectral channel followed by every non-spectral
-            state, shape ``(n_lambda + n_non, n_lambda + n_non)``. The
-            default is the identity.
+            state, shape ``(n_lambda + n_non, n_lambda + n_non)``. Entry
+            ``(i, j)`` has the product of the units of columns ``i`` and
+            ``j``: absorbance [-] for spectral channels, the model-state
+            unit for non-spectral states. The default is the identity.
 
         Raises
         ------

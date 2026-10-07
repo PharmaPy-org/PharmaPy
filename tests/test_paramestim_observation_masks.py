@@ -581,7 +581,15 @@ def test_unmasked_bootstrap_draws_are_unchanged(fix_initial):
     assert all(mask is None for mask in estimator.x_masks)
 
     def earlier_bootsamples():
-        """Return samples built by the pre-#236 expression [mol/L]."""
+        """Return samples built by the pre-#236 expression.
+
+        Returns
+        -------
+        list of list of numpy.ndarray
+            One list per experiment, in ``x_data`` order, of
+            ``BOOTSTRAP_SAMPLES`` arrays of shape ``(n_times, n_states)``
+            [mol/L], columns (c_A, c_B).
+        """
         samples = []
         for residual, fitted in zip(statistics.residuals,
                                     statistics.y_nominal):
