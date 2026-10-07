@@ -566,7 +566,39 @@ class SimulationExec:
 
         return out
 
-    def _consumed_inlet_fields(self, uo, inlet, time: np.ndarray) -> tuple:
+    @staticmethod
+    def _declared_inlet_layout(uo) -> dict:
+        """Return the inlet layout a receiving unit declares.
+
+        Parameters
+        ----------
+        uo : object
+            Receiving unit operation.
+
+        Returns
+        -------
+        dict
+            Inlet groups mapped to declared field names and dimensions, from
+            ``states_in_dict``, ``dict_states_in`` or ``states_dict``.
+
+        Raises
+        ------
+        ValueError
+            If the unit declares no inlet layout.
+        """
+        for attribute in ('states_in_dict', 'dict_states_in', 'states_dict'):
+            layout = getattr(uo, attribute, None)
+            if isinstance(layout, dict):
+                return layout
+
+        raise ValueError(
+            f"Unit {type(uo).__name__} declares no inlet layout "
+            "(states_in_dict, dict_states_in or states_dict), so the feed "
+            "it consumes from a DynamicInlet cannot be accounted; remove "
+            "the DynamicInlet from its raw inlet.")
+
+    def _consumed_inlet_fields(self, uo, inlet, time: np.ndarray,
+                               layout: dict) -> dict:
         """Evaluate the inlet fields a receiving unit consumes.
 
         Parameters
@@ -577,10 +609,14 @@ class SimulationExec:
             Raw inlet stream or mixed (slurry) inlet of ``uo``.
         time : numpy.ndarray
             Result times of ``uo`` [s], shape (num_times,).
+        layout : dict
+            The unit's declared inlet layout; see
+            :meth:`_declared_inlet_layout`. Callers validate the controlled
+            fields against it first.
 
         Returns
         -------
-        fields : dict
+        dict
             Consumed field values from every inlet group, merged by name, in
             the units and basis the unit reads: flows [kg/s], [mol/s] or
             [m**3/s], fractions [-], ``mass_conc`` [kg/m**3], ``mole_conc``
@@ -588,13 +624,6 @@ class SimulationExec:
             [#/m**3/um]. Time is on the first axis: scalar fields have shape
             (num_times,), and composition and population fields
             (num_times, num_entries), including a single species.
-        consumed : list of str
-            Field names declared by the unit's inlet layout, in layout order.
-
-        Raises
-        ------
-        ValueError
-            If the unit declares no inlet layout.
 
         Notes
         -----
@@ -614,21 +643,8 @@ class SimulationExec:
         from PharmaPy.Containers import DynamicCollector
         from PharmaPy.Crystallizers import _BaseCryst
 
-        layout = None
-        for attribute in ('states_in_dict', 'dict_states_in', 'states_dict'):
-            layout = getattr(uo, attribute, None)
-            if isinstance(layout, dict):
-                break
-        else:
-            raise ValueError(
-                f"Unit {type(uo).__name__} declares no inlet layout "
-                "(states_in_dict, dict_states_in or states_dict), so the feed "
-                "it consumes from a DynamicInlet cannot be accounted; remove "
-                "the DynamicInlet from its raw inlet.")
-
         num_times = len(time)
         vector_fields = RAW_COMPOSITION_FIELDS + RAW_POPULATION_FIELDS
-        consumed = [name for group in layout.values() for name in group]
 
         if self._evaluates_full_grid(uo):
             grouped = get_inputs_new(time, inlet, layout)
@@ -646,7 +662,7 @@ class SimulationExec:
                         fields[name] = np.broadcast_to(
                             value.reshape(-1), (num_times,)).copy()
 
-            return fields, consumed
+            return fields
 
         samples = []
         for sample_time in time:  # [s], one scalar evaluation per result time
@@ -673,7 +689,7 @@ class SimulationExec:
             else:
                 fields[name] = stacked
 
-        return fields, consumed
+        return fields
 
     @staticmethod
     def _evaluates_full_grid(uo) -> bool:
@@ -806,8 +822,10 @@ class SimulationExec:
         temperature. Volume is the consumed volume flow, or mass flow over
         that density. Without a consumed composition, the static mass
         fractions are used. Samples whose composition is exactly zero, such
-        as a stopped feed, contribute no material and no volume; non-finite
-        values propagate to the totals rather than being dropped.
+        as a stopped feed, contribute no material; they add no volume when
+        volume is derived from the mass or molar flow, whereas a consumed
+        ``vol_flow`` is reported as supplied. Non-finite values propagate to
+        the totals rather than being dropped.
         """
         population = [name for name in controlled if name in RAW_POPULATION_FIELDS]
         if population:
@@ -1031,15 +1049,18 @@ class SimulationExec:
             raise ValueError("basis must be either 'mass' or 'mole'")
 
         time = np.atleast_1d(np.asarray(uo.result.time, dtype=float))  # [s]
+        layout = self._declared_inlet_layout(uo)
+        consumed = [name for group in layout.values() for name in group]
         probe_time = time if self._evaluates_full_grid(uo) else float(time[0])
         controlled = list(inlet.DynamicInlet.evaluate_inputs(probe_time))
-        fields, consumed = self._consumed_inlet_fields(uo, inlet, time)
         unconsumed = [name for name in controlled if name not in consumed]
         if unconsumed:
             raise ValueError(
                 f"DynamicInput on raw inlet '{get_name_object(inlet)}' controls "
                 f"{unconsumed}, which {type(uo).__name__} does not consume; it "
                 f"consumes {consumed}. Control only consumed fields.")
+
+        fields = self._consumed_inlet_fields(uo, inlet, time, layout)
 
         if inlet.__module__ == 'PharmaPy.MixedPhases':
             return self._account_dynamic_slurry(inlet, fields, consumed,
@@ -1411,7 +1432,8 @@ class SimulationExec:
         ------
         ValueError
             If ``cost_raw`` has more than one dimension or has a one-dimensional
-            width other than one or the raw-material table width.
+            width other than one or the raw-material table width, or if
+            ``GetRawMaterials`` cannot account a raw inlet's dynamic controls.
 
         """
 

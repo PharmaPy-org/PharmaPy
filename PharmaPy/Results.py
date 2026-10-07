@@ -282,7 +282,9 @@ class SimulationResult:
         Raises
         ------
         ValueError
-            If ``basis`` is not ``'mass'`` or ``'mole'``.
+            If ``basis`` is not ``'mass'`` or ``'mole'``, or (forwarded from
+            ``SimulationExec.GetRawMaterials``) if a raw inlet's dynamic
+            controls cannot be accounted.
 
         Notes
         -----

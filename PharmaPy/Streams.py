@@ -10,9 +10,59 @@ from numpy.typing import ArrayLike
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
 from PharmaPy.Connections import interpolate_inputs
+from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
 
+import warnings
+
 import numpy as np
+
+
+def Interpolation(t_data, y_data, time, newton=True, num_points=3):
+    """Interpolate a profile locally with Newton polynomials (deprecated).
+
+    Parameters
+    ----------
+    t_data : numpy.ndarray
+        Sample times [s], ascending, shape (num_samples,).
+    y_data : numpy.ndarray
+        Samples with time on the first axis, shape (num_samples,) or
+        (num_samples, num_states), in their own units.
+    time : float
+        Query time [s].
+    newton : bool, optional
+        Retained for signature compatibility; Newton interpolation is always
+        used, as in earlier releases.
+    num_points : int, optional
+        Number of nodes of the local polynomial.
+
+    Returns
+    -------
+    float or numpy.ndarray
+        Interpolated value in the units of ``y_data``, shape () or
+        (num_states,).
+
+    Warns
+    -----
+    DeprecationWarning
+        Always. Use :func:`PharmaPy.Connections.interpolate_inputs` for
+        connected inlet profiles, or
+        :func:`PharmaPy.Interpolation.local_newton_interpolation`.
+
+    Notes
+    -----
+    Delegates to :func:`PharmaPy.Interpolation.local_newton_interpolation`,
+    whose node window always holds ``num_points`` nodes, including at the
+    end of the profile; earlier releases used fewer nodes there.
+    """
+    warnings.warn(
+        "PharmaPy.Streams.Interpolation is deprecated; use "
+        "PharmaPy.Connections.interpolate_inputs for connected inlet profiles "
+        "or PharmaPy.Interpolation.local_newton_interpolation.",
+        DeprecationWarning, stacklevel=2)
+
+    return local_newton_interpolation(time, t_data, y_data,
+                                      num_points=num_points)
 
 
 class BatchToFlowConnector:

@@ -25,10 +25,11 @@ accept only scalar times, as the solver supplies. The Assimulo test solves a
 real collector inside a flowsheet and checks the raw row of
 ``GetStreamTable``.
 
-Tests ending in ``_guard`` already pass on the base revision, as do the
-``mass_flow``-only collector case (established usage) and the zero-flow case
-(which pins the zero-total fallback of the new averages). Every other test
-fails there, with ``KeyError`` for uncontrolled flows, with totals that ignore
+On the milestone base (71f918a), tests ending in ``_guard`` pass, as do the
+``mass_flow``-only collector cases (established usage), the zero-flow cases
+(which pin the zero-total fallback of the new averages) and both cases of
+``test_mixer_feed_is_evaluated_on_its_whole_grid`` (the base also evaluated
+controls on the Mixer's whole grid). Every other test fails there, with ``KeyError`` for uncontrolled flows, with totals that ignore
 the controlled composition or the unit's held flow, or without the expected
 ``ValueError``.
 
@@ -66,8 +67,9 @@ SPECIES = ('A', 'B', 'C', 'solv')  # database order
 STATIC_MASS_FLOW = 2.0  # [kg/s], uncontrolled liquid feed
 # [-], static liquid feed, species order A, B, C, solv; all nonzero, unequal
 STATIC_FRACTIONS = np.array([0.4, 0.3, 0.2, 0.1])
-# [-], end-of-run composition reached by linear composition controls
-FINAL_FRACTIONS = np.array([0.1, 0.2, 0.3, 0.4])
+# [-], end-of-run composition reached by linear composition controls; unequal
+# and not a permutation of STATIC_FRACTIONS, so species order stays visible
+FINAL_FRACTIONS = np.array([0.15, 0.05, 0.5, 0.3])
 STATIC_TEMPERATURE = 300.0  # [K], _liquid_stream fixture temperature
 STATIC_PRESSURE = 101325.0  # [Pa], _liquid_stream fixture pressure
 TEMPERATURE_SLOPE = 5.0  # [K/s], controlled temperature ramp
@@ -80,6 +82,11 @@ CONC_END = np.array([1.0, 2.0, 2.5, 3.5])
 GRAMS_PER_KILOGRAM = 1000.0  # [g/kg], exact
 LITERS_PER_CUBIC_METER = 1000.0  # [L/m**3], exact
 SLURRY_SOLID_FRACTION = 0.25  # [-], _slurry_stream target kv * mu_3
+# Phases of test_simexec_raw_materials._slurry_stream, species A, B, C, solv
+SLURRY_LIQUID_FRACTIONS = np.array([0.8, 0.2, 0.0, 0.0])  # [-]
+SLURRY_CRYSTAL_FRACTIONS = np.array([0.1, 0.9, 0.0, 0.0])  # [-]
+SLURRY_LIQUID_FLOW = 1.0  # [kg/s], liquid mass flow before slurry closure
+SLURRY_CRYSTAL_FLOW = 3.0  # [kg/s], crystal mass flow before slurry closure
 SLURRY_FLOW = 4.0e-3  # [m**3/s], controlled slurry volume flow
 POPULATION_SCALE = 0.4  # [-], controlled population relative to the static one
 SHUTDOWN_TIME = 5.0  # [s], a stopped feed supplies no flow or composition after
@@ -628,7 +635,7 @@ def slurry_phase_masses(data_path, flow, liquid_conc):
     with open(_thermo_path(data_path)) as file:
         database = json.load(file)
     solid_density_pure = np.array([item['rho_solid'] for item in database.values()])
-    solid_fractions = np.array([0.1, 0.9, 0.0, 0.0])  # [-], _slurry_stream solid
+    solid_fractions = SLURRY_CRYSTAL_FRACTIONS  # [-]
     solid_density = mixture_density(solid_fractions, solid_density_pure)  # [kg/m**3]
     time = np.array(TIME_GRID)  # [s]
     liquid = trapezoid((flow * (1 - SLURRY_SOLID_FRACTION))[:, np.newaxis]
@@ -795,13 +802,14 @@ def build_slurry(path, solid_temp=STATIC_TEMPERATURE, reverse=False):
     Returns
     -------
     SlurryStream
-        Liquid of mass fractions [0.8, 0.2, 0, 0] and crystals of
-        [0.1, 0.9, 0, 0], with solid volume fraction
+        Liquid of ``SLURRY_LIQUID_FRACTIONS`` and crystals of
+        ``SLURRY_CRYSTAL_FRACTIONS`` [-], with solid volume fraction
         ``SLURRY_SOLID_FRACTION`` (unit shape factor), as in
         ``test_simexec_raw_materials._slurry_stream``.
     """
     liquid = LiquidStream(path, temp=STATIC_TEMPERATURE, pres=STATIC_PRESSURE,
-                          mass_flow=1.0, mass_frac=[0.8, 0.2, 0.0, 0.0],
+                          mass_flow=SLURRY_LIQUID_FLOW,
+                          mass_frac=SLURRY_LIQUID_FRACTIONS,
                           verbose=False)  # [kg/s], [-]
     particle_size = np.array([1.0, 2.0, 3.0, 4.0])  # [um]
     distribution_shape = np.array([1.0, 2.0, 2.0, 1.0])  # [-]
@@ -811,7 +819,8 @@ def build_slurry(path, solid_temp=STATIC_TEMPERATURE, reverse=False):
     distribution = (distribution_shape * SLURRY_SOLID_FRACTION
                     / unscaled_third_moment)  # [#/m**3/um]
     solid = SolidStream(path, temp=solid_temp, pres=STATIC_PRESSURE,
-                        mass_flow=3.0, mass_frac=[0.1, 0.9, 0.0, 0.0],
+                        mass_flow=SLURRY_CRYSTAL_FLOW,
+                        mass_frac=SLURRY_CRYSTAL_FRACTIONS,
                         x_distrib=particle_size, distrib=distribution)
     slurry = SlurryStream(vol_flow=liquid.vol + solid.vol,
                           x_distrib=particle_size, distrib=distribution)
@@ -841,8 +850,8 @@ def slurry_expectations(path, flow, solid_fraction):
         database = json.load(file)
     rho_liq = np.array([item['rho_liq'] for item in database.values()])
     rho_solid = np.array([item['rho_solid'] for item in database.values()])
-    liquid_density = mixture_density(np.array([0.8, 0.2, 0.0, 0.0]), rho_liq)
-    solid_density = mixture_density(np.array([0.1, 0.9, 0.0, 0.0]), rho_solid)
+    liquid_density = mixture_density(SLURRY_LIQUID_FRACTIONS, rho_liq)
+    solid_density = mixture_density(SLURRY_CRYSTAL_FRACTIONS, rho_solid)
     # [kg/m**3], ideal mixing at the fixture's phase compositions
     liquid_vol = flow * DURATION * (1 - solid_fraction)  # [m**3]
     solid_vol = flow * DURATION * solid_fraction  # [m**3]
@@ -1226,7 +1235,7 @@ def test_reused_control_buffer_keeps_each_sample(data_path, basis):
 
     component_mass = STATIC_MASS_FLOW * linear_integral(
         STATIC_FRACTIONS, (FINAL_FRACTIONS - STATIC_FRACTIONS) / DURATION)
-    # [kg], 5 kg of every species for the symmetric blend
+    # [kg], held mass flow times the integrated linear fractions
     assert_species(simulation, basis, on_basis(component_mass, molar_mass, basis))
 
 
@@ -1263,6 +1272,34 @@ def test_mixer_feed_is_evaluated_on_its_whole_grid(data_path, basis):
     control once on that array.
     """
     molar_mass, _ = database_properties(data_path)
+    start, slope = FLOW_LAWS['mass_flow']
+    simulation = solved_mixer(data_path, {
+        'mass_flow': lambda time: start + slope * time[...] * np.ones(len(time))})
+
+    component_mass = linear_integral(start, slope) * STATIC_FRACTIONS  # [kg]
+    assert_species(simulation, basis, on_basis(component_mass, molar_mass, basis))
+
+
+def solved_mixer(data_path, controls):
+    """Solve a real Mixer fed by a connected profile and a dynamic raw feed.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository test-data directories.
+    controls : dict
+        Control laws of the raw feed, evaluated by the Mixer on its grid.
+
+    Returns
+    -------
+    SimulationExec
+        Executor holding the solved Mixer as ``MIX``.
+
+    Notes
+    -----
+    The connected inlet's upstream profile is supplied directly on
+    ``TIME_GRID`` [s]; it fixes the Mixer's evaluation grid.
+    """
     grid = np.array(TIME_GRID)  # [s]
     connected = liquid_feed(data_path)
     profile = {'mass_flow': np.full(len(grid), STATIC_MASS_FLOW),  # [kg/s]
@@ -1271,13 +1308,63 @@ def test_mixer_feed_is_evaluated_on_its_whole_grid(data_path, basis):
     connected.y_upstream = profile
     connected.y_inlet = profile
     connected.time_upstream = grid
-    start, slope = FLOW_LAWS['mass_flow']
-    raw = attach(liquid_feed(data_path), {
-        'mass_flow': lambda time: start + slope * time[...] * np.ones(len(time))})
+    raw = attach(liquid_feed(data_path), controls)
     mixer = Mixer()
     mixer.Inlets = [connected, raw]
     mixer.solve_unit()
-    simulation = _sim_with_units(data_path, {'MIX': mixer})
+    return _sim_with_units(data_path, {'MIX': mixer})
 
-    component_mass = linear_integral(start, slope) * STATIC_FRACTIONS  # [kg]
-    assert_species(simulation, basis, on_basis(component_mass, molar_mass, basis))
+
+@pytest.mark.unit
+@pytest.mark.parametrize('field', ['mole_frac', 'mass_conc'])
+def test_mixer_rejects_unconsumed_control(data_path, field):
+    simulation = solved_mixer(data_path, {
+        field: lambda time: np.tile(STATIC_FRACTIONS, (len(time), 1))})
+    with pytest.raises(ValueError, match=(
+            rf"controls \['{field}'\], which Mixer does not consume; it "
+            r"consumes \['mass_frac', 'mass_flow', 'temp'\]")):
+        simulation.GetRawMaterials(basis='mass')
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('basis', ['mass', 'mole'])
+def test_concentration_feed_static_and_dynamic_rows_agree(data_path, basis):
+    """Pin static/dynamic agreement for a solvent-closed concentration feed.
+
+    Parameters
+    ----------
+    data_path : dict
+        Repository test-data directories.
+    basis : {'mass', 'mole'}
+        Accounting basis.
+
+    Notes
+    -----
+    Dynamic raw accounting reports ``Q c`` as the PFR consumes it, while the
+    static row uses the stream flow from its ideal-mixing density. With
+    ``name_solv`` the solvent concentration closes that density, so the two
+    agree; a no-op temperature control switches to the dynamic path.
+    """
+    def make_feed():
+        """Build the solvent-closed concentration feed.
+
+        Returns
+        -------
+        LiquidStream
+            Feed at ``STATIC_TEMPERATURE`` [K] with ``CONC_START`` [mol/L]
+            solutes and the solvent closing the volume.
+        """
+        return LiquidStream(_thermo_path(data_path), temp=STATIC_TEMPERATURE,
+                            pres=STATIC_PRESSURE, mole_conc=CONC_START,
+                            vol_flow=FLOW_LAWS['vol_flow'][0], name_solv='solv',
+                            verbose=False)
+
+    static_totals = species_totals(
+        simulation_with_unit(data_path, make_pfr(), make_feed()), basis)[1]
+    dynamic_feed = attach(make_feed(),
+                          {'temp': lambda time: STATIC_TEMPERATURE})
+    dynamic_totals = species_totals(
+        simulation_with_unit(data_path, make_pfr(), dynamic_feed), basis)[1]
+
+    # [-], the two paths differ only by round-off of the density closure
+    np.testing.assert_allclose(dynamic_totals, static_totals, rtol=1e-10, atol=0)

@@ -17,8 +17,14 @@ temperature-dependent density. Dynamic profiles carried by a real
 ``SlurryStream`` (per-phase densities) and unknown composition bases must
 raise explicit errors instead of returning unphysical flows.
 
-The ``_guard`` test already passes on the base revision and protects the
-static result; every other test fails there.
+On the milestone base (71f918a) the ``_guard`` tests, which protect the
+static result, and two parametrized cases of
+``test_dynamic_liquid_mass_mole_flow_uses_sample_molar_mass``
+(``mass_frac-mass_flow-mole_flow`` and ``mass_frac-mole_flow-mass_flow``,
+whose base conversion already used each sample's molar mass) pass; every
+other test fails there. Stopped samples (exactly zero composition) convert
+to zero flow; ``test_non_finite_sample_still_propagates`` pins that a NaN
+sample still yields NaN.
 
 Related issues: https://github.com/PharmaPy-org/PharmaPy/issues/219
 (coordination: https://github.com/PharmaPy-org/PharmaPy/issues/260)
@@ -412,3 +418,67 @@ def test_connection_from_solved_msmpr_to_mixer_raises(data_path):
     unit.solve_unit(time_grid=[0.0, DURATION], verbose=False)
     with pytest.raises(NotImplementedError, match=r"'mass_conc'.*SlurryStream"):
         Connection(unit, Mixer()).transfer_data()
+
+
+STOPPED_ROW = 1  # [-], index of the sample whose feed is stopped
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('down', ['mass_flow', 'mole_flow'])
+def test_stopped_sample_converts_to_zero_flow(down):
+    mass_frac, mw_av, density = ideal_mixing(MOLE_FRAC_ROWS)
+    mass_frac = mass_frac.copy()  # [-]
+    mass_frac[STOPPED_ROW] = 0
+    vol_flow = VOL_FLOWS.copy()  # [m**3/s]
+    vol_flow[STOPPED_ROW] = 0
+    stream = liquid_stream()
+    stream.y_upstream = {'mass_frac': mass_frac, 'vol_flow': vol_flow,
+                         'temp': PROFILE_TEMPS}
+    analyzer = NameAnalyzer(['mass_frac', 'vol_flow', 'temp'],
+                            ['mass_frac', down, 'temp'], len(MW))
+
+    converted = analyzer.convertUnits(stream)
+
+    expected = expected_flow(down, vol_flow, mw_av, density)  # [kg/s] or [mol/s]
+    assert expected[STOPPED_ROW] == 0
+    np.testing.assert_allclose(converted[down], expected, rtol=RTOL, atol=0)
+
+
+@pytest.mark.unit
+def test_non_finite_sample_still_propagates():
+    mass_frac = ideal_mixing(MOLE_FRAC_ROWS)[0].copy()  # [-]
+    mass_frac[STOPPED_ROW] = np.nan
+    stream = liquid_stream()
+    stream.y_upstream = {'mass_frac': mass_frac, 'vol_flow': VOL_FLOWS,
+                         'temp': PROFILE_TEMPS}
+    analyzer = NameAnalyzer(['mass_frac', 'vol_flow', 'temp'],
+                            ['mass_frac', 'mass_flow', 'temp'], len(MW))
+
+    converted = analyzer.convertUnits(stream)
+
+    assert np.isnan(converted['mass_flow'][STOPPED_ROW])
+    assert np.isfinite(np.delete(converted['mass_flow'], STOPPED_ROW)).all()
+
+
+@pytest.mark.unit
+def test_mixer_consumes_profile_with_stopped_sample():
+    times = np.array([0., 1., 2.])  # [s]
+    mass_frac, _, density = ideal_mixing(MOLE_FRAC_ROWS)
+    mass_frac = mass_frac.copy()  # [-]
+    mass_frac[STOPPED_ROW] = 0
+    vol_flow = VOL_FLOWS.copy()  # [m**3/s]
+    vol_flow[STOPPED_ROW] = 0
+    stream = liquid_stream()
+    stream.y_upstream = {'mass_frac': mass_frac, 'vol_flow': vol_flow,
+                         'temp': PROFILE_TEMPS}
+    analyzer = NameAnalyzer(['mass_frac', 'vol_flow', 'temp'],
+                            ['mass_frac', 'mass_flow', 'temp'], len(MW))
+    # The same conversion and stream fields Connection sets for a downstream unit.
+    stream.y_inlet = analyzer.convertUnits(stream)
+    stream.time_upstream = times
+    mixer = Mixer()
+    mixer.Inlets = [stream]
+
+    mass_flow, _, _ = mixer.solve_unit()
+
+    np.testing.assert_allclose(mass_flow, vol_flow * density, rtol=RTOL, atol=0)

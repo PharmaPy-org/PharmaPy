@@ -376,9 +376,13 @@ class NameAnalyzer:
         Concentration profiles (``mole_conc``, ``mass_conc``) contribute only
         their fractions: the liquid mass density is the ideal-mixing value
         of the database pure-component densities, not the upstream total
-        concentration.
+        concentration. A dynamic sample whose composition is exactly zero
+        (a stopped feed) carries no material and converts to zero flow
+        without evaluating mixture properties; non-finite samples are
+        converted as usual, so invalid values propagate.
         """
         up, down = prefix_up, prefix_down
+        stopped = None  # dynamic rows with exactly zero composition
 
         if np.asarray(flow).ndim == 0:
             mw_av = matter_object.mw_av  # [g/mol]
@@ -390,6 +394,14 @@ class NameAnalyzer:
                     f"'{comp_name}' needs a per-sample mixture density, "
                     f"which {type(matter_object).__name__} does not provide; "
                     "supply a single-phase liquid or vapor stream.")
+
+            # Mixture properties are undefined for stopped samples; evaluate
+            # them only for the other rows and give stopped rows zero flow.
+            composition = np.asarray(composition, dtype=float)
+            stopped = np.all(composition == 0, axis=-1)
+            if np.ndim(temp) > 0:
+                temp = np.asarray(temp, dtype=float)[~stopped]  # [K]
+            composition = composition[~stopped]
 
             # Per-sample fractions [-], rows normalized for concentrations
             if comp_name == 'mole_frac':
@@ -413,10 +425,16 @@ class NameAnalyzer:
                     f"{type(matter_object).__name__}; use mole_frac, "
                     "mass_frac, mole_conc or mass_conc.")
 
-            mw_av = np.dot(mole_frac, matter_object.mw)  # [g/mol]
+            fed_mw_av = np.dot(mole_frac, matter_object.mw)  # [g/mol]
             density_kwargs = {} if temp is None else {'temp': temp}  # [K]
-            density = matter_object.getDensity(
-                **frac_kwargs, **density_kwargs)  # [kg/m**3], per sample
+            fed_density = matter_object.getDensity(
+                **frac_kwargs, **density_kwargs)  # [kg/m**3], per fed sample
+
+            # Unit placeholders for stopped rows; their flow is zeroed below.
+            mw_av = np.ones(len(stopped))  # [g/mol]
+            density = np.ones(len(stopped))  # [kg/m**3]
+            mw_av[~stopped] = fed_mw_av
+            density[~stopped] = fed_density
 
         # Convert units; 1000 g/kg relates [g/mol] to [kg/mol]
         if 'mass' in up and 'mole' in down:
@@ -436,6 +454,9 @@ class NameAnalyzer:
                 flow_out = flow * molar_density  # [mol/s]
             else:
                 flow_out = flow * density  # [kg/s]
+
+        if stopped is not None and stopped.any():
+            flow_out = np.where(stopped, 0.0, flow_out)  # stopped feed
 
         return flow_out
 

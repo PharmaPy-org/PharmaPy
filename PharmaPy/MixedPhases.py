@@ -11,9 +11,58 @@ from typing import Union
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Commons import trapezoidal_rule
+from PharmaPy.Interpolation import local_newton_interpolation
+
+import warnings
 
 import numpy as np
 from scipy.optimize import newton
+
+# [-], node count of the deprecated three-point Newton helper below
+DEPRECATED_INTERPOLATION_NODES = 3
+
+
+def Interpolation(t_data, y_data, time):
+    """Interpolate a profile with a local three-point Newton polynomial.
+
+    Parameters
+    ----------
+    t_data : numpy.ndarray
+        Sample times [s], ascending, shape (num_samples,).
+    y_data : numpy.ndarray
+        Samples with time on the first axis, shape (num_samples,) or
+        (num_samples, num_states), in their own units.
+    time : float
+        Query time [s].
+
+    Returns
+    -------
+    float or numpy.ndarray
+        Interpolated value in the units of ``y_data``, shape () or
+        (num_states,).
+
+    Warns
+    -----
+    DeprecationWarning
+        Always. Use :func:`PharmaPy.Connections.interpolate_inputs` for
+        connected inlet profiles, or
+        :func:`PharmaPy.Interpolation.local_newton_interpolation`.
+
+    Notes
+    -----
+    Deprecated. Delegates to
+    :func:`PharmaPy.Interpolation.local_newton_interpolation` with three
+    nodes, which keeps a full three-node window at the end of the profile;
+    earlier releases used two nodes there.
+    """
+    warnings.warn(
+        "PharmaPy.MixedPhases.Interpolation is deprecated; use "
+        "PharmaPy.Connections.interpolate_inputs for connected inlet profiles "
+        "or PharmaPy.Interpolation.local_newton_interpolation.",
+        DeprecationWarning, stacklevel=2)
+
+    return local_newton_interpolation(
+        time, t_data, y_data, num_points=DEPRECATED_INTERPOLATION_NODES)
 
 
 def energy_balance(inst, mass_str):

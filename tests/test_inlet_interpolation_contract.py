@@ -11,6 +11,9 @@ liquid stream uses the real single-species nitrogen database; no solver runs.
 A second fixture puts a negligible terminal flow next to unit-scale samples,
 so any polynomial evaluation at the final node loses it to round-off.
 
+The deprecated module-level ``Streams.Interpolation`` and
+``MixedPhases.Interpolation`` aliases must warn and use the corrected window.
+
 Most tests are regressions that fail on the base revision. Tests whose names
 end in ``_guard`` already pass there and protect established behaviour:
 the vector post-horizon hold and scalar closed-form matches of
@@ -27,6 +30,7 @@ import copy
 import numpy as np
 import pytest
 
+from PharmaPy import MixedPhases, Streams
 from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Interpolation import NewtonInterpolation, local_newton_interpolation
 from PharmaPy.MixedPhases import SlurryStream
@@ -342,3 +346,32 @@ def test_liquid_stream_forwards_interpolation_node_count_guard():
     # 301 K at 1 s and 309 K at 3 s: 301 + 4 * 1.5 = 307 K.
     expected = np.array([2.25, 0.55, 307.])  # [kg/s, -, K]
     np.testing.assert_allclose(stream.InterpolateInputs(query), expected, rtol=RTOL)
+
+
+LATE_QUERY = 5.5  # [s], between the last two nodes and nearest the final one
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('module, kwargs', [
+    (Streams, {'num_points': 3}), (Streams, {}), (MixedPhases, {})])
+def test_deprecated_interpolation_alias_uses_full_final_window(module, kwargs):
+    """Warn and evaluate the deprecated aliases with a three-node window.
+
+    Parameters
+    ----------
+    module : module
+        ``PharmaPy.Streams`` or ``PharmaPy.MixedPhases``.
+    kwargs : dict
+        Optional ``num_points`` of the Streams alias (default three).
+
+    Notes
+    -----
+    A three-node polynomial reproduces the linear and quadratic states of
+    ``upstream_law`` exactly; the window used in v1.0.0 near the end of the
+    profile had fewer nodes and missed the quadratic temperature.
+    """
+    with pytest.warns(DeprecationWarning,
+                      match=rf'{module.__name__}\.Interpolation is deprecated'):
+        value = module.Interpolation(UPSTREAM_TIME, UPSTREAM_STATES, LATE_QUERY,
+                                     **kwargs)
+    np.testing.assert_allclose(value, upstream_law(LATE_QUERY), rtol=RTOL, atol=0)
