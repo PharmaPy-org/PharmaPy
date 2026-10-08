@@ -21,6 +21,15 @@ from scipy.optimize import newton
 # [-], node count of the deprecated three-point Newton helper below
 DEPRECATED_INTERPOLATION_NODES = 3
 
+# [K], common enthalpy reference shared by every phase of a mixture. It equals
+# the existing provider defaults (ThermoPhysicalManager.getEnthalpy,
+# LiquidPhase.getEnthalpy, the SolidPhase constructor, and Mixer temp_refer),
+# the conventional 25 degC thermochemical reference. These mixtures always
+# evaluated both phases at this reference, so keeping it preserves their
+# established results. In a mass-conserving adiabatic mixing balance, any
+# common value gives the same temperature root.
+MIXTURE_ENTHALPY_TEMP_REF = 298.15
+
 
 def Interpolation(t_data, y_data, time):
     """Interpolate a profile with a local three-point Newton polynomial.
@@ -65,19 +74,70 @@ def Interpolation(t_data, y_data, time):
         time, t_data, y_data, num_points=DEPRECATED_INTERPOLATION_NODES)
 
 
-def energy_balance(inst, mass_str):
-    masses = [getattr(phase, mass_str) for phase in inst.Phases]
-    h_in = [phase.getEnthalpy() for phase in inst.Phases]
-    mass_tot = sum(masses)
+def energy_balance(inst, mass_str: str,
+                   temp_ref: float = MIXTURE_ENTHALPY_TEMP_REF) -> float:
+    """Solve the adiabatic common temperature of a mixture's phases.
 
-    def fun(temp_out):
-        h_tot = inst.getEnthalpy(temp_out, volumetric=False)
-        balance = np.dot(masses, h_in) - mass_tot * h_tot
+    Parameters
+    ----------
+    inst : Slurry or SlurryStream
+        Mixture with attached ``Phases`` and a mass-basis
+        ``getEnthalpy(temp, volumetric=False, temp_ref=...)`` method.
+    mass_str : {'mass', 'mass_flow'}
+        Phase attribute holding the inventory used as balance weight:
+        mass [kg] for a batch mixture or mass flow [kg/s] for a stream.
+    temp_ref : float, optional
+        Common enthalpy reference temperature [K] for every phase and for
+        the mixture. The default is ``MIXTURE_ENTHALPY_TEMP_REF`` (298.15 K).
+
+    Returns
+    -------
+    float
+        Mixture temperature [K] at which the mixture enthalpy equals the
+        sum of the phase enthalpies at their own temperatures.
+
+    Raises
+    ------
+    RuntimeError
+        If the Newton iteration does not converge.
+
+    Notes
+    -----
+    Each phase is evaluated on the same ``temp_ref``, overriding any
+    reference stored on a phase, so the balance never combines enthalpies
+    with different zero points. The ``Slurry`` and ``SlurryStream`` phase
+    setters call this helper without ``temp_ref`` and therefore always use
+    ``MIXTURE_ENTHALPY_TEMP_REF``. When the mixture mass fractions used by
+    ``inst.getEnthalpy`` match the phase inventories, the root does not
+    depend on the common value.
+    """
+    masses = [getattr(phase, mass_str) for phase in inst.Phases]  # [kg] or [kg/s]
+    h_in = [phase.getEnthalpy(temp_ref=temp_ref)
+            for phase in inst.Phases]  # [J/kg]
+    mass_tot = sum(masses)  # [kg] or [kg/s]
+
+    def fun(temp_out: float) -> float:
+        """Return the mixture enthalpy residual at a trial temperature.
+
+        Parameters
+        ----------
+        temp_out : float
+            Trial common mixture temperature [K].
+
+        Returns
+        -------
+        float
+            Phase-inlet minus mixture enthalpy, [J] for batch weights or
+            [J/s] for stream weights.
+        """
+        h_tot = inst.getEnthalpy(temp_out, volumetric=False,
+                                 temp_ref=temp_ref)  # [J/kg]
+        balance = np.dot(masses, h_in) - mass_tot * h_tot  # [J] or [J/s]
 
         return balance
 
-    temps = [phase.temp for phase in inst.Phases]
-    temp_phase = newton(fun, np.mean(temps))
+    temps = [phase.temp for phase in inst.Phases]  # [K]
+    temp_phase = newton(fun, np.mean(temps))  # [K]
 
     return temp_phase
 
@@ -336,12 +396,56 @@ class Slurry:
         """
         return self.Liquid_1.vol + self.Solid_1.vol
 
-    def getEnthalpy(self, temp, volfracs=None, densMass=None, volumetric=True):
-        # Individual phases
-        hLiq = self.Liquid_1.getEnthalpy(temp=temp, basis='mass')
-        hSol = self.Solid_1.getEnthalpy(temp=temp, basis='mass')
+    def getEnthalpy(self, temp, volfracs=None, densMass=None, volumetric=True,
+                    temp_ref: float = MIXTURE_ENTHALPY_TEMP_REF
+                    ) -> Union[float, np.ndarray]:
+        """Return slurry enthalpy on one common phase reference.
 
-        hMass = np.array([hLiq, hSol])
+        Parameters
+        ----------
+        temp : float or ndarray
+            Common phase temperature [K]. With ``volumetric=True`` and the
+            default ``volfracs`` and ``densMass``, only a scalar temperature
+            is supported. A temperature profile of shape ``(num_temps,)`` is
+            supported only with ``volumetric=False``.
+        volfracs : array-like, optional
+            Liquid and solid fractions of slurry volume [-], ordered
+            ``[liquid, solid]``. Defaults to the attached slurry fractions.
+            Used only when ``volumetric`` is ``True``.
+        densMass : array-like, optional
+            Liquid and solid mass densities [kg/m**3], ordered
+            ``[liquid, solid]``. Defaults to the attached phase densities.
+            Used only when ``volumetric`` is ``True``.
+        volumetric : bool, optional
+            If ``True`` (default), return enthalpy per slurry volume. If
+            ``False``, return enthalpy per slurry mass, weighting the phases
+            by the mass fractions of the attached slurry.
+        temp_ref : float, optional
+            Enthalpy reference temperature [K] passed to both the liquid and
+            the solid provider. The default is ``MIXTURE_ENTHALPY_TEMP_REF``
+            (298.15 K).
+
+        Returns
+        -------
+        float or ndarray
+            Slurry enthalpy, [J/m**3 slurry] when ``volumetric`` is ``True``
+            and [J/kg slurry] otherwise.
+
+        Notes
+        -----
+        Both phases always use ``temp_ref``, including when the attached
+        solid was constructed with a different ``temp_ref``, so the result
+        never mixes references. ``temp_ref`` follows the existing parameters,
+        so positional calls such as ``getEnthalpy(temp, volfracs, densMass)``
+        keep their meaning.
+        """
+        # Individual phases
+        hLiq = self.Liquid_1.getEnthalpy(
+            temp=temp, temp_ref=temp_ref, basis='mass')  # [J/kg liquid]
+        hSol = self.Solid_1.getEnthalpy(
+            temp=temp, temp_ref=temp_ref, basis='mass')  # [J/kg solid]
+
+        hMass = np.array([hLiq, hSol])  # [J/kg], [liquid, solid]
 
         # Mixture
         if volfracs is None:
@@ -770,8 +874,9 @@ class Cake:
 
         return alpha
 
-    def getEnthalpy(self, temp=None, mass_frac=None,
-                    distrib=None) -> Union[float, np.ndarray]:
+    def getEnthalpy(self, temp=None, mass_frac=None, distrib=None,
+                    temp_ref: float = MIXTURE_ENTHALPY_TEMP_REF
+                    ) -> Union[float, np.ndarray]:
         """Return the mass-specific enthalpy of liquid and solid in a cake.
 
         Parameters
@@ -784,20 +889,26 @@ class Cake:
             Defaults to the attached liquid composition.
         distrib : array-like, optional
             Legacy unused distribution argument [#/um].
+        temp_ref : float, optional
+            Enthalpy reference temperature [K] passed to both the liquid and
+            the solid provider. The default is ``MIXTURE_ENTHALPY_TEMP_REF``
+            (298.15 K).
 
         Returns
         -------
         float or ndarray
             Enthalpy [J/kg of liquid plus solid inventory], relative to the
-            phase providers' default reference temperature of 298.15 K. Array
-            temperatures retain the providers' temperature axis.
+            common reference ``temp_ref``. Array temperatures retain the
+            providers' temperature axis.
 
         Notes
         -----
         The attached liquid and solid masses set the weights, matching the
         total inventory used by Mixer.energy_balance. Porosity and saturation
         metadata do not change these inventories. Gas mass and enthalpy are
-        neglected.
+        neglected. Both phases always use ``temp_ref``, including when the
+        attached solid was constructed with a different ``temp_ref``, so the
+        weighted result never mixes references.
         """
         if temp is None:
             temp = self.Liquid_1.temp  # [K]
@@ -806,8 +917,10 @@ class Cake:
             mass_frac = self.Liquid_1.mass_frac  # [-]
 
         hLiq = self.Liquid_1.getEnthalpy(
-            temp=temp, mass_frac=mass_frac, basis='mass')  # [J/kg liquid]
-        hSol = self.Solid_1.getEnthalpy(temp=temp, basis='mass')  # [J/kg solid]
+            temp=temp, mass_frac=mass_frac, temp_ref=temp_ref,
+            basis='mass')  # [J/kg liquid]
+        hSol = self.Solid_1.getEnthalpy(
+            temp=temp, temp_ref=temp_ref, basis='mass')  # [J/kg solid]
 
         mass_liq = self.Liquid_1.mass  # [kg]
         mass_sol = self.Solid_1.mass  # [kg]

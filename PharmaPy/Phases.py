@@ -1622,7 +1622,9 @@ class SolidPhase(ThermoPhysicalManager):
             changing its shape; its axis is independent of the species axis.
         temp_ref : float, optional
             Enthalpy reference temperature [K], default 298.15 K, stored as a
-            Python float.
+            Python float. ``getEnthalpy`` uses it when its own ``temp_ref`` is
+            omitted; mixtures such as ``Slurry`` and ``Cake`` pass their own
+            common reference instead.
         pres : float, optional
             Pressure [Pa], default one standard atmosphere (101325 Pa).
         mass : float, optional
@@ -2198,8 +2200,65 @@ class SolidPhase(ThermoPhysicalManager):
 
         return cpSolid
 
-    def getEnthalpy(self, temp=None, temp_ref=298.15, mass_frac=None,
-                    mole_frac=None, total_h=True, basis='mass'):
+    def getEnthalpy(
+            self,
+            temp: Optional[ArrayLike] = None,
+            temp_ref: Optional[float] = None,
+            mass_frac: Optional[np.ndarray] = None,
+            mole_frac: Optional[np.ndarray] = None,
+            total_h: bool = True,
+            basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Calculate solid sensible enthalpy relative to a reference temperature.
+
+        Parameters
+        ----------
+        temp : float or ndarray, optional
+            Temperature at which enthalpy is evaluated [K], a scalar or a
+            temperature profile of shape ``(num_temps,)``. The phase
+            temperature ``self.temp`` is used when ``temp`` is ``None``.
+        temp_ref : float, optional
+            Lower limit of the heat-capacity integral [K]. An explicit value
+            takes precedence over the phase state. When ``None``, the stored
+            constructor reference ``self.temp_ref`` is used; its default is
+            298.15 K.
+        mass_frac : ndarray, optional
+            Solid species mass fractions [-], shape ``(num_species,)`` or
+            ``(num_temps, num_species)``. The phase composition is used when
+            neither fraction vector is supplied.
+        mole_frac : ndarray, optional
+            Solid species mole fractions [-], with the same shapes as
+            ``mass_frac``. The phase composition is used when neither
+            fraction vector is supplied.
+        total_h : bool, optional
+            If ``True`` (default), return the fraction-weighted mixture
+            enthalpy. If ``False``, return individual species enthalpies.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned enthalpy. The default is
+            ``'mass'``.
+
+        Returns
+        -------
+        float or ndarray
+            Solid sensible enthalpy, [J/kg] for ``basis='mass'`` and [J/mol]
+            for ``basis='mole'``. With ``total_h=True`` the result is a scalar
+            for a single temperature and has shape ``(num_temps,)``
+            otherwise. With ``total_h=False`` the shape is
+            ``(num_temps, num_species)``, including ``(1, num_species)`` for a
+            scalar temperature, in the phase's component order.
+
+        Notes
+        -----
+        Species enthalpy is the integral of the ``cp_solid`` polynomial
+        [J/mol/K] from ``temp_ref`` to ``temp``. The mass basis divides it by
+        the species molecular weight [kg/mol].
+
+        Before issue #332, an omitted ``temp_ref`` always used 298.15 K and
+        ignored a nondefault constructor reference. Callers that relied on
+        that behavior should pass ``temp_ref=298.15`` explicitly. Mixture
+        providers such as ``Slurry`` and ``Cake`` pass their own common
+        reference to both phases, so the stored solid reference does not mix
+        references inside a mixture balance.
+        """
 
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
@@ -2207,6 +2266,9 @@ class SolidPhase(ThermoPhysicalManager):
 
         if temp is None:
             temp = self.temp
+
+        if temp_ref is None:
+            temp_ref = self.temp_ref  # [K]
 
         hSolid = super().getEnthalpy(temp, temp_ref, mass_frac, mole_frac,
                                      phase='solid', total_h=total_h,
