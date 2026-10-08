@@ -2208,7 +2208,10 @@ class ParameterEstimation:
         its sensitivities are divided by their standard deviation, so the
         weighted residuals ``(model - data) / sigma`` are dimensionless and
         quantities in different units can be summed. The standard
-        deviations are stored in ``_residual_std``.
+        deviations are stored in ``_residual_std``. ``get_covariance``
+        describes whether they are treated as relative or absolute, and
+        ``StatisticsClass.get_bootsamples`` resamples the standardized
+        residuals.
         No physical-unit or state-column conversion is performed.
 
         """
@@ -2892,6 +2895,14 @@ class ParameterEstimation:
         ``(model - data) / sigma`` [-], and the objective is half the sum of
         their squares.
 
+        While ``objfun_iter`` is a list, each evaluation appends a sum of
+        squares to it (the source of ``paramest_df['obj_fun']``). When
+        measurements declare uncertainties this is the weighted sum of
+        squares ``r @ r`` [-], twice the returned objective, because the raw
+        residuals may mix physical units. Otherwise it remains the unweighted
+        sum of squared raw residuals in squared measured-state units, as in
+        earlier releases, also when ``weight_matrix`` is given.
+
         """
         # Store parameter values
         params_in = np.asarray(params)  # parameter units
@@ -2957,15 +2968,20 @@ class ParameterEstimation:
         if len(sens_second) > 0:
             self.sens_second = sens_second
 
-        if type(self.objfun_iter) is list:
-            objfun_val = np.linalg.norm(np.concatenate(resid_runs))**2
-            self.objfun_iter.append(objfun_val)
-
-        residuals = self.optimize_flag * np.concatenate(resid_runs)
-
         # Weighted-residual units as above, flattened state-major.
         residual_out = np.concatenate([ar.T.ravel()
                                        for ar in weighted_residuals])
+
+        if type(self.objfun_iter) is list:
+            if self._residual_std is None:
+                # [(measured-state unit)**2], raw SSE kept for legacy history
+                objfun_val = np.linalg.norm(np.concatenate(resid_runs))**2
+            else:
+                # [-], weighted SSE; raw residuals may mix physical units.
+                objfun_val = np.dot(residual_out, residual_out)
+            self.objfun_iter.append(objfun_val)
+
+        residuals = self.optimize_flag * np.concatenate(resid_runs)
 
         if set_self:
             self.y_runs = y_runs
@@ -3162,7 +3178,13 @@ class ParameterEstimation:
         verbose : bool, optional
             If True, request verbose solver output when supported.
         store_iter : bool, optional
-            If True, store unique parameter/objective iterates.
+            If True, store unique parameter/objective iterates in
+            ``params_iter``, ``objfun_iter`` and the ``paramest_df`` table,
+            whose ``'obj_fun'`` column is the weighted sum of squares [-]
+            (twice the objective) when measurements declare uncertainties,
+            and otherwise the unweighted sum of squared raw residuals in
+            squared measured-state units, also with ``weight_matrix`` (see
+            ``get_objective``).
         method : {'LM', 'IPOPT'}, optional
             Optimization method used for fitting.
         bounds : sequence, optional
@@ -3292,7 +3314,67 @@ class ParameterEstimation:
 
         return opt_par, covar_params, info
 
-    def get_covariance(self, include_mse=True):
+    def get_covariance(self, include_mse: bool = True) -> np.ndarray:
+        """Estimate the parameter covariance at the accepted parameters.
+
+        The linearized (Gauss-Newton) covariance is built from the weighted
+        Jacobian ``J = info_opt['jac']``, shape ``(num_params, n_entries)``,
+        and the weighted residuals ``r = info_opt['fun']`` stored by
+        ``optimize_fn``.
+
+        Parameters
+        ----------
+        include_mse : bool, optional
+            If True (the default), return ``s2 * inv(J @ J.T)`` with the
+            residual mean square ``s2 = r @ r / (num_data_total -
+            num_params)``. If False, return ``inv(J @ J.T)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Covariance, shape ``(num_params, num_params)``, in optimized
+            parameter (``name_params``) order. Entry ``(i, j)`` has the
+            product of the units of parameters ``i`` and ``j`` when the
+            weighted residuals are dimensionless (declared measurement
+            uncertainties, or a ``weight_matrix`` holding measurement-error
+            covariances in squared measurement units), for both values of
+            ``include_mse``. With the default identity weighting this holds
+            for ``include_mse=True`` only if every residual has the same
+            physical unit; ``include_mse=False`` is then additionally
+            divided by that unit squared. With identity weighting of
+            residuals in different units (e.g. [mol/L] and [K]) neither
+            form is a physical covariance: it depends on the units chosen
+            for each measurement. Also stored as ``covar_params``; the
+            matching correlation matrix [-] is stored as ``correl_params``.
+
+        Raises
+        ------
+        AttributeError
+            If no fit has been run, so ``info_opt`` does not exist.
+        numpy.linalg.LinAlgError
+            If ``J @ J.T`` is singular, for example when a parameter does
+            not affect any observed entry.
+
+        Notes
+        -----
+        Only observed entries count as data: unobserved entries have zero
+        weighted residual and zero Jacobian column, and the degrees of
+        freedom are ``num_data_total - num_params`` with ``num_data_total``
+        the number of observed entries. The residual mean square requires
+        more observed entries than optimized parameters.
+
+        ``s2`` is the reduced chi-square of the weighted residuals [-] when
+        they are dimensionless, and the residual variance in the
+        measurement unit squared with identity weighting of a single
+        physical unit. The default
+        ``include_mse=True`` therefore treats declared standard deviations
+        (or ``weight_matrix``) as relative weights whose common scale is
+        re-estimated from the residual scatter, like
+        ``scipy.optimize.curve_fit(..., absolute_sigma=False)``. When the
+        declared standard deviations are known in absolute terms,
+        ``include_mse=False`` gives the covariance that treats them as
+        absolute (``absolute_sigma=True``); both coincide when ``s2 = 1``.
+        """
         jac = self.info_opt['jac']
         resid = self.info_opt['fun']
 
