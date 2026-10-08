@@ -646,6 +646,13 @@ class SimulationExec:
         Only modifier keys and entry types are validated here. Applying
         control modifiers inside the reactor callbacks is tracked by
         issue #271.
+
+        Reactor callbacks return exactly one row per requested sample time
+        (replicates repeated), so experiments need not sample the initial
+        time. Crystallizer callbacks still return the solver rows, which
+        include the charge time, until issue #328 is fixed: their grids
+        must start at the charge time (0 s) without replicates there; add
+        0 s to one measurement with a NaN value as a workaround.
         """
         if len(self.graph) == 1:
             target_unit = getattr(self, list(self.graph.keys())[0])

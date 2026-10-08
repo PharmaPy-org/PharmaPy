@@ -39,6 +39,73 @@ eps = np.finfo(float).eps
 _CENTRAL_DIFFERENCE_REL_STEP = np.cbrt(eps)  # [-], optimal for O(h**2) error
 
 
+def _requested_rows(time_profile, requested_times) -> np.ndarray:
+    """Select the solver output rows of the requested sample times.
+
+    CVode also reports the initial state, and repeated requested times at
+    the initial time collapse into one output row, so the solver profile
+    need not have one row per requested time.
+
+    Parameters
+    ----------
+    time_profile : array_like
+        Reported times [s] on the zero-based clock of ``paramest_wrapper``,
+        shape ``(num_reported,)``, non-decreasing.
+    requested_times : array_like
+        Requested sample times [s], shape ``(num_times,)``, possibly with
+        replicates.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer row indices into ``time_profile``, shape ``(num_times,)``,
+        in ``requested_times`` order. The k-th replicate of a time maps to
+        the k-th reported row with exactly that time, or to the last such
+        row if fewer were reported (initial replicates share the single
+        initial row); reported grids that equal the request therefore map
+        to the identity.
+
+    Raises
+    ------
+    ValueError
+        If a requested time is not among the reported times. The message
+        gives the number of reported times and the first and last of them.
+
+    Notes
+    -----
+    Times are matched by exact equality, without tolerance. Because
+    ``paramest_wrapper`` resets the elapsed time to 0 s, ``solve_unit``
+    passes the requested times unchanged (``t_vals + 0.0``) as CVode output
+    points, and CVode reports each output point it reaches as that same
+    float. Any tolerance would instead have to be relative to some time
+    scale and could merge distinct samples of multiscale grids, for example
+    1e-12 s and 2e-12 s within a 3600 s run.
+    """
+    reported = np.asarray(time_profile, dtype=float)  # [s]
+    requested = np.asarray(requested_times, dtype=float).ravel()  # [s]
+    rows = np.empty(requested.size, dtype=int)
+    replicates = {}  # first matching row -> requests already mapped to it
+    for index, time in enumerate(requested):
+        matches = np.flatnonzero(reported == time)
+        if matches.size == 0:
+            span = (f"{reported.size} times from {reported[0]!r} s to "
+                    f"{reported[-1]!r} s" if reported.size else "no times")
+            raise ValueError(
+                f"Requested time {time!r} s is absent from the reactor "
+                f"solution, which reports {span}. CVode's default "
+                "(non-continuous) output can omit requested points inside "
+                "its last internal step before the end time; pass "
+                "run_args={'sundials_opts': {'report_continuously': True}} "
+                "(wrapper_kwargs in SimulationExec), or a maxh below the "
+                "sample spacing. Otherwise the integration ended early (a "
+                "terminating state event or stop), or the time grid "
+                "decreases")
+        count = replicates.get(matches[0], 0)
+        rows[index] = matches[min(count, matches.size - 1)]
+        replicates[matches[0]] = count + 1
+    return rows
+
+
 def check_stoichiometry(stoich, mws):
     mass_bce = np.dot(stoich, mws)
 
@@ -1076,17 +1143,34 @@ class _BaseReactor:
         -------
         c_prof : numpy.ndarray
             Species molar concentrations [mol/L], shape
-            ``(num_times, kinetics.num_species)``.
+            ``(num_times, kinetics.num_species)``: exactly one row per
+            requested time in ``t_vals`` order, with replicate times
+            repeated. The initial state is included only if requested.
         sens : numpy.ndarray, optional
             Returned with ``c_prof`` only when ``return_sens`` is True.
-            Sensitivities have units of each state per kinetic parameter unit;
-            their layout follows ``reord_sens``.
+            Sensitivities have units of each state per kinetic parameter unit,
+            with the same rows as ``c_prof``; their layout follows
+            ``reord_sens``.
+
+        Raises
+        ------
+        ValueError
+            If a requested time is absent from the solver output: CVode's
+            default (non-continuous) output can omit requested points inside
+            its last internal step before the end time (pass
+            ``run_args={'sundials_opts': {'report_continuously': True}}``
+            or a ``maxh`` below the sample spacing), the integration ended
+            early (terminating state event or stop), or the grid decreases.
 
         Notes
         -----
         Composition-only modifiers preserve the reset charged volume used by
         geometry and initial states, rather than conserving liquid mass.
         The supplied modifier dictionary is not changed.
+        CVode reports the initial state and merges repeated initial times,
+        so rows are selected by requested time (``_requested_rows``) before
+        any sensitivity reordering; a grid that starts at the initial time
+        without initial replicates is returned unchanged.
         """
         self.reset()
 
@@ -1105,6 +1189,9 @@ class _BaseReactor:
             t_prof, states, sens = self.solve_unit(time_grid=t_vals,
                                                    verbose=False,
                                                    eval_sens=True, **run_args)
+            rows = _requested_rows(t_prof, t_vals)
+            states = states[rows]
+            sens = [block[rows] for block in sens]
 
             if reord_sens:
                 sens = reorder_sens(sens)
@@ -1119,6 +1206,7 @@ class _BaseReactor:
             t_prof, states = self.solve_unit(time_grid=t_vals,
                                              verbose=False,
                                              eval_sens=False, **run_args)
+            states = states[_requested_rows(t_prof, t_vals)]
 
             c_prof = states[:, :self.Kinetics.num_species]
 

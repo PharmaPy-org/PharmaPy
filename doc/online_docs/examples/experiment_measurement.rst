@@ -430,3 +430,23 @@ experiment receives its own wrapper keywords ``modify_phase``,
 Only modifier keys and entry types are validated by ``SetParamEstimation``;
 applying control modifiers inside reactor callbacks is tracked in
 `issue #271 <https://github.com/PharmaPy-org/PharmaPy/issues/271>`__.
+
+Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
+reactors) return exactly one row per requested sample time, in request
+order with replicates repeated, so an experiment need not sample the initial
+time: endpoint-only measurements and replicate samples at the charge time
+are supported. Crystallizer callbacks still return the solver rows, which
+include the charge time, until
+`issue #328 <https://github.com/PharmaPy-org/PharmaPy/issues/328>`__ is
+fixed: their experiment grids must start at the charge time (0 s) without
+replicates there. As a workaround, add 0 s to one measurement's ``x`` with a
+NaN value, which is unobserved and adds no residual.
+
+In its default (non-continuous) output mode CVode can omit requested sample
+times that fall inside its last internal step before the end time; the
+reactor callback then raises ``ValueError`` naming the missing time rather
+than returning misaligned rows. Pass
+``wrapper_kwargs={'sundials_opts': {'report_continuously': True}}`` (or a
+``maxh`` below the sample spacing) in that case; tightening ``rtol`` and
+``atol`` does not reliably help. Callbacks that return sensitivities already
+use continuous output.

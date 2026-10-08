@@ -359,7 +359,12 @@ class StatisticsClass:
         numpy.ndarray
             Boolean array with the shape of ``self.residuals[ind]``,
             ``(n_times, n_columns)``: True where the residual belongs to an
-            observation, False at unobserved entries of staggered grids.
+            observation, False at every unobserved entry (samples of
+            staggered grids where a state is not measured, NaN-missing
+            observations, and measurement columns the experiment does not
+            include). For ``Experiment`` input the columns are the
+            estimator's measurement columns in first-appearance order;
+            otherwise they follow ``measured_ind``.
 
         Raises
         ------
