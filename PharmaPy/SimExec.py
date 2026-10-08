@@ -8,7 +8,8 @@ Created on Mon Jan 13 12:44:44 2020
 import numpy as np
 import pandas as pd
 from PharmaPy.ThermoModule import ThermoPhysicalManager
-from PharmaPy.ParamEstim import ParameterEstimation, MultipleCurveResolution
+from PharmaPy.ParamEstim import (Experiment, MultipleCurveResolution,
+                                 ParameterEstimation, _experiment_collection)
 from PharmaPy.StatsModule import StatisticsClass
 
 from PharmaPy.Connections import (Connection, convert_str_flowsheet,
@@ -19,7 +20,9 @@ from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_obj
 from PharmaPy.Commons import trapezoidal_rule, check_steady_state
 from PharmaPy.CheckModule import check_modeling_objects
 
+import inspect
 import time
+from collections.abc import Mapping
 from typing import Optional, Sequence, Union
 
 # Consumed inlet fields used to account dynamic raw feeds, in the order a
@@ -55,6 +58,209 @@ def _broadcast_samples(value, shape: tuple) -> np.ndarray:
         If ``value`` cannot be broadcast to ``shape``.
     """
     return np.array(np.broadcast_to(np.asarray(value, dtype=float), shape))
+
+
+# Callback keywords that SetParamEstimation supplies to paramest_wrapper for
+# each experiment, and the SetParamEstimation argument that supplies each.
+WRAPPER_ARGUMENTS = {'modify_phase': 'phase_modifiers',
+                     'modify_controls': 'control_modifiers',
+                     'run_args': 'wrapper_kwargs'}
+
+
+def _unnamed_experiment_count(x_data) -> int:
+    """Count unnamed legacy experiments as ``ParameterEstimation`` reads them.
+
+    Parameters
+    ----------
+    x_data : numpy.ndarray, list, tuple or object
+        Legacy unnamed independent data, typically times [s].
+
+    Returns
+    -------
+    int
+        ``len(x_data)`` for a list or tuple, whose entries are experiments
+        (an entry may itself be a list of per-state grids); 1 for any other
+        object, such as one shared NumPy grid. This matches
+        ``PharmaPy.ParamEstim.convert_types`` for arrays, lists and tuples;
+        other objects are left to the estimator's own validation.
+    """
+    if isinstance(x_data, (list, tuple)):
+        return len(x_data)
+    return 1
+
+
+def _modifier_entries(modifiers, label: str, names: Optional[list],
+                      count: int) -> Optional[list]:
+    """Align one experiment-modifier argument with the experiments.
+
+    Parameters
+    ----------
+    modifiers : Mapping, list, tuple or None
+        ``phase_modifiers`` or ``control_modifiers`` of
+        ``SimulationExec.SetParamEstimation``. Field values keep the units
+        of the unit operation's phase or control definitions (for example
+        ``temp`` [K], ``mole_conc`` [mol/L]).
+    label : str
+        Argument name used in error messages.
+    names : list of str or None
+        Experiment names of named ``x_data`` in experiment order, or None
+        for unnamed (positional or single) experiments.
+    count : int
+        Number of experiments.
+
+    Returns
+    -------
+    list of dict or None
+        One modifier entry per experiment in ``x_data`` order (the caller's
+        dictionaries, not copied, or None entries), or None if
+        ``modifiers`` is None.
+
+    Raises
+    ------
+    ValueError
+        If a mapping for named experiments has keys other than the
+        experiment names (reporting the missing and unexpected names), a
+        mapping is given for several unnamed experiments, or a list or tuple
+        does not hold one entry per experiment.
+    TypeError
+        If named experiments receive something other than a mapping,
+        unnamed experiments receive something other than a mapping, list or
+        tuple, or an entry is neither a dict nor None. Offending entries are
+        identified by experiment name or, for unnamed experiments,
+        zero-based position.
+
+    Notes
+    -----
+    For one unnamed experiment a mapping holds that experiment's modifier
+    fields, as in earlier releases; a one-element list or tuple is
+    equivalent. A None entry is passed through and means no modification,
+    as in earlier releases. Other entries must be ``dict`` because the
+    unit-operation wrappers apply only ``dict`` modifiers and would
+    silently ignore other values.
+    """
+    if modifiers is None:
+        return None
+
+    if names is not None:
+        if not isinstance(modifiers, Mapping):
+            raise TypeError(
+                f"{label} must be a dictionary keyed by the x_data "
+                f"experiment names {names!r}; got {type(modifiers).__name__}")
+        missing = [name for name in names if name not in modifiers]
+        unexpected = [name for name in modifiers if name not in names]
+        if missing or unexpected:
+            raise ValueError(
+                f"{label} experiment keys must match x_data; "
+                f"missing={missing!r}, unexpected={unexpected!r}")
+        entries = [modifiers[name] for name in names]
+        identifiers = list(names)
+    elif isinstance(modifiers, Mapping):
+        if count != 1:
+            raise ValueError(
+                f"{label} is a dictionary, but its keys cannot be aligned "
+                f"with the {count} unnamed experiments in x_data; pass "
+                f"{label} as a list with one dictionary per experiment in "
+                "x_data order, or pass x_data as a dictionary keyed by "
+                "experiment name")
+        entries = [modifiers]
+        identifiers = [0]
+    elif isinstance(modifiers, (list, tuple)):
+        if len(modifiers) != count:
+            raise ValueError(
+                f"{label} must contain one dictionary per experiment in "
+                f"x_data order; expected {count}, got {len(modifiers)}")
+        entries = list(modifiers)
+        identifiers = list(range(count))
+    else:
+        raise TypeError(
+            f"{label} must be a dictionary, or a list or tuple with one "
+            "dictionary per experiment in x_data order; got "
+            f"{type(modifiers).__name__}")
+
+    invalid = [identifier for identifier, entry in zip(identifiers, entries)
+               if entry is not None and not isinstance(entry, dict)]
+    if invalid:
+        raise TypeError(
+            f"Each {label} entry must be a dictionary of modifier fields or "
+            f"None; offending experiments: {invalid!r}")
+    return entries
+
+
+def _experiment_with_wrapper(experiment: Experiment, name: str,
+                             wrapper: dict, supplied: dict,
+                             signature: inspect.Signature) -> Experiment:
+    """Return a copy of an experiment carrying its wrapper keywords.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Caller's experiment; it is not modified.
+    name : str
+        Experiment name used in error messages.
+    wrapper : dict
+        ``modify_phase``, ``modify_controls`` and ``run_args`` for this
+        experiment, in the units of the unit operation's phase, control and
+        solver options.
+    supplied : dict
+        Wrapper keyword -> whether the matching ``SetParamEstimation``
+        argument was given (not None).
+    signature : inspect.Signature
+        Signature of the unit's bound ``paramest_wrapper``, called as
+        ``paramest_wrapper(params, times, *args, **kwargs)``; its first two
+        parameters receive the parameters and the model time grid [s].
+
+    Returns
+    -------
+    Experiment
+        New experiment with the same measurements and positional callback
+        arguments, and keywords equal to the experiment's own keywords plus
+        each wrapper keyword that the experiment binds neither positionally
+        (through ``args``) nor by keyword.
+
+    Raises
+    ------
+    TypeError
+        If the experiment's ``args`` and ``kwargs`` cannot be bound to the
+        wrapper signature after the parameters and the time grid, for
+        example too many positional arguments, a parameter given both
+        positionally and by keyword, or an unknown keyword.
+    ValueError
+        If the experiment binds a wrapper keyword, positionally or by
+        keyword, that the corresponding ``SetParamEstimation`` argument
+        also supplies.
+    """
+    try:
+        signature.bind(None, None, *experiment.args, **experiment.kwargs)
+    except TypeError as error:
+        raise TypeError(
+            f"Experiment {name!r} args {experiment.args!r} and kwargs "
+            f"{sorted(experiment.kwargs)!r} cannot be bound to the unit's "
+            f"paramest_wrapper{signature} after its parameters and time "
+            f"grid: {error}") from error
+    # Parameters bound by position: those after the params and time grid,
+    # up to the number of positional arguments (excluding *args).
+    after_grid = list(signature.parameters.values())[2:]
+    positional = [parameter.name
+                  for parameter in after_grid[:len(experiment.args)]
+                  if parameter.kind in (parameter.POSITIONAL_ONLY,
+                                        parameter.POSITIONAL_OR_KEYWORD)]
+    kwargs = dict(experiment.kwargs)
+    for key, value in wrapper.items():
+        if key in positional:
+            if supplied[key]:
+                raise ValueError(
+                    f"Experiment {name!r} args bind {key!r} positionally, "
+                    "which SetParamEstimation also supplies through "
+                    f"{WRAPPER_ARGUMENTS[key]}; set it in one place only")
+        elif key not in kwargs:
+            kwargs[key] = value
+        elif supplied[key]:
+            raise ValueError(
+                f"Experiment {name!r} kwargs define {key!r}, which "
+                f"SetParamEstimation also supplies through "
+                f"{WRAPPER_ARGUMENTS[key]}; set it in one place only")
+    return Experiment(dict(experiment.measurements), args=experiment.args,
+                      kwargs=kwargs)
 
 
 class SimulationExec:
@@ -290,75 +496,159 @@ class SimulationExec:
                            wrapper_kwargs=None,
                            phase_modifiers=None, control_modifiers=None,
                            pick_unit=None, **inputs_paramest):
-        """
-        Set parameter estimation using the aggregated unit operation to a
-        simulation object
+        """Set up parameter estimation for the flowsheet's unit operation.
+
+        The unit's ``paramest_wrapper`` is the model callback. Each
+        experiment receives its own callback keywords ``modify_phase``,
+        ``modify_controls`` and ``run_args``, built from
+        ``phase_modifiers``, ``control_modifiers`` and ``wrapper_kwargs``
+        and aligned with ``x_data`` by experiment name or position. The
+        estimator is stored as ``self.ParamInst``.
 
         Parameters
         ----------
-        x_data : TYPE
-            DESCRIPTION.
-        y_data : TYPE, optional
-            DESCRIPTION. The default is None.
-        spectra : TYPE, optional
-            DESCRIPTION. The default is None.
-        fit_spectra : TYPE, optional
-            DESCRIPTION. The default is False.
-        wrapper_kwargs : TYPE, optional
-            DESCRIPTION. The default is None.
-        phase_modifiers : dict, optional
-            Dictionary containing values to be set to the initial state
-            of a phase for each experiment. Keys of 'phase_modifiers'
-            must be experiment names, and fields must be dictionaries
-            with keys matching the fields used to create a PharmaPy phase.
-            An example for a reactor would be:
+        x_data : Experiment, mapping or sequence of Experiment, or legacy data
+            Experiments to fit, in one of the forms accepted by
+            ``ParameterEstimation``; the independent variable is time [s]
+            for the unit-operation wrappers.
 
-                my_modifier = {
-                    'exp_1': {'temp': 300, 'mole_frac': [...]},
-                    'exp_2': {'temp': 320, 'mole_frac': [...]}}
+            * Named legacy experiments: a dictionary of experiment name ->
+              time array (or list of per-state time arrays). Insertion order
+              is experiment order.
+            * Positional legacy experiments: a list or tuple with one entry
+              per experiment, each a time array or a list of per-state time
+              arrays (staggered sampling). ``[t_A, t_B]`` therefore holds
+              two experiments and ``[[t_A, t_B]]`` one staggered experiment.
+            * One unnamed legacy experiment: a single time array.
+            * ``Experiment`` objects: a single ``Experiment``, a mapping of
+              names to ``Experiment`` (named) or a list or tuple of
+              ``Experiment`` (positional). Each holds its measurements and
+              its own callback ``args`` and ``kwargs``.
+        y_data : numpy.ndarray, list or dict, optional
+            Legacy observations in the units of the measured unit-operation
+            states (for example ``mole_conc`` [mol/L] for reactors), in the
+            same structure as ``x_data``; NaN marks a missing observation.
+            Must be None for ``Experiment`` input. The default is None.
+        y_spectra : numpy.ndarray, list or dict, optional
+            Absorbance spectra [-] fitted when ``fit_spectra`` is True; see
+            ``MultipleCurveResolution``. The default is None.
+        fit_spectra : bool, optional
+            If True, fit ``y_spectra`` with ``MultipleCurveResolution``,
+            which does not accept ``Experiment`` input. Otherwise use
+            ``ParameterEstimation``. The default is False.
+        wrapper_kwargs : Mapping, optional
+            Keyword arguments for the unit's ``solve_unit``, for example
+            ``{'sundials_opts': {'rtol': 1e-9, 'atol': 1e-11}}`` with a
+            dimensionless relative tolerance and an absolute tolerance in
+            state units. Every experiment receives its own shallow copy as
+            ``run_args``, so nested values are shared and not copied. The
+            default is None, which passes an empty dictionary.
+        phase_modifiers : dict, list or tuple, optional
+            Per-experiment updates of the initial phase state, applied by
+            the unit's ``paramest_wrapper`` after its reset. Each entry is a
+            dictionary of ``updatePhase`` fields of the unit's phase, for
+            example ``{'temp': 320.0, 'mole_conc': [...]}`` with temperature
+            [K] and concentrations [mol/L]; fractions are dimensionless [-],
+            mass concentrations [kg/m**3], and amounts mass [kg], volume
+            [m**3] or moles [mol]. Crystallizers expect an additional layer
+            keyed by ``'Liquid'`` and/or ``'Solid'``. Experiments are aligned
+            as follows:
 
-            For multi-phase systems such as crystallizer, an additional layer
-            is needed to indicate which phase is being modified, e.g.
+            * named experiments: a dictionary with exactly the experiment
+              names as keys, in any order;
+            * positional experiments: a list or tuple with one dictionary
+              per experiment, in ``x_data`` order;
+            * one unnamed experiment (a single array, a one-element list or
+              tuple, or a single ``Experiment``): the experiment's modifier
+              dictionary itself, or a one-element list or tuple holding it.
 
-                my_modifier = {
-                    'exp_1': {'Liquid_1': {'temp': 300, 'mole_frac': [...]}},
-                    'exp_2': {'Liquid_1': {'temp': 320, 'mole_frac': [...]}, 'Solid_1': {'distrib':}}
-                    }
-
+            An entry may be None, which the wrappers treat as no
+            modification. The default is None, which passes an empty
+            dictionary to every experiment.
+        control_modifiers : dict, list or tuple, optional
+            Per-experiment control-parameter updates passed to the unit's
+            ``paramest_wrapper`` as ``modify_controls``, aligned with the
+            experiments exactly like ``phase_modifiers``. Each entry is a
+            dictionary in the units of the controlled state and its control
+            function arguments; for a crystallizer temperature control
+            ``my_control(time, temp_init, ramp)`` an entry is
+            ``{'temp': {'args': (320.0, -0.2)}}``. The default is None, which
+            passes an empty dictionary to every experiment.
+        pick_unit : str, optional
+            Unit operation to fit when the flowsheet holds more than one.
             The default is None.
-        control_modifiers : dict, optional
-            Dictionary containing arguments to be passed to a control function.
-            For instance, for a crystallizer with a temperature control with
-            signature my_control(time, temp_init, ramp):
+        **inputs_paramest
+            Further keyword arguments of ``ParameterEstimation`` (or
+            ``MultipleCurveResolution``), for example ``measured_ind``,
+            ``optimize_flags``, ``weight_matrix``, ``name_params`` or
+            ``output_names``. ``param_seed``, if given, is set on the unit's
+            kinetics before the seed is read back. For legacy input
+            ``name_states`` is replaced by the unit's ``states_uo``; for
+            ``Experiment`` input a supplied ``name_states`` is passed
+            through, and otherwise the estimator names the states after
+            the measurements.
 
-                my_modifier = {'temp': {'args': (320, -0.2)}}
-
-            The default is None.
-        pick_unit : TYPE, optional
-            DESCRIPTION. The default is None.
-        **inputs_paramest : TYPE
-            DESCRIPTION.
+        Returns
+        -------
+        None
 
         Raises
         ------
         RuntimeError
-            DESCRIPTION.
+            If the flowsheet holds two or more unit operations and
+            ``pick_unit`` is None.
         ValueError
-            If ``x_data`` holds more than one unnamed experiment, because
-            modifiers and ``wrapper_kwargs`` are routed to experiments by
-            name. Pass ``x_data`` as a dictionary keyed by experiment name.
+            If ``phase_modifiers`` or ``control_modifiers``
 
-        Returns
-        -------
-        None.
+            * for named experiments has keys other than the experiment names
+              (the message names the argument and the missing and
+              unexpected experiments);
+            * is a dictionary while ``x_data`` holds several unnamed
+              experiments, whose keys cannot be aligned;
+            * is a list or tuple without exactly one entry per experiment.
 
+            Also if an ``Experiment`` binds ``modify_phase``,
+            ``modify_controls`` or ``run_args`` through its ``args``
+            (positionally) or its ``kwargs`` while the corresponding argument
+            (``phase_modifiers``, ``control_modifiers`` or
+            ``wrapper_kwargs``) is given, and for the input errors of
+            ``ParameterEstimation``.
+        TypeError
+            If a modifier argument for named experiments is not a mapping,
+            an unnamed modifier argument is not a mapping, list or tuple, a
+            modifier entry is neither a dict nor None, ``wrapper_kwargs`` is
+            not a mapping, ``fit_spectra`` is True with ``Experiment``
+            input, an ``Experiment``'s ``args`` and ``kwargs`` cannot be
+            bound to the unit's ``paramest_wrapper`` after its parameters
+            and time grid, and for the input errors of
+            ``ParameterEstimation``.
+
+        Notes
+        -----
+        Experiment count and identity follow ``ParameterEstimation``: a
+        dictionary is named, a list or tuple is positional with one
+        experiment per entry, and any other legacy object is one
+        experiment. Callback keywords are passed as a dictionary keyed by
+        experiment name for named legacy experiments and as a list in
+        ``x_data`` order otherwise. For ``Experiment`` input, new
+        ``Experiment`` objects with the same measurements and ``args`` are
+        built whose ``kwargs`` are the experiment's own keywords plus the
+        wrapper keywords it binds neither positionally nor by keyword. Its
+        ``args`` are bound to the unit's ``paramest_wrapper`` signature
+        after the parameters and time grid, so ``args=(phase_modifier,)``
+        binds ``modify_phase`` of the reactor wrappers. The caller's
+        experiments are not modified.
+
+        Caller data (``x_data``, ``y_data``, the modifier dictionaries and
+        ``wrapper_kwargs``) are not modified; the modifier dictionaries are
+        passed to the callback without copying.
+
+        Only modifier keys and entry types are validated here. Applying
+        control modifiers inside the reactor callbacks is tracked by
+        issue #271.
         """
-
-        # self.LoadUOs()
-
         if len(self.graph) == 1:
             target_unit = getattr(self, list(self.graph.keys())[0])
-            # target_unit.reset_states = True
         else:
             if pick_unit is None:
                 raise RuntimeError("Two or more unit operations detected. "
@@ -366,45 +656,67 @@ class SimulationExec:
             else:
                 pass  # remember setting reset_states to True!!
 
-        if not isinstance(x_data, dict):
-            num_experiments = (1 if isinstance(x_data, np.ndarray)
-                               else len(x_data))
-            if num_experiments > 1:
-                raise ValueError(
-                    f"x_data holds {num_experiments} unnamed experiments; "
-                    "SetParamEstimation routes phase_modifiers, "
-                    "control_modifiers and wrapper_kwargs to each experiment "
-                    "by name, so pass x_data as a dictionary keyed by "
-                    "experiment name")
+        experiments = _experiment_collection(x_data)
+        if experiments is not None:
+            if fit_spectra:
+                raise TypeError(
+                    "fit_spectra=True fits spectra with "
+                    "MultipleCurveResolution, which does not accept "
+                    "Experiment objects; pass sampling times through x_data "
+                    "and spectra through y_spectra")
+            names = (list(experiments) if isinstance(x_data, Mapping)
+                     else None)
+            count = len(experiments)
+        elif isinstance(x_data, dict):
+            names = list(x_data)
+            count = len(names)
+        else:
+            names = None
+            count = _unnamed_experiment_count(x_data)
 
-        if phase_modifiers is None:
-            if isinstance(x_data, dict):
-                phase_modifiers = {key: {} for key in x_data}
-            else:
-                phase_modifiers = {}
-
-        if control_modifiers is None:
-            if isinstance(x_data, dict):
-                control_modifiers = {key: {} for key in x_data}
-            else:
-                control_modifiers = {}
+        phase_entries = _modifier_entries(phase_modifiers, 'phase_modifiers',
+                                          names, count)
+        control_entries = _modifier_entries(
+            control_modifiers, 'control_modifiers', names, count)
 
         if wrapper_kwargs is None:
-            wrapper_kwargs = {}
-
-        if isinstance(x_data, dict):
-            kwargs_wrapper = {
-                key: {'modify_phase': phase_modifiers[key],
-                      'modify_controls': control_modifiers[key]}
-                for key in x_data}
-
-            for di in kwargs_wrapper.values():
-                di.update({'run_args': wrapper_kwargs})
+            run_args = {}
+        elif isinstance(wrapper_kwargs, Mapping):
+            run_args = wrapper_kwargs
         else:
-            kwargs_wrapper = {'modify_phase': phase_modifiers,
-                              'modify_controls': control_modifiers}
+            raise TypeError(
+                "wrapper_kwargs must be a mapping of solve_unit keyword "
+                f"arguments; got {type(wrapper_kwargs).__name__}")
 
-            kwargs_wrapper['run_args'] = wrapper_kwargs
+        wrappers = [
+            {'modify_phase': ({} if phase_entries is None
+                              else phase_entries[index]),
+             'modify_controls': ({} if control_entries is None
+                                 else control_entries[index]),
+             'run_args': dict(run_args)}
+            for index in range(count)]
+
+        if experiments is not None:
+            supplied = {'modify_phase': phase_modifiers is not None,
+                        'modify_controls': control_modifiers is not None,
+                        'run_args': wrapper_kwargs is not None}
+            signature = inspect.signature(target_unit.paramest_wrapper)
+            rebuilt = [
+                _experiment_with_wrapper(experiment, name, wrapper, supplied,
+                                         signature)
+                for (name, experiment), wrapper in zip(experiments.items(),
+                                                       wrappers)]
+            if isinstance(x_data, Experiment):
+                x_estimation = rebuilt[0]
+            elif names is not None:
+                x_estimation = dict(zip(names, rebuilt))
+            else:
+                x_estimation = rebuilt
+            kwargs_wrapper = None
+        else:
+            x_estimation = x_data
+            kwargs_wrapper = (dict(zip(names, wrappers)) if names is not None
+                              else wrappers)
 
         # Get 1D array of parameters from the UO class
         param_seed = inputs_paramest.pop('param_seed', None)
@@ -428,22 +740,22 @@ class SimulationExec:
                     else:
                         name_params.append(target_unit.name_params[ind])
 
-        name_states = target_unit.states_uo
-
-        inputs_paramest['name_states'] = name_states
+        if experiments is None:
+            inputs_paramest['name_states'] = target_unit.states_uo
         inputs_paramest['name_params'] = name_params
 
         # Instantiate parameter estimation
         if fit_spectra:
             self.ParamInst = MultipleCurveResolution(
                 target_unit.paramest_wrapper,
-                param_seed=param_seed, time_data=x_data, y_spectra=y_spectra,
+                param_seed=param_seed, time_data=x_estimation,
+                y_spectra=y_spectra,
                 kwargs_fun=kwargs_wrapper,
                 **inputs_paramest)
         else:
             self.ParamInst = ParameterEstimation(
                 target_unit.paramest_wrapper,
-                param_seed=param_seed, x_data=x_data, y_data=y_data,
+                param_seed=param_seed, x_data=x_estimation, y_data=y_data,
                 kwargs_fun=kwargs_wrapper,
                 **inputs_paramest)
 
