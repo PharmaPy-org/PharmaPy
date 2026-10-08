@@ -19,7 +19,8 @@ whose ``t_crit`` is parsed as NaN, is non-condensing: liquid sensible heat and
 zero latent heat at every temperature. For every other species evaluated at or
 below its critical temperature, non-finite Watson inputs, an invalid
 reference temperature, or an overflowing Watson ratio raise ``ValueError``,
-and so do fractions without one entry per species.
+and so do fractions without one entry per species and a ``basis`` other than
+'mass' or 'mole'.
 
 Expected values come from two independent sources: scalar-temperature calls of
 the public methods, and a scalar reference written here from the closed-form
@@ -851,3 +852,21 @@ def test_absent_watson_field_raises_species_error(tmp_path, field, method):
             ValueError,
             match=r"needs finite t_crit.*\['light', 'heavy', 'medium'\]"):
         getattr(phase, method)(400.0, basis="mole")
+
+
+INVALID_BASES = ["Mass", "mol", "molar", "MOLE"]
+
+
+@pytest.mark.parametrize("basis", INVALID_BASES)
+@pytest.mark.parametrize("total_h", [True, False])
+def test_enthalpy_rejects_unknown_basis(vapor_phase, basis, total_h):
+    """A misspelled basis must not silently select the molar result."""
+    with pytest.raises(ValueError, match="basis must be 'mass' or 'mole'"):
+        vapor_phase.getEnthalpy(temp=400.0, total_h=total_h, basis=basis)
+
+
+@pytest.mark.parametrize("basis", INVALID_BASES)
+def test_latent_heat_rejects_unknown_basis(vapor_phase, basis):
+    """A misspelled basis must not silently select molar latent heat."""
+    with pytest.raises(ValueError, match="basis must be 'mass' or 'mole'"):
+        vapor_phase.getHeatVaporization(400.0, basis=basis)

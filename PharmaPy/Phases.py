@@ -1162,13 +1162,13 @@ class VaporPhase(ThermoPhysicalManager):
         Raises
         ------
         ValueError
-            If ``temp`` is empty, non-finite, or has more than one dimension;
-            or if a species with critical data is evaluated at or below its
-            critical temperature while its ``t_crit``, ``tref_hvap`` or
-            ``delta_hvap`` is not finite or its ``tref_hvap`` is not strictly
-            below its ``t_crit``, which leaves the Watson reference
-            undefined; or, defensively, if an evaluated Watson ratio is not
-            finite and non-negative.
+            If ``basis`` is neither 'mass' nor 'mole'; if ``temp`` is empty,
+            non-finite, or has more than one dimension; or if a species with
+            critical data is evaluated at or below its critical temperature
+            while its ``t_crit``, ``tref_hvap`` or ``delta_hvap`` is not
+            finite or its ``tref_hvap`` is not strictly below its ``t_crit``,
+            which leaves the Watson reference undefined; or, defensively, if
+            an evaluated Watson ratio is not finite and non-negative.
 
         Notes
         -----
@@ -1185,6 +1185,8 @@ class VaporPhase(ThermoPhysicalManager):
         treated as missing for every species, so it is needed only when some
         entry uses the Watson correlation.
         """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
         temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
         num_temp, num_comp = is_supercritical.shape
 
@@ -1356,8 +1358,9 @@ class VaporPhase(ThermoPhysicalManager):
         Raises
         ------
         ValueError
-            If ``temp`` is empty, non-finite, or has more than one dimension;
-            if a supplied ``mass_frac`` or ``mole_frac`` is not one- or
+            If ``basis`` is neither 'mass' nor 'mole'; if ``temp`` is empty,
+            non-finite, or has more than one dimension; if a supplied
+            ``mass_frac`` or ``mole_frac`` is not one- or
             two-dimensional with ``num_species`` entries on its last axis; if
             the Watson reference of a species evaluated at or below its
             critical temperature is invalid (see ``getHeatVaporization``); or
@@ -1379,6 +1382,8 @@ class VaporPhase(ThermoPhysicalManager):
         enthalpy is the row-wise species sum of species enthalpy times the
         fraction on the selected basis.
         """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
             mole_frac = self.mole_frac
