@@ -440,6 +440,10 @@ class Mixer:
             Also raised if any inlet carries a non-empty ``DynamicInlet``,
             which this static path cannot evaluate; the message names the
             zero-based inlet index.
+            Also raised, before any balance, if a connected inlet's
+            ``time_upstream`` [s] has more than one sample; the message
+            names the zero-based inlet index, the sample count, and the
+            time window [s].
 
         Notes
         -----
@@ -463,6 +467,14 @@ class Mixer:
         solids cannot be mixed conservatively.
         Profiled and dynamic multiphase Mixer inputs are unsupported: this
         path reads static phase values only.
+        Whether a connected inlet is profiled is decided by the number of
+        samples in its ``time_upstream`` [s], as in the liquid branch of
+        :meth:`solve_unit`, not by ``y_upstream``: an upstream state
+        dictionary's length counts state names, not times. An inlet without
+        ``time_upstream``, or with a scalar or one-element time, is a
+        constant feed. Its attached phases carry the transferred final
+        upstream state, and the balance reads those phase attributes;
+        ``y_upstream`` values are not consumed.
         """
         for index, inlet in enumerate(self.Inlets):
             dynamic = getattr(inlet, 'DynamicInlet', None)
@@ -472,13 +484,17 @@ class Mixer:
                     'multiphase Mixer inputs are unsupported and would be '
                     'ignored; remove the DynamicInlet or mix liquid-only streams.')
 
-        timeseries_flag = []
-
-        for inlet in self.Inlets:
-            if getattr(inlet, 'y_upstream', None) is None:
-                timeseries_flag.append(False)
-            else:
-                timeseries_flag.append(len(inlet.y_upstream) > 1)
+        for index, inlet in enumerate(self.Inlets):
+            inlet_time = getattr(inlet, 'time_upstream', None)  # [s]
+            if np.size(inlet_time) > 1:
+                inlet_time = np.atleast_1d(inlet_time)  # [s]
+                raise ValueError(
+                    f'Mixer inlet {index} carries a connected profile of '
+                    f'{inlet_time.size} samples over [{inlet_time[0]}, '
+                    f'{inlet_time[-1]}] s, but solids mixing is static and '
+                    'reads one phase state per inlet, so the profile cannot '
+                    'be mixed; connect a single-sample upstream result or mix '
+                    'liquid-only streams.')
 
         solids_flag = [hasattr(inlet, 'Solid_1') for inlet in self.Inlets]
 
@@ -542,33 +558,30 @@ class Mixer:
                     f'Mixer inlet {index} has x_distrib different from inlet {ind_solid}.')
         num_dist = reference_solid.distrib.shape[0]
 
-        if any(timeseries_flag):
-            pass
-        else:
-            for inlet in self.Inlets:
-                if hasattr(inlet, 'Solid_1'):
-                    mass_solid.append(getattr(inlet.Solid_1, amount_name))
-                    mass_liquid.append(getattr(inlet.Liquid_1, amount_name))
+        for inlet in self.Inlets:
+            if hasattr(inlet, 'Solid_1'):
+                mass_solid.append(getattr(inlet.Solid_1, amount_name))
+                mass_liquid.append(getattr(inlet.Liquid_1, amount_name))
 
-                    massfrac_liq.append(inlet.Liquid_1.mass_frac)
+                massfrac_liq.append(inlet.Liquid_1.mass_frac)
 
-                    distrib_sol.append(inlet.Solid_1.distrib)
+                distrib_sol.append(inlet.Solid_1.distrib)
 
-                    temps.append(inlet.Liquid_1.temp)
-                else:
-                    mass_solid.append(0)
-                    mass_liquid.append(getattr(inlet, amount_name))
+                temps.append(inlet.Liquid_1.temp)
+            else:
+                mass_solid.append(0)
+                mass_liquid.append(getattr(inlet, amount_name))
 
-                    massfrac_liq.append(inlet.mass_frac)
-                    distrib_sol.append(np.zeros(num_dist))
+                massfrac_liq.append(inlet.mass_frac)
+                distrib_sol.append(np.zeros(num_dist))
 
-                    temps.append(inlet.temp)
+                temps.append(inlet.temp)
 
-            massfrac_liq = np.array(massfrac_liq)
-            mass_solid = np.array(mass_solid)
-            mass_liquid = np.array(mass_liquid)
-            temps = np.array(temps)
-            distrib_sol = np.array(distrib_sol)
+        massfrac_liq = np.array(massfrac_liq)  # [-]
+        mass_solid = np.array(mass_solid)  # [kg] or [kg/s]
+        mass_liquid = np.array(mass_liquid)  # [kg] or [kg/s]
+        temps = np.array(temps)  # [K]
+        distrib_sol = np.array(distrib_sol)  # [#/um] or [#/um/s]
 
         dict_out = {'temp': temps, 'mass_frac': massfrac_liq,
                     'mass_liq': mass_liquid, 'mass_solid': mass_solid,
@@ -916,7 +929,9 @@ class Mixer:
             chosen grid or starts after that grid begins. The message names
             the zero-based inlet index and both windows [s]. With a solids
             inlet, also if :meth:`get_inputs_solids` rejects the inlets,
-            including any inlet with non-empty ``DynamicInlet`` controls.
+            including any inlet with non-empty ``DynamicInlet`` controls and
+            any connected inlet whose ``time_upstream`` [s] has more than
+            one sample.
 
         Notes
         -----
@@ -943,7 +958,10 @@ class Mixer:
         hold one sample at time 0 s, so a flowsheet records zero
         processing time for it; see :meth:`_publish_solids_result` for the
         published names, shapes, and bases. The returned tuple is
-        unchanged.
+        unchanged. Connected inputs to solids mixing must have one upstream
+        sample; they are constant feeds whose attached phase state is
+        mixed, so the balance equals that of the same phases supplied
+        directly.
         """
 
         # ---------- Read inputs
@@ -963,18 +981,15 @@ class Mixer:
             u_input, ind_solids = self.get_inputs_solids()
 
             path = self.Inlets[ind_solids].Liquid_1.path_data
-            if isinstance(u_input['mass_frac'], list):
-                pass
+            states = self.balances_solids(u_input, ind_solids)
+            # Reuse balanced liquid fractions [-] and the appropriate
+            # batch inventory [kg] or continuous mass flow [kg/s].
+            if self.is_continuous:
+                self.Liquid_1 = LiquidStream(
+                    path, mass_frac=states[2], mass_flow=states[0], temp=states[-1])
             else:
-                states = self.balances_solids(u_input, ind_solids)
-                # Reuse balanced liquid fractions [-] and the appropriate
-                # batch inventory [kg] or continuous mass flow [kg/s].
-                if self.is_continuous:
-                    self.Liquid_1 = LiquidStream(
-                        path, mass_frac=states[2], mass_flow=states[0], temp=states[-1])
-                else:
-                    self.Liquid_1 = LiquidPhase(
-                        path, mass_frac=states[2], mass=states[0], temp=states[-1])
+                self.Liquid_1 = LiquidPhase(
+                    path, mass_frac=states[2], mass=states[0], temp=states[-1])
         else:
             self.states_in_dict = {'Inlet': states_in_dict}
             time_prof = [0]  # [s], instantaneous static mixing

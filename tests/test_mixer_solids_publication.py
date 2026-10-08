@@ -11,8 +11,9 @@ two-cake batch mix that remains a Cake and a continuous SlurryStream mix.
 
 Downstream handoffs use real collaborators without a solve, so no ODE
 backend is needed: a Filter receives the batch slurry and an MSMPR reads the
-continuous stream through ``get_inputs``. Solids Mixer to solids Mixer chains
-also need the connected-input fix of #276 and are not covered here.
+continuous stream through ``get_inputs``. Connected inputs to a solids Mixer,
+including solids Mixer to solids Mixer chains, are covered in
+tests/test_mixer_solids_connected_inputs.py.
 """
 
 import json
