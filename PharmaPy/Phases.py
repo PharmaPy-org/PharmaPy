@@ -3,7 +3,7 @@
 
 # import numpy as np
 # from autograd import numpy as np
-from typing import Optional, Sequence, Union
+from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -21,6 +21,14 @@ eps = np.finfo(float).eps
 # Drying_Model, Evaporators, and ThermoModule, so vapor amounts agree with
 # the evaporator's own P V / (R T).
 VAPOR_GAS_CONSTANT = 8.314  # [J/mol/K]
+
+# Exponent n of the Watson latent-heat correlation,
+# dh(T) = dh(Tref) * ((Tc - T) / (Tc - Tref))**n (K. M. Watson, Ind. Eng.
+# Chem. 1943, 35, 398-406). Poling, Prausnitz and O'Connell, The Properties
+# of Gases and Liquids, 5th ed. (2001), Section 7-11, Eq. (7-11.1), p. 7.24,
+# list n = 0.375 or 0.38 as the common choices; PharmaPy has always used 0.38.
+# Valid for subcritical temperatures, T <= Tc, with Tref < Tc.
+WATSON_EXPONENT = 0.38  # [-]
 
 
 def _as_float_array(values: ArrayLike) -> np.ndarray:
@@ -1051,22 +1059,91 @@ class VaporPhase(ThermoPhysicalManager):
 
         return cpMix
 
-    def getHeatVaporization(self, temp, basis='mass'):
-        """Calculate the latent heat of vaporization of each species.
-
-        Species that are supercritical at every requested temperature
-        cannot condense. Their latent heat is reported as zero rather
-        than omitted, so the component axis of the returned array stays
-        aligned with the mass- or mole-fraction vectors that callers
-        weight it with.
+    def _classify_criticality(
+            self, temp: ArrayLike) -> Tuple[np.ndarray, np.ndarray]:
+        """Validate temperatures and classify every species at each of them.
 
         Parameters
         ----------
         temp : float or array-like
-            Temperature at which the latent heat is evaluated [K]. An
-            array-like input is read as several independent
-            temperatures, such as the spatial nodes of a distributed
-            model, not as a per-species temperature.
+            Scalar temperature or one-dimensional array of independent
+            temperatures [K], such as the spatial nodes of a distributed
+            model. Entries are never paired with species.
+
+        Returns
+        -------
+        temp_values : ndarray
+            Requested temperatures as floats [K], shape
+            ``(num_temperatures,)``; a scalar becomes one entry.
+        is_supercritical : ndarray of bool
+            Criticality mask [-], shape ``(num_temperatures, num_species)``.
+            Entry ``[i, j]`` is ``True`` when ``temp_values[i]`` lies strictly
+            above ``t_crit[j]``.
+
+        Raises
+        ------
+        ValueError
+            If ``temp`` has more than one dimension, is empty, or contains a
+            non-finite value.
+
+        Notes
+        -----
+        Supercritical means strictly ``T > Tc``. Every other entry, including
+        ``T == Tc``, is subcritical, so the two classes partition every
+        ``(temperature, species)`` pair. Assigning equality to the subcritical
+        side matches the earlier all-subcritical scalar path, which earlier
+        releases used whenever no species was supercritical, and agrees with
+        the ``temp > t_crit`` supercritical test of the evaporator models.
+        Earlier releases mishandled ``T == Tc`` only when another species was
+        supercritical at the same temperature. The
+        Watson latent heat is exactly zero at ``Tc``, so the latent term is
+        continuous there; the sensible term switches from liquid to vapor heat
+        capacity at ``Tc``, so the model's species enthalpy jumps at ``Tc``
+        whichever side the equality is assigned to.
+
+        A species without critical data, whose ``t_crit`` is parsed as NaN,
+        compares as not supercritical at every temperature, so it always uses
+        liquid sensible heat. ``getHeatVaporization`` assigns it zero latent
+        heat, the established treatment of such a non-condensing species.
+        """
+        temp_values = np.asarray(temp, dtype=float)  # [K]
+        if temp_values.ndim > 1:
+            raise ValueError(
+                "temp must be a scalar or a one-dimensional array of "
+                f"independent temperatures [K]; got shape {temp_values.shape}")
+        temp_values = np.atleast_1d(temp_values)  # [K]
+        if temp_values.size == 0:
+            raise ValueError("temp must contain at least one temperature [K]")
+        non_finite = np.flatnonzero(~np.isfinite(temp_values))
+        if non_finite.size > 0:
+            raise ValueError(
+                "temp must be finite [K]; got "
+                f"{temp_values[non_finite].tolist()} at positions "
+                f"{non_finite.tolist()}")
+
+        is_supercritical = temp_values[:, np.newaxis] > self.t_crit  # [-]
+
+        return temp_values, is_supercritical
+
+    def getHeatVaporization(self, temp: ArrayLike,
+                            basis: str = 'mass') -> np.ndarray:
+        """Calculate the latent heat of vaporization of each species.
+
+        Every requested temperature classifies every species separately. A
+        species that is supercritical at a temperature cannot condense there,
+        so its latent heat in that row is reported as zero rather than
+        omitted. The species axis of the returned array therefore stays
+        aligned with the mass- or mole-fraction vectors that callers weight
+        it with, also when the requested temperatures straddle a critical
+        temperature.
+
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature at which the latent heat is evaluated [K]: a scalar or
+            a one-dimensional array of independent temperatures, such as the
+            spatial nodes of a distributed model. Array entries are never
+            paired with species, so any number of temperatures is accepted.
         basis : {'mass', 'mole'}, optional
             Basis of the returned latent heat. The default is 'mass'.
 
@@ -1074,68 +1151,145 @@ class VaporPhase(ThermoPhysicalManager):
         -------
         ndarray
             Latent heat of vaporization per species, in [J/kg] for
-            ``basis='mass'`` and [J/mol] for ``basis='mole'``. The shape
-            is ``(num_species, )`` for a scalar or single-element
-            ``temp`` and ``(num_temperatures, num_species)`` otherwise.
-            Columns of species that are supercritical at every
-            requested temperature are zero.
+            ``basis='mass'`` and [J/mol] for ``basis='mole'``, in the phase's
+            component order. The shape is ``(num_species,)`` for a scalar or
+            one-element ``temp`` and ``(num_temperatures, num_species)``
+            otherwise. Entries whose temperature lies strictly above the
+            species critical temperature are zero; at exactly ``t_crit`` the
+            Watson value is itself zero. Columns of species without critical
+            data (``t_crit`` is NaN) are zero at every temperature.
 
         Raises
         ------
         ValueError
-            If the Watson temperature ratio is negative, either because a
-            species is subcritical at one requested temperature and
-            supercritical at another, or because the tabulated
-            ``tref_hvap`` of a subcritical species lies above its
-            ``t_crit``.
+            If ``temp`` is empty, non-finite, or has more than one dimension;
+            or if a species with critical data is evaluated at or below its
+            critical temperature while its ``t_crit``, ``tref_hvap`` or
+            ``delta_hvap`` is not finite or its ``tref_hvap`` is not strictly
+            below its ``t_crit``, which leaves the Watson reference
+            undefined; or, defensively, if an evaluated Watson ratio is not
+            finite and non-negative.
 
         Notes
         -----
-        The latent heat is extrapolated from ``delta_hvap`` at
-        ``tref_hvap`` with the Watson correlation,
-        ``dh(T) = dh(Tref) * ((Tc - T) / (Tc - Tref))**0.38``.
+        The latent heat is extrapolated from ``delta_hvap`` at ``tref_hvap``
+        with the Watson correlation,
+        ``dh(T) = dh(Tref) * ((Tc - T) / (Tc - Tref))**WATSON_EXPONENT``,
+        which requires ``Tref < Tc`` and is applied for ``T <= Tc``.
+        Supercritical means strictly ``T > Tc``, so ``T == Tc`` is subcritical
+        with zero latent heat; ``_classify_criticality`` documents why. A
+        species whose ``t_crit`` is NaN (no critical data in the property
+        database) is treated as non-condensing: zero latent heat at every
+        temperature, and its Watson inputs are neither used nor checked.
+        A ``tref_hvap`` or ``delta_hvap`` field that every species omits is
+        treated as missing for every species, so it is needed only when some
+        entry uses the Watson correlation.
         """
+        temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
+        num_temp, num_comp = is_supercritical.shape
 
-        temp = np.atleast_1d(temp)
-        num_comp = len(self.t_crit)
+        # Species without critical data (NaN t_crit) never condense, so only
+        # subcritical entries of species with critical data use Watson.
+        has_critical_data = ~np.isnan(self.t_crit)  # [-]
+        uses_watson = ~is_supercritical & has_critical_data  # [-]
+        rows, cols = np.nonzero(uses_watson)
 
-        num_temp = len(temp)
-        if num_temp > 1:
-            temp = temp[..., np.newaxis]
-            idx = np.unique(np.where(temp < self.t_crit)[1])
-            delta_shape = (num_temp, num_comp)
-        else:
-            idx = np.where(temp < self.t_crit)[0]
-            delta_shape = num_comp
+        # ParseDatabase creates no attribute for a field that every species
+        # omits; read such a field as missing (NaN) for every species, so a
+        # Watson use raises the species-specific error below and a database
+        # without latent-heat data is accepted when no entry needs it.
+        missing_data = np.full(num_comp, np.nan)  # [K] or [J/mol] placeholder
+        tref_hvap = np.asarray(getattr(self, 'tref_hvap', missing_data),
+                               dtype=float)  # [K]
+        delta_hvap = np.asarray(getattr(self, 'delta_hvap', missing_data),
+                                dtype=float)  # [J/mol]
 
-        tref = self.tref_hvap[idx]
+        watson_columns = np.unique(cols)
+        t_crit_used = self.t_crit[watson_columns]  # [K]
+        tref_used = tref_hvap[watson_columns]  # [K]
+        delta_hvap_used = delta_hvap[watson_columns]  # [J/mol]
+        valid_reference = (np.isfinite(t_crit_used) & np.isfinite(tref_used)
+                           & np.isfinite(delta_hvap_used)
+                           & (tref_used < t_crit_used))  # [-]
+        if not np.all(valid_reference):
+            invalid = ~valid_reference  # [-]
+            names = [self.name_species[ind]
+                     for ind in watson_columns[invalid]]
+            raise ValueError(
+                "The Watson latent-heat correlation needs finite t_crit, "
+                "tref_hvap and delta_hvap with tref_hvap < t_crit for every "
+                "species evaluated at or below its critical temperature; "
+                f"check the property data of {names}: "
+                f"t_crit = {t_crit_used[invalid].tolist()} K, "
+                f"tref_hvap = {tref_used[invalid].tolist()} K, "
+                f"delta_hvap = {delta_hvap_used[invalid].tolist()} J/mol")
 
-        watson = ((self.t_crit[idx] - temp) / (self.t_crit[idx] - tref))**0.38
-        if np.isnan(watson.flatten()).any():
-            raise ValueError("(self.t_crit[idx] - temp) / (self.t_crit[idx] - tref) was negative. Check property values")
-        deltahvap = np.zeros(delta_shape)
+        watson_ratio = ((self.t_crit[cols] - temp_values[rows])
+                        / (self.t_crit[cols] - tref_hvap[cols]))  # [-]
+        # Defensive: the checks above make the ratio finite and non-negative
+        # unless the arithmetic overflows, so the fractional power is defined.
+        bad_ratio = ~(np.isfinite(watson_ratio) & (watson_ratio >= 0))  # [-]
+        if np.any(bad_ratio):
+            names = sorted({self.name_species[ind] for ind in cols[bad_ratio]})
+            raise ValueError(
+                "The Watson ratio (t_crit - temp) / (t_crit - tref_hvap) must "
+                "be finite and non-negative; got "
+                f"{watson_ratio[bad_ratio].tolist()} for species {names} at temp = "
+                f"{temp_values[rows[bad_ratio]].tolist()} K")
+        watson = watson_ratio**WATSON_EXPONENT  # [-]
 
-        if num_temp > 1:
-            deltahvap[:, idx] = (watson * self.delta_hvap[idx])  # [J/mol]
-        else:
-            deltahvap[idx] = (watson * self.delta_hvap[idx])  # [J/mol]
+        deltahvap = np.zeros((num_temp, num_comp))  # [J/mol]
+        deltahvap[rows, cols] = watson * delta_hvap[cols]  # [J/mol]
 
         if basis == 'mass':
-            # Convert the populated subcritical entries in place so that
-            # the species axis keeps its full width. Supercritical
-            # species stay at zero latent heat instead of being dropped,
-            # which would misalign the result with a fraction vector.
-            if num_temp > 1:
-                deltahvap[:, idx] = (deltahvap[:, idx] / self.mw[idx]
-                                     * 1000)  # [J/kg]
-            else:
-                deltahvap[idx] = deltahvap[idx] / self.mw[idx] * 1000  # [J/kg]
+            # Convert the populated subcritical entries in place so that the
+            # species axis keeps its full width; supercritical entries stay
+            # at zero latent heat instead of being dropped.
+            deltahvap[rows, cols] = (deltahvap[rows, cols] / self.mw[cols]
+                                     * 1000)  # [J/kg], 1000 g/kg
+
+        if num_temp == 1:
+            deltahvap = deltahvap[0]  # [J/kg] or [J/mol], by basis
 
         return deltahvap
 
+    def _validate_fraction_width(self, fractions: ArrayLike,
+                                 name: str) -> np.ndarray:
+        """Check that supplied fractions carry one entry per species.
+
+        Parameters
+        ----------
+        fractions : array-like
+            Species mass or mole fractions [-], shape ``(num_species,)`` or
+            ``(num_rows, num_species)``.
+        name : str
+            Public argument name used in the error message.
+
+        Returns
+        -------
+        ndarray
+            ``fractions`` as a float array [-] with unchanged shape and
+            values; an existing float array is returned without copying.
+
+        Raises
+        ------
+        ValueError
+            If ``fractions`` is not one- or two-dimensional or its last axis
+            does not have ``num_species`` entries.
+        """
+        fraction_values = np.asarray(fractions, dtype=float)  # [-]
+        if (fraction_values.ndim not in (1, 2)
+                or fraction_values.shape[-1] != self.num_species):
+            raise ValueError(
+                f"{name} must have shape (num_species,) = "
+                f"{(self.num_species,)} or (num_temperatures, num_species) "
+                f"with num_species = {self.num_species} in the order "
+                f"{self.name_species}; got shape {fraction_values.shape}")
+        return fraction_values
+
     def getEnthalpy(
             self,
-            temp: Optional[Union[float, np.ndarray]] = None,
+            temp: Optional[ArrayLike] = None,
             temp_ref: float = 298.15,
             mass_frac: Optional[np.ndarray] = None,
             mole_frac: Optional[np.ndarray] = None,
@@ -1143,118 +1297,158 @@ class VaporPhase(ThermoPhysicalManager):
             basis: str = 'mass') -> Union[float, np.ndarray]:
         """Calculate vapor-phase enthalpy relative to a liquid reference.
 
+        Every requested temperature classifies every species separately.
+        Entries strictly above the species critical temperature contribute
+        vapor sensible heat and no latent heat. All other entries, including
+        a temperature exactly equal to ``t_crit``, contribute liquid sensible
+        heat plus the Watson latent heat of vaporization, which is zero at
+        ``t_crit``. A species without critical data (``t_crit`` is NaN) is
+        treated as non-condensing: liquid sensible heat and zero latent heat
+        at every temperature.
+
         Parameters
         ----------
-        temp : float or ndarray, optional
-            Temperature at which to calculate enthalpy [K]. The phase
-            temperature is used when ``temp`` is ``None``. The supported
-            forms are a scalar or a one-element array.
+        temp : float or array-like, optional
+            Temperature at which to calculate enthalpy [K]: a scalar or a
+            one-dimensional array of independent temperatures, such as the
+            spatial nodes of a distributed model. Array entries are never
+            paired with species. The phase temperature is used when ``temp``
+            is ``None``.
         temp_ref : float, optional
             Liquid-reference temperature for the sensible-enthalpy integral
             [K]. The default is 298.15 K.
         mass_frac : ndarray, optional
-            One-dimensional vapor-phase species mass fractions [-], ordered
-            according to the phase's components. The phase composition is
-            used when neither fraction vector is supplied.
+            Vapor-phase species mass fractions [-], ordered according to the
+            phase's components: shape ``(num_species,)`` for a composition
+            shared by every temperature, or ``(num_temperatures,
+            num_species)`` for a profile whose row ``i`` is paired with
+            temperature ``i``. Takes precedence over ``mole_frac``. The phase
+            composition is used when neither fraction is supplied.
         mole_frac : ndarray, optional
-            One-dimensional vapor-phase species mole fractions [-], ordered
-            according to the phase's components. The phase composition is
-            used when neither fraction vector is supplied.
+            Vapor-phase species mole fractions [-], with the same ordering
+            and shapes as ``mass_frac``. Used only when ``mass_frac`` is not
+            supplied.
         total_h : bool, optional
-            If ``True``, return fraction-weighted mixture enthalpy. If
-            ``False``, return individual species enthalpies. The default is
+            If ``True``, return the fraction-weighted mixture enthalpy. If
+            ``False``, return unweighted individual species enthalpies; a
+            supplied ``mass_frac`` or ``mole_frac`` must still have
+            ``num_species`` entries on its last axis, but its row count is
+            paired with ``temp`` only when ``total_h=True``. The default is
             ``True``.
         basis : {'mass', 'mole'}, optional
-            Physical basis of the returned enthalpy. The default is ``'mass'``.
+            Physical basis of the returned enthalpy and of the weighting
+            fractions. The default is ``'mass'``.
 
         Returns
         -------
         float or ndarray
             Vapor-phase enthalpy on the selected basis: [J/kg] for
-            ``basis='mass'`` and [J/mol] for ``basis='mole'``. For the
-            supported single-temperature forms, when the requested
-            temperature differs from every species critical temperature,
-            mixture enthalpy is scalar and individual species enthalpy has
-            shape ``(1, num_species)`` in the phase's component order.
+            ``basis='mass'`` and [J/mol] for ``basis='mole'``. For a scalar
+            or one-element ``temp``, the mixture enthalpy is a scalar and the
+            species enthalpy has shape ``(1, num_species)``. For several
+            temperatures, the mixture enthalpy has shape
+            ``(num_temperatures,)`` and the species enthalpy
+            ``(num_temperatures, num_species)``. Species columns follow the
+            phase's component order, and every row equals the evaluation at
+            that row's temperature alone (with its composition row, for a
+            paired profile).
 
         Raises
         ------
         ValueError
-            If the Watson correlation used for a subcritical species receives
-            a negative reduced-temperature ratio.
+            If ``temp`` is empty, non-finite, or has more than one dimension;
+            if a supplied ``mass_frac`` or ``mole_frac`` is not one- or
+            two-dimensional with ``num_species`` entries on its last axis; if
+            the Watson reference of a species evaluated at or below its
+            critical temperature is invalid (see ``getHeatVaporization``); or
+            if, for ``total_h=True``, the weighting composition is neither
+            ``(num_species,)`` nor ``(num_temperatures, num_species)``. A
+            scalar ``temp`` therefore accepts only a one-row profile.
+        AttributeError
+            If a species is supercritical at a requested temperature but the
+            property database supplies no ``cp_vapor`` data.
 
         Notes
         -----
-        Supercritical species contribute vapor sensible heat and no latent
-        heat. Subcritical species contribute liquid sensible heat plus latent
-        heat of vaporization.
-
-        Arrays containing more than one temperature are outside the supported
-        public contract, but this boundary is not yet validated. The current
-        implementation accepts an array only when its length equals the number
-        of species; every other length raises from the elementwise
-        ``temp > t_crit`` comparison. That comparison pairs a temperature
-        index with a species index, so the split is meaningful only while each
-        species keeps one classification over the requested temperatures.
-
-        A temperature exactly equal to a species critical temperature is
-        omitted from both strict comparison subsets. The broader
-        temperature-axis validation and criticality classification contract is
-        tracked in issue #178.
+        Liquid heat capacities are integrated only for species that are
+        subcritical at some requested temperature, and vapor heat capacities
+        only for species that are supercritical at some requested
+        temperature, so heat-capacity data that no entry uses need not exist.
+        The supercritical classification is strictly ``T > Tc``; see
+        ``_classify_criticality`` for the equality rule. The mixture
+        enthalpy is the row-wise species sum of species enthalpy times the
+        fraction on the selected basis.
         """
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
             mole_frac = self.mole_frac
         elif mass_frac is None:
+            mole_frac = self._validate_fraction_width(mole_frac,
+                                                      'mole_frac')  # [-]
             mass_frac = self.frac_to_frac(mole_frac=mole_frac)
         else:
+            mass_frac = self._validate_fraction_width(mass_frac,
+                                                      'mass_frac')  # [-]
             mole_frac = self.frac_to_frac(mass_frac)
 
         if temp is None:
             temp = self.temp
 
-        # Sensible heat
-        if any(temp > self.t_crit):
-            ind_super = np.where(temp > self.t_crit)[0]
-            ind_sub = np.where(temp < self.t_crit)[0]
+        temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
+        num_temp, num_comp = is_supercritical.shape
 
-            ind_sort = np.argsort(np.concatenate((ind_super, ind_sub)))
+        subcritical_columns = np.flatnonzero((~is_supercritical).any(axis=0))
+        supercritical_columns = np.flatnonzero(is_supercritical.any(axis=0))
 
-            sensSuper = super().getEnthalpy(
-                temp, temp_ref, mass_frac, mole_frac, total_h=total_h,
-                idx=ind_super, phase='vapor', basis=basis)
+        # Sensible heat from temp_ref on each candidate correlation; the
+        # per-entry mask below selects one of them for every entry.
+        h_liquid = np.zeros((num_temp, num_comp))  # [J/kg] or [J/mol], by basis
+        if subcritical_columns.size > 0:
+            h_liquid[:, subcritical_columns] = super().getEnthalpy(
+                temp_values, temp_ref, phase='liquid', basis=basis,
+                idx=subcritical_columns, total_h=False)  # [J/kg] or [J/mol]
 
-            if len(ind_sub) > 0:
-                sensSub = super().getEnthalpy(
-                    temp, temp_ref, mass_frac, mole_frac, phase='liquid',
-                    total_h=total_h, idx=ind_sub, basis=basis)
+        h_vapor = np.zeros((num_temp, num_comp))  # [J/kg] or [J/mol], by basis
+        if supercritical_columns.size > 0:
+            if not hasattr(self, 'cp_vapor'):
+                names = [self.name_species[ind]
+                         for ind in supercritical_columns]
+                raise AttributeError(
+                    f"Species {names} are supercritical (temp > t_crit) at a "
+                    "requested temperature, so their enthalpy needs vapor "
+                    "heat-capacity coefficients 'cp_vapor' [J/mol/K], which "
+                    f"the property database {self.path_data!r} does not "
+                    "supply; add 'cp_vapor' or evaluate at or below t_crit")
+            h_vapor[:, supercritical_columns] = super().getEnthalpy(
+                temp_values, temp_ref, phase='vapor', basis=basis,
+                idx=supercritical_columns, total_h=False)  # [J/kg] or [J/mol]
 
-                if total_h:
-                    hSens = sensSuper + sensSub
-                else:
-                    hSens = np.concatenate(
-                        (sensSuper, sensSub), axis=1)[:, ind_sort]
+        h_sensible = np.where(is_supercritical, h_vapor, h_liquid)  # [J/kg] or [J/mol]
 
-            else:
-                hSens = sensSuper
+        # Zero for supercritical entries, Watson value otherwise.
+        latent_heat = np.reshape(
+            self.getHeatVaporization(temp_values, basis=basis),
+            (num_temp, num_comp))  # [J/kg] or [J/mol], by basis
 
-        else:
-            hSens = super().getEnthalpy(
-                temp, temp_ref, mass_frac, mole_frac, phase='liquid',
-                total_h=total_h, basis=basis)
+        h_species = h_sensible + latent_heat  # [J/kg] or [J/mol], by basis
 
-        # Phase change
-        deltaVap = self.getHeatVaporization(temp, basis=basis)
+        if not total_h:
+            return h_species
 
-        # Collect terms
-        if total_h:
-            frac = mass_frac if basis == 'mass' else mole_frac
-            hVap = hSens + np.dot(deltaVap, frac)
+        frac = np.asarray(mass_frac if basis == 'mass' else mole_frac,
+                          dtype=float)  # [-], on the requested basis
+        if frac.shape not in ((num_comp,), (num_temp, num_comp)):
+            raise ValueError(
+                "The weighting composition must have shape (num_species,) = "
+                f"{(num_comp,)} for a fixed composition or (num_temperatures, "
+                f"num_species) = {(num_temp, num_comp)} for a profile paired "
+                f"row by row with temp; got {frac.shape}")
 
-        else:
-            hVap = hSens + deltaVap
+        h_total = (h_species * frac).sum(axis=1)  # [J/kg] or [J/mol], by basis
+        if num_temp == 1:
+            h_total = h_total[0]  # [J/kg] or [J/mol], by basis
 
-        return hVap
+        return h_total
 
     def AntoineEquation(self, temp=None, pres=None):
         a_ct, b_ct, c_ct = self.p_vap.T
