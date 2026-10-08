@@ -257,6 +257,11 @@ Each CSTR/Semibatch segment retains its sampled inlet concentration, temperature
 
 Batch and MSMPR crystallizers store :code:`heat_duty = [0, Q]` [J], filling the cooling column of :code:`SimExec.GetDuties`. Their :code:`heat_prof` and :code:`heat_duty` cover only the latest solve segment, even when result profiles include earlier segments. Positive duty means heat removed to the utility, opposite to the reactor heating column. Without a temperature control, these units integrate the jacket heat rate; with prescribed temperature, they reconstruct the utility rate from the energy balance and the temperature slope over each reporting interval. The prescribed-temperature Batch duty has changed sign relative to earlier releases. :code:`SemibatchCryst` does not publish these duty diagnostics.
 
+Utility flow controls
+=====================
+
+A :code:`DynamicInput`, or any controller exposing :code:`evaluate_inputs(time)`, attached to :code:`CoolingWater.DynamicInlet` may control :code:`temp_in` [K] and one flow basis, either :code:`mass_flow` [kg/s] or :code:`vol_flow` [m**3/s]; the fields it returns are the controlled ones. :code:`CoolingWater.get_inputs` derives the other basis from the controlled one with the constant utility density :code:`rho` [kg/m**3], elementwise for profile evaluations, so reactor and crystallizer jacket balances, which read :code:`vol_flow`, receive the controlled flow. Earlier releases returned the stored static value of the uncontrolled basis, so a :code:`mass_flow` control did not reach the jacket balances. Controlling both bases raises :code:`ValueError`; control only one. Without a :code:`DynamicInlet`, or with a :code:`temp_in`-only control, the stored static flows are returned unchanged.
+
 Crystallizer jacket volume
 ==========================
 
