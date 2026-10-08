@@ -359,7 +359,12 @@ class StatisticsClass:
         numpy.ndarray
             Boolean array with the shape of ``self.residuals[ind]``,
             ``(n_times, n_columns)``: True where the residual belongs to an
-            observation, False at unobserved entries of staggered grids.
+            observation, False at every unobserved entry (samples of
+            staggered grids where a state is not measured, NaN-missing
+            observations, and measurement columns the experiment does not
+            include). For ``Experiment`` input the columns are the
+            estimator's measurement columns in first-appearance order;
+            otherwise they follow ``measured_ind``.
 
         Raises
         ------
@@ -408,8 +413,11 @@ class StatisticsClass:
 
         For each experiment and measured state, the residuals at observed
         model-grid entries are resampled with replacement and subtracted from
-        the fitted responses at those entries. The datasets are fitted by
-        ``bootstrap_params``.
+        the fitted responses at those entries. When the measurements declare
+        standard deviations (``Measurement.uncertainty``), the standardized
+        residuals are resampled instead and rescaled by the standard
+        deviation of the entry they are assigned to. The datasets are fitted
+        by ``bootstrap_params``.
 
         Parameters
         ----------
@@ -425,42 +433,88 @@ class StatisticsClass:
             One list per experiment, in ``x_data`` order, of ``num_samples``
             arrays with shape ``(n_times, n_measured)``: model-grid rows and
             measured-state (``measured_ind``) columns, in the measured
-            states' units. Unobserved entries of staggered observation grids
-            are NaN.
+            states' units. Unobserved entries (staggered grids, missing
+            observations, measurements an experiment does not include) are
+            NaN.
+
+        Raises
+        ------
+        ValueError
+            If a ``MultipleCurveResolution`` observation mask does not match
+            the residual columns (see ``_observed_columns``).
 
         Notes
         -----
         Each state's resampling pool holds only its observed residuals
-        (model minus data, in that state's unit). Unobserved entries of
-        staggered grids have zero residual by construction; drawing them
+        (model minus data, in that state's unit) of one experiment.
+        Unobserved entries have zero residual by construction; drawing them
         would add phantom zero errors and shrink the bootstrap spread. Each
         state is resampled independently, so correlations between
         measurement errors of different states are not reproduced. Without
-        observation masks the random draws equal those of earlier releases.
+        observation masks and without declared standard deviations the
+        random draws equal those of earlier releases.
         ``_observed_columns`` documents the mask layouts, including those of
         ``MultipleCurveResolution``.
+
+        Residual resampling assumes the errors in a pool are exchangeable.
+        With declared standard deviations ``sigma`` [measured-state unit],
+        which may differ from sample to sample, the raw residuals are not:
+        a residual drawn from a precise sample and placed at an imprecise
+        one would misstate that entry's error. The pool therefore holds the
+        standardized residuals ``z = r / sigma`` [-] of the observed entries,
+        and entry ``i`` of a generated dataset is
+        ``y_fit[i] - sigma[i] * z_drawn`` [measured-state unit]. With one
+        standard deviation per measurement this equals raw-residual
+        resampling up to rounding. Without declared standard deviations the
+        draws and generated values are unchanged.
+
+        The generated errors follow the empirical residual scatter, like the
+        default ``get_covariance(include_mse=True)`` (and
+        ``scipy.optimize.curve_fit(..., absolute_sigma=False)``): the
+        declared standard deviations set only the relative error size of
+        each entry. Errors are not drawn with the declared absolute
+        ``sigma``; that would require a parametric bootstrap, which is not
+        provided.
         """
+        # Per experiment, (n_times, n_measured) [measured-state units], NaN
+        # where unobserved; None entries without declared uncertainties.
+        std_runs = self.inst._residual_std_runs()
+
         y_boot = []
         for ind in range(self.inst.num_datasets):  # datasets
             # (n_measured, n_times) [measured-state units]
             residual = self.residuals[ind].T
             y_nominal = self.y_nominal[ind].T
             observed_by_state = self._observed_columns(ind).T
+            # (n_measured, n_times) [measured-state units] or None per state
+            std_by_state = ([None] * len(residual) if std_runs[ind] is None
+                            else std_runs[ind].T)
 
             y_states = []
-            for res, y, observed in zip(residual, y_nominal,
-                                        observed_by_state):  # states
+            for res, y, observed, std in zip(residual, y_nominal,
+                                             observed_by_state,
+                                             std_by_state):  # states
                 observed = observed[fix_initial:]
                 # [measured-state unit], observed entries only
                 resid = res[fix_initial:][observed]
+                if std is None:
+                    pool = resid  # [measured-state unit]
+                else:
+                    # [measured-state unit], observed entries only
+                    scale = std[fix_initial:][observed]
+                    pool = resid / scale  # [-], standardized residuals
 
                 # [measured-state unit]; NaN where the state is unobserved
                 y_generated = np.full((num_samples, len(observed)), np.nan)
-                if resid.size > 0:
-                    # [measured-state unit], resampled observed residuals
-                    boots = np.random.choice(resid,
-                                             size=(num_samples, len(resid)),
+                if pool.size > 0:
+                    # Resampled observed residuals [measured-state unit], or
+                    # standardized residuals [-] with declared uncertainties.
+                    boots = np.random.choice(pool,
+                                             size=(num_samples, len(pool)),
                                              replace=True)
+                    if std is not None:
+                        # [measured-state unit], rescaled to each entry
+                        boots = boots * scale
 
                     y_generated[:, observed] = (
                         y[fix_initial:][observed] - boots)

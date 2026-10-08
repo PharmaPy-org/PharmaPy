@@ -48,8 +48,15 @@ of those states, the inverse of their covariance block, rather than the
 corresponding block of the full precision. The residual bootstrap
 (:code:`StatisticsClass.get_bootsamples` and :code:`bootstrap_params`) draws
 each state's errors only from its observed residuals and leaves unobserved
-entries of the generated datasets as NaN. Without staggered grids the draws are
-unchanged.
+entries of the generated datasets as NaN. Without staggered grids and without
+declared measurement uncertainties the draws are unchanged. When measurements
+declare standard deviations (``Measurement`` uncertainties), the standardized
+residuals are resampled and rescaled by the standard deviation of each
+generated entry, so the generated errors follow the empirical residual scatter
+rather than the declared absolute standard deviations; see
+:doc:`examples/experiment_measurement`, which also describes residual packing,
+uncertainty scaling and the two covariance forms of
+:code:`get_covariance`.
 
 :code:`MultipleCurveResolution` applies the same rules to non-spectral states
 measured at fewer times than the spectra: their unobserved entries have zero

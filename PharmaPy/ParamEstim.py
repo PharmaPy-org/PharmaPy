@@ -6,10 +6,14 @@ Created on Mon Oct 28 15:35:48 2019
 @author: casas100
 """
 
+import numbers
+
 import numpy as np
 from scipy.linalg import cholesky, solve_triangular
+from collections.abc import Mapping
 from itertools import cycle
-from typing import Callable, Optional, Sequence
+from types import MappingProxyType
+from typing import Callable, NamedTuple, Optional, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
@@ -388,9 +392,1504 @@ def analyze_data(x, y, merge_y=True):
     return x_model, x_mask, y_masked
 
 
+def _validate_field(field):
+    """Validate the model-output identity of a measurement.
+
+    Parameters
+    ----------
+    field : int or str
+        Zero-based column of the model callback output, or the name of that
+        column in the estimator's ``output_names``.
+
+    Returns
+    -------
+    int or str
+        ``field`` as a built-in ``int`` or ``str``.
+
+    Raises
+    ------
+    TypeError
+        If ``field`` is a bool or neither an integer nor a str.
+    ValueError
+        If an integer ``field`` is negative or a str ``field`` is empty.
+    """
+    if isinstance(field, (bool, np.bool_)):
+        raise TypeError(
+            "Measurement field must be a non-negative int column index or a "
+            "str output name; got a bool")
+    if isinstance(field, (int, np.integer)):
+        if field < 0:
+            raise ValueError(
+                "Measurement field must be a non-negative column index of "
+                f"the model output; got {field}")
+        return int(field)
+    if isinstance(field, str):
+        if not field:
+            raise ValueError("Measurement field name must be a non-empty str")
+        return field
+    raise TypeError(
+        "Measurement field must be a non-negative int column index or a str "
+        f"output name; got {type(field).__name__}")
+
+
+def _float_vector(values, label: str) -> np.ndarray:
+    """Return a private one-dimensional float copy of sample values.
+
+    Parameters
+    ----------
+    values : array_like
+        Scalar or one-dimensional samples; units are preserved.
+    label : str
+        Input name used in error messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        New float array of shape ``(n,)``; a scalar becomes shape ``(1,)``.
+
+    Raises
+    ------
+    TypeError
+        If ``values`` is complex or cannot be converted to floats.
+    ValueError
+        If ``values`` has more than one dimension.
+    """
+    try:
+        is_complex = np.iscomplexobj(np.asarray(values))
+    except (TypeError, ValueError):
+        is_complex = False  # reported by the float conversion below
+    if is_complex:
+        raise TypeError(
+            f"{label} must be real; got complex values, whose imaginary "
+            "part would otherwise be discarded")
+    try:
+        array = np.array(values, dtype=float)  # [units of values]
+    except (TypeError, ValueError) as error:
+        raise TypeError(f"{label} must be numeric; {error}") from error
+    if array.ndim == 0:
+        array = array.reshape(1)  # [units of values]
+    if array.ndim != 1:
+        raise ValueError(
+            f"{label} must be one-dimensional (a scalar is one sample); got "
+            f"shape {array.shape}")
+    return array
+
+
+def _frozen(array: np.ndarray) -> np.ndarray:
+    """Return an immutable copy of a numeric array.
+
+    Parameters
+    ----------
+    array : numpy.ndarray
+        Values to freeze; units and shape are preserved.
+
+    Returns
+    -------
+    numpy.ndarray
+        Read-only copy backed by an immutable ``bytes`` buffer, so its
+        ``WRITEABLE`` flag cannot be set to True again.
+    """
+    return np.frombuffer(array.tobytes(), dtype=array.dtype).reshape(
+        array.shape)
+
+
+def _optional_label(value, label: str) -> Optional[str]:
+    """Validate optional unit or basis metadata.
+
+    Parameters
+    ----------
+    value : str or None
+        Metadata label; None means undeclared.
+    label : str
+        Input name used in error messages.
+
+    Returns
+    -------
+    str or None
+        ``value`` unchanged.
+
+    Raises
+    ------
+    TypeError
+        If ``value`` is neither None nor a str.
+    """
+    if value is not None and not isinstance(value, str):
+        raise TypeError(
+            f"Measurement {label} must be a str or None; got "
+            f"{type(value).__name__}")
+    return value
+
+
+class Measurement:
+    """One observed model-output field sampled within one experiment.
+
+    A measurement pairs independent-variable samples ``x`` (typically time
+    [s]) with observations of one column of the model callback output.
+    Arrays are stored as private immutable float copies (their read-only
+    flag cannot be re-enabled), so later changes to
+    the caller's arrays do not affect the measurement and fitting never
+    modifies them.
+
+    Parameters
+    ----------
+    field : int or str
+        Zero-based column of the model callback output, or its name in the
+        ``output_names`` given to ``ParameterEstimation``.
+    x : array_like
+        Independent-variable samples, shape ``(n,)``, in ``x_units``. A
+        scalar is a single sampled point. Samples must be finite and
+        non-decreasing; a repeated value denotes replicate observations at
+        that x.
+    values : array_like
+        Observations, shape ``(n,)``, already in the units and physical
+        basis of the model output column ``field``. NaN marks a missing
+        observation, which is excluded from residuals, data counts and
+        degrees of freedom; nothing is interpolated or invented.
+    uncertainty : float or array_like, optional
+        Standard deviation of the measurement error, a positive scalar or
+        shape ``(n,)``, in the units and basis of ``values``. It must be
+        finite and positive at every observed sample; entries at missing
+        samples are ignored. The default None declares no uncertainty.
+    units : str, optional
+        Label of the observation units, e.g. ``'mol/L'``. No conversion is
+        performed; the label documents ``values`` and is checked for
+        consistency with other measurements of the same name or field.
+    basis : str, optional
+        Label of the observation basis, e.g. ``'molar concentration'``; no
+        conversion is performed.
+    x_units : str or None, optional
+        Label of the independent-variable units. The default is ``'s'``
+        (time); None leaves them undeclared.
+
+    Raises
+    ------
+    TypeError
+        If ``field`` or a label has an invalid type, or samples are not
+        numeric.
+    ValueError
+        If ``x`` is empty, non-finite or decreasing, ``values`` does not
+        match ``x`` in shape, contains infinities or has no observation, or
+        ``uncertainty`` is not finite and positive at an observed sample.
+
+    Notes
+    -----
+    Replicates may be given either as repeated x values within one
+    measurement or as separate measurements of the same field. Within an
+    ``Experiment`` the model grid holds each distinct x as many times as the
+    measurement with most replicates at that x, and the model callback then
+    receives repeated x values (as with the legacy array input, for example
+    the replicate samples of the Ziegler 723 K workshop data).
+    """
+
+    def __init__(self, field, x, values, *, uncertainty=None, units=None,
+                 basis=None, x_units='s') -> None:
+        """Validate and store a private copy of one measurement.
+
+        Parameters
+        ----------
+        field, x, values, uncertainty, units, basis, x_units
+            See the class docstring.
+
+        Raises
+        ------
+        TypeError, ValueError
+            See the class docstring.
+        """
+        self._field = _validate_field(field)
+
+        x = _float_vector(x, 'Measurement x')  # [x_units]
+        if x.size == 0:
+            raise ValueError("Measurement x must contain at least one sample")
+        nonfinite = np.flatnonzero(~np.isfinite(x))
+        if nonfinite.size:
+            index = nonfinite[0]
+            raise ValueError(
+                "Measurement x must be finite; "
+                f"x[{index}] = {float(x[index])!r}")
+        decreasing = np.flatnonzero(x[1:] < x[:-1])
+        if decreasing.size:
+            index = decreasing[0] + 1
+            raise ValueError(
+                f"Measurement x must be non-decreasing; x[{index}] = "
+                f"{float(x[index])!r} is smaller than x[{index - 1}] = "
+                f"{float(x[index - 1])!r}. Sort the samples together with "
+                "their values; repeated x values denote replicate "
+                "observations")
+
+        values = _float_vector(values, 'Measurement values')  # [units]
+        if values.shape != x.shape:
+            raise ValueError(
+                "Measurement values must have one entry per x sample; got "
+                f"values shape {values.shape} and x shape {x.shape}")
+        infinite = np.flatnonzero(np.isinf(values))
+        if infinite.size:
+            index = infinite[0]
+            raise ValueError(
+                f"Measurement values must be finite or NaN (missing); "
+                f"values[{index}] = {float(values[index])!r}")
+        observed = ~np.isnan(values)
+        if not observed.any():
+            raise ValueError(
+                "Measurement values are all NaN; a measurement needs at "
+                "least one observation (NaN marks a missing observation)")
+
+        std = None  # [units]
+        if uncertainty is not None:
+            if np.ndim(uncertainty) == 0:
+                scalar = _float_vector(uncertainty,
+                                       'Measurement uncertainty')  # [units]
+                std = np.full(x.shape, scalar[0])  # [units]
+            else:
+                std = _float_vector(uncertainty,
+                                    'Measurement uncertainty')  # [units]
+            if std.shape != x.shape:
+                raise ValueError(
+                    "Measurement uncertainty must be a scalar or have one "
+                    f"entry per x sample; got shape {std.shape} and x shape "
+                    f"{x.shape}")
+            invalid = np.flatnonzero(
+                observed & ~(np.isfinite(std) & (std > 0)))
+            if invalid.size:
+                index = invalid[0]
+                raise ValueError(
+                    "Measurement uncertainty must be a finite, positive "
+                    "standard deviation at every observed sample; "
+                    f"uncertainty[{index}] = {float(std[index])!r}")
+            std = _frozen(std)  # [units]
+
+        self._x = _frozen(x)  # [x_units]
+        self._values = _frozen(values)  # [units]
+        self._uncertainty = std  # [units]
+        self._units = _optional_label(units, 'units')
+        self._basis = _optional_label(basis, 'basis')
+        self._x_units = _optional_label(x_units, 'x_units')
+
+    @property
+    def field(self):
+        """Model-output identity.
+
+        Returns
+        -------
+        int or str
+            Zero-based output column or output name.
+        """
+        return self._field
+
+    @property
+    def x(self) -> np.ndarray:
+        """Independent-variable samples.
+
+        Returns
+        -------
+        numpy.ndarray
+            Read-only, shape ``(n,)``, non-decreasing, in ``x_units``.
+        """
+        return self._x
+
+    @property
+    def values(self) -> np.ndarray:
+        """Observations.
+
+        Returns
+        -------
+        numpy.ndarray
+            Read-only, shape ``(n,)``, in ``units``; NaN marks a missing
+            observation.
+        """
+        return self._values
+
+    @property
+    def uncertainty(self) -> Optional[np.ndarray]:
+        """Standard deviation of the measurement error.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Read-only, shape ``(n,)``, in ``units``; None if undeclared.
+        """
+        return self._uncertainty
+
+    @property
+    def units(self) -> Optional[str]:
+        """Observation unit label.
+
+        Returns
+        -------
+        str or None
+            Label, or None if undeclared.
+        """
+        return self._units
+
+    @property
+    def basis(self) -> Optional[str]:
+        """Observation basis label.
+
+        Returns
+        -------
+        str or None
+            Label, or None if undeclared.
+        """
+        return self._basis
+
+    @property
+    def x_units(self) -> Optional[str]:
+        """Independent-variable unit label.
+
+        Returns
+        -------
+        str or None
+            Label, or None if undeclared.
+        """
+        return self._x_units
+
+
 class Experiment:
-    def __init__(self):
-        pass
+    """One experimental run: named measurements and its callback association.
+
+    Parameters
+    ----------
+    measurements : Mapping[str, Measurement] or sequence of Measurement
+        Named measurements; insertion order is the declared order. In
+        sequence form each measurement is named by its field: the str field
+        itself, or ``f'field_{field}'`` for an int field; replicate
+        measurements of one field then need a mapping with distinct names.
+    args : tuple or list, optional
+        Positional callback arguments for this experiment, passed as
+        ``func(params, x_model, *args, **kwargs)`` in model-defined units.
+        Stored as a tuple; the values themselves are not copied.
+    kwargs : Mapping, optional
+        Callback keywords in model-defined units; a shallow copy is stored.
+
+    Raises
+    ------
+    TypeError
+        If ``measurements`` is not a mapping or sequence of
+        ``Measurement`` objects, a name is not a str, ``args`` is not a
+        tuple or list, or ``kwargs`` is not a mapping with str keys.
+    ValueError
+        If there are no measurements, a name is empty, the sequence form
+        repeats a name, or measurements declare different ``x_units``.
+
+    Notes
+    -----
+    The experiment model grid is the multiset union of the measurement
+    grids: each distinct x appears as many times as the largest number of
+    replicates any measurement has at that x, in sorted order. The k-th
+    replicate of a measurement at x maps to the k-th grid row with that x;
+    rows a measurement does not sample are unobserved for it. Undeclared
+    (None) ``x_units`` are compatible with any declared value.
+    """
+
+    def __init__(self, measurements, args=(), kwargs=None) -> None:
+        """Validate and store the measurements and callback arguments.
+
+        Parameters
+        ----------
+        measurements, args, kwargs
+            See the class docstring.
+
+        Raises
+        ------
+        TypeError, ValueError
+            See the class docstring.
+        """
+        if isinstance(measurements, Measurement):
+            raise TypeError(
+                "Experiment measurements must be a mapping of names to "
+                "Measurement objects or a sequence of Measurement objects; "
+                "wrap a single Measurement in a list")
+        if isinstance(measurements, Mapping):
+            items = list(measurements.items())
+        elif isinstance(measurements, (list, tuple)):
+            items = []
+            for index, measurement in enumerate(measurements):
+                if not isinstance(measurement, Measurement):
+                    raise TypeError(
+                        f"Experiment measurements[{index}] must be a "
+                        f"Measurement; got {type(measurement).__name__}")
+                field = measurement.field
+                name = field if isinstance(field, str) else f'field_{field}'
+                items.append((name, measurement))
+            names = [name for name, _ in items]
+            repeated = sorted({name for name in names
+                               if names.count(name) > 1})
+            if repeated:
+                raise ValueError(
+                    f"Experiment measurements repeat the names {repeated!r}; "
+                    "pass a mapping with distinct names for replicate "
+                    "measurements of the same field")
+        else:
+            raise TypeError(
+                "Experiment measurements must be a mapping of names to "
+                "Measurement objects or a sequence of Measurement objects; "
+                f"got {type(measurements).__name__}")
+
+        if not items:
+            raise ValueError("Experiment needs at least one Measurement")
+
+        checked = {}
+        for name, measurement in items:
+            if not isinstance(name, str):
+                raise TypeError(
+                    "Experiment measurement names must be str; got "
+                    f"{type(name).__name__} {name!r}")
+            if not name:
+                raise ValueError(
+                    "Experiment measurement names must be non-empty")
+            if not isinstance(measurement, Measurement):
+                raise TypeError(
+                    f"Experiment measurement {name!r} must be a Measurement; "
+                    f"got {type(measurement).__name__}")
+            checked[name] = measurement
+
+        declared_x_units = {name: measurement.x_units
+                            for name, measurement in checked.items()
+                            if measurement.x_units is not None}
+        if len(set(declared_x_units.values())) > 1:
+            raise ValueError(
+                "All measurements of one experiment must share x_units; got "
+                f"{declared_x_units!r}")
+
+        if not isinstance(args, (tuple, list)):
+            raise TypeError(
+                "Experiment args must be a tuple or list of positional "
+                f"callback arguments; got {type(args).__name__}")
+        if kwargs is None:
+            kwargs = {}
+        if not isinstance(kwargs, Mapping):
+            raise TypeError(
+                "Experiment kwargs must be a mapping of callback keywords; "
+                f"got {type(kwargs).__name__}")
+        for key in kwargs:
+            if not isinstance(key, str):
+                raise TypeError(
+                    "Experiment kwargs keys must be str callback keyword "
+                    f"names; got {type(key).__name__} {key!r}")
+
+        self._measurements = checked
+        self._x_units = next(iter(declared_x_units.values()), None)
+        self._args = tuple(args)
+        self._kwargs = dict(kwargs)
+
+    @property
+    def measurements(self) -> Mapping:
+        """Named measurements in declared order.
+
+        Returns
+        -------
+        types.MappingProxyType
+            Read-only view mapping names to ``Measurement`` objects.
+        """
+        return MappingProxyType(self._measurements)
+
+    @property
+    def measurement_names(self) -> tuple:
+        """Measurement names in declared order.
+
+        Returns
+        -------
+        tuple of str
+            Names of ``measurements``.
+        """
+        return tuple(self._measurements)
+
+    @property
+    def args(self) -> tuple:
+        """Positional callback arguments.
+
+        Returns
+        -------
+        tuple
+            Arguments in model-defined units.
+        """
+        return self._args
+
+    @property
+    def kwargs(self) -> Mapping:
+        """Callback keywords.
+
+        Returns
+        -------
+        types.MappingProxyType
+            Read-only view of the stored keywords, in model-defined units.
+        """
+        return MappingProxyType(self._kwargs)
+
+    @property
+    def x_units(self) -> Optional[str]:
+        """Independent-variable unit label shared by the measurements.
+
+        Returns
+        -------
+        str or None
+            Declared label, or None if no measurement declares one.
+        """
+        return self._x_units
+
+
+class _AlignedColumn(NamedTuple):
+    """One measurement column of one experiment, aligned to its model grid.
+
+    Attributes
+    ----------
+    name : str
+        Measurement (residual column) name.
+    field : int or str
+        Declared model-output field: a column index (negative legacy
+        indices count from the last output column) or an output name.
+    units, basis, x_units : str or None
+        Declared labels; None means undeclared.
+    rows : numpy.ndarray
+        Integer model-grid row of each sample, shape ``(n_m,)``.
+    values : numpy.ndarray
+        Observations, shape ``(n_m,)``, in the measurement units; NaN marks
+        a missing observation.
+    uncertainty : numpy.ndarray or None
+        Measurement-error standard deviations, shape ``(n_m,)``, in the
+        measurement units, or None if undeclared.
+    """
+
+    name: str
+    field: object
+    units: Optional[str]
+    basis: Optional[str]
+    x_units: Optional[str]
+    rows: np.ndarray
+    values: np.ndarray
+    uncertainty: Optional[np.ndarray]
+
+
+class _AlignedExperiment(NamedTuple):
+    """Experiment data aligned to the model grid passed to the callback.
+
+    Attributes
+    ----------
+    grid : object
+        Model grid passed to the callback, in the model's x units. For
+        ``Experiment`` input and staggered legacy grids, the multiset union
+        of the measurement grids; for a shared legacy grid, the caller's
+        object unchanged (dtype, shape, order and repeats preserved).
+    num_rows : int
+        Number of model-grid samples (first-axis length of ``grid``).
+    columns : list of _AlignedColumn
+        Measurement columns in declared order.
+    args : object
+        Positional callback arguments.
+    kwargs : object
+        Callback keyword dictionary.
+    staggered : bool
+        True for legacy staggered (per-state) grids, which keep the legacy
+        layout: an ndarray observation mask even when every entry is
+        observed, and float64 observations.
+    """
+
+    grid: object
+    num_rows: int
+    columns: list
+    args: object
+    kwargs: object
+    staggered: bool = False
+
+
+class _CompiledExperiments(NamedTuple):
+    """Internal estimation layout compiled from aligned experiments.
+
+    Attributes
+    ----------
+    measurement_names : list of str
+        Residual (measurement) column names, first-appearance order.
+    fields : list of int
+        Model-output column of each measurement column, resolved through
+        ``output_names``; legacy negative indices are kept.
+    x_model : list
+        Per-experiment model grid passed to the callback, in x units.
+    x_masks : list of numpy.ndarray or None
+        Per-experiment observation mask, shape ``(n_times, n_columns)``;
+        None when every entry is observed.
+    y_data : list of numpy.ndarray
+        Per-experiment observations, shape ``(n_times, n_columns)``, in the
+        measurement units; NaN where unobserved.
+    residual_std : list of numpy.ndarray or None
+        Per-experiment measurement standard deviations, shape
+        ``(n_times, n_columns)``, in the measurement units, NaN where
+        unobserved; None when no uncertainty is declared.
+    args_fun : list
+        Positional callback arguments per experiment.
+    kwargs_fun : list
+        Callback keywords per experiment.
+    num_data : list of int
+        Observed entries per experiment.
+    """
+
+    measurement_names: list
+    fields: list
+    x_model: list
+    x_masks: list
+    y_data: list
+    residual_std: Optional[list]
+    args_fun: list
+    kwargs_fun: list
+    num_data: list
+
+
+def _validate_output_names(output_names) -> Optional[tuple]:
+    """Validate the names of the model callback output columns.
+
+    Parameters
+    ----------
+    output_names : iterable of str or None
+        Unique, non-empty names in output-column order.
+
+    Returns
+    -------
+    tuple of str or None
+        The names, or None if not given.
+
+    Raises
+    ------
+    TypeError
+        If ``output_names`` is a str or contains a non-str entry.
+    ValueError
+        If ``output_names`` is empty, contains an empty name or repeats a
+        name.
+    """
+    if output_names is None:
+        return None
+    if isinstance(output_names, str):
+        raise TypeError(
+            "output_names must be a sequence of str, one per model output "
+            "column, not a single str")
+    names = tuple(output_names)
+    if not names:
+        raise ValueError("output_names must name at least one output column")
+    for name in names:
+        if not isinstance(name, str):
+            raise TypeError(
+                f"output_names entries must be str; got {name!r}")
+        if not name:
+            raise ValueError("output_names entries must be non-empty")
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            f"output_names must be unique; repeated {repeated!r}")
+    return names
+
+
+def _resolve_field(field, measurement_name, experiment_name,
+                   output_names: Optional[tuple]) -> int:
+    """Resolve a measurement field to a model-output column index.
+
+    Parameters
+    ----------
+    field : int or str
+        Validated field: a column index (negative legacy indices count from
+        the last output column) or an output name.
+    measurement_name, experiment_name : str
+        Identity used in error messages.
+    output_names : tuple of str or None
+        Names of the model output columns.
+
+    Returns
+    -------
+    int
+        Model-output column; a negative legacy index is returned unchanged
+        and checked against the callback output at evaluation.
+
+    Raises
+    ------
+    ValueError
+        If a str field is given without ``output_names`` or is not one of
+        them, or an int field lies outside the declared output columns.
+    """
+    location = (f"Measurement {measurement_name!r} of experiment "
+                f"{experiment_name!r}")
+    if isinstance(field, str):
+        if output_names is None:
+            raise ValueError(
+                f"{location} names model output {field!r}, but output_names "
+                "was not given; pass output_names (the model output column "
+                "names in column order) or use an int column index")
+        if field not in output_names:
+            raise ValueError(
+                f"{location} names unknown model output {field!r}; "
+                f"available output_names: {list(output_names)!r}")
+        return output_names.index(field)
+    if output_names is not None and not (
+            -len(output_names) <= field < len(output_names)):
+        raise ValueError(
+            f"{location} selects model output column {field}, but "
+            f"output_names declares {len(output_names)} output columns "
+            f"{list(output_names)!r}")
+    return field
+
+
+def _model_grid(grids: list) -> tuple:
+    """Build the multiset union of non-decreasing measurement grids.
+
+    Parameters
+    ----------
+    grids : list of numpy.ndarray
+        Non-decreasing one-dimensional grids, each shape ``(n_m,)``, in one
+        x unit.
+
+    Returns
+    -------
+    x_model : numpy.ndarray
+        Sorted grid, shape ``(n_times,)``, in the promoted dtype of
+        ``grids``: each distinct x repeated as many times as its largest
+        multiplicity in any grid.
+    distinct : numpy.ndarray
+        Sorted distinct x values.
+    first_rows : numpy.ndarray
+        Row of ``x_model`` holding the first copy of each distinct value.
+
+    Notes
+    -----
+    For strictly increasing grids every multiplicity is one and ``x_model``
+    equals ``numpy.unique`` of the concatenated grids, the legacy staggered
+    model grid.
+    """
+    distinct = np.unique(np.concatenate(grids))  # [x units]
+    multiplicity = np.zeros(distinct.size, dtype=int)  # [-], copies per value
+    for grid in grids:
+        # [x units], [-] copies of each value in this grid.
+        values, counts = np.unique(grid, return_counts=True)
+        positions = np.searchsorted(distinct, values)
+        multiplicity[positions] = np.maximum(multiplicity[positions], counts)
+
+    x_model = np.repeat(distinct, multiplicity)  # [x units]
+    first_rows = np.cumsum(multiplicity) - multiplicity
+    return x_model, distinct, first_rows
+
+
+def _grid_rows(grid: np.ndarray, distinct: np.ndarray,
+               first_rows: np.ndarray) -> np.ndarray:
+    """Map the samples of one measurement grid to model-grid rows.
+
+    Parameters
+    ----------
+    grid : numpy.ndarray
+        Non-decreasing measurement grid, shape ``(n_m,)``, in x units.
+    distinct, first_rows : numpy.ndarray
+        Outputs of ``_model_grid`` for the experiment.
+
+    Returns
+    -------
+    numpy.ndarray
+        Row index of each sample, shape ``(n_m,)``: the k-th replicate at a
+        value maps to the k-th model-grid row holding that value.
+    """
+    # [-], zero-based replicate index among equal x values.
+    replicate_rank = (np.arange(grid.size)
+                      - np.searchsorted(grid, grid, side='left'))
+    return first_rows[np.searchsorted(distinct, grid)] + replicate_rank
+
+
+def _align_experiment(experiment: 'Experiment') -> _AlignedExperiment:
+    """Align the measurements of one ``Experiment`` to its model grid.
+
+    Parameters
+    ----------
+    experiment : Experiment
+        Validated experiment.
+
+    Returns
+    -------
+    _AlignedExperiment
+        Multiset-union model grid [x units], one aligned column per
+        measurement, the callback arguments and a fresh keyword copy.
+    """
+    measurements = experiment.measurements
+    grid, distinct, first_rows = _model_grid(
+        [measurement.x for measurement in measurements.values()])
+    columns = [
+        _AlignedColumn(name, measurement.field, measurement.units,
+                       measurement.basis, measurement.x_units,
+                       _grid_rows(measurement.x, distinct, first_rows),
+                       measurement.values, measurement.uncertainty)
+        for name, measurement in measurements.items()]
+    return _AlignedExperiment(grid, grid.size, columns, experiment.args,
+                              dict(experiment.kwargs))
+
+
+def _check_declared(declared: dict, key: tuple, value, measurement_name,
+                    experiment_name, subject: str) -> None:
+    """Require declared metadata to agree; None (undeclared) always agrees.
+
+    Parameters
+    ----------
+    declared : dict
+        First declaration per key: ``(value, measurement, experiment)``.
+        Updated in place.
+    key : tuple
+        Identity of the declaration, e.g. ``('units', 'field', 0)``.
+    value : str or None
+        Declared label.
+    measurement_name, experiment_name : str
+        Identity of the declaring measurement.
+    subject : str
+        Description of what must agree, used in the error message.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` differs from an earlier declared value.
+    """
+    if value is None:
+        return
+    reference = declared.setdefault(
+        key, (value, measurement_name, experiment_name))
+    if reference[0] != value:
+        raise ValueError(
+            f"Inconsistent {key[0]} for {subject}: measurement "
+            f"{reference[1]!r} of experiment {reference[2]!r} declares "
+            f"{reference[0]!r}, but measurement {measurement_name!r} of "
+            f"experiment {experiment_name!r} declares {value!r}. Values are "
+            "not converted, so they must already be in one unit and basis")
+
+
+def _compile_experiments(experiments: dict,
+                         output_names: Optional[tuple]
+                         ) -> _CompiledExperiments:
+    """Compile experiments into the estimator's aligned data layout.
+
+    This is the only alignment path for ``ParameterEstimation`` data:
+    ``Experiment`` input and adapted legacy arrays both pass through it.
+
+    Parameters
+    ----------
+    experiments : dict
+        Experiment name -> ``Experiment`` or ``_AlignedExperiment`` (the
+        legacy adapter's output), in experiment order.
+    output_names : tuple of str or None
+        Names of the model output columns, used to resolve str fields.
+
+    Returns
+    -------
+    _CompiledExperiments
+        Measurement columns in first-appearance order (experiment order,
+        then each experiment's declared order); per experiment the model
+        grid, observations and mask of shape ``(n_times, n_columns)``
+        (columns an experiment does not measure are unobserved), standard
+        deviations, callback arguments and observed-entry counts.
+
+    Raises
+    ------
+    ValueError
+        If a measurement name resolves to different fields in different
+        experiments, declared ``x_units``, ``units`` or ``basis`` disagree
+        (per measurement name and per resolved field; ``x_units`` across
+        all experiments), only some measurements declare an uncertainty,
+        or a field cannot be resolved.
+
+    Notes
+    -----
+    Observations keep the dtype of the supplied values when every entry is
+    covered (a shared legacy grid); otherwise they are promoted to at least
+    float64 so that unobserved entries can hold NaN. Legacy staggered grids
+    keep the earlier layout: float64 observations and an ndarray mask even
+    when every entry is observed.
+    """
+    aligned = {name: (_align_experiment(experiment)
+                      if isinstance(experiment, Experiment) else experiment)
+               for name, experiment in experiments.items()}
+
+    column_fields = {}  # name -> (field, first experiment)
+    declared = {}
+    with_std, without_std = [], []
+    for experiment_name, spec in aligned.items():
+        for column in spec.columns:
+            name = column.name
+            field = _resolve_field(column.field, name, experiment_name,
+                                   output_names)
+            if name in column_fields:
+                reference_field, reference_experiment = column_fields[name]
+                if field != reference_field:
+                    raise ValueError(
+                        f"Measurement {name!r} resolves to model output "
+                        f"column {reference_field} in experiment "
+                        f"{reference_experiment!r} but to column {field} in "
+                        f"experiment {experiment_name!r}; a measurement name "
+                        "must denote the same model output in every "
+                        "experiment")
+            else:
+                column_fields[name] = (field, experiment_name)
+
+            _check_declared(declared, ('x_units',), column.x_units, name,
+                            experiment_name,
+                            'all experiments, because one model callback '
+                            'receives every grid')
+            for attribute in ('units', 'basis'):
+                value = getattr(column, attribute)
+                _check_declared(declared, (attribute, 'name', name), value,
+                                name, experiment_name,
+                                f'measurement name {name!r}')
+                _check_declared(declared, (attribute, 'field', field), value,
+                                name, experiment_name,
+                                f'model output column {field}')
+
+            if column.uncertainty is None:
+                without_std.append((experiment_name, name))
+            else:
+                with_std.append((experiment_name, name))
+
+    if with_std and without_std:
+        raise ValueError(
+            "Either every Measurement declares an uncertainty or none does: "
+            f"measurement {with_std[0][1]!r} of experiment "
+            f"{with_std[0][0]!r} declares one, but measurement "
+            f"{without_std[0][1]!r} of experiment {without_std[0][0]!r} does "
+            "not. Mixing standard-deviation-scaled (dimensionless) and "
+            "unscaled (unit-bearing) residuals is dimensionally inconsistent")
+
+    measurement_names = list(column_fields)
+    column_of = {name: column
+                 for column, name in enumerate(measurement_names)}
+    num_columns = len(measurement_names)  # [-]
+
+    x_model, x_masks, y_data, residual_std = [], [], [], []
+    args_fun, kwargs_fun, num_data = [], [], []
+    for spec in aligned.values():
+        shape = (spec.num_rows, num_columns)
+        covered = np.zeros(shape, dtype=bool)
+        for column in spec.columns:
+            covered[column.rows, column_of[column.name]] = True
+        dtype = np.result_type(*[column.values for column in spec.columns])
+        if spec.staggered:
+            dtype = np.dtype(np.float64)  # legacy staggered layout
+        elif not covered.all():
+            dtype = np.result_type(np.float64, dtype)
+        # [measurement units]; NaN where unobserved.
+        observations = (np.full(shape, np.nan, dtype=dtype)
+                        if np.issubdtype(dtype, np.inexact)
+                        else np.empty(shape, dtype=dtype))
+        observed = np.zeros(shape, dtype=bool)
+        std = np.full(shape, np.nan) if with_std else None  # [meas. units]
+        for column in spec.columns:
+            index = column_of[column.name]
+            values = column.values  # [measurement units]
+            sampled = (~np.isnan(values)
+                       if np.issubdtype(values.dtype, np.inexact)
+                       else np.ones(values.shape, dtype=bool))
+            observations[column.rows, index] = values
+            observed[column.rows, index] = sampled
+            if std is not None:
+                std[column.rows[sampled], index] = (
+                    column.uncertainty[sampled])
+
+        x_model.append(spec.grid)
+        x_masks.append(None if observed.all() and not spec.staggered
+                       else observed)
+        y_data.append(observations)
+        residual_std.append(std)
+        args_fun.append(spec.args)
+        kwargs_fun.append(spec.kwargs)
+        num_data.append(int(observed.sum()))
+
+    return _CompiledExperiments(
+        measurement_names=measurement_names,
+        fields=[column_fields[name][0] for name in measurement_names],
+        x_model=x_model, x_masks=x_masks, y_data=y_data,
+        residual_std=residual_std if with_std else None,
+        args_fun=args_fun, kwargs_fun=kwargs_fun, num_data=num_data)
+
+
+def _holds_measurements(x_data) -> bool:
+    """Tell whether independent data contain bare ``Measurement`` objects.
+
+    Parameters
+    ----------
+    x_data : object
+        ``x_data`` argument of an estimator.
+
+    Returns
+    -------
+    bool
+        True for a ``Measurement``, or a list, tuple or mapping whose
+        entries (or the entries of whose list or tuple values) include one.
+    """
+    def is_or_holds(value):
+        """Tell whether one entry is or directly holds a Measurement.
+
+        Parameters
+        ----------
+        value : object
+            One ``x_data`` entry.
+
+        Returns
+        -------
+        bool
+            True for a ``Measurement`` or a list or tuple containing one.
+        """
+        return isinstance(value, Measurement) or (
+            isinstance(value, (list, tuple))
+            and any(isinstance(item, Measurement) for item in value))
+
+    if is_or_holds(x_data):
+        return True
+    if isinstance(x_data, Mapping):
+        return any(is_or_holds(value) for value in x_data.values())
+    if isinstance(x_data, (list, tuple)):
+        return any(is_or_holds(value) for value in x_data)
+    return False
+
+
+def _holds_experiments(x_data) -> bool:
+    """Tell whether independent data contain ``Experiment`` objects.
+
+    Parameters
+    ----------
+    x_data : object
+        ``x_data`` argument of an estimator.
+
+    Returns
+    -------
+    bool
+        True for an ``Experiment`` or a mapping, list or tuple containing at
+        least one.
+    """
+    if isinstance(x_data, Experiment):
+        return True
+    if isinstance(x_data, Mapping):
+        return any(isinstance(value, Experiment) for value in x_data.values())
+    if isinstance(x_data, (list, tuple)):
+        return any(isinstance(value, Experiment) for value in x_data)
+    return False
+
+
+def _experiment_collection(x_data) -> Optional[dict]:
+    """Normalize ``Experiment`` input to an ordered name mapping.
+
+    Parameters
+    ----------
+    x_data : object
+        ``x_data`` argument of ``ParameterEstimation``.
+
+    Returns
+    -------
+    dict or None
+        Experiment name -> ``Experiment`` in experiment order: mapping keys,
+        or ``'exp_1'``, ``'exp_2'``, ... for a single experiment or a list or
+        tuple. None if ``x_data`` holds no ``Experiment`` (legacy input).
+
+    Raises
+    ------
+    TypeError
+        If ``Experiment`` objects are mixed with other entries or a mapping
+        key is not a str.
+    ValueError
+        If a mapping key is empty.
+    """
+    if not _holds_experiments(x_data):
+        return None
+    if isinstance(x_data, Experiment):
+        return {'exp_1': x_data}
+    if isinstance(x_data, Mapping):
+        items = list(x_data.items())
+    else:
+        items = [(f'exp_{index + 1}', value)
+                 for index, value in enumerate(x_data)]
+
+    mixed = [name for name, value in items
+             if not isinstance(value, Experiment)]
+    if mixed:
+        raise TypeError(
+            "x_data mixes Experiment objects with other entries "
+            f"{mixed!r}; pass only Experiment objects, or only legacy "
+            "arrays")
+    for name, _ in items:
+        if not isinstance(name, str):
+            raise TypeError(
+                f"Experiment names must be str; got {type(name).__name__} "
+                f"{name!r}")
+        if not name:
+            raise ValueError("Experiment names must be non-empty")
+    return dict(items)
+
+
+def _labelled_weight_matrix(weight_matrix, names: list) -> np.ndarray:
+    """Order a labelled measurement-error covariance by measurement column.
+
+    Parameters
+    ----------
+    weight_matrix : pandas.DataFrame
+        Covariance with index and columns labelled by measurement name, in
+        any order; entry ``(i, j)`` in ``u_i * u_j``.
+    names : list of str
+        Measurement column names in internal column order.
+
+    Returns
+    -------
+    numpy.ndarray
+        Symmetric covariance, shape ``(n_columns, n_columns)``, rows and
+        columns in ``names`` order, in ``u_i * u_j``.
+
+    Raises
+    ------
+    TypeError
+        If ``weight_matrix`` is not a DataFrame or holds complex values.
+    ValueError
+        If labels repeat, index and columns differ, or the labels are not
+        exactly ``names``.
+
+    Notes
+    -----
+    Columns are first aligned to the index order, and only the lower
+    triangle in that caller order is read (as for array weights); the
+    symmetric matrix it defines is then reordered by name. The weighting is
+    therefore independent of the measurement column order even when the
+    upper triangle differs or is left empty.
+    """
+    if not isinstance(weight_matrix, pd.DataFrame):
+        raise TypeError(
+            "With Experiment input, weight_matrix must be a pandas DataFrame "
+            f"whose index and columns are the measurement names {names!r}, "
+            "so that rows are matched by name rather than position; got "
+            f"{type(weight_matrix).__name__}")
+    index = list(weight_matrix.index)
+    columns = list(weight_matrix.columns)
+    for axis, labels in (('index', index), ('columns', columns)):
+        repeated = sorted({str(label) for label in labels
+                           if labels.count(label) > 1})
+        if repeated:
+            raise ValueError(
+                f"weight_matrix {axis} repeats the labels {repeated!r}")
+    if set(index) != set(columns):
+        raise ValueError(
+            "weight_matrix index and columns must hold the same measurement "
+            f"names; index only: {[i for i in index if i not in columns]!r}, "
+            f"columns only: {[c for c in columns if c not in index]!r}")
+    missing = [name for name in names if name not in index]
+    unexpected = [label for label in index if label not in names]
+    if missing or unexpected:
+        raise ValueError(
+            "weight_matrix labels must be exactly the measurement names; "
+            f"missing={missing!r}, unexpected={unexpected!r}")
+    # Caller order: columns aligned to the index labels.
+    aligned = weight_matrix.loc[index, index].to_numpy()
+    if np.iscomplexobj(aligned):
+        raise TypeError(
+            "weight_matrix must hold real covariances; got complex values")
+    aligned = np.asarray(aligned, dtype=float)  # [u_i * u_j]
+    # [u_i * u_j], symmetric from the lower triangle in caller order.
+    symmetric = np.tril(aligned) + np.tril(aligned, -1).T
+    positions = [index.index(name) for name in names]
+    # [u_i * u_j], rows and columns in measurement column order.
+    return symmetric[np.ix_(positions, positions)]
+
+
+def _validate_legacy_fields(measured_ind) -> list:
+    """Validate legacy ``measured_ind`` entries.
+
+    Parameters
+    ----------
+    measured_ind : sequence of int or str
+        Model-output column per y column; negative ints count from the last
+        output column (NumPy indexing), str entries are output names.
+
+    Returns
+    -------
+    list
+        Entries as built-in ``int`` or ``str``.
+
+    Raises
+    ------
+    TypeError
+        If ``measured_ind`` is not a sequence or an entry is a bool or
+        neither an integer nor a str.
+    """
+    if isinstance(measured_ind, (str, bytes)) or not hasattr(
+            measured_ind, '__len__'):
+        raise TypeError(
+            "measured_ind must be a sequence of int model-output columns or "
+            f"output names; got {measured_ind!r}")
+    fields = []
+    for field in measured_ind:
+        if isinstance(field, (bool, np.bool_)) or not isinstance(
+                field, (int, np.integer, str)):
+            raise TypeError(
+                "measured_ind entries must be int columns or str output "
+                f"names; got {field!r}")
+        fields.append(field if isinstance(field, str) else int(field))
+    return fields
+
+
+def _legacy_grid(grid, name, label: str) -> np.ndarray:
+    """Validate one staggered legacy grid without changing its dtype.
+
+    Parameters
+    ----------
+    grid : array_like
+        Per-state sample grid in the model's x units.
+    name : str
+        Experiment name used in error messages.
+    label : str
+        Grid position used in error messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        The grid as a one-dimensional array: a scalar becomes one sample,
+        and a grid with at most one non-singleton axis, such as ``(1, n)``
+        or ``(n, 1)``, is flattened as earlier releases did.
+
+    Raises
+    ------
+    ValueError
+        If the grid has more than one non-singleton axis, is non-finite or
+        decreasing.
+    """
+    grid = np.asarray(grid)  # [x units]
+    if sum(length != 1 for length in grid.shape) <= 1:
+        grid = grid.reshape(-1)  # [x units]
+    location = f"x_data grid {label} of experiment {name!r}"
+    if grid.ndim != 1:
+        raise ValueError(
+            f"{location} must be one-dimensional; got shape {grid.shape}")
+    if np.issubdtype(grid.dtype, np.inexact) and not np.all(
+            np.isfinite(grid)):
+        raise ValueError(f"{location} must be finite")
+    # Direct comparison; np.diff wraps or overflows for integer dtypes.
+    decreasing = np.flatnonzero(grid[1:] < grid[:-1])
+    if decreasing.size:
+        index = decreasing[0] + 1
+        raise ValueError(
+            f"{location} must be non-decreasing; x[{index}] = "
+            f"{grid[index].item()!r} is smaller than x[{index - 1}] = "
+            f"{grid[index - 1].item()!r}. Sort each grid together with its "
+            "observations")
+    return grid
+
+
+def _legacy_alignment(x_experiment, y_experiment, name) -> tuple:
+    """Align one legacy experiment's observations to its model grid.
+
+    Parameters
+    ----------
+    x_experiment : array_like or list of array_like
+        Shared grid (any shape; row i belongs to observation row i), or one
+        grid per observation array (staggered input), in the model's
+        independent-variable units.
+    y_experiment : numpy.ndarray or list of numpy.ndarray
+        Observations of shape ``(n, n_columns)`` (or ``(n,)``), or one such
+        array per staggered grid, in the model's state units.
+    name : str
+        Experiment name used in error messages.
+
+    Returns
+    -------
+    grid : object
+        Model grid: the caller's shared grid unchanged, or the multiset
+        union of staggered grids in their promoted dtype.
+    num_rows : int
+        Number of model-grid samples.
+    columns : list of tuple
+        ``(rows, values)`` per y column, in column order: model-grid rows
+        and observations (caller dtype).
+    staggered : bool
+        True for per-state (staggered) grids.
+
+    Raises
+    ------
+    ValueError
+        If staggered grids and observation arrays do not pair up, a grid is
+        invalid, or the row counts of grids and observations differ.
+    """
+    def as_two_d(observations, label):
+        """Return observations as a two-dimensional array.
+
+        Parameters
+        ----------
+        observations : array_like
+            Observations in the model's state units.
+        label : str
+            Position used in error messages.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(n, n_columns)``, dtype preserved.
+
+        Raises
+        ------
+        ValueError
+            If ``observations`` has more than two dimensions.
+        """
+        observations = np.asarray(observations)  # [state units]
+        if observations.ndim < 2:
+            # [state units]
+            observations = observations.reshape(-1, 1)
+        if observations.ndim != 2:
+            raise ValueError(
+                f"y_data {label}of experiment {name!r} must be one- or "
+                f"two-dimensional; got shape {observations.shape}")
+        return observations
+
+    if not isinstance(x_experiment, (list, tuple)):
+        # Shared grid: row i of y_data is observed at x_data[i] (identity).
+        observations = as_two_d(y_experiment, '')
+        num_rows = 1 if np.ndim(x_experiment) == 0 else len(x_experiment)
+        if observations.shape[0] != num_rows:
+            raise ValueError(
+                f"Experiment {name!r}: y_data has {observations.shape[0]} "
+                f"rows, but x_data has {num_rows} samples; row i of y_data "
+                "must hold the observations at x_data[i]")
+        rows = np.arange(num_rows)
+        return x_experiment, num_rows, [(rows, column)
+                                        for column in observations.T], False
+
+    if (not isinstance(y_experiment, (list, tuple))
+            or len(y_experiment) != len(x_experiment)):
+        count = (len(y_experiment)
+                 if isinstance(y_experiment, (list, tuple)) else 'one')
+        raise ValueError(
+            f"Experiment {name!r} lists {len(x_experiment)} x_data "
+            "grids, so y_data must list one observation array per grid; "
+            f"got {count}")
+    grids = [_legacy_grid(grid, name, str(index))
+             for index, grid in enumerate(x_experiment)]
+    grid, distinct, first_rows = _model_grid(grids)
+    columns = []
+    for index, (samples, observations) in enumerate(zip(grids,
+                                                        y_experiment)):
+        observations = as_two_d(observations, f'array {index} ')
+        if observations.shape[0] != samples.size:
+            raise ValueError(
+                f"Experiment {name!r}: y_data array {index} has "
+                f"{observations.shape[0]} rows, but its x_data grid has "
+                f"{samples.size} samples")
+        rows = _grid_rows(samples, distinct, first_rows)
+        columns += [(rows, column) for column in observations.T]
+    return grid, grid.size, columns, True
+
+
+def _legacy_values(values: np.ndarray, column: int, name,
+                   allow_empty: bool) -> np.ndarray:
+    """Validate one legacy observation column with Measurement's rules.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Observations of one y column, shape ``(n,)``, in the model's state
+        units.
+    column : int
+        Zero-based y column, used in error messages.
+    name : str
+        Experiment name, used in error messages.
+    allow_empty : bool
+        Accept a column without samples, which a staggered experiment uses
+        to leave a state unmeasured (a fully unobserved column).
+
+    Returns
+    -------
+    numpy.ndarray
+        ``values`` unchanged for integer, boolean and floating dtypes; an
+        object array whose elements are all real numbers (for example a
+        pandas nullable column exported with ``na_value=numpy.nan``) is
+        converted to float64, so its NaN entries mark missing observations.
+
+    Raises
+    ------
+    TypeError
+        If the observations are complex, or of another non-numeric dtype or
+        object elements that are not real numbers.
+    ValueError
+        If the column is empty (unless ``allow_empty``), has no non-NaN
+        observation, or holds an infinite value.
+
+    Notes
+    -----
+    Integer and boolean dtypes cannot hold NaN or infinity and are accepted
+    as they are.
+    """
+    location = f"y_data column {column} of experiment {name!r}"
+    if values.dtype == object:
+        invalid = [value for value in values.ravel()
+                   if not isinstance(value, (numbers.Real, np.number))
+                   or np.iscomplexobj(value)]
+        if invalid:
+            raise TypeError(
+                f"{location}: values must be real numbers; got "
+                f"{invalid[0]!r}")
+        values = values.astype(np.float64)  # [state units]
+    if np.iscomplexobj(values):
+        raise TypeError(
+            f"{location}: values must be real; got complex values, whose "
+            "imaginary part would otherwise be discarded")
+    if not (np.issubdtype(values.dtype, np.number)
+            or np.issubdtype(values.dtype, np.bool_)):
+        raise TypeError(
+            f"{location}: values must be real numbers; got dtype "
+            f"{values.dtype}")
+    if values.size == 0:
+        if allow_empty:
+            return values
+        raise ValueError(f"{location} has no observations")
+    if not np.issubdtype(values.dtype, np.inexact):
+        return values
+    infinite = np.flatnonzero(np.isinf(values))
+    if infinite.size:
+        index = infinite[0]
+        raise ValueError(
+            f"{location}: values must be finite or NaN (missing); "
+            f"values[{index}] = {float(values[index])!r}")
+    if np.all(np.isnan(values)):
+        raise ValueError(
+            f"{location}: values are all NaN; a measurement needs at least "
+            "one observation (NaN marks a missing observation)")
+    return values
+
+
+def _legacy_experiments(alignments: list, fields: list, args_fun: list,
+                        kwargs_fun: list, names: list) -> dict:
+    """Adapt aligned legacy data to compile-ready experiments.
+
+    Parameters
+    ----------
+    alignments : list of tuple
+        ``_legacy_alignment`` output per experiment.
+    fields : list
+        Validated ``measured_ind`` entries, one per y column.
+    args_fun, kwargs_fun : list
+        Aligned callback containers per experiment, stored unchanged.
+    names : list
+        Experiment names in experiment order.
+
+    Returns
+    -------
+    dict
+        Name -> ``_AlignedExperiment`` with one column ``f'y_{j}'`` per y
+        column ``j`` (field ``fields[j]``; undeclared units, basis and x
+        units).
+
+    Raises
+    ------
+    ValueError
+        If an experiment's column count differs from ``fields`` or a column
+        is invalid (see ``_legacy_values``; empty columns are accepted only
+        in staggered experiments).
+    TypeError
+        If a column holds complex or non-numeric values.
+    """
+    experiments = {}
+    for name, (grid, num_rows, columns, staggered), args, kwargs in zip(
+            names, alignments, args_fun, kwargs_fun):
+        if len(columns) != len(fields):
+            raise ValueError(
+                f"Experiment {name!r} has {len(columns)} y_data "
+                f"columns, but measured_ind lists {len(fields)} model "
+                "outputs; supply one y_data column per measured_ind entry")
+        columns = [(rows, _legacy_values(values, index, name, staggered))
+                   for index, (rows, values) in enumerate(columns)]
+        aligned_columns = [
+            _AlignedColumn(f'y_{index}', field, None, None, None, rows,
+                           values, None)
+            for index, (field, (rows, values)) in enumerate(
+                zip(fields, columns))]
+        experiments[name] = _AlignedExperiment(grid, num_rows,
+                                               aligned_columns, args, kwargs,
+                                               staggered)
+    return experiments
 
 
 def flatten_spectral_sens(sens):
@@ -418,9 +1917,23 @@ def flatten_spectral_sens(sens):
 class ParameterEstimation:
     """Fit model parameters to weighted observations from one or more experiments.
 
-    Experiment identity follows ``x_data`` keys when provided; state columns,
-    physical bases and callback units remain those declared by the model.
+    Data are given either as ``Experiment`` objects holding named
+    ``Measurement`` objects, or as legacy arrays, lists and dictionaries.
+    Both are compiled by one alignment path into measurement columns, a
+    per-experiment model grid and observation masks. Experiment identity
+    follows ``x_data`` keys when provided; state columns, physical bases and
+    callback units remain those declared by the model; no unit conversion is
+    performed.
+
+    Weighted residuals are packed in experiment order, then measurement
+    column order, then model-grid sample order (``get_residual_layout``).
+    Unobserved entries keep their positions and are exactly zero.
     """
+
+    #: Whether data are compiled through ``_compile_experiments``. Subclasses
+    #: with a different residual definition (``MultipleCurveResolution``)
+    #: keep the legacy ``analyze_data`` layout.
+    _compiles_experiments = True
 
     def __init__(self, func: Callable, param_seed, x_data, y_data=None,
                  measured_ind=None,
@@ -428,7 +1941,8 @@ class ParameterEstimation:
                  optimize_flags=None,
                  jac_fun=None, dx_finitediff=None,
                  weight_matrix=None,
-                 name_params=None, name_states=None) -> None:
+                 name_params=None, name_states=None,
+                 output_names=None) -> None:
         """ Create a ParameterEstimation object
 
         Parameters
@@ -441,31 +1955,52 @@ class ParameterEstimation:
             parameter units must match ``param_seed``. See ``x_data`` for x_i.
         param_seed : array-like
             Parameter seed values in the units required by ``func``.
-        x_data : numpy array, list of arrays or dict
-            array with experimental values for the independent variable x. If
-            several datasets Ne are passed, either a list of arrays
+        x_data : Experiment, mapping or sequence of them, or legacy arrays
+            Either ``Experiment`` objects or legacy independent-variable
+            data. ``Experiment`` input is a single ``Experiment`` (named
+            ``'exp_1'``), a mapping of experiment names to ``Experiment``
+            (insertion order is experiment order), or a list or tuple of
+            ``Experiment`` (named ``'exp_1'``, ``'exp_2'``, ...); then
+            ``y_data``, ``measured_ind``, ``args_fun`` and ``kwargs_fun``
+            must be None because each ``Experiment`` holds them, and
+            ``self.x_data`` stores the per-experiment model grids.
+            Legacy input is an array with experimental values for the
+            independent variable x. If several datasets Ne are passed, either
+            a list of arrays
                 x_data = [x_1, ..., x_i, ..., x_Ne]
             or a dictionary of arrays:
                 x_data = {'name_exp_1': x_1, ..., 'name_exp_i': x_i, ...,
                           'name_exp_N': x_Ne}
-            can be specified. Units follow the model independent variable
-            (typically time [s]). Dictionary insertion order declares experiment
+            can be specified; an experiment may also be a list of per-state
+            grids (staggered sampling). Units follow the model independent
+            variable (typically time [s]). A shared array is passed to
+            ``func`` unchanged (any shape, dtype, order or repeated values),
+            with row i of y belonging to its first-axis entry i. Staggered
+            grids must be one-dimensional, finite and non-decreasing;
+            repeated values are replicate samples, passed to ``func``
+            repeatedly. Dictionary insertion order declares experiment
             order; other experiment mappings are aligned by those keys.
         y_data : numpy array, list of arrays or dict
-            Experimental values for the dependent variable(s) y, in the model's
-            state units and physical bases.
+            Legacy experimental values for the dependent variable(s) y, in
+            the model's state units and physical bases.
             Array y is of dimension len(x_i) x N_meas, where N_meas is less
             than or equal to the number of states returned by func (Ny).
             It supports same data structures as ``x_data``. If ``y_data`` is a
             dictionary, its keys must match those of ``x_data``. A dictionary
             with more than one experiment requires named ``x_data``; with
             unnamed ``x_data``, pass a list in ``x_data`` order instead.
-            Observations are required; ``None`` raises ``TypeError``.
-        measured_ind : list of int, optional
+            NaN marks a missing observation. Observations are required for
+            legacy input; ``None`` raises ``TypeError``.
+        measured_ind : list of int or str, optional
             Indexes of the states returned by func that are measured and
-            passed in each dataset contained in 'y_data'.
-            If None, it is assumed that all the states are measured.
-            The default is None.
+            passed in each dataset contained in 'y_data', one per y column.
+            Negative indexes count from the last output column; str entries
+            name columns through ``output_names``. A one-dimensional output
+            has one column, and with a single measured column its index is
+            ignored for such outputs. If None, the first N_meas states are
+            assumed to be measured. It is read at construction: the caller's
+            object is stored unchanged as ``measured_ind``, and later changes
+            to it have no effect. The default is None.
         args_fun : tuple, list of tuples or dict of tuples, optional
             Positional callback arguments in model-defined units. A tuple is
             passed directly for one experiment. A list contains one tuple per
@@ -519,11 +2054,22 @@ class ParameterEstimation:
             Sample rows with unobserved states (staggered ``x_data``
             grids) are weighted by the marginal precision
             ``inv(weight_matrix[o][:, o])`` of their observed states ``o``.
+            With ``Experiment`` input it must be a ``pandas.DataFrame``
+            whose index and columns are the measurement names (in any
+            order), so rows are matched by name and reordering experiments
+            cannot re-weight the fit; a plain array raises ``TypeError``.
+            It must be None when measurements declare an ``uncertainty``.
             The default is None, which uses the dimensionless identity.
         name_params : list of str, optional
             list with parameter names. The default is None.
         name_states : list of str, optional
-            list with state names. The default is None.
+            list with state names. The default is None, which uses the
+            measurement names for ``Experiment`` input.
+        output_names : sequence of str, optional
+            Unique names of the model callback output columns, in column
+            order. Str ``Measurement.field`` values resolve through them, and
+            the callback output must then have exactly this many columns.
+            The default is None.
 
         Returns
         -------
@@ -533,26 +2079,139 @@ class ParameterEstimation:
         Raises
         ------
         ValueError
-            If experiment mappings disagree, experiment counts differ, no
-            experiments are supplied, an observation/callback mapping
-            has multiple experiment keys while ``x_data`` is unnamed, or
-            ``weight_matrix`` is not a finite square two-dimensional array.
+            Raised when:
+
+            * legacy experiment mappings (``y_data``, ``args_fun``,
+              ``kwargs_fun``) have keys other than those of ``x_data``, or
+              several keys while ``x_data`` is unnamed;
+            * no experiments are given, or ``x_data``, ``y_data``,
+              ``args_fun`` or ``kwargs_fun`` hold different experiment
+              counts;
+            * ``y_data``, ``measured_ind``, ``args_fun`` or ``kwargs_fun``
+              accompany ``Experiment`` input, or an experiment name is empty;
+            * ``output_names`` is empty, has an empty or repeated name, or is
+              given with nested state observation dictionaries;
+            * a field names no ``output_names`` entry, a str field is given
+              without ``output_names``, an int field lies outside them, or a
+              measurement name resolves to different fields in different
+              experiments;
+            * declared units or bases disagree for one measurement name or
+              model-output field, or declared x units across experiments;
+            * only some measurements declare an uncertainty, or
+              uncertainties are combined with ``weight_matrix``;
+            * ``weight_matrix`` is not a finite square two-dimensional array
+              with one row and column per measurement column, or a labelled
+              ``weight_matrix`` repeats labels, has different index and
+              column labels, or labels other than the measurement names;
+            * a legacy shared grid and its observations differ in row count,
+              observations have more than two dimensions, or an
+              experiment's column count differs from ``measured_ind``;
+            * legacy staggered grids do not pair with one observation array
+              each or differ from it in length, or a grid has more than one
+              non-singleton axis, is non-finite or decreasing;
+            * a legacy observation column is empty (allowed only in a
+              staggered experiment, where it leaves the state unmeasured),
+              has no non-NaN observation, or holds an infinite value.
         TypeError
-            If ``y_data`` is None, positional arguments are not iterable, or
-            keyword arguments are not a dictionary. Positional errors identify
-            experiment keys or, for unnamed experiments, zero-based positions.
+            Raised when:
+
+            * ``y_data`` is None for legacy input;
+            * ``Experiment`` objects are mixed with other entries, an
+              experiment name is not a str, or ``x_data`` holds bare
+              ``Measurement`` objects not wrapped in an ``Experiment``;
+            * ``output_names`` is a single str or holds a non-str entry;
+            * with ``Experiment`` input, ``weight_matrix`` is not a
+              ``pandas.DataFrame``, or a labelled ``weight_matrix`` holds
+              complex values;
+            * ``measured_ind`` is not a sequence or holds an entry that is
+              a bool or neither an int nor a str;
+            * a legacy observation column holds complex or non-numeric
+              values (object arrays must hold real numbers only);
+            * positional callback arguments are not iterable or keyword
+              arguments are not a dictionary. Positional errors identify
+              experiment keys or, for unnamed experiments, zero-based
+              positions.
         numpy.linalg.LinAlgError
             If ``weight_matrix`` is not positive definite.
 
         Notes
         -----
-        Lists and arrays retain positional ordering. Nested state observation
-        dictionaries are passed through without treating state names as
-        experiment names. Observation and callback mappings with multiple
-        experiment keys cannot be aligned with unnamed ``x_data`` and are
-        rejected; use lists in ``x_data`` order instead. A single
-        experiment's direct keyword dictionary may still contain multiple
-        callback keywords.
+        Legacy arrays, lists and dictionaries are adapted to one
+        measurement column per y column (named ``'y_0'``, ``'y_1'``, ...;
+        field ``measured_ind[j]``) and compiled by the same alignment path
+        as ``Experiment`` input. A shared grid is aligned by identity (row
+        i of y to entry i of x) and passed to ``func`` unchanged; the
+        observations keep their dtype and the callback argument containers
+        are stored as given. Staggered grids keep the earlier layout:
+        float64 observations and an ndarray mask; an empty grid with an
+        empty observation array leaves that state unmeasured. Valid legacy
+        input therefore keeps its model grid, masks (None when a shared
+        grid is fully observed), objective, residuals, Jacobian and fit.
+        Intentional changes for legacy input:
+
+        * A NaN observation marks a missing observation, excluded from the
+          residuals and the data count; it previously made the objective
+          NaN.
+        * Object-dtype observations whose elements are all real numbers
+          (for example pandas nullable columns exported with
+          ``na_value=numpy.nan``) are converted to float64, so NaN entries
+          are missing observations; previously they made the objective
+          NaN. Other object or non-numeric observations raise
+          ``TypeError``.
+        * A column that is empty (outside staggered grids), has no non-NaN
+          observation or holds an infinite value raises ``ValueError``, and
+          complex observations raise ``TypeError``; previously they gave a
+          non-finite or complex objective.
+        * Raw residuals (``resid_runs``) of unobserved entries are exactly
+          zero for every observation dtype; with float32 observations they
+          were previously rounding residues of the model values.
+        * Decreasing staggered grids raise ``ValueError``; they were
+          previously paired with the wrong observations. Staggered grids
+          with repeated values are now accepted as replicates.
+        * Observation arrays whose row count differs from the shared grid,
+          or whose column count differs from ``measured_ind``, raise
+          ``ValueError``; they were previously broadcast.
+        * Callback outputs must be one- or two-dimensional with one row per
+          model-grid sample, and selected columns must exist; violations
+          raise ``ValueError`` naming the experiment instead of being
+          broadcast or raising ``IndexError``.
+        * ``measured_ind`` is read at construction; later changes to the
+          caller's object do not affect residuals or sensitivities.
+        * For a one-dimensional callback output with a ``measured_ind``
+          listing column 0 more than once (e.g. ``[0, 0]``), ``y_runs``
+          holds one column per entry; it was previously one column
+          broadcast against the observations, with equal residuals.
+
+        Nested state observation dictionaries (the ``'spectra'`` /
+        ``'non_spectra'`` layout of ``MultipleCurveResolution``) keep the
+        legacy ``analyze_data`` layout, because their residuals are spectra
+        resolved by curve resolution rather than model outputs minus
+        observations; they are passed through without treating state names
+        as experiment names.
+
+        Lists and arrays retain positional ordering. Observation and callback
+        mappings with multiple experiment keys cannot be aligned with
+        unnamed ``x_data`` and are rejected; use lists in ``x_data`` order
+        instead. A single experiment's direct keyword dictionary may still
+        contain multiple callback keywords.
+
+        Measurement columns are the union of measurement names in
+        first-appearance order. A column an experiment does not measure is
+        unobserved for it. Each experiment's model grid is the multiset
+        union of its measurement grids (see ``Experiment``), so the model
+        callback may receive repeated x values for replicate samples.
+        Declared units and bases must agree per measurement name and per
+        model-output field, and declared x units across experiments; None
+        (undeclared) agrees with anything.
+
+        If measurements declare uncertainties, each observed residual and
+        its sensitivities are divided by their standard deviation, so the
+        weighted residuals ``(model - data) / sigma`` are dimensionless and
+        quantities in different units can be summed. The standard
+        deviations are stored in ``_residual_std``. ``get_covariance``
+        describes whether they are treated as relative or absolute, and
+        ``StatisticsClass.get_bootsamples`` resamples the standardized
+        residuals.
         No physical-unit or state-column conversion is performed.
 
         """
@@ -581,44 +2240,112 @@ class ParameterEstimation:
 
         # --------------- Data
         self.experim_names = None
+        self.output_names = _validate_output_names(output_names)
 
-        if isinstance(x_data, dict):
-            self.experim_names = list(x_data.keys())
+        experiments = (_experiment_collection(x_data)
+                       if self._compiles_experiments else None)
+        if experiments is not None:
+            supplied = [label for label, value in (
+                ('y_data', y_data), ('measured_ind', measured_ind),
+                ('args_fun', args_fun), ('kwargs_fun', kwargs_fun))
+                if value is not None]
+            if supplied:
+                raise ValueError(
+                    f"{', '.join(supplied)} must be None when x_data holds "
+                    "Experiment objects; observations, measured fields and "
+                    "callback arguments live in each Experiment and its "
+                    "Measurement objects")
+            self.experim_names = list(experiments)
+            compiled = _compile_experiments(experiments, self.output_names)
+            measured_ind = list(compiled.fields)
+            x_data = list(compiled.x_model)  # [x units], model grids
+            if weight_matrix is not None and compiled.residual_std is None:
+                # [u_i * u_j], reordered by name to the column order.
+                weight_matrix = _labelled_weight_matrix(
+                    weight_matrix, compiled.measurement_names)
+            legacy_fields = None
+        else:
+            if self._compiles_experiments and _holds_measurements(x_data):
+                raise TypeError(
+                    "x_data holds Measurement objects; wrap each "
+                    "experiment's measurements in Experiment(...), e.g. "
+                    "x_data=Experiment({'c_A': measurement}) or "
+                    "{'run_1': Experiment([...]), "
+                    "'run_2': Experiment([...])}")
+            if isinstance(x_data, dict):
+                self.experim_names = list(x_data.keys())
 
-        if y_data is None:
-            raise TypeError(
-                "y_data is required; pass observations for each experiment "
-                "in x_data")
+            if y_data is None:
+                raise TypeError(
+                    "y_data is required; pass observations for each "
+                    "experiment in x_data")
 
-        if isinstance(y_data, dict) and self.experim_names is not None:
-            y_data = _ordered_experiment_values(
-                y_data, self.experim_names, 'y_data')
-        elif isinstance(y_data, dict) and len(y_data) > 1:
-            raise ValueError(
-                f"y_data experiment keys {list(y_data)!r} cannot be aligned "
-                "with unnamed x_data; pass x_data as a dictionary with the "
-                "same keys, or y_data as a list in x_data order")
+            if isinstance(y_data, dict) and self.experim_names is not None:
+                y_data = _ordered_experiment_values(
+                    y_data, self.experim_names, 'y_data')
+            elif isinstance(y_data, dict) and len(y_data) > 1:
+                raise ValueError(
+                    f"y_data experiment keys {list(y_data)!r} cannot be "
+                    "aligned with unnamed x_data; pass x_data as a "
+                    "dictionary with the same keys, or y_data as a list in "
+                    "x_data order")
 
-        x_data = convert_types(x_data)
-        y_data = convert_types(y_data, two_d=True)
-        if not x_data or len(x_data) != len(y_data):
-            raise ValueError(
-                "x_data and y_data must contain the same nonzero number of "
-                f"experiments; got {len(x_data)} and {len(y_data)}")
+            x_data = convert_types(x_data)
+            y_data = convert_types(y_data, two_d=True)
+            if not x_data or len(x_data) != len(y_data):
+                raise ValueError(
+                    "x_data and y_data must contain the same nonzero number "
+                    f"of experiments; got {len(x_data)} and {len(y_data)}")
 
-        args_fun = _experiment_arguments(
-            args_fun, len(x_data), self.experim_names, 'args_fun', keyword=False)
-        kwargs_fun = _experiment_arguments(
-            kwargs_fun, len(x_data), self.experim_names, 'kwargs_fun',
-            keyword=True)
+            args_fun = _experiment_arguments(
+                args_fun, len(x_data), self.experim_names, 'args_fun',
+                keyword=False)
+            kwargs_fun = _experiment_arguments(
+                kwargs_fun, len(x_data), self.experim_names, 'kwargs_fun',
+                keyword=True)
 
-        x_model, x_masks, y_data = analyze_data(x_data, y_data)
+            nested = any(isinstance(y, dict) for y in y_data)
+            legacy_fields = None
+            if self._compiles_experiments and not nested:
+                # Legacy adapter: one column per y column, compiled by the
+                # same path as Experiment input. A shared grid is aligned by
+                # identity and passed to the callback unchanged; staggered
+                # grids use the multiset union.
+                names = (self.experim_names if self.experim_names is not None
+                         else ['exp_%i' % (ind + 1)
+                               for ind in range(len(x_data))])
+                alignments = [_legacy_alignment(x, y, name)
+                              for x, y, name in zip(x_data, y_data, names)]
+                if measured_ind is None:
+                    measured_ind = list(range(len(alignments[0][2])))
+                legacy_fields = _validate_legacy_fields(measured_ind)
+                compiled = _compile_experiments(
+                    _legacy_experiments(alignments, legacy_fields, args_fun,
+                                        kwargs_fun, names),
+                    self.output_names)
+            else:
+                # Nested 'spectra'/'non_spectra' dictionaries and
+                # MultipleCurveResolution keep the analyze_data layout: their
+                # spectral residuals are not model outputs minus data.
+                if self.output_names is not None:
+                    raise ValueError(
+                        "output_names is not supported with nested state "
+                        "observation dictionaries or MultipleCurveResolution")
+                compiled = None
 
+        if compiled is None:
+            x_model, x_masks, y_data = analyze_data(x_data, y_data)
+        else:
+            x_model, x_masks, y_data = (compiled.x_model, compiled.x_masks,
+                                        compiled.y_data)
+            args_fun, kwargs_fun = compiled.args_fun, compiled.kwargs_fun
+
+        # [x units]; per experiment, model grid with replicate repeats.
         self.x_model = x_model
         self.x_masks = x_masks
 
         self.x_data = x_data
-        self.y_data = y_data
+        self.y_data = y_data  # [measured-state units]
         self.num_datasets = len(self.y_data)
 
         if self.experim_names is None:
@@ -628,35 +2355,71 @@ class ParameterEstimation:
         if measured_ind is None:
             measured_ind = list(range(y_data[0].shape[1]))
 
+        # Caller's object for legacy input, read once here; the private
+        # resolved copy below selects model outputs.
         self.measured_ind = measured_ind
         self.num_model_states = None
         self.sens_second = None  # sensitivities returned along with obj fun
+
+        # Compiled layout; None for the analyze_data layout.
+        self._measurement_names = (None if compiled is None
+                                   else list(compiled.measurement_names))
+        self._measured_fields = (None if compiled is None
+                                 else list(compiled.fields))
+        # Legacy input with one measured column ignores its field for
+        # one-dimensional callback outputs, as earlier releases did.
+        self._legacy_single_output = (legacy_fields is not None
+                                      and len(legacy_fields) == 1)
+        # Non-negative output columns selected at the last evaluation.
+        self._output_columns = None
+        # Per experiment, measurement-error standard deviations [measurement
+        # units], shape (n_times, n_columns), NaN where unobserved; None
+        # unless measurements declare an uncertainty.
+        self._residual_std = (None if compiled is None
+                              else compiled.residual_std)
 
         # ---------- Arguments
         self.args_fun = args_fun
         self.kwargs_fun = kwargs_fun
 
-        num_data = []
-        for ind in range(self.num_datasets):
-            if self.x_masks[ind] is None:
-                num_data.append(self.y_data[ind].size)
-            else:
-                if isinstance(self.x_masks[ind], dict):
-                    num = [sum(mask) for mask in self.x_masks[ind].values()]
-                    num_data.append(sum(num))
+        if compiled is None:
+            num_data = []
+            for ind in range(self.num_datasets):
+                if self.x_masks[ind] is None:
+                    num_data.append(self.y_data[ind].size)
                 else:
-                    num_data.append(self.x_masks[ind].sum())
+                    if isinstance(self.x_masks[ind], dict):
+                        num = [sum(mask)
+                               for mask in self.x_masks[ind].values()]
+                        num_data.append(sum(num))
+                    else:
+                        num_data.append(self.x_masks[ind].sum())
+        else:
+            num_data = list(compiled.num_data)  # observed entries only
 
         self.num_data_total = sum(num_data)
         self.num_data = num_data
 
+        if self._residual_std is not None and weight_matrix is not None:
+            raise ValueError(
+                "weight_matrix must be None when measurements declare an "
+                "uncertainty: a correlated covariance (weight_matrix) and "
+                "per-sample standard deviations are alternative weightings")
+
+        num_columns = (len(self.measured_ind) if compiled is None
+                       else len(self._measured_fields))  # [-]
         if weight_matrix is None:
-            weight_matrix = np.eye(len(self.measured_ind))  # [-]
+            weight_matrix = np.eye(num_columns)  # [-]
 
         # Lower triangular; row i in [1/u_i] for measured state unit u_i,
         # columns [-]. sigma_inv @ sigma_inv.T equals inv(weight_matrix) in
         # measured-state order.
         self.sigma_inv = _measurement_precision_root(weight_matrix)
+        if compiled is not None and self.sigma_inv.shape[0] != num_columns:
+            raise ValueError(
+                "weight_matrix must have one row and column per measurement "
+                f"column ({num_columns}: {self._measurement_names!r}); got "
+                f"shape {self.sigma_inv.shape}")
         # [u_i * u_j], validated above; source of the marginal precision
         # roots of partially observed sample rows. A private copy, because
         # those roots are built lazily and must match sigma_inv even if the
@@ -705,7 +2468,14 @@ class ParameterEstimation:
                                      for name in self.name_params]
 
         # ---------- States
-        if name_states is None:
+        if name_states is None and experiments is not None:
+            self.name_states = list(self._measurement_names)
+        elif name_states is None and legacy_fields is not None:
+            # Output names label str fields.
+            self.name_states = [field if isinstance(field, str)
+                                else r'$y_{}$'.format(field + 1)
+                                for field in legacy_fields]
+        elif name_states is None:
             self.name_states = [r'$y_{}$'.format(ind + 1)
                                 for ind in self.measured_ind]
         else:
@@ -729,7 +2499,9 @@ class ParameterEstimation:
         self.method = None
 
     def _weight_sample_rows(self, values: np.ndarray,
-                            x_mask: Optional[np.ndarray]) -> np.ndarray:
+                            x_mask: Optional[np.ndarray],
+                            residual_std: Optional[np.ndarray] = None
+                            ) -> np.ndarray:
         """Whiten residual-like values sample row by sample row.
 
         Parameters
@@ -744,11 +2516,19 @@ class ParameterEstimation:
             Observation mask, shape ``(n_times, n_measured)``, True where the
             state was measured at that model time. None means every state was
             measured at every model time.
+        residual_std : numpy.ndarray or None, optional
+            Measurement-error standard deviation of each entry, shape
+            ``(n_times, n_measured)``, in the measured state's unit; read
+            only at observed entries. None (the default) applies the
+            ``weight_matrix`` weighting instead.
 
         Returns
         -------
         numpy.ndarray
-            Weighted values with the shape of ``values``. For each sample row
+            Weighted values with the shape of ``values``. With
+            ``residual_std``, observed entries are ``values / residual_std``
+            (dimensionless residuals, sensitivities per parameter unit).
+            Otherwise, for each sample row
             with observed states ``o``, entries ``o`` are
             ``values[k, ..., o] @ S_o``, where ``S_o`` is the lower Cholesky
             factor of ``inv(weight_matrix[o][:, o])``; unobserved entries are
@@ -758,6 +2538,9 @@ class ParameterEstimation:
 
         Notes
         -----
+        Residuals and sensitivities pass through the same weighting, so the
+        weighted Jacobian is the derivative of the weighted residuals.
+
         Whitening the zero-filled full row with ``sigma_inv`` would instead
         apply the conditional precision ``P[o][:, o]`` of the full precision
         ``P = inv(weight_matrix)``, which exceeds the marginal precision of
@@ -769,6 +2552,20 @@ class ParameterEstimation:
         without staggered grids are unchanged.
         """
         num_measured = values.shape[-1]
+        if residual_std is not None:
+            observed = (np.ones(residual_std.shape, dtype=bool)
+                        if x_mask is None else x_mask)
+            std = residual_std  # [u_i]; NaN where unobserved
+            if values.ndim == 3:
+                std = std[:, np.newaxis, :]  # [u_i]
+                observed = observed[:, np.newaxis, :]
+            # [value unit / u_i]; divided directly, so tiny standard
+            # deviations cannot overflow a reciprocal. Unobserved entries
+            # are exactly zero.
+            weighted = np.zeros(values.shape)
+            np.divide(values, std, out=weighted, where=observed)
+            return weighted
+
         if x_mask is None:
             # [value unit / u_i]: whitened values of every row.
             weighted = np.dot(values.reshape(-1, num_measured), self.sigma_inv)
@@ -806,15 +2603,204 @@ class ParameterEstimation:
 
         return weighted
 
-    def select_sens(self, sens_ordered, num_states, times=None):
+    def _residual_std_runs(self) -> list:
+        """Return the per-experiment standard deviations used for weighting.
 
+        Returns
+        -------
+        list
+            ``_residual_std`` entries, shape ``(n_times, n_columns)`` in the
+            measurement units, or one None per experiment when no
+            uncertainty is declared.
+        """
+        if self._residual_std is None:
+            return [None] * self.num_datasets
+        return self._residual_std
+
+    def _check_model_output(self, ind: int, output,
+                            two_dimensional: bool = False) -> None:
+        """Check the shape of one experiment's callback output.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``experim_names`` order.
+        output : numpy.ndarray
+            Model states returned by the callback, in model units.
+        two_dimensional : bool, optional
+            Require a two-dimensional output, as curve resolution selects
+            state columns. The default False also accepts one dimension.
+
+        Raises
+        ------
+        ValueError
+            If ``output`` does not have the allowed number of dimensions or
+            one row per model-grid sample (the first-axis length of
+            ``x_model[ind]``).
+        """
+        grid = self.x_model[ind]  # [x units]
+        num_rows = 1 if np.ndim(grid) == 0 else np.shape(grid)[0]  # [-]
+        shape = np.shape(output)
+        allowed = (2,) if two_dimensional else (1, 2)
+        if len(shape) not in allowed or shape[0] != num_rows:
+            expected = ('a two-dimensional' if two_dimensional
+                        else 'a one- or two-dimensional')
+            raise ValueError(
+                "The model callback returned an output of shape "
+                f"{shape} for experiment {self.experim_names[ind]!r}; "
+                f"expected {expected} array with {num_rows} rows, one per "
+                "model-grid sample")
+
+    def _select_output_columns(self, ind: int, output) -> list:
+        """Resolve the model-output columns selected by the measurements.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``experim_names`` order.
+        output : numpy.ndarray
+            Callback output of shape ``(n_times,)`` or
+            ``(n_times, n_outputs)``, in model units.
+
+        Returns
+        -------
+        list of int
+            Non-negative output column per measurement column, also stored
+            as ``_output_columns`` for the sensitivity selection.
+
+        Raises
+        ------
+        ValueError
+            If the column count differs from ``output_names`` or a
+            measurement selects a column the output does not have.
+
+        Notes
+        -----
+        The selector is resolved from the private copy of the fields taken
+        at construction, so later changes to a caller's ``measured_ind``
+        cannot make residuals and sensitivities select different columns.
+        Negative legacy indices count from the last output column. Legacy
+        input with a single measured column ignores its field when the
+        output is one-dimensional, as earlier releases did.
+        """
+        experiment = self.experim_names[ind]
+        # [-], model output columns; a 1-D output has one.
+        num_columns = 1 if np.ndim(output) == 1 else np.shape(output)[1]
+        if (self.output_names is not None
+                and num_columns != len(self.output_names)):
+            raise ValueError(
+                f"The model callback returned {num_columns} output columns "
+                f"for experiment {experiment!r}, but output_names declares "
+                f"{len(self.output_names)}: {list(self.output_names)!r}")
+        if np.ndim(output) == 1 and self._legacy_single_output:
+            columns = [0]
+        else:
+            columns = []
+            for name, field in zip(self._measurement_names,
+                                   self._measured_fields):
+                if not -num_columns <= field < num_columns:
+                    raise ValueError(
+                        f"Measurement {name!r} selects model output column "
+                        f"{field}, but the model callback returned "
+                        f"{num_columns} output column(s) for experiment "
+                        f"{experiment!r}")
+                columns.append(field % num_columns)
+        self._output_columns = columns
+        return columns
+
+    def get_residual_layout(self) -> pd.DataFrame:
+        """Describe each entry of the weighted residual vector.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per weighted residual, in the order of
+            ``get_objective(..., out_array=True)``: experiment order, then
+            measurement column order, then model-grid sample order. Columns:
+            ``'experiment'`` (name), ``'measurement'`` (column name),
+            ``'field'`` (model-output column: after an evaluation, the
+            non-negative column actually selected, which is 0 for legacy
+            single-column input with a one-dimensional callback output;
+            before any evaluation, the declared column resolved through
+            ``output_names``, with negative legacy indices as given),
+            ``'x'`` (model-grid entry in the model's x units; a row of a
+            multi-dimensional legacy grid) and ``'observed'`` (bool;
+            unobserved entries are exactly zero).
+            Columns of ``info['jac']`` and rows of ``sens`` follow the same
+            layout.
+
+        Raises
+        ------
+        NotImplementedError
+            For the nested ``'spectra'``/``'non_spectra'`` layout, whose
+            residuals are not one entry per measurement and sample.
+        """
+        if self._measurement_names is None:
+            raise NotImplementedError(
+                "get_residual_layout is not available for nested state "
+                "observation dictionaries or MultipleCurveResolution")
+
+        fields = (self._measured_fields if self._output_columns is None
+                  else self._output_columns)
+        layout = {'experiment': [], 'measurement': [], 'field': [], 'x': [],
+                  'observed': []}
+        for name, x_model, x_mask in zip(self.experim_names, self.x_model,
+                                         self.x_masks):
+            # [x units], one entry (or legacy grid row) per sample.
+            samples = [x_model] if np.ndim(x_model) == 0 else list(x_model)
+            num_times = len(samples)  # [-]
+            for column, (measurement, field) in enumerate(
+                    zip(self._measurement_names, fields)):
+                layout['experiment'] += [name] * num_times
+                layout['measurement'] += [measurement] * num_times
+                layout['field'] += [field] * num_times
+                layout['x'] += samples
+                layout['observed'] += (
+                    [True] * num_times if x_mask is None
+                    else x_mask[:, column].tolist())
+
+        return pd.DataFrame(layout).astype({'field': int, 'observed': bool})
+
+    def select_sens(self, sens_ordered, num_states, times=None):
+        """Select the sensitivities of the measured model outputs.
+
+        Parameters
+        ----------
+        sens_ordered : numpy.ndarray
+            State-major sensitivities, shape ``(num_states * n_times,
+            n_params)``, in state unit per parameter unit.
+        num_states : int
+            Number of model output columns.
+        times : sequence of array_like, optional
+            Row selection per measured output. The default None keeps all
+            rows.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            One ``(n_times, n_params)`` block per measurement column, in
+            measurement column order.
+
+        Notes
+        -----
+        Compiled layouts use the same private selector as the residuals
+        (``_select_output_columns``), so the Jacobian is the derivative of
+        the residuals even if a caller later changes its ``measured_ind``.
+        """
         parts = np.split(sens_ordered, num_states, axis=0)
 
+        if self._measured_fields is None:
+            selector = self.measured_ind
+        elif self._output_columns is not None:
+            selector = self._output_columns
+        else:
+            selector = self._measured_fields
+
         if times is None:
-            selected = [parts[ind] for ind in self.measured_ind]
+            selected = [parts[ind] for ind in selector]
         else:
             selected = [parts[ind][times[count]]
-                        for count, ind in enumerate(self.measured_ind)]
+                        for count, ind in enumerate(selector)]
 
         return selected
 
@@ -887,14 +2873,35 @@ class ParameterEstimation:
             variances in squared state units. The objective has the squared
             unit of ``r``.
 
+        Raises
+        ------
+        ValueError
+            If the model output is not one- or two-dimensional with one row
+            per model-grid sample, lacks a measured column, or its column
+            count differs from ``output_names``.
+
         Notes
         -----
-        With staggered observation grids, unobserved model-grid entries keep
-        their positions in ``r`` but are exactly zero, and each partially
+        ``r`` is packed by experiment, then measurement column, then
+        model-grid sample; ``get_residual_layout`` lists the entries.
+        With staggered observation grids or missing observations, unobserved
+        model-grid entries keep their positions in ``r`` but are exactly
+        zero, and each partially
         observed sample row is weighted by the marginal precision of its
         observed states (see ``_weight_sample_rows``), so the objective is
         ``1/2 * sum_k r_ok @ inv(weight_matrix[o_k][:, o_k]) @ r_ok`` over the
-        observed residuals ``r_ok`` of each sample row.
+        observed residuals ``r_ok`` of each sample row. When measurements
+        declare uncertainties, each observed entry is instead
+        ``(model - data) / sigma`` [-], and the objective is half the sum of
+        their squares.
+
+        While ``objfun_iter`` is a list, each evaluation appends a sum of
+        squares to it (the source of ``paramest_df['obj_fun']``). When
+        measurements declare uncertainties this is the weighted sum of
+        squares ``r @ r`` [-], twice the returned objective, because the raw
+        residuals may mix physical units. Otherwise it remains the unweighted
+        sum of squared raw residuals in squared measured-state units, as in
+        earlier releases, also when ``weight_matrix`` is given.
 
         """
         # Store parameter values
@@ -923,7 +2930,15 @@ class ParameterEstimation:
             else:  # call a separate function for jacobian
                 y_prof = result
 
-            if y_prof.ndim == 1:
+            self._check_model_output(ind, y_prof)
+            if self._measured_fields is not None:
+                columns = self._select_output_columns(ind, y_prof)
+                # [model state units]; one column for 1-D outputs.
+                y_run = y_prof.reshape(len(y_prof), -1)[:, columns]
+                self.num_model_states = 1 if y_prof.ndim == 1 else (
+                    y_prof.shape[1])
+
+            elif y_prof.ndim == 1:
                 y_run = y_prof.reshape(-1, 1)
                 self.num_model_states = 1
 
@@ -931,14 +2946,13 @@ class ParameterEstimation:
                 y_run = y_prof[:, self.measured_ind]
                 self.num_model_states = y_prof.shape[1]
 
-            # Replace missing data with model values so as residuals are zero
-            # for those entries
-            y_data = self.y_data[ind].copy()
+            # [model state units]; residuals of unobserved entries are set
+            # to exactly zero, whatever the observation dtype (writing model
+            # values into a float32 copy would round them).
             x_mask = self.x_masks[ind]
+            resid_run = y_run - self.y_data[ind]
             if x_mask is not None:
-                y_data[~x_mask] = y_run[~x_mask]
-
-            resid_run = y_run - y_data
+                resid_run[~x_mask] = 0
 
             # Store
             y_runs.append(y_run)
@@ -946,22 +2960,28 @@ class ParameterEstimation:
 
         # [measured-state unit / weight_matrix unit**0.5]; [-] only with
         # state-variance weights. Unobserved entries are exactly zero.
-        weighted_residuals = [self._weight_sample_rows(resid, x_mask)
-                              for resid, x_mask in zip(resid_runs,
-                                                       self.x_masks)]
+        weighted_residuals = [
+            self._weight_sample_rows(resid, x_mask, residual_std)
+            for resid, x_mask, residual_std in zip(
+                resid_runs, self.x_masks, self._residual_std_runs())]
 
         if len(sens_second) > 0:
             self.sens_second = sens_second
 
-        if type(self.objfun_iter) is list:
-            objfun_val = np.linalg.norm(np.concatenate(resid_runs))**2
-            self.objfun_iter.append(objfun_val)
-
-        residuals = self.optimize_flag * np.concatenate(resid_runs)
-
         # Weighted-residual units as above, flattened state-major.
         residual_out = np.concatenate([ar.T.ravel()
                                        for ar in weighted_residuals])
+
+        if type(self.objfun_iter) is list:
+            if self._residual_std is None:
+                # [(measured-state unit)**2], raw SSE kept for legacy history
+                objfun_val = np.linalg.norm(np.concatenate(resid_runs))**2
+            else:
+                # [-], weighted SSE; raw residuals may mix physical units.
+                objfun_val = np.dot(residual_out, residual_out)
+            self.objfun_iter.append(objfun_val)
+
+        residuals = self.optimize_flag * np.concatenate(resid_runs)
 
         if set_self:
             self.y_runs = y_runs
@@ -1014,7 +3034,9 @@ class ParameterEstimation:
         -----
         Analytical (``jac_fun`` or model-returned) and finite-difference
         model sensitivities are weighted row by row exactly like the
-        residuals. Columns of unobserved model-grid entries are therefore
+        residuals, including division by declared measurement standard
+        deviations. Columns follow ``get_residual_layout``. Columns of
+        unobserved model-grid entries are therefore
         zero and contribute no information to ``jac @ jac.T`` or to the
         parameter covariance.
 
@@ -1048,8 +3070,9 @@ class ParameterEstimation:
             raw_sens = self.sens_second
 
         weighted_sens = []
-        for sensit, x_model, x_mask in zip(raw_sens, self.x_model,
-                                           self.x_masks):
+        for sensit, x_model, x_mask, residual_std in zip(
+                raw_sens, self.x_model, self.x_masks,
+                self._residual_std_runs()):
             sensit = self.select_sens(sensit, self.num_model_states)
 
             # (n_params * n_times, n_measured), parameter-major rows; this
@@ -1064,7 +3087,8 @@ class ParameterEstimation:
             # weighted residuals returned by get_objective.
             # (n_times, n_params, n_measured) [weighted residual unit /
             # parameter unit]
-            weighted = self._weight_sample_rows(sens_by_row, x_mask)
+            weighted = self._weight_sample_rows(sens_by_row, x_mask,
+                                                residual_std)
             # (n_measured * n_times, n_params), same units; state-major rows
             # (state, time) matching the residual vector.
             weighted = weighted.transpose(2, 0, 1).reshape(
@@ -1154,7 +3178,13 @@ class ParameterEstimation:
         verbose : bool, optional
             If True, request verbose solver output when supported.
         store_iter : bool, optional
-            If True, store unique parameter/objective iterates.
+            If True, store unique parameter/objective iterates in
+            ``params_iter``, ``objfun_iter`` and the ``paramest_df`` table,
+            whose ``'obj_fun'`` column is the weighted sum of squares [-]
+            (twice the objective) when measurements declare uncertainties,
+            and otherwise the unweighted sum of squared raw residuals in
+            squared measured-state units, also with ``weight_matrix`` (see
+            ``get_objective``).
         method : {'LM', 'IPOPT'}, optional
             Optimization method used for fitting.
         bounds : sequence, optional
@@ -1170,14 +3200,17 @@ class ParameterEstimation:
             ``(i, j)`` has the product of parameter i and parameter j units.
         info : dict
             Solver information at the accepted parameters. ``info['fun']`` is
-            the weighted residual vector, ordered by experiment then state
-            then sample, in the units documented by ``assemble_solver_info``:
-            measured-state units with the default identity weights and [-]
-            with state-variance weights. ``info['jac']`` has shape
+            the weighted residual vector, ordered by experiment then
+            measurement column then model-grid sample (see
+            ``get_residual_layout``), in the units documented by
+            ``assemble_solver_info``: measured-state units with the default
+            identity weights and [-] with state-variance weights or declared
+            measurement uncertainties. ``info['jac']`` has shape
             ``(num_params, len(info['fun']))``; each entry has its ``fun``
             entry's unit divided by the matching parameter unit.
-            With staggered measurement grids, columns include unobserved
-            model-grid entries, so their count can exceed ``num_data_total``;
+            With staggered measurement grids or missing observations, columns
+            include unobserved model-grid entries, so their count can exceed
+            ``num_data_total``;
             those entries of ``info['fun']`` and columns of ``info['jac']``
             are exactly zero, so they add no residual or information.
             LM additionally supplies its accepted ``x`` and solver diagnostics.
@@ -1281,7 +3314,67 @@ class ParameterEstimation:
 
         return opt_par, covar_params, info
 
-    def get_covariance(self, include_mse=True):
+    def get_covariance(self, include_mse: bool = True) -> np.ndarray:
+        """Estimate the parameter covariance at the accepted parameters.
+
+        The linearized (Gauss-Newton) covariance is built from the weighted
+        Jacobian ``J = info_opt['jac']``, shape ``(num_params, n_entries)``,
+        and the weighted residuals ``r = info_opt['fun']`` stored by
+        ``optimize_fn``.
+
+        Parameters
+        ----------
+        include_mse : bool, optional
+            If True (the default), return ``s2 * inv(J @ J.T)`` with the
+            residual mean square ``s2 = r @ r / (num_data_total -
+            num_params)``. If False, return ``inv(J @ J.T)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Covariance, shape ``(num_params, num_params)``, in optimized
+            parameter (``name_params``) order. Entry ``(i, j)`` has the
+            product of the units of parameters ``i`` and ``j`` when the
+            weighted residuals are dimensionless (declared measurement
+            uncertainties, or a ``weight_matrix`` holding measurement-error
+            covariances in squared measurement units), for both values of
+            ``include_mse``. With the default identity weighting this holds
+            for ``include_mse=True`` only if every residual has the same
+            physical unit; ``include_mse=False`` is then additionally
+            divided by that unit squared. With identity weighting of
+            residuals in different units (e.g. [mol/L] and [K]) neither
+            form is a physical covariance: it depends on the units chosen
+            for each measurement. Also stored as ``covar_params``; the
+            matching correlation matrix [-] is stored as ``correl_params``.
+
+        Raises
+        ------
+        AttributeError
+            If no fit has been run, so ``info_opt`` does not exist.
+        numpy.linalg.LinAlgError
+            If ``J @ J.T`` is singular, for example when a parameter does
+            not affect any observed entry.
+
+        Notes
+        -----
+        Only observed entries count as data: unobserved entries have zero
+        weighted residual and zero Jacobian column, and the degrees of
+        freedom are ``num_data_total - num_params`` with ``num_data_total``
+        the number of observed entries. The residual mean square requires
+        more observed entries than optimized parameters.
+
+        ``s2`` is the reduced chi-square of the weighted residuals [-] when
+        they are dimensionless, and the residual variance in the
+        measurement unit squared with identity weighting of a single
+        physical unit. The default
+        ``include_mse=True`` therefore treats declared standard deviations
+        (or ``weight_matrix``) as relative weights whose common scale is
+        re-estimated from the residual scatter, like
+        ``scipy.optimize.curve_fit(..., absolute_sigma=False)``. When the
+        declared standard deviations are known in absolute terms,
+        ``include_mse=False`` gives the covariance that treats them as
+        absolute (``absolute_sigma=True``); both coincide when ``s2 = 1``.
+        """
         jac = self.info_opt['jac']
         resid = self.info_opt['fun']
 
@@ -1625,6 +3718,17 @@ class Deconvolution:
 
 
 class MultipleCurveResolution(ParameterEstimation):
+    """Estimate kinetic parameters from spectra by curve resolution (MCR).
+
+    Concentration profiles from the model are resolved against measured
+    absorbance spectra with least-squares pure-component absorptivities;
+    optional non-spectral states are fitted as model minus data.
+    """
+
+    # Spectral residuals are not model outputs minus observations, so data
+    # keep the legacy analyze_data layout (see __init__ Notes).
+    _compiles_experiments = False
+
     def __init__(self, func, param_seed, time_data, y_spectra, mult_penalty=1,
                  global_analysis=True,
                  args_fun=None, kwargs_fun=None,
@@ -1681,6 +3785,9 @@ class MultipleCurveResolution(ParameterEstimation):
             If a spectra dictionary lacks ``'spectra'`` or ``weight_matrix``
             does not match the residual columns, besides the
             ``ParameterEstimation`` input errors.
+        TypeError
+            If ``time_data`` holds ``Experiment`` or ``Measurement``
+            objects.
 
         Notes
         -----
@@ -1690,7 +3797,17 @@ class MultipleCurveResolution(ParameterEstimation):
         non-spectral``); ``sigma_inv`` and the marginal roots of partially
         observed rows are built for it. Block-diagonal weights are
         unaffected.
+
+        Data keep the legacy ``analyze_data`` layout instead of the
+        ``Experiment``/``Measurement`` compilation of ``ParameterEstimation``:
+        spectral residuals are absorbances resolved by curve resolution, with
+        one column per wavelength, not model-output columns minus data.
         """
+        if _holds_experiments(time_data) or _holds_measurements(time_data):
+            raise TypeError(
+                "MultipleCurveResolution does not accept Experiment or "
+                "Measurement objects; pass spectral observations through "
+                "time_data and y_spectra")
 
         super().__init__(func, param_seed, time_data, y_spectra, measured_ind,
                          args_fun, kwargs_fun, optimize_flags, jac_fun,
@@ -1932,6 +4049,12 @@ class MultipleCurveResolution(ParameterEstimation):
             are zero.
         absorptivity_pure : numpy.ndarray
             Least-squares absorptivities, ``(n_spectral_states, n_lambda)``.
+
+        Raises
+        ------
+        ValueError
+            If a callback output is not two-dimensional with one row per
+            model-grid sample of its experiment.
         """
         c_runs = []
         states_non = []
@@ -1949,6 +4072,7 @@ class MultipleCurveResolution(ParameterEstimation):
             else:
                 states = result
 
+            self._check_model_output(ind, states, two_dimensional=True)
             conc_target = states[:, self.measured_ind['spectra']]
 
             if self.has_non:
