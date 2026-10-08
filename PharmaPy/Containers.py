@@ -938,6 +938,12 @@ class Mixer:
         Entirely static liquid mixing publishes a single time [s]
         and contributes no duration. Duration-based flowsheet accounting of
         instantaneous units is a separate SimExec concern.
+
+        Solids mixing is also instantaneous: ``result`` and ``outputs``
+        hold one sample at time 0 s, so a flowsheet records zero
+        processing time for it; see :meth:`_publish_solids_result` for the
+        published names, shapes, and bases. The returned tuple is
+        unchanged.
         """
 
         # ---------- Read inputs
@@ -952,6 +958,8 @@ class Mixer:
 
         if any(solids_flag):
             self.states_in_dict = {'Inlet': states_in_dict}
+            # Instantaneous static mixing: one sample, no invented duration.
+            time_prof = np.zeros(1)  # [s]
             u_input, ind_solids = self.get_inputs_solids()
 
             path = self.Inlets[ind_solids].Liquid_1.path_data
@@ -1033,8 +1041,9 @@ class Mixer:
 
         Parameters
         ----------
-        time : sequence of float or None
-            Profile times [s]; None for static solids mixing.
+        time : sequence of float
+            Profile times [s]; for static solids mixing, the one-sample zero
+            time of shape (1,).
         states : tuple
             Returned balance quantities: liquid-only amount [kg] or flow
             [kg/s], composition [-], temperature [K]; for solids, liquid and
@@ -1045,7 +1054,9 @@ class Mixer:
         -----
         Solid populations and phase amounts are already reconciled by
         ``balances_solids``. Retrieval commits temperature without replacing
-        a total solid population with a volume-specific slurry distribution.
+        a total solid population with a volume-specific slurry distribution,
+        then publishes ``result`` and ``outputs`` through
+        :meth:`_publish_solids_result`.
         For continuous liquid mixing, outlet temperature is committed before
         ``updatePhase`` reconciles volumetric flow at that temperature.
         Entirely static, instantaneous liquid mixing publishes one time [s]
@@ -1056,14 +1067,7 @@ class Mixer:
                        for inlet in self.Inlets]
 
         if any(solids_flag):
-            mass_liq, mass_sol, massfrac_liq, distrib, temp = states
-
-            if self.type_out == 'Slurry':
-                self.names_states_out = ['mass_liq', 'temp', 'num_distrib']
-            else:
-                self.names_states_out = ['mass_liq', 'temp', 'total_distrib']
-
-            self.outputs = states
+            temp = states[-1]  # [K], adiabatic outlet temperature
 
             # Amounts and populations were reconciled during construction.
             self.Outlet.Liquid_1.temp = temp
@@ -1071,6 +1075,8 @@ class Mixer:
             self.Outlet.temp = temp  # [K]
 
             self.timeProf = [0]
+
+            self._publish_solids_result(time, states)
 
         else:
             mass, massfrac, temp = states
@@ -1110,6 +1116,90 @@ class Mixer:
                                           mass=last_mass)
 
             self.Outlet = self.Liquid_1
+
+    def _publish_solids_result(self, time: np.ndarray, states: tuple) -> None:
+        """Publish the one-sample result of instantaneous solids mixing.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Result time [s], shape (1,). Static mixing has one sample and
+            no duration.
+        states : tuple
+            Balanced outlet quantities from :meth:`balances_solids`: liquid
+            and solid amounts [kg] (batch) or mass flows [kg/s]
+            (continuous), liquid mass fractions [-] of shape
+            (num_species,), distribution of shape (num_sizes,), and
+            temperature [K]. The distribution is slurry-volume specific
+            [#/m**3/um] for Slurry and SlurryStream outlets and a total
+            population [#/um] for a Cake outlet.
+
+        Notes
+        -----
+        Replaces ``states_di``, ``name_states``, ``dim_states`` and
+        ``names_states_out`` with ``mass_liq``, ``mass_solid``,
+        ``mass_frac``, ``temp``, and the distribution, named ``distrib``
+        for Slurry and SlurryStream outlets and ``total_distrib`` for a
+        Cake, as crystallizers name these two population bases. All are
+        algebraic. ``outputs`` is a dictionary and ``result`` is a
+        ``DynamicResult`` (attribute access, not subscriptable) whose
+        attributes reference the same arrays, for example
+        ``result.temp is outputs['temp']``. Every state has a leading time
+        axis of length one: amounts and temperature (1,), mass fractions
+        (1, num_species) in the outlet liquid's database species order, and
+        the distribution (1, num_sizes). Both also carry ``time`` [s] and
+        the size grid ``x_cryst`` [um] of shape (num_sizes,), the grid name
+        used by crystallizer results.
+
+        A SlurryStream distribution is the solid number-rate distribution
+        [#/um/s] divided by the slurry volumetric flow [m**3/s], hence
+        [#/m**3/um] like a batch Slurry. Continuous amounts keep the names
+        ``mass_liq`` and ``mass_solid``, with [kg/s] recorded in
+        ``states_di``, because ``NameAnalysis.getBipartite`` pairs any
+        upstream name containing ``flow`` with a downstream flow state
+        before it checks exact name matches.
+        """
+        mass_liq, mass_solid, massfrac_liq, distrib, temp = states
+        species = list(self.Outlet.Liquid_1.name_species)
+        num_species = len(species)
+        x_grid = np.array(self.Outlet.Solid_1.x_distrib, dtype=float)  # [um]
+        num_sizes = len(x_grid)
+
+        # Phase amounts stay off the 'flow' names that getBipartite would
+        # pair with a downstream flow state; the basis lives in the units.
+        amount_units = 'kg/s' if self.is_continuous else 'kg'
+        if self.type_out == 'Slurry':
+            distrib_name, distrib_units = 'distrib', '#/m**3/um'
+        else:
+            distrib_name, distrib_units = 'total_distrib', '#/um'
+
+        self.states_di = {
+            'mass_liq': {'units': amount_units, 'dim': 1, 'type': 'alg'},
+            'mass_solid': {'units': amount_units, 'dim': 1, 'type': 'alg'},
+            'mass_frac': {'units': '', 'dim': num_species, 'index': species,
+                          'type': 'alg'},
+            'temp': {'units': 'K', 'dim': 1, 'type': 'alg'},
+            distrib_name: {'units': distrib_units, 'dim': num_sizes,
+                           'index': list(range(num_sizes)), 'type': 'alg'},
+            }
+        self.name_states = list(self.states_di.keys())
+        self.dim_states = [di['dim'] for di in self.states_di.values()]
+        self.names_states_out = self.name_states.copy()
+
+        result = {
+            'mass_liq': np.array(mass_liq, dtype=float).reshape(1),  # [kg] or [kg/s]
+            'mass_solid': np.array(mass_solid, dtype=float).reshape(1),  # [kg] or [kg/s]
+            'mass_frac': np.array(massfrac_liq, dtype=float).reshape(
+                1, num_species),  # [-]
+            'temp': np.array(temp, dtype=float).reshape(1),  # [K]
+            distrib_name: np.array(distrib, dtype=float).reshape(
+                1, num_sizes),  # [#/m**3/um] or [#/um]
+            'x_cryst': x_grid,  # [um]
+            'time': np.array(time, dtype=float).reshape(1),  # [s]
+            }
+
+        self.result = DynamicResult(self.states_di, **result)
+        self.outputs = result
 
 
 class DynamicCollector:
