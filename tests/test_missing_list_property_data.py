@@ -48,10 +48,15 @@ TEMP_REF = 298.15  # [K], default lower limit of the enthalpy integrals
 WATSON_EXPONENT = 0.38  # [-]
 # Closed-form expectations differ from PharmaPy's sums only by roundoff.
 CLOSED_FORM_RTOL = 1e-12  # [-]
-# Newton-root tolerance: scipy.optimize.newton (secant) stops when a step is
-# below its default tol = 1.48e-8 in the root's units, here [K]; the closed-
-# form expectations are exact, so 1e-6 K leaves margin for the last step.
+# Newton-root tolerance (bubble and dew points, Mixer outlet temperature):
+# scipy.optimize.newton stops when a step is below its default tol = 1.48e-8
+# in the root's units, here [K]; the closed-form expectations are exact, so
+# 1e-6 K leaves margin for the last step.
 BUBBLE_POINT_ATOL = 1e-6  # [K]
+# Same stopping rule for bubble pressures: newton's tol = 1.48e-8 applies to
+# the secant step in [Pa]; 1e-6 Pa keeps the same margin and stays far above
+# the float spacing of the 1e3-1e5 Pa roots compared (about 1e-11 Pa).
+BUBBLE_PRESSURE_ATOL = 1e-6  # [Pa]
 
 # --------------------------------------------------------------------------
 # Parser fixture: three species with mixed present and missing properties.
@@ -853,6 +858,94 @@ def test_liquid_viscosity_needs_visc_liq_only_for_present_species(
         liquid.getViscosityPure()
 
 
+INERT_VISC = (-1.0, 100.0, 0.0, 0.0)  # [-], [K], [1/K], [1/K**2], synthetic
+
+
+def _log_mixing(pure, frac):
+    """Closed-form logarithmic liquid-viscosity mixing.
+
+    Parameters
+    ----------
+    pure : numpy.ndarray
+        Pure viscosities [Pa*s], shape (num_temps, num_species).
+    frac : numpy.ndarray
+        Mole fractions [-], shape (num_species,) or (num_temps,
+        num_species).
+
+    Returns
+    -------
+    numpy.ndarray
+        ``exp(sum_i x_i * ln(mu_i))`` [Pa*s], shape (num_temps,).
+    """
+    return np.exp((frac * np.log(pure)).sum(axis=-1))
+
+
+@pytest.mark.unit
+def test_liquid_viscosity_accepts_temperature_arrays(tmp_path):
+    """Array temperatures give one row per temperature, like getEnthalpy.
+
+    Pure and mixture viscosities equal the closed-form correlation and
+    logarithmic mixing rule at each temperature, for one composition and
+    for a profile paired row by row.
+    """
+    database = copy.deepcopy(LIQUID_DATABASE)
+    database["inert"]["visc_liq"] = list(INERT_VISC)
+    liquid = _liquid(_write(tmp_path, database), INERT_PRESENT)
+    temps = np.array([300.0, LIQUID_TEMP, 380.0])  # [K], asymmetric spacing
+    composition = np.array(INERT_PRESENT)  # [-]
+    profile = np.array([INERT_PRESENT, [0.5, 0.25, 0.25],
+                        [0.75, 0.25, 0.0]])  # [-], paired with temps
+    closed_form = np.array([[_liquid_viscosity(coefs, temp)
+                             for coefs in (SOLVENT_VISC, SOLUTE_VISC,
+                                           INERT_VISC)]
+                            for temp in temps])  # [Pa*s]
+
+    pure = liquid.getViscosityPure("liquid", temps)  # [Pa*s]
+    mixed = liquid.getViscosity(temps, mole_frac=composition)  # [Pa*s]
+    paired = liquid.getViscosity(temps, mole_frac=profile)  # [Pa*s]
+
+    np.testing.assert_allclose(pure, closed_form, rtol=CLOSED_FORM_RTOL)
+    np.testing.assert_allclose(mixed, _log_mixing(closed_form, composition),
+                               rtol=CLOSED_FORM_RTOL)
+    np.testing.assert_allclose(paired, _log_mixing(closed_form, profile),
+                               rtol=CLOSED_FORM_RTOL)
+
+
+@pytest.mark.unit
+def test_liquid_viscosity_arrays_need_visc_liq_only_where_present(
+        liquid_path):
+    """The inert lacks visc_liq: absent rows evaluate, a present row raises."""
+    liquid = _liquid(liquid_path, INERT_ABSENT)
+    temps = np.array([300.0, LIQUID_TEMP])  # [K]
+    absent = np.array([INERT_ABSENT, [0.5, 0.5, 0.0]])  # [-]
+    closed_form = np.array([[_liquid_viscosity(coefs, temp)
+                             for coefs in (SOLVENT_VISC, SOLUTE_VISC)]
+                            for temp in temps])  # [Pa*s]
+
+    paired = liquid.getViscosity(temps, mole_frac=absent)  # [Pa*s]
+
+    assert np.isfinite(paired).all()
+    np.testing.assert_allclose(paired,
+                               _log_mixing(closed_form, absent[:, :2]),
+                               rtol=CLOSED_FORM_RTOL)
+    with pytest.raises(MissingPropertyError, match=r"^Species \['inert'\] "
+                       r"carry a nonzero fraction.*'visc_liq'"):
+        liquid.getViscosity(temps, mole_frac=np.array([INERT_ABSENT,
+                                                       INERT_PRESENT]))
+
+
+@pytest.mark.unit
+def test_vle_ratio_rejects_unpaired_rows(liquid_path):
+    """Temperatures and composition rows must pair one to one."""
+    liquid = _liquid(liquid_path, INERT_ABSENT)
+    temps = np.array([300.0, LIQUID_TEMP])  # [K], two rows
+    three_rows = np.array([INERT_ABSENT] * 3)  # [-], three rows
+
+    with pytest.raises(ValueError, match=r"temp has 2 entries but x_liq "
+                       r"has 3 rows"):
+        liquid.getKeqVLE(temp=temps, pres=PRESSURE, x_liq=three_rows)
+
+
 @pytest.mark.unit
 def test_viscosity_without_any_visc_liq_names_species_and_property(tmp_path):
     """A wholly absent correlation gives the named error, not a shape error."""
@@ -936,6 +1029,32 @@ def test_vle_ratio_uses_henry_for_supercritical_species_without_p_vap(
 
 
 @pytest.mark.unit
+def test_vle_ratio_profile_pairs_temperature_and_composition_rows(
+        liquid_path):
+    """Each row needs Antoine data only where the species is present there.
+
+    Row 1 is below the inert's critical temperature with no inert; row 2 is
+    above it with the inert present, so Henry's law applies and no row needs
+    the inert's Antoine data. The profile equals the stacked single-row
+    evaluations. Swapping the rows puts the inert in the subcritical row.
+    """
+    liquid = _liquid(liquid_path, INERT_PRESENT)
+    temps = np.array([BELOW_INERT_T_CRIT, LIQUID_TEMP])  # [K]
+    profile = np.array([INERT_ABSENT, INERT_PRESENT])  # [-]
+
+    paired = liquid.getKeqVLE(temp=temps, pres=PRESSURE,
+                              x_liq=profile)  # [-]
+
+    stacked = np.vstack([
+        liquid.getKeqVLE(temp=temp, pres=PRESSURE, x_liq=row)
+        for temp, row in zip(temps, profile)])  # [-]
+    np.testing.assert_array_equal(paired, stacked)
+    with pytest.raises(MissingPropertyError, match=r"^Species \['inert'\] "
+                       r"carry a nonzero fraction.*'p_vap'"):
+        liquid.getKeqVLE(temp=temps, pres=PRESSURE, x_liq=profile[::-1])
+
+
+@pytest.mark.unit
 def test_bubble_point_with_henry_species_without_p_vap(liquid_path):
     """The seed evaluates the inert's missing row with zero coefficients.
 
@@ -977,7 +1096,8 @@ def test_bubble_pressure_and_dew_point_with_henry_species_without_p_vap(
     expected_pres = (liquid_frac[0]
                      * _antoine_pressure(SOLVENT_ANTOINE, LIQUID_TEMP)
                      + inert_frac * INERT_HENRY)  # [Pa]
-    assert pres_bubble == pytest.approx(expected_pres, rel=CLOSED_FORM_RTOL)
+    assert pres_bubble == pytest.approx(expected_pres, rel=0,
+                                        abs=BUBBLE_PRESSURE_ATOL)
 
     pressure = PRESSURE  # [Pa]
     vapor_frac = np.array([0.5, 0.0, 0.5])  # [-], equimolar solvent/inert
@@ -1025,7 +1145,8 @@ def test_dilute_bubble_pressure_keeps_the_henry_raoult_root(tmp_path):
 
     expected = (mole_frac[0] * psat_solvent
                 + inert_frac * INERT_HENRY)  # [Pa]
-    assert pres_bubble == pytest.approx(expected, rel=CLOSED_FORM_RTOL)
+    assert pres_bubble == pytest.approx(expected, rel=0,
+                                        abs=BUBBLE_PRESSURE_ATOL)
 
 
 @pytest.mark.unit
@@ -1119,6 +1240,169 @@ def test_bubble_pressure_and_dew_point_check_their_converged_roots(tmp_path):
         vapor.getDewPoint()
 
 
+# Solid fixture: "A" has a constant cp_solid, "B" none. Units: mw [g/mol],
+# rho_solid [kg/m**3], cp_solid [J/mol/K].
+SOLID_DATABASE = {
+    "A": {"mw": 100.0, "rho_solid": 1200.0, "cp_solid": [10.0]},
+    "B": {"mw": 50.0, "rho_solid": 1000.0},
+}
+SOLID_TEMP = 320.0  # [K]
+
+
+SOLID_ZERO_SENTINEL = np.finfo(float).eps  # [-], what SolidPhase stores for 0
+
+
+def _solid(path, mass_frac, stream=False):
+    """Build a one-kilogram solid phase, or a 1 kg/s solid stream.
+
+    Parameters
+    ----------
+    path : str
+        Property database path.
+    mass_frac : array-like
+        Mass fractions [-].
+    stream : bool, optional
+        Build a ``SolidStream`` instead of a ``SolidPhase``.
+
+    Returns
+    -------
+    SolidPhase
+        The phase or stream at SOLID_TEMP.
+    """
+    from PharmaPy.Streams import SolidStream
+
+    if stream:
+        return SolidStream(path, temp=SOLID_TEMP, mass_flow=1.0,
+                           mass_frac=mass_frac)  # [kg/s]
+    return SolidPhase(path, temp=SOLID_TEMP, mass=1.0,
+                      mass_frac=mass_frac)  # [kg]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("stream", [False, True], ids=["phase", "stream"])
+def test_solid_zero_sentinel_species_needs_no_cp_solid(tmp_path, stream):
+    """A zero solid fraction, stored as eps, stays absent.
+
+    The constructor replaces the zero fraction of "B" by machine epsilon;
+    the default Cp and enthalpy still treat "B" as absent, giving the
+    closed-form values of pure "A", also for a solid rebuilt from that
+    stored composition. Reassigning a real composition, or a genuine trace
+    above the sentinel, makes "B" present, so it needs its data.
+    """
+    path = _write(tmp_path, SOLID_DATABASE)
+    original = _solid(path, [1.0, 0.0])
+    rebuilt = _solid(path, original.mass_frac, stream=stream)
+    cp_a = SOLID_DATABASE["A"]["cp_solid"][0]  # [J/mol/K]
+    mw_a = SOLID_DATABASE["A"]["mw"]  # [g/mol]
+    h_a = cp_a * (SOLID_TEMP - TEMP_REF)  # [J/mol]
+
+    for solid in (_solid(path, [1.0, 0.0], stream=stream), rebuilt):
+        assert solid.getCp() == pytest.approx(
+            cp_a * 1000 / mw_a, rel=CLOSED_FORM_RTOL)  # [J/kg/K]
+        assert solid.getCp(basis="mole") == pytest.approx(
+            cp_a, rel=CLOSED_FORM_RTOL)  # [J/mol/K]
+        assert solid.getEnthalpy() == pytest.approx(
+            h_a * 1000 / mw_a, rel=CLOSED_FORM_RTOL)  # [J/kg]
+        assert solid.getEnthalpy(basis="mole") == pytest.approx(
+            h_a, rel=CLOSED_FORM_RTOL)  # [J/mol]
+
+    message = r"^Species \['B'\] carry a nonzero fraction.*'cp_solid'"
+    reassigned_frac = np.array([0.6, 0.4])  # [-]
+    original.mass_frac = reassigned_frac
+    original.mole_frac = original.frac_to_frac(mass_frac=reassigned_frac)
+    with pytest.raises(MissingPropertyError, match=message):
+        original.getCp()
+    with pytest.raises(MissingPropertyError, match=message):
+        original.getEnthalpy()
+
+    trace = 1.0e-12  # [-], small but above the sentinel
+    with pytest.raises(MissingPropertyError, match=message):
+        _solid(path, [1.0 - trace, trace], stream=stream).getCp()
+
+
+@pytest.mark.unit
+def test_solid_sentinel_species_with_data_keeps_its_epsilon_weight(tmp_path):
+    """With data, the sentinel weight still enters, as before #414.
+
+    B's cp_solid is synthetic and large, so its eps-weighted term stands far
+    above round-off on both bases; the tolerance is a quarter of that term.
+    """
+    database = copy.deepcopy(SOLID_DATABASE)
+    cp_b = 1.0e6  # [J/mol/K], synthetic, makes the eps term resolvable
+    database["B"]["cp_solid"] = [cp_b]
+    solid = _solid(_write(tmp_path, database), [1.0, 0.0])
+    cp_mole = np.array([SOLID_DATABASE["A"]["cp_solid"][0], cp_b])  # [J/mol/K]
+    mw = np.array([SOLID_DATABASE["A"]["mw"], database["B"]["mw"]])  # [g/mol]
+    mass_frac = np.array([1.0, SOLID_ZERO_SENTINEL])  # [-], as stored
+    mole_frac = (mass_frac / mw) / (mass_frac / mw).sum()  # [-]
+
+    for basis, frac, cp_pure in (("mass", mass_frac, cp_mole * 1000 / mw),
+                                 ("mole", mole_frac, cp_mole)):
+        eps_term = frac[1] * cp_pure[1]  # [J/kg/K] or [J/mol/K]
+        tolerance = 0.25 * eps_term  # [J/kg/K] or [J/mol/K]
+        observed = solid.getCp(basis=basis)  # [J/kg/K] or [J/mol/K]
+        assert observed == pytest.approx(frac @ cp_pure, rel=0,
+                                         abs=tolerance)
+        assert abs(observed - frac[0] * cp_pure[0]) > tolerance
+
+
+@pytest.mark.unit
+def test_mixer_with_absent_solid_species_without_cp_solid(tmp_path):
+    """Mixed solids built from stored compositions keep B absent.
+
+    Two slurries at 300 K and 320 K, the second with three times the
+    particle number density, so their solid and liquid masses differ. With
+    constant heat capacities the adiabatic outlet temperature is the
+    capacity-weighted mean ``sum_i C_i T_i / sum_i C_i``, where
+    ``C_i = m_liq,i * cp_liq,B + m_sol,i * cp_sol,A`` [J/K]. The mixer
+    builds its outlet solid from the inlets' stored (eps-filled) mass
+    fractions, so B, without cp_solid, must stay absent; A's solid heat
+    capacity must enter with its full weight.
+    """
+    from PharmaPy.Containers import Mixer
+    from PharmaPy.MixedPhases import Slurry
+
+    database = {
+        "A": {"mw": 100.0, "rho_solid": 1200.0, "cp_solid": [100.0],
+              "rho_liq": 1000.0, "cp_liq": [150.0]},
+        "B": {"mw": 50.0, "rho_solid": 1000.0, "rho_liq": 900.0,
+              "cp_liq": [120.0]},
+    }  # mw [g/mol], rho [kg/m**3], cp [J/mol/K]; B has no cp_solid
+    path = _write(tmp_path, database)
+    sizes = np.array([0.0, 100.0, 200.0, 300.0])  # [um]
+    number = np.array([0.0, 1.0e9, 1.25e8, 0.0])  # [#/um], synthetic
+    density_scales = (1.0, 3.0)  # [-], second inlet carries more solid
+    temps = (300.0, 320.0)  # [K]
+
+    inlets = []
+    for temp, scale in zip(temps, density_scales):
+        liquid = LiquidPhase(path, mass_frac=[0.0, 1.0], temp=temp)
+        solid = SolidPhase(path, mass_frac=[1.0, 0.0], kv=1.0, temp=temp)
+        slurry = Slurry(vol=1.0e-3, x_distrib=sizes,
+                        distrib=scale * number)  # [m**3], [#/um]
+        slurry.Phases = (liquid, solid)
+        inlets.append(slurry)
+    mixer = Mixer()
+    mixer.Inlets = inlets
+
+    mixer.solve_unit()
+
+    cp_liquid_b = (database["B"]["cp_liq"][0] * 1000
+                   / database["B"]["mw"])  # [J/kg/K]
+    cp_solid_a = (database["A"]["cp_solid"][0] * 1000
+                  / database["A"]["mw"])  # [J/kg/K]
+    capacities = np.array([
+        inlet.Liquid_1.mass * cp_liquid_b + inlet.Solid_1.mass * cp_solid_a
+        for inlet in inlets])  # [J/K]
+    expected = capacities @ np.array(temps) / capacities.sum()  # [K]
+    masses = [(inlet.Liquid_1.mass, inlet.Solid_1.mass)
+              for inlet in inlets]  # [kg]
+    assert masses[0] != masses[1]
+    assert abs(expected - np.mean(temps)) > BUBBLE_POINT_ATOL  # [K]
+    assert mixer.Outlet.Solid_1.temp == pytest.approx(
+        expected, abs=BUBBLE_POINT_ATOL)  # [K], Newton root
+
+
 # ------------------------------------------------------- phase construction
 @pytest.mark.unit
 def test_phases_build_without_heat_capacity_or_antoine_data(tmp_path):
@@ -1149,6 +1433,21 @@ def test_phases_build_without_heat_capacity_or_antoine_data(tmp_path):
 
 
 # --------------------------------------------------------------- reactors
+# PFR case: the shipped PFR database (A, B, C, solvent "solv") plus, in the
+# solver tests, an "imp" species without cp_liq; second-order A + B --> C.
+PFR_IMPURITY = {"mw": 120.0, "rho_liq": 1000.0}  # [g/mol], [kg/m**3]
+PFR_BASE_CONC = [0.15, 0.10, 0.02, 10.0]  # [mol/L], A, B, C, solvent
+PFR_TEMP = 320.0  # [K]
+PFR_DIAMETER = 0.0254  # [m]
+PFR_NODES = 3  # [-]
+PFR_HOLDUP = 0.002  # [m**3]
+PFR_RESIDENCE_TIME = 1800.0  # [s]
+PFR_RATE_CONSTANT = 1e-3  # [L/mol/s]
+PFR_HEAT_OF_REACTION = -1e4  # [J/mol]
+PFR_RUNTIME = 60.0  # [s]
+PFR_IMPURITY_CONC = 0.5  # [mol/L], when "imp" is charged or fed
+
+
 def _pfr_steady_derivative(path, solvent_conc=0.0):
     """Steady PFR temperature derivative for a reacting ternary.
 
@@ -1163,27 +1462,26 @@ def _pfr_steady_derivative(path, solvent_conc=0.0):
     Returns
     -------
     float
-        ``dT/dV`` [K/m**3] at the inlet, 320 K.
+        ``dT/dV`` [K/m**3] at the inlet, at PFR_TEMP.
     """
     from PharmaPy.Kinetics import RxnKinetics
     from PharmaPy.Reactors import PlugFlowReactor
     from PharmaPy.Streams import LiquidStream
 
     # A, B, C react; the library solvent does not react.
-    conc = np.array([0.15, 0.10, 0.02, solvent_conc])  # [mol/L]
-    temp = 320.0  # [K]
-    holdup = 0.002  # [m**3]
-    residence_time = 1800.0  # [s]
-    unit = PlugFlowReactor(0.0254, 2, adiabatic=True)  # [m], [-] nodes
-    unit.Phases = LiquidPhase(path, temp=temp, mole_conc=conc, vol=holdup)
+    conc = np.array(PFR_BASE_CONC[:3] + [solvent_conc])  # [mol/L]
+    unit = PlugFlowReactor(PFR_DIAMETER, PFR_NODES, adiabatic=True)
+    unit.Phases = LiquidPhase(path, temp=PFR_TEMP, mole_conc=conc,
+                              vol=PFR_HOLDUP)
     unit.Kinetics = RxnKinetics(
-        path, k_params=[1e-3], ea_params=[0.0], rxn_list=["A + B --> C"],
-        delta_hrxn=-1e4, tref_hrxn=TEMP_REF)  # [L/mol/s], [J/mol], [J/mol]
-    unit.Inlet = LiquidStream(path, temp=temp, mole_conc=conc,
-                              vol_flow=holdup / residence_time)  # [m**3/s]
+        path, k_params=[PFR_RATE_CONSTANT], ea_params=[0.0],
+        rxn_list=["A + B --> C"], delta_hrxn=PFR_HEAT_OF_REACTION,
+        tref_hrxn=TEMP_REF)
+    unit.Inlet = LiquidStream(path, temp=PFR_TEMP, mole_conc=conc,
+                              vol_flow=PFR_HOLDUP / PFR_RESIDENCE_TIME)
     unit.set_names()
     unit.c_inert = unit.Inlet.mole_conc[~unit.mask_species]  # [mol/L]
-    return unit.energy_steady(conc[unit.mask_species], temp)
+    return unit.energy_steady(conc[unit.mask_species], PFR_TEMP)
 
 
 @pytest.mark.unit
@@ -1212,11 +1510,20 @@ def test_pfr_energy_balance_ignores_absent_species_without_cp_liq(tmp_path):
 
 
 # ----------------------------------------------------------------- drying
-def _dryer(path):
+# Cake pressure drop for ``Drying.initialize_states``: the value of the
+# existing drying gas-balance tests. It sets the gas flow, which is the same
+# in the two databases each test compares, so the comparisons do not depend
+# on it.
+DRYING_PRESSURE_DROP = 5.0e4  # [Pa]
+
+
+def _dryer(drying_unit_factory, path):
     """Build the conftest drying unit on a given property database.
 
     Parameters
     ----------
+    drying_unit_factory : callable
+        The conftest factory.
     path : str
         Database derived from ``conftest.DRYING_THERMO_DATA``.
 
@@ -1226,42 +1533,20 @@ def _dryer(path):
         The ``Drying`` unit and its initial packed state (units of
         ``Drying.initialize_states``).
     """
-    from conftest import (DRYING_CSD_NUMBER, DRYING_GAS_MASS_FRACTION,
-                          DRYING_LIQUID_MASS_FRACTION, DRYING_SIZE_GRID_UM)
-    from PharmaPy.Drying_Model import Drying
-    from PharmaPy.MixedPhases import Cake
-    from PharmaPy.Streams import VaporStream
-
-    temperature = 302.0  # [K], condensed phase, as in the conftest factory
-    gas_temperature = 300.0  # [K], as in the conftest factory
-    saturation = 0.55  # [-], as in the conftest factory
-    liquid = LiquidPhase(path, temp=temperature, mass=1.0e-3,
-                         mass_frac=DRYING_LIQUID_MASS_FRACTION)  # [kg]
-    solid = SolidPhase(path, temp=temperature, x_distrib=DRYING_SIZE_GRID_UM,
-                       distrib=DRYING_CSD_NUMBER,
-                       mass_frac=np.array([0.0, 1.0, 0.0]))  # [um], [#/um]
-    cake = Cake(z_external=np.array([0.0, 1.0]),  # [m]
-                saturation=np.atleast_1d(saturation))  # [m], [-]
-    cake.Phases = [liquid, solid]
-    dryer = Drying(3, supercrit_names=["nitrogen"])  # 3 nodes
-    dryer.Phases = cake
-    dryer.CakePhase.z_external = np.array([0.0, dryer.cake_height])  # [m]
-    dryer.Phases = VaporPhase(path, temp=gas_temperature, mass=1.0e-4,
-                              mass_frac=DRYING_GAS_MASS_FRACTION)  # [kg]
-    dryer.Inlet = VaporStream(path, temp=gas_temperature, mass_flow=1.0e-4,
-                              mass_frac=DRYING_GAS_MASS_FRACTION)  # [kg/s]
-    states = dryer.initialize_states(deltaP=5.0e4).ravel()  # [Pa] drop
+    dryer = drying_unit_factory(thermo_path=path)
+    states = dryer.initialize_states(deltaP=DRYING_PRESSURE_DROP).ravel()
     return dryer, states
 
 
 @pytest.mark.unit
-def test_drying_equilibrium_needs_no_p_vap_for_the_carrier_gas(tmp_path):
+def test_drying_equilibrium_needs_no_p_vap_for_the_carrier_gas(
+        tmp_path, drying_unit_factory):
     """The supercritical drying carrier may omit Antoine coefficients."""
     from conftest import DRYING_THERMO_DATA
 
     database = copy.deepcopy(DRYING_THERMO_DATA)
     del database["nitrogen"]["p_vap"]
-    dryer, _ = _dryer(_write(tmp_path, database))
+    dryer, _ = _dryer(drying_unit_factory, _write(tmp_path, database))
     assert dryer.Liquid_1.name_species[2] == "nitrogen"
     assert np.isnan(dryer.Liquid_1.p_vap[2]).all()
 
@@ -1282,7 +1567,8 @@ def test_drying_equilibrium_needs_no_p_vap_for_the_carrier_gas(tmp_path):
 
 
 @pytest.mark.unit
-def test_drying_model_ignores_the_carrier_antoine_data(tmp_path):
+def test_drying_model_ignores_the_carrier_antoine_data(tmp_path,
+                                                       drying_unit_factory):
     """The full drying right-hand side never reads the carrier's p_vap."""
     from conftest import DRYING_THERMO_DATA
 
@@ -1293,7 +1579,8 @@ def test_drying_model_ignores_the_carrier_antoine_data(tmp_path):
     derivatives = []
     for name, data in (("without.json", without), ("arbitrary.json",
                                                    arbitrary)):
-        dryer, states = _dryer(_write(tmp_path, data, name))
+        dryer, states = _dryer(drying_unit_factory,
+                               _write(tmp_path, data, name))
         derivatives.append(np.asarray(dryer.unit_model(0.0, states)))  # [s]
 
     assert np.isfinite(derivatives[0]).all()
@@ -1552,21 +1839,6 @@ def test_batch_reactor_needs_cp_liq_for_a_species_only_in_the_holdup(
     with pytest.raises(MissingPropertyError, match=r"^Species "
                        r"\['impurity'\] carry a nonzero weight.*'cp_liq'"):
         _solve(unit)
-
-
-# PFR case: the shipped PFR database plus an "imp" species without cp_liq,
-# second-order A + B --> C, non-isothermal, three nodes.
-PFR_IMPURITY = {"mw": 120.0, "rho_liq": 1000.0}  # [g/mol], [kg/m**3]
-PFR_BASE_CONC = [0.15, 0.10, 0.02, 10.0]  # [mol/L], A, B, C, solvent
-PFR_TEMP = 320.0  # [K]
-PFR_DIAMETER = 0.0254  # [m]
-PFR_NODES = 3  # [-]
-PFR_HOLDUP = 0.002  # [m**3]
-PFR_RESIDENCE_TIME = 1800.0  # [s]
-PFR_RATE_CONSTANT = 1e-3  # [L/mol/s]
-PFR_HEAT_OF_REACTION = -1e4  # [J/mol]
-PFR_RUNTIME = 60.0  # [s]
-PFR_IMPURITY_CONC = 0.5  # [mol/L], when "imp" is charged or fed
 
 
 def _pfr_database(imp_cp=None):
@@ -1860,6 +2132,33 @@ def test_inlet_enthalpy_keeps_requiring_a_species_after_its_feed_stops(
         unit.energy_balances(after, conc, TANK_HOLDUP, temp, None,
                              inputs_after, heat_prof=True)
     assert inlet_path in str(error.value)
+
+
+@pytest.mark.integration
+@pytest.mark.assimulo
+@pytest.mark.parametrize("kind", ["batch", "cstr"])
+def test_unit_stays_copyable_after_a_pre_solve_missing_data_error(tmp_path,
+                                                                  kind):
+    """An error raised before CVode runs leaves nothing on the unit.
+
+    The first right-hand-side evaluation, before the solver is built,
+    raises the named error directly; recording it (with its traceback)
+    would make ``copy.deepcopy`` of the unit fail.
+    """
+    pytest.importorskip("assimulo")
+    path = _write(tmp_path, REACTOR_DATABASE)
+    charged = np.add(REACTOR_CONC, IMPURITY_DOSE)  # [mol/L]
+    if kind == "batch":
+        unit = _tank("batch", path, conc=charged)
+    else:
+        unit = _tank("cstr", path, feed=charged)
+
+    with pytest.raises(MissingPropertyError) as error:
+        _solve(unit)
+    assert error.value.__cause__ is None
+
+    duplicate = copy.deepcopy(unit)
+    assert duplicate.Liquid_1.name_species == unit.Liquid_1.name_species
 
 
 # Child-process script for the termination test: solve the separate-inlet

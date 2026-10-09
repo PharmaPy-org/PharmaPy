@@ -163,8 +163,9 @@ def _records_missing_data(method):
     Returns
     -------
     callable
-        Wrapper that stores a ``MissingPropertyError`` in
-        ``self._missing_data_error`` before re-raising it, so that
+        Wrapper that, while ``_simulate`` runs, stores a
+        ``MissingPropertyError`` in ``self._missing_data_error`` before
+        re-raising it, so that
         ``_BaseReactor._simulate`` can re-raise it after the solver, which
         reports only its own error, fails.
 
@@ -207,8 +208,11 @@ def _records_missing_data(method):
         try:
             return method(self, *args, **kwargs)
         except MissingPropertyError as error:
-            self._missing_data_error = error
-            self._missing_data_traceback = error.__traceback__
+            if self._simulating:
+                # Only a running solve needs it; outside, the error
+                # propagates directly and nothing is kept on the unit.
+                self._missing_data_error = error
+                self._missing_data_traceback = error.__traceback__
             raise
 
     return wrapper
@@ -578,13 +582,14 @@ class _BaseReactor:
 
         Notes
         -----
-        The record and its traceback are cleared at the start and at the end
-        of every call, so a later, unrelated failure is never relabeled. While the solver runs, the
-        record is sticky (see ``_records_missing_data``): every later
-        right-hand side fails the same way, so the failure persists until
-        CVode gives up. The chaining relies on that persistence; any solver
-        error after a recorded missing-data error is attributed to it,
-        whatever its flag (right-hand-side or convergence failure).
+        The record and its traceback are cleared at the start and at the
+        end of every call, so a later, unrelated failure is never relabeled.
+        While the solver runs, the record is sticky (see
+        ``_records_missing_data``): every later right-hand side fails the
+        same way, so the failure persists until CVode gives up. The chaining
+        relies on that persistence; any solver error after a recorded
+        missing-data error is attributed to it, whatever its flag
+        (right-hand-side or convergence failure).
         """
         self._missing_data_error = None
         self._missing_data_traceback = None
@@ -3348,7 +3353,6 @@ class PlugFlowReactor(_BaseReactor):
             no ``cp_liq`` data where the balance uses heat capacities or
             enthalpies.
         """
-
 
         # Heat of reaction
         delta_href = self.Kinetics.delta_hrxn

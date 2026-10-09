@@ -911,7 +911,36 @@ class LiquidPhase(ThermoPhysicalManager):
 
         return gamma
 
-    def getViscosity(self, temp=None, mass_frac=None, mole_frac=None):
+    def getViscosity(self, temp: Optional[ArrayLike] = None,
+                     mass_frac: Optional[np.ndarray] = None,
+                     mole_frac: Optional[np.ndarray] = None
+                     ) -> Union[float, np.ndarray]:
+        """Return the liquid mixture viscosity.
+
+        Parameters
+        ----------
+        temp : float or array-like, optional
+            Temperature [K], scalar or shape ``(num_temps,)``; the phase
+            temperature when ``None``.
+        mass_frac, mole_frac : numpy.ndarray, optional
+            Fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``; mole fractions take precedence,
+            and the phase mole fractions are used when neither is supplied.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Viscosity [Pa*s], shaped as in ``getViscosityMix``: a scalar for
+            one temperature and one composition, otherwise one value per
+            temperature or composition row, row-paired when both are arrays
+            of equal length.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``. If a species with a nonzero
+            fraction in some row has no ``visc_liq`` coefficients.
+        """
         viscosity = self.getViscosityMix(temp, mass_frac, mole_frac,
                                          phase='liquid')
 
@@ -1917,6 +1946,7 @@ class SolidPhase(ThermoPhysicalManager):
         self.mass = mass
 
         mass_frac = np.array(np.atleast_1d(mass_frac), dtype=float)  # [-]
+        # Zero sentinel: exact zeros become eps (see _stored_fractions).
         mass_frac[mass_frac == 0] = eps
 
         self.mass_frac = mass_frac
@@ -2425,13 +2455,79 @@ class SolidPhase(ThermoPhysicalManager):
 
         return porosity
 
+    def _stored_fractions(self) -> tuple:
+        """Return the stored composition for a ``cp_solid`` mixture value.
+
+        Returns
+        -------
+        mass_frac, mole_frac : numpy.ndarray
+            Stored mass and mole fractions [-], shape ``(num_species,)`` or
+            ``(num_rows, num_species)``. A species whose stored mass fraction
+            is at or below the zero sentinel ``eps`` in every row and that
+            has no ``cp_solid`` data gets exact zeros in both arrays.
+
+        Notes
+        -----
+        The constructor writes ``eps`` = ``np.finfo(float).eps`` [-] for a
+        zero fraction, so a stored mass fraction at or below ``eps`` is a
+        declared zero, or a mixture or copy of one (such as a solid built
+        from another solid's ``mass_frac``), and is physically zero at
+        double precision. Such a species is absent for the decision whether
+        ``cp_solid`` data are needed, also when the mole-fraction basis is
+        evaluated. With data it keeps its ``eps`` weight, so results are
+        unchanged; without data its contribution is exactly zero, as the
+        zero rows of releases before #414 gave. A stored fraction above
+        ``eps`` is present however small, and fractions passed to a method
+        keep the bitwise nonzero rule.
+        """
+        mass_frac = np.asarray(self.mass_frac, dtype=float)  # [-]
+        mole_frac = np.asarray(self.mole_frac, dtype=float)  # [-]
+        rows = self._property_rows('cp_solid')  # [J/mol/K/K**k], ascending k
+        if mass_frac.shape[-1] != len(rows):
+            return self.mass_frac, self.mole_frac
+
+        sentinel = np.atleast_2d(mass_frac <= eps).all(axis=0)  # [-]
+        absent = sentinel & np.isnan(rows).any(axis=1)
+        if not absent.any():
+            return self.mass_frac, self.mole_frac
+
+        return (np.where(absent, 0.0, mass_frac),
+                np.where(absent, 0.0, mole_frac))  # [-], [-]
+
     def getCp(self, temp=None, mass_frac=None, mole_frac=None, basis='mass'):
+        """Return the solid heat capacity on the requested basis.
+
+        Parameters
+        ----------
+        temp : float or array-like, optional
+            Temperature [K]; the phase temperature when ``None``.
+        mass_frac, mole_frac : numpy.ndarray, optional
+            Species fractions [-], shape ``(num_species,)`` or
+            ``(num_rows, num_species)``; the stored composition when neither
+            is supplied, in which a species at the zero sentinel without
+            ``cp_solid`` data is absent (see ``_stored_fractions``).
+        basis : {'mass', 'mole'}, optional
+            Basis of the result; default mass.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Heat capacity [J/kg/K] or [J/mol/K], shaped as in
+            ``ThermoPhysicalManager.getCpMix``.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole'.
+        MissingPropertyError
+            A subclass of ``AttributeError``. If a species with a nonzero
+            fraction has no ``cp_solid`` data.
+        """
         if temp is None:
             temp = self.temp
 
         if mass_frac is None and mole_frac is None:
-            mass_frac = self.mass_frac
-            mole_frac = self.mole_frac
+            mass_frac, mole_frac = self._stored_fractions()  # [-]
 
         cpSolid = super().getCpMix(temp, mass_frac, mole_frac, phase='solid',
                                    basis=basis)
@@ -2491,6 +2587,12 @@ class SolidPhase(ThermoPhysicalManager):
         ValueError
             If ``basis`` is neither 'mass' nor 'mole', for both ``total_h``
             modes, raised by ``ThermoPhysicalManager.getEnthalpy``.
+        MissingPropertyError
+            A subclass of ``AttributeError``. If a species that the result
+            needs has no ``cp_solid`` data: every species for
+            ``total_h=False``, species with a nonzero fraction otherwise. In
+            the stored composition, a species at the zero sentinel ``eps``
+            is absent (see ``_stored_fractions``).
 
         Notes
         -----
@@ -2507,8 +2609,7 @@ class SolidPhase(ThermoPhysicalManager):
         """
 
         if mass_frac is None and mole_frac is None:
-            mass_frac = self.mass_frac
-            mole_frac = self.mole_frac
+            mass_frac, mole_frac = self._stored_fractions()  # [-]
 
         if temp is None:
             temp = self.temp
