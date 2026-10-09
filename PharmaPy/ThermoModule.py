@@ -298,9 +298,75 @@ class ThermoPhysicalManager:
 
         return cpMix
 
-    def getEnthalpy(self, temp, temp_ref=298.15, mass_frac=None,
-                    mole_frac=None, phase='liquid', basis='mass', idx=None,
-                    total_h=True):
+    def getEnthalpy(self, temp: Union[float, np.ndarray],
+                    temp_ref: float = 298.15,
+                    mass_frac: Optional[np.ndarray] = None,
+                    mole_frac: Optional[np.ndarray] = None,
+                    phase: str = 'liquid', basis: str = 'mass',
+                    idx: Optional[Sequence[int]] = None,
+                    total_h: bool = True) -> Union[float, np.ndarray]:
+        """Integrate pure-component heat capacities into sensible enthalpies.
+
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature [K], scalar or shape ``(num_temps,)``.
+        temp_ref : float, optional
+            Lower limit of the heat-capacity integral [K]; default 298.15 K.
+        mass_frac, mole_frac : ndarray, optional
+            Species fractions [-], shape ``(num_species,)`` for a fixed
+            composition or ``(num_rows, num_species)`` for a composition
+            profile. Used only when ``total_h`` is ``True``. The fraction
+            matching ``basis`` is used when supplied; otherwise the other one
+            is converted.
+        phase : {'liquid', 'solid', 'vapor'}, optional
+            Selects the ``cp_liq``, ``cp_solid`` or ``cp_vapor`` heat-capacity
+            polynomial [J/mol/K]; default liquid.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned enthalpy and of the weighting
+            fractions; default mass.
+        idx : array-like of int, optional
+            Species indices to evaluate, in the requested order. All species
+            are evaluated when ``None``. The matching fraction columns weight
+            the selected species without renormalization.
+        total_h : bool, optional
+            If ``True`` (default), return the fraction-weighted sum over the
+            selected species. If ``False``, return the species enthalpies.
+
+        Returns
+        -------
+        float or ndarray
+            Sensible enthalpy, [J/kg] for ``basis='mass'`` and [J/mol] for
+            ``basis='mole'``. With ``total_h=True``, one value per
+            temperature or composition row: the ``(num_temps,
+            num_selected_species)`` species enthalpies broadcast against the
+            fractions, giving shape ``(num_temps,)`` for a fixed composition,
+            ``(num_rows,)`` for a single temperature with a profile, and
+            row-paired ``(num_temps,)`` when ``num_temps == num_rows``. A
+            scalar is returned only when that result has one entry, that is,
+            a single temperature with a fixed composition or a one-row
+            profile. With ``total_h=False``, shape ``(num_temps,
+            num_selected_species)``, including ``(1, num_selected_species)``
+            for a scalar temperature.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole'. The check precedes any
+            computation and applies to both ``total_h`` modes. NumPy also
+            raises it, for ``total_h=True``, when ``num_temps`` and
+            ``num_rows`` differ and neither is one.
+
+        Notes
+        -----
+        With ascending coefficients ``cp = sum_k c_k * T**k`` [J/mol/K], the
+        species molar enthalpy is
+        ``sum_k c_k / (k + 1) * (temp**(k + 1) - temp_ref**(k + 1))`` [J/mol].
+        The mass basis multiplies it by ``1000 / mw`` [g/kg / (g/mol)].
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
+
         temp = np.atleast_1d(temp)
 
         if idx is None:
@@ -346,7 +412,6 @@ class ThermoPhysicalManager:
                 else:
                     mole_fr = mole_frac[:, idx]
 
-                # enthalpyOut = np.dot(integral, mole_fr.T)
                 enthalpyOut = (integral * mole_fr).sum(axis=1)
 
             if len(enthalpyOut) == 1:
@@ -397,8 +462,47 @@ class ThermoPhysicalManager:
 
         return rhoMass, rhoMole
 
-    def getDensityMix(self, mass_frac=None, mole_frac=None, phase='liquid',
-                      temp=None, basis='mass'):
+    def getDensityMix(self, mass_frac: Optional[np.ndarray] = None,
+                      mole_frac: Optional[np.ndarray] = None,
+                      phase: str = 'liquid', temp: Optional[float] = None,
+                      basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Mix pure-component densities assuming ideal (additive) volumes.
+
+        Parameters
+        ----------
+        mass_frac, mole_frac : ndarray, optional
+            Species fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``. The fraction matching ``basis`` is
+            used when supplied; otherwise the other one is converted.
+        phase : {'liquid', 'solid'}, optional
+            Selects the ``rho_liq`` or ``rho_solid`` pure density
+            [kg/m**3]; default liquid.
+        temp : float, optional
+            Temperature [K]; defaults to ``self.temp``. The pure densities
+            are temperature independent, so it does not change the result.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned density; default mass.
+
+        Returns
+        -------
+        float or ndarray
+            Mixture density, [kg/m**3] for ``basis='mass'`` and [kmol/m**3]
+            (equivalently [mol/L]) for ``basis='mole'``. Scalar for a
+            one-dimensional composition, shape ``(num_points,)`` otherwise.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole'. The check precedes any
+            computation.
+
+        Notes
+        -----
+        ``1 / rho_mix = sum_i frac_i / rho_i`` on the selected basis, with
+        pure molar densities ``rho_i / mw_i`` [kmol/m**3].
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
 
         if temp is None:
             temp = self.temp

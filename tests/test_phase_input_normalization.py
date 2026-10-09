@@ -198,14 +198,14 @@ def test_scalar_temperature_storage(thermo_path, phase_type, scalar):
         options['moments' if phase_type is SolidPhase else 'distrib'] = (
             MOMENTS_UPDATED if phase_type is SolidPhase else DISTRIB_INITIAL)
         options['x_distrib'] = X_DISTRIB_INITIAL  # [um]
-        if phase_type is SolidPhase:
-            options['temp_ref'] = scalar(290)  # [K], distinct reference
+        options['temp_ref'] = scalar(290)  # [K], distinct reference
     else:
         options['check_input'] = False
     phase = phase_type(thermo_path, **options)
     assert type(phase.temp) is float
     if isinstance(phase, SolidPhase):
         assert type(phase.temp_ref) is float
+        assert phase.temp_ref == pytest.approx(290, rel=RTOL, abs=0)
     # Solid and liquid stream updates do not expose temperature arguments.
     if phase_type in (LiquidPhase, VaporPhase, VaporStream):
         phase.updatePhase(temp=scalar(310))

@@ -544,7 +544,33 @@ class LiquidPhase(ThermoPhysicalManager):
 
     def getDensity(self, mass_frac=None, mole_frac=None, temp=None,
                    basis='mass'):
+        """Return the ideal-mixing liquid density on the requested basis.
 
+        Parameters
+        ----------
+        mass_frac, mole_frac : ndarray, optional
+            Liquid species fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``. The stored phase composition is
+            used when neither is supplied.
+        temp : float, optional
+            Temperature [K]; defaults to the phase temperature. Pure liquid
+            densities are temperature independent, so it does not change the
+            result.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned density; default mass.
+
+        Returns
+        -------
+        float or ndarray
+            Liquid density, [kg/m**3] for ``basis='mass'`` and [kmol/m**3]
+            (equivalently [mol/L]) for ``basis='mole'``.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole', raised by
+            ``ThermoPhysicalManager.getDensityMix``.
+        """
         if temp is None:
             temp = self.temp
 
@@ -602,7 +628,46 @@ class LiquidPhase(ThermoPhysicalManager):
 
     def getEnthalpy(self, temp=None, temp_ref=298.15, mass_frac=None,
                     mole_frac=None, total_h=True, basis='mass'):
+        """Calculate liquid sensible enthalpy relative to a reference.
 
+        Parameters
+        ----------
+        temp : float or ndarray, optional
+            Temperature [K], scalar or shape ``(num_temps,)``. The phase
+            temperature is used when ``None``.
+        temp_ref : float, optional
+            Lower limit of the ``cp_liq`` integral [K]; default 298.15 K.
+        mass_frac, mole_frac : ndarray, optional
+            Liquid species fractions [-], shape ``(num_species,)`` or
+            ``(num_rows, num_species)``. The stored phase composition is used
+            when neither is supplied.
+        total_h : bool, optional
+            If ``True`` (default), return the fraction-weighted mixture
+            enthalpy. If ``False``, return individual species enthalpies.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned enthalpy and of the weighting
+            fractions; default mass.
+
+        Returns
+        -------
+        float or ndarray
+            Liquid sensible enthalpy, [J/kg] for ``basis='mass'`` and [J/mol]
+            for ``basis='mole'``. With ``total_h=True``, one value per
+            temperature or composition row, broadcast as in
+            ``ThermoPhysicalManager.getEnthalpy``: shape ``(num_temps,)`` for
+            a fixed composition, ``(num_rows,)`` for a single temperature with
+            a profile, and row-paired when ``num_temps == num_rows``. A scalar
+            is returned only for a single temperature with a fixed composition
+            or a one-row profile. With ``total_h=False``, shape
+            ``(num_temps, num_species)``, including ``(1, num_species)`` for a
+            scalar temperature.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole', for both ``total_h``
+            modes, raised by ``ThermoPhysicalManager.getEnthalpy``.
+        """
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
             mole_frac = self.mole_frac
@@ -2076,13 +2141,39 @@ class SolidPhase(ThermoPhysicalManager):
 
     def getDensity(self, mass_frac=None, mole_frac=None, temp=None,
                    basis='mass'):
+        """Return the ideal-mixing solid density on the requested basis.
 
+        Parameters
+        ----------
+        mass_frac, mole_frac : ndarray, optional
+            Solid species fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``. The stored phase mass fractions are
+            used, and converted for ``basis='mole'``, when neither is
+            supplied.
+        temp : float, optional
+            Temperature [K]; defaults to the phase temperature. Pure solid
+            densities are temperature independent, so it does not change the
+            result.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned density; default mass.
+
+        Returns
+        -------
+        float or ndarray
+            Solid density, [kg/m**3] for ``basis='mass'`` and [kmol/m**3]
+            (equivalently [mol/L]) for ``basis='mole'``.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole', raised by
+            ``ThermoPhysicalManager.getDensityMix``.
+        """
         if temp is None:
             temp = self.temp
 
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
-            # mole_frac = self.mole_frac
 
         densSolid = self.getDensityMix(mass_frac, mole_frac, phase='solid',
                                        temp=temp, basis=basis)
@@ -2228,7 +2319,7 @@ class SolidPhase(ThermoPhysicalManager):
             298.15 K.
         mass_frac : ndarray, optional
             Solid species mass fractions [-], shape ``(num_species,)`` or
-            ``(num_temps, num_species)``. The phase composition is used when
+            ``(num_rows, num_species)``. The phase composition is used when
             neither fraction vector is supplied.
         mole_frac : ndarray, optional
             Solid species mole fractions [-], with the same shapes as
@@ -2245,11 +2336,19 @@ class SolidPhase(ThermoPhysicalManager):
         -------
         float or ndarray
             Solid sensible enthalpy, [J/kg] for ``basis='mass'`` and [J/mol]
-            for ``basis='mole'``. With ``total_h=True`` the result is a scalar
-            for a single temperature and has shape ``(num_temps,)``
-            otherwise. With ``total_h=False`` the shape is
+            for ``basis='mole'``. With ``total_h=True``, one value per
+            temperature or composition row, broadcast as in
+            ``ThermoPhysicalManager.getEnthalpy``; a scalar only for a single
+            temperature with a fixed composition or a one-row profile. With
+            ``total_h=False`` the shape is
             ``(num_temps, num_species)``, including ``(1, num_species)`` for a
             scalar temperature, in the phase's component order.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole', for both ``total_h``
+            modes, raised by ``ThermoPhysicalManager.getEnthalpy``.
 
         Notes
         -----

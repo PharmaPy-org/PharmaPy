@@ -3,7 +3,16 @@
 Issue #332: an omitted ``SolidPhase.getEnthalpy`` reference must honor the
 constructor ``temp_ref`` [K], while ``Slurry``, ``Cake``, the slurry
 initialization energy balance, and ``Mixer`` must keep evaluating liquid and
-solid on one common reference.
+solid on one common reference. Issue #412: the ``SolidStream`` constructor
+must accept and forward the same ``temp_ref`` without changing the meaning of
+its existing positional arguments, and a ``SlurryStream`` built from such a
+stream must keep the common mixture reference. Issue #422 (open policy
+decision): the current outlet behavior is pinned, a constructed solids
+``Mixer`` outlet using the 298.15 K default and a copied ``BatchCryst``
+outlet keeping its holdup solid's reference. The crystallizer case reuses the
+inactive-kinetics FVM fixture of ``test_crystallizer_heat_duty`` and its
+five-species ``compound_database.json``; ``retrieve_results`` runs on a
+constant state profile, so no solver backend is needed.
 
 The checked-in PFR fixture ``tests/integration/data/pfr_test_pure_comp.json``
 supplies synthetic repository values, not measured properties of a real
@@ -24,8 +33,12 @@ from scipy.integrate import quad
 from scipy.optimize import brentq
 
 from PharmaPy.Containers import Mixer
-from PharmaPy.MixedPhases import Cake, Slurry, energy_balance
+from PharmaPy.MixedPhases import Cake, Slurry, SlurryStream, energy_balance
 from PharmaPy.Phases import LiquidPhase, SolidPhase
+from PharmaPy.Streams import LiquidStream, SolidStream
+from test_crystallizer_heat_duty import (
+    DURATION as CRYST_DURATION, TEMPERATURE as CRYST_TEMPERATURE, BatchCryst,
+    make_unit as make_cryst_unit)
 
 
 pytestmark = pytest.mark.unit
@@ -75,6 +88,16 @@ SLURRY_X_DISTRIB = np.array([0.0, 100.0, 200.0, 300.0])  # [um]
 SLURRY_DISTRIB = np.array([0.0, 1.0e9, 1.25e8, 0.0])  # [#/m**3/um]
 SLURRY_SOLID_VOL_FRAC = 0.2  # [-], derived above
 KV = 1.0  # [-], cubic shape factor
+
+# Stream flows [kg/s]; unequal so a swapped weighting would be detected.
+STREAM_LIQUID_FLOW = 0.4  # [kg/s]
+STREAM_SOLID_FLOW = 1.0  # [kg/s]
+# [Pa], two standard atmospheres; differs from the 101325 Pa SolidStream
+# default, so a dropped or shifted positional pressure would be detected.
+STREAM_PRESSURE = 2 * 101325.0  # [Pa]
+# [-], noncubic shape factor that differs from the default of one, so a
+# shifted positional argument would be detected.
+NONCUBIC_KV = 0.5  # [-]
 
 # LiquidPhase warning for a phase constructed without an inventory.
 ZERO_INVENTORY_WARNING = "'mass', 'moles' and 'vol' are all set to zero"
@@ -226,7 +249,8 @@ def _liquid_mass_enthalpy(thermo_data, species, temp, temp_ref):
         Mass sensible enthalpy [J/kg], from ascending coefficients
         ``cp = sum_k c_k T**k`` [J/mol/K].
     """
-    coefficients = np.asarray(thermo_data[species]['cp_liq'])  # ascending
+    coefficients = np.asarray(
+        thermo_data[species]['cp_liq'])  # [J/mol/K**(k+1)], ascending k
 
     def cp_molar(temperature):
         """Return liquid heat capacity [J/mol/K] at ``temperature`` [K]."""
@@ -655,3 +679,276 @@ def test_mixer_outlet_temperature_ignores_solid_constructor_reference(
 
     assert outlet_temps[1] == pytest.approx(expected, rel=RTOL)
     assert outlet_temps[1] == pytest.approx(outlet_temps[0], rel=RTOL)
+
+
+# --- SolidStream constructor (issue #412) -----------------------------------
+
+
+def _make_solid_stream(thermo_path, thermo_data, **kwargs):
+    """Build a pure-A solid stream through the public constructor.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Path of the JSON property database.
+    thermo_data : dict
+        Raw JSON property entries keyed by species name.
+    **kwargs
+        Additional ``SolidStream`` keywords, with units as documented there.
+        ``temp`` defaults to ``TEMPERATURE`` [K] and ``mass_flow`` to
+        ``STREAM_SOLID_FLOW`` [kg/s].
+
+    Returns
+    -------
+    PharmaPy.Streams.SolidStream
+        Real solid stream.
+    """
+    kwargs.setdefault('temp', TEMPERATURE)
+    kwargs.setdefault('mass_flow', STREAM_SOLID_FLOW)
+    return SolidStream(thermo_path,
+                       mass_frac=_pure_fractions(thermo_data, SOLID_SPECIES),
+                       **kwargs)
+
+
+@pytest.mark.parametrize('temp_ref', [ICE_POINT_TEMP_REF, LOW_TEMP_REF])
+def test_solid_stream_constructor_reference_is_stored_and_used(
+        thermo_path, thermo_data, temp_ref):
+    """Store the stream reference and use it when the method omits one."""
+    stream = _make_solid_stream(thermo_path, thermo_data, temp_ref=temp_ref)
+
+    expected_mass = _solid_mass_enthalpy(
+        thermo_data, SOLID_SPECIES, TEMPERATURE, temp_ref)  # [J/kg]
+    expected_mole = _solid_molar_enthalpy(
+        thermo_data, SOLID_SPECIES, TEMPERATURE, temp_ref)  # [J/mol]
+
+    assert stream.temp_ref == temp_ref
+    assert stream.getEnthalpy(basis='mass') == pytest.approx(
+        expected_mass, rel=RTOL)
+    assert stream.getEnthalpy(basis='mole') == pytest.approx(
+        expected_mole, rel=RTOL)
+
+
+@pytest.mark.parametrize('explicit_ref', [DEFAULT_TEMP_REF, LOW_TEMP_REF])
+def test_solid_stream_explicit_reference_overrides_stored_reference(
+        thermo_path, thermo_data, explicit_ref):
+    """Let an explicit method reference, even 298.15 K, take precedence."""
+    stream = _make_solid_stream(thermo_path, thermo_data,
+                                temp_ref=ICE_POINT_TEMP_REF)
+
+    expected_mass = _solid_mass_enthalpy(
+        thermo_data, SOLID_SPECIES, TEMPERATURE, explicit_ref)  # [J/kg]
+    expected_mole = _solid_molar_enthalpy(
+        thermo_data, SOLID_SPECIES, TEMPERATURE, explicit_ref)  # [J/mol]
+
+    assert stream.getEnthalpy(temp_ref=explicit_ref) == pytest.approx(
+        expected_mass, rel=RTOL)
+    assert stream.getEnthalpy(temp_ref=explicit_ref, basis='mole') == \
+        pytest.approx(expected_mole, rel=RTOL)
+    assert stream.temp_ref == ICE_POINT_TEMP_REF
+
+
+def test_solid_stream_default_reference_is_unchanged(
+        thermo_path, thermo_data):
+    """Keep 298.15 K and its enthalpy without a constructor ``temp_ref``."""
+    stream = _make_solid_stream(thermo_path, thermo_data)
+
+    expected_mass = _solid_mass_enthalpy(
+        thermo_data, SOLID_SPECIES, TEMPERATURE, DEFAULT_TEMP_REF)  # [J/kg]
+    expected_mole = _solid_molar_enthalpy(
+        thermo_data, SOLID_SPECIES, TEMPERATURE, DEFAULT_TEMP_REF)  # [J/mol]
+
+    assert stream.temp_ref == DEFAULT_TEMP_REF
+    assert stream.getEnthalpy() == pytest.approx(expected_mass, rel=RTOL)
+    assert stream.getEnthalpy(basis='mole') == pytest.approx(
+        expected_mole, rel=RTOL)
+
+
+def test_solid_stream_positional_arguments_keep_their_meaning(
+        thermo_path, thermo_data):
+    """Append ``temp_ref`` after the existing positional parameters."""
+    fractions = _pure_fractions(thermo_data, SOLID_SPECIES)  # [-]
+    legacy_args = (thermo_path, TEMPERATURE, STREAM_PRESSURE,
+                   STREAM_SOLID_FLOW, fractions, CAKE_DISTRIB,
+                   CAKE_X_DISTRIB, NONCUBIC_KV)
+
+    legacy = SolidStream(*legacy_args)
+    extended = SolidStream(*legacy_args, ICE_POINT_TEMP_REF)
+    # Keyword construction defines the intended meaning of each position.
+    keyword = SolidStream(
+        thermo_path, temp=TEMPERATURE, pres=STREAM_PRESSURE,
+        mass_flow=STREAM_SOLID_FLOW, mass_frac=fractions,
+        distrib=CAKE_DISTRIB, x_distrib=CAKE_X_DISTRIB, kv=NONCUBIC_KV)
+
+    for stream, temp_ref in ((legacy, DEFAULT_TEMP_REF),
+                             (extended, ICE_POINT_TEMP_REF)):
+        assert stream.temp == TEMPERATURE
+        assert stream.pres == STREAM_PRESSURE
+        assert stream.mass_flow == pytest.approx(STREAM_SOLID_FLOW, rel=RTOL)
+        np.testing.assert_array_equal(stream.mass_frac, keyword.mass_frac)
+        np.testing.assert_array_equal(stream.distrib, keyword.distrib)
+        np.testing.assert_array_equal(stream.x_distrib, CAKE_X_DISTRIB)
+        assert stream.kv == NONCUBIC_KV
+        assert stream.temp_ref == temp_ref
+    # Self-check: species A carries the mass and the bin weights became a
+    # positive number distribution [#/um/s].
+    assert keyword.mass_frac[0] == pytest.approx(1.0, rel=RTOL)
+    assert np.all(keyword.distrib > 0)
+
+
+def _make_slurry_stream(thermo_path, thermo_data, solid_temp_ref,
+                        liquid_temp=TEMPERATURE, solid_temp=TEMPERATURE):
+    """Attach a liquid stream and a referenced solid stream to a SlurryStream.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Path of the JSON property database.
+    thermo_data : dict
+        Raw JSON property entries keyed by species name.
+    solid_temp_ref : float
+        Constructor enthalpy reference of the solid stream [K].
+    liquid_temp : float, optional
+        Liquid stream temperature before mixing [K].
+    solid_temp : float, optional
+        Solid stream temperature before mixing [K].
+
+    Returns
+    -------
+    PharmaPy.MixedPhases.SlurryStream
+        Slurry stream with liquid flow ``STREAM_LIQUID_FLOW`` and solid flow
+        ``STREAM_SOLID_FLOW`` [kg/s].
+    """
+    liquid = LiquidStream(
+        thermo_path, temp=liquid_temp, mass_flow=STREAM_LIQUID_FLOW,
+        mass_frac=_pure_fractions(thermo_data, LIQUID_SPECIES))
+    solid = _make_solid_stream(thermo_path, thermo_data, temp=solid_temp,
+                               temp_ref=solid_temp_ref,
+                               x_distrib=CAKE_X_DISTRIB, distrib=CAKE_DISTRIB)
+    slurry = SlurryStream()
+    slurry.Phases = [liquid, solid]
+
+    # Fixture self-checks: the setter keeps the constructed flows and the
+    # attached solid keeps its nondefault reference.
+    assert slurry.Liquid_1.mass_flow == pytest.approx(STREAM_LIQUID_FLOW,
+                                                      rel=RTOL)
+    assert slurry.Solid_1.mass_flow == pytest.approx(STREAM_SOLID_FLOW,
+                                                     rel=RTOL)
+    assert slurry.Solid_1.temp_ref == solid_temp_ref
+    return slurry
+
+
+@pytest.mark.parametrize('common_ref', [None, LOW_TEMP_REF])
+def test_slurry_stream_with_referenced_solid_stream_uses_common_reference(
+        thermo_path, thermo_data, common_ref):
+    """Weight both stream phases on the mixture reference, not the solid's."""
+    slurry = _make_slurry_stream(thermo_path, thermo_data, ICE_POINT_TEMP_REF)
+    kwargs = {} if common_ref is None else {'temp_ref': common_ref}
+    expected_ref = (DEFAULT_TEMP_REF if common_ref is None
+                    else common_ref)  # [K]
+
+    flows = np.array([STREAM_LIQUID_FLOW, STREAM_SOLID_FLOW])  # [kg/s]
+    expected = (np.dot(flows, _phase_enthalpies(
+        thermo_data, TEMPERATURE, expected_ref)) / flows.sum())  # [J/kg]
+
+    assert slurry.getEnthalpy(TEMPERATURE, volumetric=False, **kwargs) == \
+        pytest.approx(expected, rel=RTOL)
+
+
+def test_slurry_stream_initialization_ignores_solid_stream_reference(
+        thermo_path, thermo_data):
+    """Solve the stream mixing temperature on one common reference."""
+    slurry = _make_slurry_stream(
+        thermo_path, thermo_data, ICE_POINT_TEMP_REF,
+        liquid_temp=COLD_TEMP, solid_temp=HOT_TEMP)
+
+    # Stream flows [kg/s] replace the batch masses [kg] of the helper; the
+    # balance is linear in them, so the root is unchanged.
+    expected = _mixing_root(
+        thermo_data,
+        [(STREAM_LIQUID_FLOW, 0.0, COLD_TEMP),
+         (0.0, STREAM_SOLID_FLOW, HOT_TEMP)],
+        (STREAM_LIQUID_FLOW, STREAM_SOLID_FLOW))  # [K]
+
+    assert slurry.temp == pytest.approx(expected, rel=RTOL)
+
+
+# --- Unit-operation solid outlets (issue #422, current behavior) ----------
+
+
+@pytest.mark.parametrize('continuous', [False, True])
+def test_mixer_constructed_solid_outlet_uses_default_reference(
+        thermo_path, thermo_data, continuous):
+    """Pin that the solids Mixer builds its outlet solid at 298.15 K.
+
+    Issue #422 will choose one outlet policy; this test pins the current
+    behavior of a constructing unit and must change with that decision.
+    """
+    if continuous:
+        liquid_inlet = LiquidStream(
+            thermo_path, temp=COLD_TEMP, mass_flow=STREAM_LIQUID_FLOW,
+            mass_frac=_pure_fractions(thermo_data, LIQUID_SPECIES))
+        slurry_inlet = _make_slurry_stream(
+            thermo_path, thermo_data, ICE_POINT_TEMP_REF,
+            liquid_temp=HOT_TEMP, solid_temp=HOT_TEMP)
+        solid_type = SolidStream
+    else:
+        liquid_inlet = LiquidPhase(
+            thermo_path, temp=COLD_TEMP, mass=CAKE_LIQUID_MASS,
+            mass_frac=_pure_fractions(thermo_data, LIQUID_SPECIES))
+        slurry_inlet, _ = _make_slurry(
+            thermo_path, thermo_data, ICE_POINT_TEMP_REF,
+            liquid_temp=HOT_TEMP, solid_temp=HOT_TEMP)
+        solid_type = SolidPhase
+
+    mixer = Mixer()
+    # The solids-free inlet is first because Mixer reads name_species from
+    # Inlets[0], which the slurry does not define.
+    mixer.Inlets = [liquid_inlet, slurry_inlet]
+    mixer.solve_unit()
+
+    outlet_solid = mixer.Outlet.Solid_1
+    temp_out = mixer.Outlet.temp  # [K]
+    expected = _solid_mass_enthalpy(
+        thermo_data, SOLID_SPECIES, temp_out, DEFAULT_TEMP_REF)  # [J/kg]
+
+    assert slurry_inlet.Solid_1.temp_ref == ICE_POINT_TEMP_REF
+    assert type(outlet_solid) is solid_type
+    assert outlet_solid.temp_ref == DEFAULT_TEMP_REF
+    assert outlet_solid.getEnthalpy(temp=temp_out) == pytest.approx(
+        expected, rel=RTOL)
+
+
+def test_batch_crystallizer_copied_solid_outlet_keeps_holdup_reference(
+        data_path):
+    """Pin that a BatchCryst outlet copies its holdup solid's reference.
+
+    Issue #422 will choose one outlet policy; this test pins the current
+    behavior of a copying unit and must change with that decision.
+    """
+    unit, initial = make_cryst_unit(data_path, BatchCryst, adiabatic=True)
+    holdup = unit.Solid_1
+    referenced = SolidPhase(
+        holdup.path_data, temp=holdup.temp, temp_ref=ICE_POINT_TEMP_REF,
+        mass_frac=holdup.mass_frac, x_distrib=holdup.x_distrib,
+        distrib=holdup.distrib, kv=holdup.kv)
+    # Self-check: the replacement holds the same inventory as the fixture.
+    assert referenced.mass == pytest.approx(holdup.mass, rel=RTOL)
+    unit.Phases = (unit.Liquid_1, referenced)
+
+    time = np.array([0.0, CRYST_DURATION])  # [s]
+    states = np.tile(initial, (len(time), 1))  # [state units], constant
+    unit.retrieve_results(time, states)
+
+    with open(data_path['flowsheet'] / 'compound_database.json') as stream:
+        cryst_data = json.load(stream)
+    # The fixture solid is pure A, the first database species.
+    species = list(cryst_data)[0]
+    expected = (cryst_data[species]['cp_solid'][0]
+                * (CRYST_TEMPERATURE - ICE_POINT_TEMP_REF)
+                / (cryst_data[species]['mw'] / GRAMS_PER_KILOGRAM))  # [J/kg]
+
+    outlet_solid = unit.Outlet.Solid_1
+    assert outlet_solid is not referenced
+    assert outlet_solid.temp == CRYST_TEMPERATURE
+    assert outlet_solid.temp_ref == ICE_POINT_TEMP_REF
+    assert outlet_solid.getEnthalpy() == pytest.approx(expected, rel=RTOL)
