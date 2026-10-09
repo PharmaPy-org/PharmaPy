@@ -133,8 +133,10 @@ class _BaseCrystallizer(MultiPhaseVessel):
         missed 2 of the 33, by at most 5 %. With a 10 s cap both came within
         1 % of SciPy LSODA on every feed, so the step is the root cause and
         dense is the more forgiving choice, not a cure. Each dense Jacobian
-        costs one right-hand side evaluation per state, which is affordable
-        at the grids used here: 800 size classes solve in about 16 s. Asking
+        costs one right-hand side evaluation per state. At the 35 size
+        classes used here that keeps the dense solve about as cheap as
+        Krylov, but at 800 classes the Jacobians make up 96 % of the
+        right-hand side evaluations and a batch takes minutes. Asking
         the backend rather than its solver keeps this independent of the
         integrator; one with no such choice ignores the request.
 
