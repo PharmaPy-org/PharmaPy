@@ -5,10 +5,11 @@ Created on Wed May 27 10:12:13 2020
 @author: dcasasor
 """
 
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 from numpy.typing import ArrayLike
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
+from PharmaPy.MixedPhases import Cake, Slurry, SlurryStream
 from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
@@ -66,9 +67,32 @@ def Interpolation(t_data, y_data, time, newton=True, num_points=3):
 
 
 class BatchToFlowConnector:
-    def __init__(self, cycle_time, flow_mult=1):
-        self.flow_mult = flow_mult
-        self.cycle_time = cycle_time
+    """Discharge a liquid batch holdup as a constant continuous stream.
+
+    The connector turns the final inventory of a single liquid batch holdup
+    into a ``LiquidStream`` outlet whose mass flow [kg/s] is the liquid
+    holdup mass [kg] divided by ``cycle_time`` [s] and multiplied by
+    ``flow_mult`` [-], at the holdup's temperature, pressure and composition.
+    Only one liquid holdup is supported; see the ``Phases`` setter for the
+    rejected inputs. The transfer is instantaneous: ``result`` and
+    ``outputs`` hold one sample at time 0 s (see :meth:`retrieve_results`).
+    ``has_solids`` is retained for compatibility and is always False for an
+    accepted holdup.
+    """
+
+    def __init__(self, cycle_time: float, flow_mult: float = 1) -> None:
+        """Create an unconnected batch-to-flow connector.
+
+        Parameters
+        ----------
+        cycle_time : float
+            Time over which the batch holdup is discharged [s].
+        flow_mult : float, optional
+            Multiplier applied to the discharge mass flow [-]; the default
+            of one discharges the holdup exactly once per cycle.
+        """
+        self.flow_mult = flow_mult  # [-]
+        self.cycle_time = cycle_time  # [s]
 
         self._Phases = None
         self._Inlet = None
@@ -81,26 +105,96 @@ class BatchToFlowConnector:
         return self._Phases
 
     @Phases.setter
-    def Phases(self, phases):
-        self.has_solids = False
+    def Phases(self, phases: Union[LiquidPhase, Sequence[LiquidPhase]]
+               ) -> None:
+        """Attach the single liquid batch holdup to discharge.
 
-        if isinstance(phases, (list, tuple)):
-            self._Phases = phases
-        elif 'LiquidPhase' in phases.__class__.__name__:
-            self._Phases = [phases]
-        elif 'Slurry' in phases.__class__.__name__:
-            self._Phases = phases.Phases
-            self.has_solids = True
+        Parameters
+        ----------
+        phases : LiquidPhase or a one-element list/tuple of LiquidPhase
+            Liquid batch inventory with mass [kg], temperature [K], pressure
+            [Pa] and mass fractions [-]. Liquid streams are not accepted.
 
-        classify_phases(self)
+        Raises
+        ------
+        TypeError
+            If ``phases`` is or contains an object that is not a batch
+            holdup: any stream (``LiquidStream``, ``SolidStream``,
+            ``VaporStream``, ``SlurryStream``, or a subclass) or a non-phase
+            object.
+        ValueError
+            If ``phases`` is an empty list or tuple.
+        NotImplementedError
+            If ``phases`` is a batch holdup other than exactly one liquid
+            phase: a ``SolidPhase``, ``VaporPhase``, ``Slurry`` or ``Cake``
+            (including subclasses), or several phases such as two liquids or
+            a liquid with a vapor or solid.
+
+        Notes
+        -----
+        The check is an allowlist applied before any state changes, so a
+        rejected assignment leaves the connector, including a previously
+        attached holdup, unchanged. Every rejected object is named in the
+        message. Any ``LiquidPhase`` subclass is accepted, whatever its class
+        name, because the holdup is installed as ``Liquid_1`` explicitly.
+        ``TypeError`` marks objects that are not batch inventories
+        at all; ``ValueError`` a container with no holdup;
+        ``NotImplementedError`` physically valid holdups whose discharge is
+        not implemented, as for other unimplemented PharmaPy model options.
+        Those holdups are rejected rather than reduced to their liquid,
+        because the liquid-only outlet would drop the rest from the
+        flowsheet mass balance.
+        """
+        candidates = (list(phases) if isinstance(phases, (list, tuple))
+                      else [phases])
+        streams = (LiquidStream, SolidStream, VaporStream, SlurryStream)
+        holdups = (LiquidPhase, SolidPhase, VaporPhase, Slurry, Cake)
+        not_holdups = [type(phase).__name__ for phase in candidates
+                       if isinstance(phase, streams)
+                       or not isinstance(phase, holdups)]
+        if not_holdups:
+            raise TypeError(
+                f'BatchToFlowConnector.Phases takes a batch holdup; got '
+                f'{not_holdups}, which are streams or not phases. Assign the '
+                'single batch LiquidPhase to discharge.')
+        if not candidates:
+            raise ValueError(
+                'BatchToFlowConnector.Phases needs one liquid batch holdup '
+                '(a LiquidPhase); got an empty sequence.')
+        if len(candidates) > 1 or not isinstance(candidates[0], LiquidPhase):
+            names = [type(phase).__name__ for phase in candidates]
+            raise NotImplementedError(
+                'BatchToFlowConnector discharges exactly one liquid batch '
+                f'holdup (a LiquidPhase); got {names}. Discharging solids, '
+                'slurries, cakes, vapor or several phases is not implemented: '
+                'a liquid-only outlet would drop them from the mass balance.')
+
+        self.has_solids = False  # retained for compatibility
+        self._Phases = (phases if isinstance(phases, (list, tuple))
+                        else [phases])
+
+        # Explicit name: classify_phases' class-name matching would fail for
+        # a LiquidPhase subclass whose name lacks 'Liquid'.
+        classify_phases(self, names=['Liquid_1'])
         self.nomenclature()
 
-    def nomenclature(self):
-        comp = self.Liquid_1.name_species
+    def nomenclature(self) -> None:
+        """Declare the published outlet states and their metadata.
+
+        Notes
+        -----
+        ``names_states_out`` and ``states_di`` list, in the same order, the
+        temperature [K], pressure [Pa], liquid mass fractions [-] (one per
+        species, in the holdup's database species order) and the discharge
+        mass flow [kg/s]. No state carries a ``type``: the connector solves
+        no equations.
+        """
+        comp = list(self.Liquid_1.name_species)
         self.states_di = {
-            'mass_frac': {'dim': len(comp), 'index': comp},
-            'mass_flow': {'dim': 1, 'units': 'kg/s'},
-            'temp': {'dim': 1, 'units': 'K'}}
+            'temp': {'dim': 1, 'units': 'K'},
+            'pres': {'dim': 1, 'units': 'Pa'},
+            'mass_frac': {'dim': len(comp), 'units': '', 'index': comp},
+            'mass_flow': {'dim': 1, 'units': 'kg/s'}}
 
         self.names_states_out = ('temp', 'pres', 'mass_frac', 'mass_flow')
 
@@ -110,32 +204,51 @@ class BatchToFlowConnector:
     def solve_unit(self):
         self.retrieve_results()
 
-    def retrieve_results(self):
+    def retrieve_results(self) -> None:
+        """Publish the liquid outlet stream and its single-sample result.
 
-        fields = ('temp', 'pres', 'mass_frac', 'path_data')
+        Notes
+        -----
+        The outlet ``LiquidStream`` carries the holdup's temperature [K],
+        pressure [Pa] and mass fractions [-] with mass flow
+        ``Liquid_1.mass / cycle_time * flow_mult`` [kg/s].
 
-        # if self.cycle_time is None:
-        #     self.cycle_time = self.Phases[0].time_upstream
+        The transfer itself is instantaneous, like the solids ``Mixer``:
+        ``outputs`` (a dictionary) and ``result`` (a ``DynamicResult``
+        whose attributes reference the same arrays) hold one sample at
+        ``time = [0.]`` [s], so ``SimulationExec`` records zero processing
+        time for the connector; the discharge over ``cycle_time`` [s]
+        happens in the downstream continuous unit. Every state has a
+        leading time axis of length one: ``temp`` [K], ``pres`` [Pa] and
+        ``mass_flow`` [kg/s] of shape (1,), ``mass_frac`` [-] of shape
+        (1, num_species). A ``Connection`` therefore hands downstream units
+        a constant single-sample feed.
 
-        if self.has_solids:
-            pass  # TODO: add this if continuous downstream solid processing is made available
-        else:
-            kw_phase = {key: getattr(self.Liquid_1, key) for key in fields}
+        That feed does not stop after ``cycle_time``: it lasts for the
+        downstream unit's whole runtime. To transfer exactly the holdup
+        mass times ``flow_mult`` [kg], run the downstream unit for
+        ``cycle_time`` [s]; a longer run delivers more than the holdup.
+        """
+        liquid = self.Liquid_1
+        num_species = len(liquid.name_species)
+        mass_flow = liquid.mass / self.cycle_time * self.flow_mult  # [kg/s]
+        outlet = LiquidStream(liquid.path_data, temp=liquid.temp,
+                              pres=liquid.pres, mass_frac=liquid.mass_frac,
+                              mass_flow=mass_flow)
 
-            kw_phase['path_thermo'] = kw_phase.pop('path_data')
-            mass_flow = self.Liquid_1.mass / self.cycle_time * self.flow_mult
-            outlet = LiquidStream(**kw_phase, mass_flow=mass_flow)
+        outputs = {
+            'temp': np.array(liquid.temp, dtype=float).reshape(1),  # [K]
+            'pres': np.array(liquid.pres, dtype=float).reshape(1),  # [Pa]
+            'mass_frac': np.array(liquid.mass_frac, dtype=float).reshape(
+                1, num_species),  # [-]
+            'mass_flow': np.array(mass_flow, dtype=float).reshape(1),  # [kg/s]
+            'time': np.zeros(1),  # [s], instantaneous transfer
+            }
 
-            kw_phase.pop('path_thermo')
-            kw_phase['mass_flow'] = mass_flow
-
-        # kw_phase['time'] = [self.cycle_time]
-        kw_phase['time'] = None
-
-        self.result = DynamicResult(self.states_di, **kw_phase)
+        self.result = DynamicResult(self.states_di, **outputs)
 
         self.Outlet = outlet
-        self.outputs = kw_phase
+        self.outputs = outputs
 
 
 class LiquidStream(LiquidPhase):

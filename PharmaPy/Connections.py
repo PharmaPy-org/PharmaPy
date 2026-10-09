@@ -495,6 +495,43 @@ class Connection:
         else:
             self.Matter.time_upstream = time_prof[-1]
 
+    def _collector_input_names(self) -> list:
+        """Return the DynamicCollector input names for the transferred matter.
+
+        Returns
+        -------
+        list of str
+            The collector's crystallizer names (liquid ``mass_conc``
+            [kg/m**3], ``vol_flow`` [m**3/s], ``temp`` [K], ``distrib``
+            [#/m**3/um], ``mu_n`` [m**n/m**3]) for mixed-phase matter,
+            otherwise its liquid-mixer names (``mass_frac`` [-],
+            ``mass_flow`` [kg/s], ``temp`` [K]).
+
+        Notes
+        -----
+        The choice follows the matter type, as ``DynamicCollector.Inlet``
+        selects its model, rather than the source class: mixed-phase
+        (``PharmaPy.MixedPhases``) matter, such as a ``SlurryStream`` from an
+        ``MSMPR`` or a continuous solids ``Mixer``, gets the crystallizer
+        names, and a liquid source the liquid-mixer names.
+
+        ``NameAnalyzer`` then pairs them with the source's published names.
+        An ``MSMPR`` publishes ``mass_conc`` [kg/m**3], passed through
+        unchanged. A source publishing liquid mass fractions ``mass_frac``
+        [-], such as the solids ``Mixer``, has them converted to liquid mass
+        concentration [kg/m**3] by the attached liquid's ``frac_to_conc``:
+        ``w_i / sum_j(w_j / rho_j)``, the fractions times the ideal
+        mass-basis mixing density of the database pure-component liquid
+        densities ``rho_liq`` [kg/m**3], which are temperature independent.
+        Fields the source does not publish, such as the solids Mixer's
+        ``vol_flow`` [m**3/s], are read by the collector from the
+        transferred stream itself.
+        """
+        names = self.destination_uo.names_states_in
+        if self.Matter.__module__ == 'PharmaPy.MixedPhases':
+            return names['crystallizer']
+        return names['liquid_mixer']
+
     def ConvertUnits(self) -> None:
         """Convert upstream states using the destination's selected names.
 
@@ -505,6 +542,8 @@ class Connection:
         so an unconnected mixer still exposes both alternatives here. Stream
         quantities retain their per-second basis; batch amounts retain their
         inventory basis. Converted states are stored in ``Matter.y_inlet``.
+        A ``DynamicCollector`` destination receives the input names of the
+        model its inlet selects, from :meth:`_collector_input_names`.
         """
         mode_source = self.source_uo.oper_mode
         mode_dest = self.destination_uo.oper_mode
@@ -523,19 +562,9 @@ class Connection:
 
             class_destination = self.destination_uo.__class__.__name__
             if class_destination == 'DynamicCollector':
-                if self.source_uo.__class__.__name__ == 'MSMPR':
-                    states_down = self.destination_uo.names_states_in['crystallizer']
-                else:
-                    states_down = self.destination_uo.names_states_in['liquid_mixer']
-
+                states_down = self._collector_input_names()
             else:
                 states_down = names_states_in
-            
-            # if hasattr(self.Matter, 'moments'):
-            #     num_distr = len(self.Matter.moments)
-            
-            # elif hasattr(self.Matter, 'distrib'):
-            #     num_distr = len(self.Matter.distrib)
             
             if 'mu_n' in states_up:
                 num_distr = len(self.Matter.moments)
@@ -557,11 +586,7 @@ class Connection:
 
             class_destination = self.destination_uo.__class__.__name__
             if class_destination == 'DynamicCollector':
-                if self.source_uo.__class__.__name__ == 'MSMPR':
-                    states_down = self.destination_uo.names_states_in['crystallizer']
-                else:
-                    states_down = self.destination_uo.names_states_in['liquid_mixer']
-
+                states_down = self._collector_input_names()
             else:
                 states_down = names_states_in
 
@@ -587,8 +612,6 @@ class Connection:
 
         elif mode_dest == 'Batch':
             self.destination_uo.Phases = transfered_matter
-            # if class_destination == 'BatchToFlowConnector':
-            #     self.destination_uo.names_states_out = self.source_uo.names_states_out
 
         elif mode_dest == 'Semibatch':
             if class_destination == 'DynamicCollector':
