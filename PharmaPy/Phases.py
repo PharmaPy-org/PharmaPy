@@ -223,9 +223,6 @@ class LiquidPhase(ThermoPhysicalManager):
 
         super().__init__(path_thermo)
 
-        self.cp_liq = np.atleast_2d(self.cp_liq)
-        self.p_vap = np.atleast_2d(self.p_vap)
-
         if name_solv is None:
             ind_solv = name_solv
         else:
@@ -626,8 +623,13 @@ class LiquidPhase(ThermoPhysicalManager):
 
         return cpLiq
 
-    def getEnthalpy(self, temp=None, temp_ref=298.15, mass_frac=None,
-                    mole_frac=None, total_h=True, basis='mass'):
+    def getEnthalpy(self, temp: Optional[ArrayLike] = None,
+                    temp_ref: float = 298.15,
+                    mass_frac: Optional[np.ndarray] = None,
+                    mole_frac: Optional[np.ndarray] = None,
+                    total_h: bool = True, basis: str = 'mass',
+                    weights: Optional[np.ndarray] = None
+                    ) -> Union[float, np.ndarray]:
         """Calculate liquid sensible enthalpy relative to a reference.
 
         Parameters
@@ -647,6 +649,11 @@ class LiquidPhase(ThermoPhysicalManager):
         basis : {'mass', 'mole'}, optional
             Physical basis of the returned enthalpy and of the weighting
             fractions; default mass.
+        weights : ndarray, optional
+            With ``total_h=False``, amounts by which the caller weights the
+            species enthalpies [any basis], shape ``(num_species,)`` or
+            ``(num_rows, num_species)``; see
+            ``ThermoPhysicalManager.getEnthalpy``.
 
         Returns
         -------
@@ -667,6 +674,10 @@ class LiquidPhase(ThermoPhysicalManager):
         ValueError
             If ``basis`` is neither 'mass' nor 'mole', for both ``total_h``
             modes, raised by ``ThermoPhysicalManager.getEnthalpy``.
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a species that the result needs has no ``cp_liq`` data; see
+            ``ThermoPhysicalManager.getEnthalpy``.
         """
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
@@ -677,13 +688,56 @@ class LiquidPhase(ThermoPhysicalManager):
 
         hLiq = super().getEnthalpy(temp, temp_ref, mass_frac, mole_frac,
                                    phase='liquid', total_h=total_h,
-                                   basis=basis)
+                                   basis=basis, weights=weights)
 
         return hLiq
 
-    def getBubblePoint(self, pres=None, mass_frac=None, mole_frac=None,
-                       thermo_method='ideal', y_vap=False):
+    def getBubblePoint(self, pres: Optional[float] = None,
+                       mass_frac: Optional[np.ndarray] = None,
+                       mole_frac: Optional[np.ndarray] = None,
+                       thermo_method: str = 'ideal',
+                       y_vap: bool = False) -> Union[float, tuple]:
+        """Solve for the liquid bubble-point temperature.
 
+        Parameters
+        ----------
+        pres : float, optional
+            Pressure [Pa]; the phase pressure when ``None``.
+        mass_frac, mole_frac : ndarray, optional
+            Liquid fractions [-], shape ``(num_species,)``. Mole fractions
+            are converted from mass fractions when only those are given; the
+            phase composition is used when neither is.
+        thermo_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Liquid activity model passed to ``getKeqVLE``.
+        y_vap : bool, optional
+            Also return the incipient vapor composition.
+
+        Returns
+        -------
+        temp_bubble : float
+            Bubble-point temperature [K].
+        y_frac : ndarray
+            Incipient vapor mole fractions [-], shape ``(num_species,)``;
+            only when ``y_vap`` is True.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            From ``getKeqVLE`` if a species at or below its critical
+            temperature has no ``p_vap`` coefficients.
+        RuntimeError
+            If the Newton iteration does not converge.
+
+        Notes
+        -----
+        The Newton seed is ``sum_i x_i * Tsat_i(pres)`` [K]. The seed and the
+        Newton iterates evaluate a species without Antoine data with zero
+        coefficients, as releases before #414 did, so the convergence path
+        is unchanged (see ``_antoine_seed``). The converged root is then
+        checked with ``getKeqVLE``: a species with a nonzero fraction that is
+        at or below its critical temperature there must have ``p_vap``.
+        """
         if mass_frac is None and mole_frac is None:
             mole_frac = self.mole_frac
 
@@ -694,30 +748,66 @@ class LiquidPhase(ThermoPhysicalManager):
             pres = self.pres
 
         def bubble_fn(temp):
-            k_vals = self.getKeqVLE(temp, pres, mole_frac,
-                                    gamma_model=thermo_method)
+            k_vals = self._vle_ratios(temp, pres, mole_frac, thermo_method,
+                                      check=False)  # [-], iterate only
 
             obj = np.dot(mole_frac, (k_vals - 1))
 
             return obj
 
-        temp_pure = self.AntoineEquation(pres=pres)
-        temp_seed = np.dot(mole_frac, temp_pure)
+        temp_seed = self._antoine_seed(mole_frac, pres=pres)  # [K]
         temp_bubble = newton(bubble_fn, temp_seed, full_output=False)
 
-        if y_vap:
-            k_vals = self.getKeqVLE(temp_bubble, pres, mole_frac,
-                                    gamma_model=thermo_method)
+        # Check the data the converged root needs.
+        k_vals = self.getKeqVLE(temp_bubble, pres, mole_frac,
+                                gamma_model=thermo_method)  # [-]
 
+        if y_vap:
             y_frac = k_vals * mole_frac
 
             return temp_bubble, y_frac
         else:
             return temp_bubble
 
-    def getBubblePressure(self, temp=None, mass_frac=None, mole_frac=None,
-                          thermo_method='ideal', y_vap=False):
+    def getBubblePressure(self, temp: Optional[float] = None,
+                          mass_frac: Optional[np.ndarray] = None,
+                          mole_frac: Optional[np.ndarray] = None,
+                          thermo_method: str = 'ideal',
+                          y_vap: bool = False) -> float:
+            """Solve for the liquid bubble-point pressure.
 
+            Parameters
+            ----------
+            temp : float, optional
+                Temperature [K]; the phase temperature when ``None``.
+            mass_frac, mole_frac : ndarray, optional
+                Liquid fractions [-], shape ``(num_species,)``, resolved as
+                in ``getBubblePoint``.
+            thermo_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+                Liquid activity model passed to ``getKeqVLE``.
+            y_vap : bool, optional
+                Accepted for signature symmetry; unused.
+
+            Returns
+            -------
+            float
+                Bubble-point pressure [Pa].
+
+            Raises
+            ------
+            MissingPropertyError
+                A subclass of ``AttributeError``.
+                From ``getKeqVLE`` if a species at or below its critical
+                temperature has no ``p_vap`` coefficients.
+            RuntimeError
+                If the Newton iteration does not converge.
+
+            Notes
+            -----
+            The Newton seed is ``sum_i x_i * psat_i(temp)`` [Pa]. Seed and
+            iterates treat missing Antoine data as in ``getBubblePoint``, and
+            the converged root is checked with ``getKeqVLE``.
+            """
             if mass_frac is None and mole_frac is None:
                 mole_frac = self.mole_frac
 
@@ -728,16 +818,19 @@ class LiquidPhase(ThermoPhysicalManager):
                 temp = self.temp
 
             def bubble_fn(pr):
-                k_vals = self.getKeqVLE(temp, pr, mole_frac,
-                                        gamma_model=thermo_method)
+                k_vals = self._vle_ratios(temp, pr, mole_frac, thermo_method,
+                                          check=False)  # [-], iterate only
 
                 obj = np.dot(mole_frac, (k_vals - 1))
 
                 return obj
 
-            pres_pure = self.AntoineEquation(temp=temp)
-            pres_seed = np.dot(mole_frac, pres_pure)
+            pres_seed = self._antoine_seed(mole_frac, temp=temp)  # [Pa]
             pres_bubble = newton(bubble_fn, pres_seed, full_output=False)
+
+            # Check the data the converged root needs.
+            self.getKeqVLE(temp, pres_bubble, mole_frac,
+                           gamma_model=thermo_method)
 
             return pres_bubble
 
@@ -1432,9 +1525,13 @@ class VaporPhase(ThermoPhysicalManager):
             if, for ``total_h=True``, the weighting composition is neither
             ``(num_species,)`` nor ``(num_temperatures, num_species)``. A
             scalar ``temp`` therefore accepts only a one-row profile.
-        AttributeError
+        MissingPropertyError
+            A subclass of ``AttributeError``.
             If a species is supercritical at a requested temperature but the
-            property database supplies no ``cp_vapor`` data.
+            property database supplies no ``cp_vapor`` data for it, or is at
+            or below its critical temperature without ``cp_liq`` data. Data
+            missing for one species only (a NaN row, see ``ParseDatabase``)
+            count as missing. The error names the species and the property.
 
         Notes
         -----
@@ -1442,6 +1539,17 @@ class VaporPhase(ThermoPhysicalManager):
         subcritical at some requested temperature, and vapor heat capacities
         only for species that are supercritical at some requested
         temperature, so heat-capacity data that no entry uses need not exist.
+        For ``total_h=True``, an entry whose weighting fraction is zero adds
+        nothing to the mixture and needs no heat-capacity data either; its
+        sensible heat is taken as exactly zero, never NaN times zero. Nonzero
+        is bitwise: a round-off-level fraction counts as present, so a
+        species carried as a solver state may need data at a nominal zero
+        fraction. With
+        ``total_h=False``, every entry is returned and needs its data. This
+        zero-fraction exemption covers heat-capacity data only: the latent
+        heat still requires valid ``delta_hvap`` and ``tref_hvap`` for every
+        species at or below its critical temperature, whatever its fraction
+        (see ``getHeatVaporization`` and issue #424).
         The supercritical classification is strictly ``T > Tc``; see
         ``_classify_criticality`` for the equality rule. The mixture
         enthalpy is the row-wise species sum of species enthalpy times the
@@ -1467,28 +1575,51 @@ class VaporPhase(ThermoPhysicalManager):
         temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
         num_temp, num_comp = is_supercritical.shape
 
-        subcritical_columns = np.flatnonzero((~is_supercritical).any(axis=0))
-        supercritical_columns = np.flatnonzero(is_supercritical.any(axis=0))
+        if total_h:
+            frac = np.asarray(mass_frac if basis == 'mass' else mole_frac,
+                              dtype=float)  # [-], on the requested basis
+            if frac.shape not in ((num_comp,), (num_temp, num_comp)):
+                raise ValueError(
+                    "The weighting composition must have shape "
+                    f"(num_species,) = {(num_comp,)} for a fixed composition "
+                    "or (num_temperatures, num_species) = "
+                    f"{(num_temp, num_comp)} for a profile paired row by row "
+                    f"with temp; got {frac.shape}")
+            # A zero-fraction entry adds nothing to the mixture, so it needs
+            # no heat-capacity data and keeps zero sensible heat below.
+            is_used = np.broadcast_to(frac != 0, is_supercritical.shape)
+        else:
+            # Every species enthalpy is returned, so every entry is used.
+            is_used = np.ones_like(is_supercritical)
+
+        subcritical_columns = np.flatnonzero(
+            (~is_supercritical & is_used).any(axis=0))
+        supercritical_columns = np.flatnonzero(
+            (is_supercritical & is_used).any(axis=0))
 
         # Sensible heat from temp_ref on each candidate correlation; the
         # per-entry mask below selects one of them for every entry.
         h_liquid = np.zeros((num_temp, num_comp))  # [J/kg] or [J/mol], by basis
         if subcritical_columns.size > 0:
+            self._check_species_rows(
+                'cp_liq', self._property_rows('cp_liq')[subcritical_columns],
+                subcritical_columns, np.ones(subcritical_columns.size, bool),
+                'are at or below t_crit (or have no t_crit) at a requested '
+                'temperature, so their enthalpy')
             h_liquid[:, subcritical_columns] = super().getEnthalpy(
                 temp_values, temp_ref, phase='liquid', basis=basis,
                 idx=subcritical_columns, total_h=False)  # [J/kg] or [J/mol]
 
         h_vapor = np.zeros((num_temp, num_comp))  # [J/kg] or [J/mol], by basis
         if supercritical_columns.size > 0:
-            if not hasattr(self, 'cp_vapor'):
-                names = [self.name_species[ind]
-                         for ind in supercritical_columns]
-                raise AttributeError(
-                    f"Species {names} are supercritical (temp > t_crit) at a "
-                    "requested temperature, so their enthalpy needs vapor "
-                    "heat-capacity coefficients 'cp_vapor' [J/mol/K], which "
-                    f"the property database {self.path_data!r} does not "
-                    "supply; add 'cp_vapor' or evaluate at or below t_crit")
+            self._check_species_rows(
+                'cp_vapor',
+                self._property_rows('cp_vapor')[supercritical_columns],
+                supercritical_columns,
+                np.ones(supercritical_columns.size, bool),
+                'are supercritical (temp > t_crit) at a requested '
+                'temperature, so their enthalpy',
+                remedy=' or evaluate at or below t_crit')
             h_vapor[:, supercritical_columns] = super().getEnthalpy(
                 temp_values, temp_ref, phase='vapor', basis=basis,
                 idx=supercritical_columns, total_h=False)  # [J/kg] or [J/mol]
@@ -1505,43 +1636,56 @@ class VaporPhase(ThermoPhysicalManager):
         if not total_h:
             return h_species
 
-        frac = np.asarray(mass_frac if basis == 'mass' else mole_frac,
-                          dtype=float)  # [-], on the requested basis
-        if frac.shape not in ((num_comp,), (num_temp, num_comp)):
-            raise ValueError(
-                "The weighting composition must have shape (num_species,) = "
-                f"{(num_comp,)} for a fixed composition or (num_temperatures, "
-                f"num_species) = {(num_temp, num_comp)} for a profile paired "
-                f"row by row with temp; got {frac.shape}")
-
         h_total = (h_species * frac).sum(axis=1)  # [J/kg] or [J/mol], by basis
         if num_temp == 1:
             h_total = h_total[0]  # [J/kg] or [J/mol], by basis
 
         return h_total
 
-    def AntoineEquation(self, temp=None, pres=None):
-        a_ct, b_ct, c_ct = self.p_vap.T
+    def getDewPoint(self, pres: Optional[float] = None,
+                    mass_frac: Optional[np.ndarray] = None,
+                    mole_frac: Optional[np.ndarray] = None,
+                    thermo_method: str = 'ideal',
+                    x_liq: bool = False) -> Union[float, tuple]:
+        """Solve for the vapor dew-point temperature.
 
-        if pres is None:
-            if isinstance(temp, np.ndarray):
-                temp = temp[..., np.newaxis]
+        Parameters
+        ----------
+        pres : float, optional
+            Pressure [Pa]; the phase pressure when ``None``.
+        mass_frac, mole_frac : ndarray, optional
+            Vapor fractions [-], shape ``(num_species,)``. Mole fractions
+            are converted from mass fractions when only those are given; the
+            phase composition is used when neither is.
+        thermo_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Liquid activity model passed to ``getKeqVLE``.
+        x_liq : bool, optional
+            Also return the incipient liquid composition.
 
-            vap_pressure = a_ct - b_ct / (temp + c_ct)
+        Returns
+        -------
+        temp_dew : float
+            Dew-point temperature [K].
+        x_frac : ndarray
+            Incipient liquid mole fractions [-], shape ``(num_species,)``;
+            only when ``x_liq`` is True.
 
-            return 10**(vap_pressure)
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            From ``getKeqVLE`` if a species at or below its critical
+            temperature has no ``p_vap`` coefficients.
+        RuntimeError
+            If the Newton iteration does not converge.
 
-        else:
-            if isinstance(pres, np.ndarray):
-                pres = pres[..., np.newaxis]
-
-            temp_sat = b_ct / (a_ct - np.log10(pres)) - c_ct
-
-            return temp_sat
-
-    def getDewPoint(self, pres=None, mass_frac=None, mole_frac=None,
-                    thermo_method='ideal', x_liq=False):
-
+        Notes
+        -----
+        The Newton seed is ``sum_i y_i * Tsat_i(pres)`` [K]. Seed and
+        iterates treat missing Antoine data as in
+        ``LiquidPhase.getBubblePoint``, and the converged root is checked
+        with ``getKeqVLE`` weighted by the vapor composition.
+        """
         if mass_frac is None and mole_frac is None:
             mole_frac = self.mole_frac
 
@@ -1552,20 +1696,20 @@ class VaporPhase(ThermoPhysicalManager):
             pres = self.pres
 
         def dew_fn(temp):
-            k_vals = self.getKeqVLE(temp, pres, mole_frac,
-                                    gamma_model=thermo_method)
+            k_vals = self._vle_ratios(temp, pres, mole_frac, thermo_method,
+                                      check=False)  # [-], iterate only
 
             obj = np.dot(mole_frac, 1/k_vals) - 1
 
             return obj
-        temp_pure = self.AntoineEquation(pres=pres)
-        temp_seed = np.dot(mole_frac, temp_pure)
+        temp_seed = self._antoine_seed(mole_frac, pres=pres)  # [K]
         temp_dew = newton(dew_fn, temp_seed, full_output=False)
 
-        if x_liq:
-            k_vals = self.getKeqVLE(temp_dew, pres, mole_frac,
-                                    gamma_model=thermo_method)
+        # Check the data the converged root needs.
+        k_vals = self.getKeqVLE(temp_dew, pres, mole_frac,
+                                gamma_model=thermo_method)  # [-]
 
+        if x_liq:
             x_frac = mole_frac/k_vals
 
             return temp_dew, x_frac
@@ -1764,8 +1908,6 @@ class SolidPhase(ThermoPhysicalManager):
         self.kv = kv  # [-], physical particle volume / size**3
         self.distrib_type = distrib_type
         self.num_mom = num_mom  # [-]
-
-        self.cp_solid = np.atleast_2d(self.cp_solid)
 
         self.temp = (float(temp) if np.ndim(temp) == 0
                      else _as_float_array(temp))  # [K]

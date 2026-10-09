@@ -18,15 +18,16 @@ from PharmaPy.Results import DynamicResult
 from PharmaPy.ProcessControl import analyze_controls
 from PharmaPy.CheckModule import check_modeling_objects
 from PharmaPy.jac_module import numerical_jac_central
+from PharmaPy.ThermoModule import MissingPropertyError
 
 import numpy as np
-# from numpy.core.umath_tests import inner1d
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
 from matplotlib.animation import FuncAnimation
 from matplotlib.animation import FFMpegWriter
 
 import copy
+import functools
 from typing import Optional, Union
 from functools import partial
 from itertools import cycle
@@ -149,6 +150,68 @@ def _ordered_state_layout(metadata: dict) -> tuple[list[str], list[int]]:
     names = order_state_names(list(metadata))
     dimensions = [metadata[name]['dim'] for name in names]
     return names, dimensions
+
+
+def _records_missing_data(method):
+    """Record missing-property errors raised by a solver callback.
+
+    Parameters
+    ----------
+    method : callable
+        Reactor right-hand-side method, called as ``method(self, ...)``.
+
+    Returns
+    -------
+    callable
+        Wrapper that stores a ``MissingPropertyError`` in
+        ``self._missing_data_error`` before re-raising it, so that
+        ``_BaseReactor._simulate`` can re-raise it after the solver, which
+        reports only its own error, fails.
+
+    Notes
+    -----
+    Assimulo treats a right-hand-side exception as recoverable, so CVode
+    may retry with other steps and states. The presence latches of the
+    energy balances already make a missing-data failure persist (a species
+    stays required once present). Inside ``_simulate`` the record is also
+    sticky, as defense in depth for any failure that is not latched: once an
+    error is recorded, every later call re-raises it before evaluating
+    anything, so the solve ends instead of stepping around it. The re-raise
+    reuses the traceback stored with the first failure, so repeated
+    attempts do not stack solver frames.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        """Call ``method``, recording a missing-property error.
+
+        Parameters
+        ----------
+        *args, **kwargs
+            Arguments of the wrapped right-hand side.
+
+        Returns
+        -------
+        numpy.ndarray
+            The wrapped method's derivatives.
+
+        Raises
+        ------
+        MissingPropertyError
+            Raised by the wrapped method, or re-raised from an earlier call
+            of the same ``_simulate``.
+        """
+        if self._simulating and self._missing_data_error is not None:
+            raise self._missing_data_error.with_traceback(
+                self._missing_data_traceback)
+
+        try:
+            return method(self, *args, **kwargs)
+        except MissingPropertyError as error:
+            self._missing_data_error = error
+            self._missing_data_traceback = error.__traceback__
+            raise
+
+    return wrapper
 
 
 def get_sundials_callable(events, eval_sens, param_vals, unit_model, get_jac):
@@ -337,6 +400,12 @@ class _BaseReactor:
         self.reset_states = reset_states
         self.elapsed_time = 0
 
+        # Missing-data bookkeeping for the energy balances (#414)
+        self._missing_data_error = None
+        self._missing_data_traceback = None
+        self._simulating = False
+        self._reset_species_presence()
+
         self.reset_states = reset_states
 
         self.__original_prof__ = {
@@ -467,6 +536,209 @@ class _BaseReactor:
         )  # [J/mol of normalized reaction extent]
 
         return rate_basis_heat
+
+    def _reset_species_presence(self) -> None:
+        """Forget the species presence of the previous solve.
+
+        Notes
+        -----
+        Every ``solve_unit`` and ``solve_steady`` calls this first, so each
+        solve restarts presence from the structural rule of
+        ``_present_species`` and latches feeds only from its own
+        evaluations.
+        """
+        self._present_latch = None
+        self._present_fed = None
+
+    def _simulate(self, solver: object, *args, **kwargs) -> tuple:
+        """Run ``solver.simulate`` and expose missing property data.
+
+        Parameters
+        ----------
+        solver : assimulo.solvers.CVode
+            Configured solver.
+        *args, **kwargs
+            Passed to ``solver.simulate``.
+
+        Returns
+        -------
+        tuple
+            Whatever ``solver.simulate`` returns: times or volumes and the
+            state profile.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``. If a right-hand-side
+            evaluation of this call raised one, it is re-raised chained from
+            the solver's own error, which does not name the species or the
+            property.
+        Exception
+            Any other solver failure, unchanged.
+
+        Notes
+        -----
+        The record and its traceback are cleared at the start and at the end
+        of every call, so a later, unrelated failure is never relabeled. While the solver runs, the
+        record is sticky (see ``_records_missing_data``): every later
+        right-hand side fails the same way, so the failure persists until
+        CVode gives up. The chaining relies on that persistence; any solver
+        error after a recorded missing-data error is attributed to it,
+        whatever its flag (right-hand-side or convergence failure).
+        """
+        self._missing_data_error = None
+        self._missing_data_traceback = None
+        self._simulating = True
+        try:
+            return solver.simulate(*args, **kwargs)
+        except Exception as solver_error:
+            if self._missing_data_error is not None:
+                raise self._missing_data_error.with_traceback(
+                    self._missing_data_traceback) from solver_error
+            raise
+        finally:
+            self._simulating = False
+            self._missing_data_error = None
+            self._missing_data_traceback = None
+
+    def _structural_presence(self) -> np.ndarray:
+        """Mark species with a nonzero stoichiometric coefficient.
+
+        Returns
+        -------
+        numpy.ndarray of bool
+            Shape ``(num_species,)``, in database order.
+        """
+        present = np.zeros(len(self.Liquid_1.name_species), dtype=bool)
+        reacting = (np.asarray(self.Kinetics.stoich_matrix) != 0).any(axis=0)
+        present[np.asarray(self.mask_species)] = reacting
+
+        return present
+
+    def _present_species(self, *feed_conc: np.ndarray) -> np.ndarray:
+        """Mark the species that can be present during the current solve.
+
+        Parameters
+        ----------
+        *feed_conc : numpy.ndarray
+            Evaluated feed concentrations [mol/L], shape ``(num_species,)``
+            or ``(num_rows, num_species)``, in database order.
+
+        Returns
+        -------
+        numpy.ndarray of bool
+            True for a present species, shape ``(num_species,)``.
+
+        Notes
+        -----
+        For a transient solve, a species is present if it is in the liquid
+        holdup at the first evaluation of the solve, has a nonzero
+        stoichiometric coefficient, or is nonzero in any feed evaluated so
+        far in this solve, by ``get_inputs`` (see ``_record_feed``) or
+        passed here. Evaluated feeds follow the input precedence of
+        ``get_inputs`` (a ``DynamicInlet``, an upstream profile or the
+        static stream), so only the feed the reactor actually uses counts.
+        Presence is latched: it only grows
+        until ``_reset_species_presence`` starts the next solve, so a
+        species fed by a time-dependent inlet that later stops keeps needing
+        its data while it is in the tank. A solver trial evaluation at a
+        future time latches only a species that the feed actually supplies
+        at that time. The steady PFR uses ``_steady_present_species``.
+
+        Other species stay at exactly zero concentration in the exact
+        solution, so their heat capacities and enthalpies never contribute.
+        The energy balances pass this mask as the ``weights`` of
+        ``getCpPure`` and ``getEnthalpy(total_h=False)``: present species
+        need ``cp_liq`` data, absent ones may omit it and contribute exactly
+        zero. The mask never uses the instantaneous states, which solver
+        iterates and difference-quotient Jacobians perturb away from zero
+        for absent species.
+        """
+        present = self._present_latch
+        if present is None:
+            present = (np.asarray(self.Liquid_1.mole_conc) != 0
+                       ) | self._structural_presence()
+        else:
+            present = present.copy()
+
+        if self._present_fed is not None:
+            present |= self._present_fed
+
+        for conc in feed_conc:
+            present |= np.atleast_2d(np.asarray(conc) != 0).any(axis=0)
+
+        self._present_latch = present
+        return present.copy()
+
+    def _steady_present_species(self) -> np.ndarray:
+        """Mark the species present in a steady PFR solve.
+
+        Returns
+        -------
+        numpy.ndarray of bool
+            True for a species in the static inlet composition, including
+            inert species, or with a nonzero stoichiometric coefficient,
+            shape ``(num_species,)``.
+
+        Notes
+        -----
+        ``solve_steady`` builds every concentration from
+        ``Inlet.mole_conc``, so the transient holdup, temporal feed profiles
+        and the integrated states play no part.
+        """
+        inlet = np.asarray(self.Inlet.mole_conc) != 0
+        return inlet | self._structural_presence()
+
+    def _record_feed(self, inputs: dict) -> None:
+        """Latch the species of an evaluated feed for ``_present_species``.
+
+        Parameters
+        ----------
+        inputs : dict
+            Inputs returned by ``get_inputs``; ``inputs['Inlet']['mole_conc']``
+            holds feed concentrations [mol/L], shape ``(num_species,)`` or
+            ``(num_times, num_species)``.
+
+        Notes
+        -----
+        Every input evaluation, including those of isothermal right-hand
+        sides that never reach the energy balance, records the species it
+        feeds, so a later heat-profile reconstruction still treats them as
+        present after the feed stops.
+        """
+        feed = inputs.get('Inlet', {}) if isinstance(inputs, dict) else {}
+        conc = feed.get('mole_conc') if isinstance(feed, dict) else None
+        if conc is None:
+            return
+
+        seen = np.atleast_2d(np.asarray(conc) != 0).any(axis=0)
+        if self._present_fed is None:
+            self._present_fed = seen
+        else:
+            self._present_fed = self._present_fed | seen
+
+    def _fed_species(self, feed_conc: np.ndarray) -> np.ndarray:
+        """Mark the species fed so far in this solve, including this feed.
+
+        Parameters
+        ----------
+        feed_conc : numpy.ndarray
+            Evaluated feed concentrations [mol/L], shape ``(num_species,)``
+            or ``(num_rows, num_species)``.
+
+        Returns
+        -------
+        numpy.ndarray of bool
+            Shape ``(num_species,)``: the latched feed record of
+            ``_record_feed`` or this feed. Used as the weights of the
+            inlet-database enthalpies, so a species stays required after its
+            feed stops instead of the check switching on and off with time.
+        """
+        fed = np.atleast_2d(np.asarray(feed_conc) != 0).any(axis=0)
+        if self._present_fed is not None:
+            fed = fed | self._present_fed
+
+        return fed
 
     @property
     def Utility(self):
@@ -819,15 +1091,35 @@ class _BaseReactor:
 
         self.states_in_dict = {'Inlet': states_in_dict}
 
-    def get_inputs(self, time):
+    def get_inputs(self, time: Union[float, np.ndarray]) -> dict:
+        """Evaluate the inlet inputs and latch the species they feed.
+
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Absolute time [s], scalar or shape ``(num_times,)``.
+
+        Returns
+        -------
+        dict
+            ``{'Inlet': {...}}`` with the inlet variables in their stream
+            units, such as ``mole_conc`` [mol/L], ``temp`` [K] and
+            ``vol_flow`` [m**3/s]; empty without an inlet.
+
+        Notes
+        -----
+        Fed species are recorded for ``_present_species``.
+        """
         inlet = getattr(self, 'Inlet', None)
         if inlet is None:
             inputs = {}
         else:
             inputs = get_inputs_new(time, inlet, self.states_in_dict)
+            self._record_feed(inputs)
 
         return inputs
 
+    @_records_missing_data
     def unit_model(self, time: float, states: np.ndarray,
                    sw: Optional[list] = None,
                    params: Optional[np.ndarray] = None) -> np.ndarray:
@@ -863,6 +1155,11 @@ class _BaseReactor:
         ------
         ValueError
             If an active bath or jacket balance has no Utility.
+        MissingPropertyError
+            A subclass of ``AttributeError``. If a present species lacks
+            ``cp_liq`` data where the energy balance needs it (see
+            ``_present_species``). Inside ``_simulate`` a recorded error is
+            re-raised by every later call (see ``_records_missing_data``).
         """
         # Calculate inlets
         u_values = self.get_inputs(time)
@@ -1413,6 +1710,14 @@ class BatchReactor(_BaseReactor):
             when active, or time-by-rate profiles [W]: reaction, utility, and
             (CSTR/Semibatch only) sensible flow. Signs follow _BaseReactor.
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a species that can be present (see ``_present_species``) has
+            no ``cp_liq`` data where the balance uses heat capacities or
+            enthalpies.
+
         Notes
         -----
         Prescribed-temperature heat differentiates the control function as
@@ -1430,9 +1735,6 @@ class BatchReactor(_BaseReactor):
         else:
             conc_all[:, self.mask_species] = mole_conc
             conc_all[:, ~self.mask_species] *= self.conc_inert
-
-        # Enthalpy calculations
-        _, cp_j = self.Liquid_1.getCpPure(temp)  # J/mol
 
         # Heat of reaction
         delta_href = self.Kinetics.delta_hrxn
@@ -1453,6 +1755,9 @@ class BatchReactor(_BaseReactor):
 
         if heat_prof:
             if 'temp' in self.controls:
+                # Heat capacities only where the capacitance uses them.
+                _, cp_j = self.Liquid_1.getCpPure(
+                    temp, weights=self._present_species())  # [J/mol/K]
                 capacitance = vol * (conc_all * 1000 * cp_j).sum(axis=1)  # [J/K]
                 utility_heat = self._prescribed_heat(
                     time, temp, capacitance, source_term)  # [W]
@@ -1465,6 +1770,8 @@ class BatchReactor(_BaseReactor):
             return heat_profile
         else:
             ht_term = self.heat_transfer(temp, temp_ht, vol)
+            _, cp_j = self.Liquid_1.getCpPure(
+                temp, weights=self._present_species())  # [J/mol/K]
             capacitance = vol * np.dot(conc_all * 1000, cp_j)  # J/K (NCp)
             dtemp_dt = (source_term - ht_term) / capacitance  # K/s
 
@@ -1536,6 +1843,10 @@ class BatchReactor(_BaseReactor):
             If an active bath or jacket balance has no Utility.
         ImportError
             If the optional Assimulo solver backend is unavailable.
+        MissingPropertyError
+            If the energy balance needs ``cp_liq`` for a present species
+            without data (see ``_present_species``); raised during
+            integration, it is re-raised chained from the CVode error.
 
         Notes
         -----
@@ -1543,6 +1854,7 @@ class BatchReactor(_BaseReactor):
         Otherwise continuation retains liquid and jacket states and appends
         cumulative heat duty. Control differentiation uses the completed span.
         """
+        self._reset_species_presence()
 
         check_modeling_objects(self)
 
@@ -1646,7 +1958,8 @@ class BatchReactor(_BaseReactor):
             solver.verbosity = 50
 
         # Solve model
-        time, states = solver.simulate(final_time, ncp_list=time_grid)
+        time, states = self._simulate(solver, final_time,
+                                      ncp_list=time_grid)
 
         # Store results
         self.retrieve_results(time, states)
@@ -1907,6 +2220,14 @@ class CSTR(_BaseReactor):
             when active, or time-by-rate profiles [W]: reaction, utility, and
             (CSTR/Semibatch only) sensible flow. Signs follow _BaseReactor.
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a species that can be present (see ``_present_species``) has
+            no ``cp_liq`` data where the balance uses heat capacities or
+            enthalpies.
+
         Notes
         -----
         Prescribed-temperature heat differentiates the control function as
@@ -1921,10 +2242,11 @@ class CSTR(_BaseReactor):
 
         temp = np.atleast_1d(temp)
 
-        # Enthalpy calculations
-        _, cp_j = self.Liquid_1.getCpPure(temp)  # J/mol
+        # Enthalpy calculations; only species that can be present need data
+        present = self._present_species(inlet_conc)
         h_tempj = self.Liquid_1.getEnthalpy(temp, self.temp_ref, total_h=False,
-                                            basis='mole')
+                                            basis='mole',
+                                            weights=present)  # [J/mol]
 
         # Heat of reaction
         deltah_ref = self.Kinetics.delta_hrxn
@@ -1942,8 +2264,11 @@ class CSTR(_BaseReactor):
 
         # Inlet stream
         stream = self.Inlet
+        # The inlet's own database needs data only for the species it has
+        # fed so far in this solve (latched, like the holdup mask).
         h_inj = stream.getEnthalpy(inlet_temp, temp_ref=self.temp_ref,
-                                   total_h=False, basis='mole')
+                                   total_h=False, basis='mole',
+                                   weights=self._fed_species(inlet_conc))  # [J/mol]
 
         h_in = (inlet_conc * h_inj).sum(axis=1) * 1000  # [J/m**3]
 
@@ -1960,6 +2285,9 @@ class CSTR(_BaseReactor):
 
         if heat_prof:
             if 'temp' in self.controls:
+                # Heat capacities only where the capacitance uses them.
+                _, cp_j = self.Liquid_1.getCpPure(
+                    temp, weights=present)  # [J/mol/K]
                 capacitance = vol * (mole_conc * 1000 * cp_j).sum(axis=1)  # [J/K]
                 utility_heat = self._prescribed_heat(
                     time, temp, capacitance, source_term, flow_term)  # [W]
@@ -1974,6 +2302,8 @@ class CSTR(_BaseReactor):
         else:
             ht_term = self.heat_transfer(temp, temp_ht, vol)
 
+            _, cp_j = self.Liquid_1.getCpPure(
+                temp, weights=present)  # [J/mol/K]
             div = vol * np.dot(mole_conc * 1000, cp_j)  # J/K (NCp)
             dtemp_dt = (flow_term + source_term - ht_term) / div  # K/s
 
@@ -2051,6 +2381,10 @@ class CSTR(_BaseReactor):
             If the optional Assimulo backend is unavailable.
         ValueError
             If an active bath or jacket energy balance has no Utility.
+        MissingPropertyError
+            If the energy balance needs ``cp_liq`` for a present species
+            without data (see ``_present_species``); raised during
+            integration, it is re-raised chained from the CVode error.
 
         Notes
         -----
@@ -2060,6 +2394,7 @@ class CSTR(_BaseReactor):
         The RHS is evaluated before constructing the solver so input failures
         propagate directly.
         """
+        self._reset_species_presence()
 
         check_modeling_objects(self)
 
@@ -2146,7 +2481,8 @@ class CSTR(_BaseReactor):
             solver.verbosity = 50
 
         # Solve model
-        time, states = solver.simulate(final_time, ncp_list=time_grid)
+        time, states = self._simulate(solver, final_time,
+                                      ncp_list=time_grid)
 
         # Store results
         self.statesProf = states
@@ -2389,6 +2725,10 @@ class SemibatchReactor(CSTR):
             If the optional Assimulo backend is unavailable.
         ValueError
             If an active bath or jacket energy balance has no Utility.
+        MissingPropertyError
+            If the energy balance needs ``cp_liq`` for a present species
+            without data (see ``_present_species``); raised during
+            integration, it is re-raised chained from the CVode error.
 
         Notes
         -----
@@ -2398,7 +2738,7 @@ class SemibatchReactor(CSTR):
         The RHS is evaluated before constructing the solver so input failures
         propagate directly.
         """
-
+        self._reset_species_presence()
 
         check_modeling_objects(self)
 
@@ -2479,7 +2819,8 @@ class SemibatchReactor(CSTR):
             solver.verbosity = 50
 
         # Solve model
-        time, states = solver.simulate(final_time, ncp_list=time_grid)
+        time, states = self._simulate(solver, final_time,
+                                      ncp_list=time_grid)
 
         # Store results
         self.time_runs.append(time)
@@ -2682,8 +3023,27 @@ class PlugFlowReactor(_BaseReactor):
         self.names_states_out += ['temp', 'vol_flow']
         self.names_states_in = self.names_states_out
 
-    def get_inputs(self, time):
+    def get_inputs(self, time: Union[float, np.ndarray]) -> dict:
+        """Evaluate the inlet inputs and latch the species they feed.
+
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Absolute time [s], scalar or shape ``(num_times,)``.
+
+        Returns
+        -------
+        dict
+            ``{'Inlet': {...}}`` with the inlet variables in their stream
+            units, such as ``mole_conc`` [mol/L], ``temp`` [K] and
+            ``vol_flow`` [m**3/s].
+
+        Notes
+        -----
+        Fed species are recorded for ``_present_species``.
+        """
         inputs = get_inputs_new(time, self.Inlet, self.states_in_dict)
+        self._record_feed(inputs)
 
         return inputs
 
@@ -2719,12 +3079,21 @@ class PlugFlowReactor(_BaseReactor):
         -------
         dtemp_dv : float
             Temperature derivative with respect to reactor volume [K/m**3].
-        """
-        _, cp_j = self.Liquid_1.getCpPure(temp)
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a species of the steady inlet composition (including inert
+            species) or with a nonzero stoichiometric coefficient lacks
+            ``cp_liq`` data (see ``_steady_present_species``).
+        """
         concentr = np.zeros_like(self.Liquid_1.mole_conc)
         concentr[self.mask_species] = conc
         concentr[~self.mask_species] = self.c_inert
+
+        _, cp_j = self.Liquid_1.getCpPure(
+            temp, weights=self._steady_present_species())  # [J/mol/K]
 
         # Volumetric heat capacity. cp_j is [J/mol/K] and concentr is [mol/L],
         # so the product is [J/L/K]; the 1000 is the L -> m**3 conversion.
@@ -2769,6 +3138,7 @@ class PlugFlowReactor(_BaseReactor):
 
         return dtemp_dv
 
+    @_records_missing_data
     def unit_steady(self, time: float, states: np.ndarray,
                     params: Optional[np.ndarray] = None) -> np.ndarray:
         """Evaluate participating-species and temperature balances along volume.
@@ -2792,6 +3162,15 @@ class PlugFlowReactor(_BaseReactor):
             concentration per volume [mol/L/m**3], then temperature per volume
             [K/m**3] when its balance is active. Inert concentrations remain
             fixed at the inlet values stored by ``solve_steady``.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``. If a species of the steady
+            inlet or the reactions lacks ``cp_liq`` data (see
+            ``_steady_present_species``). Inside ``_simulate`` a recorded
+            error is re-raised by every later call (see
+            ``_records_missing_data``).
         """
         conc = states[:self.num_species_steady]  # [mol/L]
 
@@ -2833,6 +3212,14 @@ class PlugFlowReactor(_BaseReactor):
             molar concentrations [mol/L], followed by temperature [K] when
             the instance is non-isothermal or ``adiabatic=True``.
 
+        Raises
+        ------
+        MissingPropertyError
+            If the energy balance needs ``cp_liq`` for a species present in
+            the inlet or the reactions without data (see
+            ``_steady_present_species``). The right-hand side is evaluated
+            once before CVode is built, so this is raised directly.
+
         Notes
         -----
         The requested adiabatic mode applies only during this solve. It
@@ -2846,6 +3233,8 @@ class PlugFlowReactor(_BaseReactor):
         unchanged; the returned concentration profile contains only
         participating species in thermodynamic species order.
         """
+        self._reset_species_presence()
+
         original_isothermal = self.isothermal
         original_adiabatic = self.adiabatic
         original_states = self.states_uo
@@ -2877,10 +3266,13 @@ class PlugFlowReactor(_BaseReactor):
                 # inlet utility condition at the start of the volume profile.
                 self.temp_ht_steady = self.Utility.evaluate_inputs(0)['temp_in']
 
+            # Evaluate once so missing data raise their named error here.
+            self.unit_steady(0, states_init)
+
             problem = Explicit_Problem(self.unit_steady, states_init, t0=0)
             solver = CVode(problem)
 
-            volPosition, states_solver = solver.simulate(vol_rxn)
+            volPosition, states_solver = self._simulate(solver, vol_rxn)
 
             num_x = len(volPosition)
 
@@ -2917,16 +3309,45 @@ class PlugFlowReactor(_BaseReactor):
 
         return dconc_dt
 
-    def energy_balances(self, time, mole_conc, vol_diff, temp, flow_in, rate_i,
-                        heat_profile=False):
+    def energy_balances(self, time: float, mole_conc: np.ndarray,
+                        vol_diff: np.ndarray, temp: np.ndarray,
+                        flow_in: float, rate_i: np.ndarray,
+                        heat_profile: bool = False
+                        ) -> Union[np.ndarray, float]:
+        """Evaluate the PFR temperature balance or its total heat rate.
 
-        _, cp_j = self.Liquid_1.getCpPure(temp)
+        Parameters
+        ----------
+        time : float
+            Absolute time [s].
+        mole_conc : numpy.ndarray
+            Concentrations [mol/L], shape ``(num_nodes, num_species)``.
+        vol_diff : numpy.ndarray
+            Volume increments between nodes [m**3].
+        temp : numpy.ndarray
+            Temperature at each node [K], shape ``(num_nodes,)``.
+        flow_in : float
+            Volumetric flow [m**3/s].
+        rate_i : numpy.ndarray
+            Per-reaction rates [mol/L/s], shape
+            ``(num_nodes, num_reactions)``.
+        heat_profile : bool, optional
+            Return the total heat-transfer rate instead of derivatives.
 
-        # Volumetric heat capacity
-        # cp_vol = inner1d(cp_j, mole_conc) * 1000  # J/m**3/K
-        # TODO: Check if this is correct
-        # cp_vol = -np.dot(cp_j, mole_conc) * 1000  # J/m**3/K
-        cp_vol = (cp_j * mole_conc).sum(axis=1) * 1000  # vol in L
+        Returns
+        -------
+        numpy.ndarray or float
+            Temperature derivatives [K/s] at nodes ``1:``, or the total heat
+            transfer rate [W] when ``heat_profile`` is True.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a species that can be present (see ``_present_species``) has
+            no ``cp_liq`` data where the balance uses heat capacities or
+            enthalpies.
+        """
 
 
         # Heat of reaction
@@ -2962,13 +3383,55 @@ class PlugFlowReactor(_BaseReactor):
             return ht_total
 
         else:
+            # Heat capacities only where the balance uses them.
+            _, cp_j = self.Liquid_1.getCpPure(
+                temp, weights=self._present_species())  # [J/mol/K]
+            cp_vol = (cp_j * mole_conc).sum(axis=1) * 1000  # [J/m**3/K], conc in mol/L
             dtemp_dt = flow_term + \
                 (source_term[1:] - heat_transfer[1:])/cp_vol[1:]
 
-            return dtemp_dt  # TODO: if adiabatic, T vs V shouldn't be constant
+            return dtemp_dt
 
-    def unit_model(self, time, states, sw=None, params=None, enrgy_bce=False):
+    @_records_missing_data
+    def unit_model(self, time: float, states: np.ndarray,
+                   sw: Optional[list] = None,
+                   params: Optional[np.ndarray] = None,
+                   enrgy_bce: bool = False) -> np.ndarray:
+        """Evaluate the discretized transient PFR balances.
 
+        Parameters
+        ----------
+        time : float
+            Absolute time [s].
+        states : numpy.ndarray
+            Packed states, node by node ``[C_1 ... C_n, T]``:
+            concentrations [mol/L] of every species, then temperature [K]
+            when the energy balance is active; shape
+            ``(num_nodes * (num_species + 1),)`` or
+            ``(num_nodes * num_species,)``.
+        sw : list, optional
+            State-event switches; unused by the balances.
+        params : numpy.ndarray, optional
+            Solver parameters; unused, the kinetics keep their values.
+        enrgy_bce : bool, optional
+            Return the total heat-transfer rate [W] instead of derivatives.
+
+        Returns
+        -------
+        numpy.ndarray or float
+            Time derivatives in the layout of ``states``: [mol/L/s] for the
+            concentrations and [K/s] for the temperatures; the inlet
+            boundary values come from ``get_inputs``. With ``enrgy_bce``,
+            the total heat-transfer rate [W] instead.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``. If a present species lacks
+            ``cp_liq`` data where the energy balance needs it (see
+            ``_present_species``). Inside ``_simulate`` a recorded error is
+            re-raised by every later call (see ``_records_missing_data``).
+        """
         di_states = unpack_discretized(states, self.len_states,
                                        self.name_states)
 
@@ -3045,7 +3508,46 @@ class PlugFlowReactor(_BaseReactor):
 
     def solve_unit(self, runtime=None, time_grid=None, verbose=True,
                    any_event=True, sundials_opts=None):
+        """Integrate the transient PFR balances with CVode.
 
+        Parameters
+        ----------
+        runtime : float, optional
+            Integration span [s] after ``elapsed_time``.
+        time_grid : array-like, optional
+            Reporting times [s] passed to CVode as ``ncp_list``; when given,
+            the end time is ``time_grid[-1] + elapsed_time``.
+        verbose : bool, optional
+            Print solver statistics.
+        any_event : bool, optional
+            Stop at the first state event rather than all of them.
+        sundials_opts : dict, optional
+            CVode attributes to set, such as tolerances.
+
+        Returns
+        -------
+        time : numpy.ndarray
+            Reported times [s], shape ``(num_times,)``.
+        states : numpy.ndarray
+            Shape ``(num_times, num_nodes * (num_species + 1))`` with the
+            energy balance active, node by node ``[C_1 ... C_n, T]``
+            (concentrations [mol/L], temperature [K]); shape
+            ``(num_times, num_nodes * num_species)`` with only the
+            concentrations otherwise.
+
+        Raises
+        ------
+        MissingPropertyError
+            If the energy balance needs ``cp_liq`` for a present species
+            without data, re-raised chained from the CVode error when it
+            occurs during integration (see ``_simulate``).
+
+        Notes
+        -----
+        Each call restarts the species-presence latch used by the energy
+        balance (see ``_present_species``).
+        """
+        self._reset_species_presence()
 
         check_modeling_objects(self)
 
@@ -3065,10 +3567,7 @@ class PlugFlowReactor(_BaseReactor):
 
         self.num_states = self.num_species
 
-        # c_init = c_init.astype(np.float64)
-        # c_init[c_init == 0] = eps
-
-        self.num_concentr = self.num_species  # TODO: make consistent with Batch
+        self.num_concentr = self.num_species
         self.args_inputs = (self, self.num_concentr, 0)
 
         len_states = [self.num_species]
@@ -3094,14 +3593,6 @@ class PlugFlowReactor(_BaseReactor):
                                    **kw_model)
 
         if len(self.state_event_list) > 0:
-            # def model(t, y): return self.unit_model(t, y, None)
-            # problem = Explicit_Problem(model, states_init,
-            #                            t0=self.elapsed_time)
-        # else:
-            # switches = [True] * len(self.state_event_list)
-            # problem = Explicit_Problem(self.unit_model, states_init,
-            #                            t0=self.elapsed_time, sw0=switches)
-
             def new_handle(solver, info):
                 return handle_events(solver, info, self.state_event_list,
                                      any_event=any_event)
@@ -3125,7 +3616,8 @@ class PlugFlowReactor(_BaseReactor):
         if not verbose:
             solver.verbosity = 50
 
-        time, states_solver = solver.simulate(final_time, ncp_list=time_grid)
+        time, states_solver = self._simulate(solver, final_time,
+                                             ncp_list=time_grid)
 
         self.retrieve_results(time, states_solver)
 

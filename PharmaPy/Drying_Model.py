@@ -204,7 +204,8 @@ class Drying:
 
         return events
 
-    def get_y_equilib(self, temp_cond, x_liq, p_gas):
+    def get_y_equilib(self, temp_cond: np.ndarray, x_liq: np.ndarray,
+                      p_gas: Union[float, np.ndarray]) -> np.ndarray:
         """Calculate equilibrium gas mole fractions above the liquid.
 
         Parameters
@@ -212,23 +213,33 @@ class Drying:
         temp_cond : ndarray
             Condensed-phase temperature by spatial node [K].
         x_liq : ndarray
-            Liquid mass fractions for volatile components [-].
+            Liquid mass fractions for volatile components [-], shape
+            ``(num_nodes, num_volatiles)``.
         p_gas : ndarray or float
             Gas pressure [Pa].
 
         Returns
         -------
         ndarray
-            Equilibrium gas mole fractions for volatile components [-].
+            Equilibrium gas mole fractions for volatile components [-],
+            shape ``(num_volatiles, num_nodes)``.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a volatile species has no ``p_vap`` coefficients. The
+            supercritical carrier gas needs none.
         """
         mw_liq = self.Liquid_1.mw[self.idx_volatiles]  # [g/mol]
         x_liq_mole_frac = (x_liq / mw_liq).T / np.dot(1/mw_liq, x_liq.T)
         x_liq_mole_frac = x_liq_mole_frac.T  # [-]
 
-        p_sat = self.Liquid_1.AntoineEquation(temp=temp_cond)  # [Pa]
+        p_sat = self.Liquid_1.AntoineEquation(
+            temp=temp_cond, idx=self.idx_volatiles)  # [Pa], volatiles only
 
         gamma = self.Liquid_1.getActivityCoeff(mole_frac=x_liq_mole_frac)  # [-]
-        p_partial = (gamma * x_liq_mole_frac * p_sat[:, self.idx_volatiles]).T  # [Pa]
+        p_partial = (gamma * x_liq_mole_frac * p_sat).T  # [Pa]
         y_equil = p_partial  / p_gas  # [-]
 
         return y_equil
