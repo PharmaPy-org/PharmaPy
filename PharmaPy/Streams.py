@@ -319,22 +319,83 @@ class LiquidStream(LiquidPhase):
 
 
 class SolidStream(SolidPhase):
-    def __init__(self, path_thermo=None, temp=298.15, pres=101325,
-                 mass_flow=0, mass_frac=None,
-                 distrib=None, x_distrib=None, kv=1):
+    """Represent a flowing solid phase on a per-second basis.
 
+    ``SolidStream`` reuses the ``SolidPhase`` amount attributes as flow-rate
+    storage: ``mass`` [kg/s], ``moles`` [mol/s], ``vol`` [m**3/s], and a
+    ``distrib`` number-rate distribution [#/um/s]. The flow-named aliases
+    ``mass_flow``, ``mole_flow`` and ``vol_flow`` mirror those attributes
+    and are refreshed together by :meth:`updatePhase`.
+    """
+
+    def __init__(self, path_thermo: Optional[str] = None,
+                 temp: float = 298.15, pres: float = 101325,
+                 mass_flow: float = 0, mass_frac: Optional[ArrayLike] = None,
+                 distrib: Optional[ArrayLike] = None,
+                 x_distrib: Optional[ArrayLike] = None,
+                 kv: float = 1) -> None:
+        """Initialize a solid stream and its flow-basis aliases.
+
+        Parameters
+        ----------
+        path_thermo : str, optional
+            Path to the thermodynamic property database.
+        temp : float, optional
+            Temperature [K]; default 298.15 K is the reference condition.
+        pres : float, optional
+            Pressure [Pa], default one standard atmosphere (101325 Pa).
+        mass_flow : float, optional
+            Solid mass flow [kg/s]. Zero derives the flow from the number-rate
+            distribution; a positive value scales ``distrib`` as normalized
+            bin weights, as in ``SolidPhase`` with ``mass``.
+        mass_frac : array-like
+            Species mass fractions [-], shape ``(num_species,)``.
+        distrib : array-like, optional
+            Shape ``(num_sizes,)``: crystal number rate [#/um/s] when
+            ``mass_flow`` is zero, otherwise bin weights [-].
+        x_distrib : array-like, optional
+            Crystal sizes [um], shape ``(num_sizes,)``.
+        kv : float, optional
+            Volumetric shape factor [-]; default one represents cubic
+            particles.
+
+        Raises
+        ------
+        ValueError
+            Propagated from ``SolidPhase`` for missing ``mass_frac``, an
+            invalid grid, or a ``kv`` that is not finite and positive.
+        RuntimeError
+            Propagated from ``SolidPhase`` if the mass fractions sum to less
+            than its composition threshold.
+
+        Notes
+        -----
+        ``vol_flow`` is defined only when the phase defines ``vol``, which
+        ``SolidPhase`` sets when a distribution is supplied. A stream built
+        from composition alone gains both once a later update sets its
+        amount, for example through ``SlurryStream.Phases``.
+        """
         super().__init__(path_thermo, temp, pres=pres,
                          mass=mass_flow, mass_frac=mass_frac,
-                         # moments=moments,
                          distrib=distrib, x_distrib=x_distrib, kv=kv)
 
-        self.mass_flow = self.mass
-        # self.vol_flow = self.vol
-        self.mole_flow = self.moles
+        self._sync_flow_aliases()
 
-        # del self.mass
-        # # del self.vol
-        # del self.moles
+    def _sync_flow_aliases(self) -> None:
+        """Copy the per-second phase amounts onto their flow-named aliases.
+
+        Notes
+        -----
+        Sets ``mass_flow`` [kg/s] from ``mass`` and ``mole_flow`` [mol/s]
+        from ``moles``. Sets ``vol_flow`` [m**3/s] from ``vol`` whenever
+        ``vol`` exists, so raw-material and stream-table reporting can read
+        the solid volume flow for every stream construction route. Without
+        ``vol`` no volume alias is created rather than inventing a value.
+        """
+        self.mass_flow = self.mass  # [kg/s]
+        self.mole_flow = self.moles  # [mol/s]
+        if hasattr(self, 'vol'):
+            self.vol_flow = self.vol  # [m**3/s]
 
     def updatePhase(self, x_distrib: Optional[np.ndarray] = None,
                     distrib: Optional[np.ndarray] = None,
@@ -348,15 +409,20 @@ class SolidStream(SolidPhase):
         x_distrib : numpy.ndarray, optional
             Crystal-size grid with shape ``(num_sizes,)`` [um].
         distrib : numpy.ndarray, optional
-            Total-population number distribution with shape ``(num_sizes,)``
-            [#/um].
+            Crystal number rate with shape ``(num_sizes,)`` [#/um/s], the
+            stream counterpart of the phase's total population [#/um]. It
+            sets ``vol`` to ``kv`` times its third moment [m**3/s] and
+            ``mass`` to that volume times the solid density [kg/s].
         mass : float, optional
             Solid mass flow represented by the inherited phase amount
             attribute [kg/s].
         moments : numpy.ndarray, optional
-            Total-population moments with shape ``(num_moments,)``. Entry
-            ``n`` has the inherited solid-phase unit [m**n], with order zero
-            a crystal count [-].
+            Moment rates with shape ``(num_moments,)``, stored unchanged.
+            Entry ``n`` is [m**n/s], the per-second form of the phase's
+            [m**n] moments (``SolidPhase.getMoments`` converts sizes from um
+            to m), with order zero a crystal number rate [#/s]. Issue #288:
+            ``SlurryStream`` moment input currently passes slurry-volume
+            moments [m**n/m**3] here unconverted.
         mass_flow : float, optional
             Additive flow-oriented alias for ``mass`` [kg/s]. Specify at most
             one of ``mass`` and ``mass_flow``.
@@ -369,10 +435,11 @@ class SolidStream(SolidPhase):
         Notes
         -----
         ``SolidStream`` preserves the historical ``SolidPhase`` amount
-        attributes as flow-rate storage. After the phase update, ``mass`` and
-        ``moles`` therefore map to ``mass_flow`` [kg/s] and ``mole_flow``
-        [mol/s], respectively. When both ``vol`` and an existing ``vol_flow``
-        alias are present, ``vol_flow`` is refreshed from ``vol`` [m**3/s].
+        attributes as flow-rate storage. After the phase update, ``mass``,
+        ``moles`` and ``vol`` therefore map to ``mass_flow`` [kg/s],
+        ``mole_flow`` [mol/s] and ``vol_flow`` [m**3/s], respectively. The
+        ``vol_flow`` alias is created or refreshed whenever ``vol`` exists;
+        see :meth:`_sync_flow_aliases`.
         """
         if mass is not None and mass_flow is not None:
             raise ValueError("Specify either 'mass' or 'mass_flow', not both")
@@ -385,10 +452,7 @@ class SolidStream(SolidPhase):
             moments=moments,
         )
 
-        self.mass_flow = self.mass  # [kg/s]
-        self.mole_flow = self.moles  # [mol/s]
-        if hasattr(self, 'vol_flow') and hasattr(self, 'vol'):
-            self.vol_flow = self.vol  # [m**3/s]
+        self._sync_flow_aliases()
 
 
 class VaporStream(VaporPhase):

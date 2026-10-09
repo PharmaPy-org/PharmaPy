@@ -284,7 +284,11 @@ class Mixer:
         Notes
         -----
         Species metadata comes from the first inlet's liquid phase, whether
-        supplied directly or attached to a slurry or cake.
+        supplied directly or attached to a slurry or cake. The liquid
+        ``states_di`` declares the amount [kg] or flow [kg/s], the
+        dimensionless ``mass_frac`` [-] with one entry per species, and the
+        temperature [K]; ``dim_states`` therefore sums to
+        ``num_species + 2``, the width of one packed liquid state.
         """
         incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
         flow_flags = [hasattr(inlet, 'mass_flow')
@@ -315,20 +319,21 @@ class Mixer:
         self.bipartite.append(None)
 
         liquid_inlet = getattr(self.Inlets[0], 'Liquid_1', self.Inlets[0])
+        # Dimensionless per-species fractions, as in the solids branch.
+        mass_frac_di = {'units': '', 'dim': len(liquid_inlet.name_species),
+                        'index': liquid_inlet.name_species, 'type': 'alg'}
 
         if flow_flag:
             self.states_di = {
                 'mass_flow': {'units': 'kg/s', 'dim': 1, 'type': 'alg'},
-                'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': liquid_inlet.name_species, 'type': 'alg'},
+                'mass_frac': mass_frac_di,
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
         else:
             self.states_di = {
                 'mass': {'units': 'kg', 'dim': 1, 'type': 'alg'},
-                'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': liquid_inlet.name_species, 'type': 'alg'},
+                'mass_frac': mass_frac_di,
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
