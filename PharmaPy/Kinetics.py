@@ -26,11 +26,12 @@ ZERO_KEQ_REPLACEMENT = 1e20  # [Keq units], concentration basis of each raw reac
 def cryst_mechanism(sup_sat, moms, temp, temp_ref, params, reformulate, kv,
                     order):
     sec = False
-    if len(params) == 3:
-        phi_1, phi_2, exp = params
-    else:
+    if len(params)==4:
         phi_1, phi_2, exp, s_2 = params
         sec = True
+    else:
+        phi_1, phi_2, exp = params[:3] #for size dependent growth, len(params) is 5 but the last 2 are used in the fvm_method code
+        
 
     # absup = np.maximum(eps, sup_sat)
     absup_ = np.abs(sup_sat)
@@ -1042,7 +1043,9 @@ class RxnKinetics:
             return jac_params
 
     def get_rxn_rates(self, conc, temp=298.15, overall_rates: bool = True,
-                      jac: bool = False, delta_hrxn=None) -> np.ndarray:
+                      jac: bool = False, delta_hrxn=None, max_iter: int = 3,
+                      return_both: bool = False,
+                      limiter_dt: float = 1.0) -> np.ndarray:
         """Evaluate reaction rates or their concentration Jacobian.
 
         Parameters
@@ -1063,6 +1066,15 @@ class RxnKinetics:
             reversible rate or Jacobian evaluations. Values use the raw
             ``stoich_matrix`` row basis. None uses ``self.delta_hrxn``;
             explicit values, including zero, take precedence.
+        max_iter : int, optional
+            Unused; kept for call-site compatibility. The default is 3.
+        return_both : bool, optional
+            If True, return ``(rxn_rates, total_rates)`` with every
+            reaction extent scaled by one factor so no species is driven
+            negative within ``limiter_dt``. The default is False.
+        limiter_dt : float, optional
+            Depletion horizon for the ``return_both`` limiter, in the time
+            unit set by ``k_params``. The default is 1.0.
 
         Returns
         -------
@@ -1075,6 +1087,9 @@ class RxnKinetics:
         jac_states : ndarray
             Species-rate Jacobian with respect to concentrations when ``jac``
             is True. Units are species-rate units divided by [mol/L].
+        rxn_rates, total_rates : tuple of ndarray
+            Limited per-reaction and species rates [mol/L/time] when
+            ``return_both`` is True.
         """
 
         if jac:
@@ -1091,10 +1106,58 @@ class RxnKinetics:
                 f_terms = self.equilibrium_model(conc, temp, delta_hrxn)
 
             rxn_rates = temp_terms * f_terms
+
+            rrates = rxn_rates.copy()
+
+            # Keep a species from being driven negative, by scaling the
+            # reaction extents rather than the species rates. This is scoped
+            # to return_both, the refactored mechanisms' call, and is
+            # deliberately not applied to the reported rates: derivatives()
+            # differentiates the unclamped rate law, so clamping here would
+            # hand a solver a rate and a Jacobian that disagree.
+            #
+            # One factor applied to EVERY extent, not a per-species fix to the
+            # reactions that consume each offender. Scaling all extents by a
+            # single number is trivially stoichiometry preserving, leaves the
+            # selectivity between reactions exactly as the kinetics set it,
+            # and terminates without iterating -- so there is no max_iter to
+            # exhaust and no way to return a rate set that still goes
+            # negative. It is the more conservative choice, because a reaction
+            # that does not touch the limiting species is throttled too.
+            #
+            # limiter_dt is the horizon over which depletion is anticipated,
+            # and it is explicit because conc and total_rates are in different
+            # units: adding them directly, as this once did, silently assumed
+            # a one second window. MultiPhaseVessel passes its own
+            # positivity_horizon so the vessel limiter and this one agree.
+            #
+            # Still irreducibly 1-D: conc[short] selects rows on a 2-D input.
+            if return_both and np.asarray(conc).ndim == 1:
+
+                total_rates = np.dot(rrates, self.normalized_stoich.T)
+                short = conc + total_rates * limiter_dt < -eps * 10
+
+                if short.any():
+
+                    # Positive where short: those species are net consumed.
+                    consumed = -total_rates[short] * limiter_dt
+
+                    scale = min(
+                        1.0,
+                        float(np.min(conc[short] / consumed)),
+                    )
+
+                    rrates = rrates * max(scale, 0.0)
+
+            total_rates = np.dot(rrates, self.normalized_stoich.T)
+            if return_both:
+                return rrates,total_rates
             if overall_rates:  # per species
-                total_rates = np.dot(rxn_rates, self.normalized_stoich.T)
                 return total_rates
             else:  # per rxn
+                # Deliberately the raw extents: this path never ran the
+                # limiter pre-refactor and the legacy Reactors.py callers
+                # depend on getting kinetics untouched.
                 return rxn_rates
 
 
@@ -1149,6 +1212,10 @@ class CrystKinetics:
         and parameters. See ``get_kinetics`` for the moment basis.
     mu_sec_nucl : {'area', 'volume'}, optional
         Select moment order 2 or 3 for (kv*moment)**s_2; default 'volume'.
+    solubility_basis : str, optional
+        Composition basis the solubility correlation is stated in; one of
+        ``SOLUBILITY_BASES``. Default 'mass_per_volume_solution'
+        [kg/m**3 solution].
 
     Raises
     ------
@@ -1156,6 +1223,8 @@ class CrystKinetics:
         If sup_sat_type is not 'relative', 'ratio', or 'absolute'.
     PharmaPyTypeError
         If custom_mechanisms is not a dictionary.
+    PharmaPyValueError
+        If solubility_basis is not in ``SOLUBILITY_BASES``.
 
     Warns
     -----
@@ -1165,12 +1234,27 @@ class CrystKinetics:
         refitted.
     """
 
+    # Composition bases a solubility correlation can be expressed in. The
+    # correlation itself carries no units, so which one is meant has to be
+    # stated -- "mass_conc" is ambiguous because it does not say per what.
+    # Whichever is named here is the basis the liquid composition is converted
+    # into before being compared against the solubility.
+    SOLUBILITY_BASES = (
+        'mass_per_volume_solution',   # kg solute / m3 solution
+        'mass_per_volume_solvent',    # kg solute / m3 solvent
+        'mass_per_mass_solvent',      # kg solute / kg solvent
+        'mass_per_mass_solution',     # kg solute / kg solution (= mass_frac)
+        'mole_per_volume_solution',   # kmol solute / m3 solution (= mol/L)
+        'mole_frac',                  # mole fraction
+    )
+
     def __init__(self, coeff_solub=None, solub_fn=None,
                  nucl_prim=None, nucl_sec=None, growth=None, dissolution=None,
                  solubility_type='polynomial', sup_sat_type: str = 'relative',
                  reformulate_kin=False, alpha_fn=None,
                  temp_ref=298.15, custom_mechanisms=None,
-                 mu_sec_nucl='volume') -> None:
+                 mu_sec_nucl='volume',
+                 solubility_basis='mass_per_volume_solution') -> None:
         """Initialize kinetics; see the class docstring for parameters and errors."""
         if sup_sat_type not in ('relative', 'ratio', 'absolute'):
             raise ValueError("sup_sat_type must be 'relative', 'ratio', or "
@@ -1187,6 +1271,17 @@ class CrystKinetics:
         self.temp_ref = temp_ref  # [K]
         self.sup_sat_type = sup_sat_type
         self.reformulate_kin = reformulate_kin
+
+        if solubility_basis not in self.SOLUBILITY_BASES:
+            raise PharmaPyValueError(
+                f"solubility_basis={solubility_basis!r} is not one of "
+                f"{list(self.SOLUBILITY_BASES)}"
+            )
+
+        # Default matches original PharmaPy, which feeds solubility_temp a
+        # mass concentration on a solution-volume basis (Crystallizers.py
+        # material_balances, basis='mass_conc').
+        self.solubility_basis = solubility_basis
 
         if solub_fn is None:
             self.get_solubility = self.solubility_temp
@@ -1226,14 +1321,26 @@ class CrystKinetics:
         self.solub_type = solubility_type
 
         if reformulate_kin:
-            self.name_params = ('\log(k_{bp})', '\log(E_{bp}/R)', 'b',
-                                '\log(k_{bs})', '\log(E_{bs}/R)', 's_1', 's_2',
-                                '\log(k_{g})', '\log(E_{g}/R)', 'g',
-                                '\log(k_{d})', '\log(E_{d}/R)', 'd')
+            if len(param_dict.get('growth') or ()) <= 3:
+                self.name_params = (r'\log(k_{bp})', r'\log(E_{bp}/R)', 'b',
+                                    r'\log(k_{bs})', r'\log(E_{bs}/R)', 's_1', 's_2',
+                                    r'\log(k_{g})', r'\log(E_{g}/R)', 'g',
+                                    r'\log(k_{d})', r'\log(E_{d}/R)', 'd')
+            else:
+                self.name_params = (r'\log(k_{bp})', r'\log(E_{bp}/R)', 'b',
+                                r'\log(k_{bs})', r'\log(E_{bs}/R)', 's_1', 's_2',
+                                r'\log(k_{g})', r'\log(E_{g}/R)', 'g','alpha','beta',
+                                r'\log(k_{d})', r'\log(E_{d}/R)', 'd')
         else:
-            self.name_params = ('k_{bp}', 'E_{bp}', 'b',
+            if len(param_dict.get('growth') or ()) <= 3:
+                self.name_params = ('k_{bp}', 'E_{bp}', 'b',
+                                    'k_{bs}', 'E_{bs}', 's_1', 's_2',
+                                    'k_{g}', 'E_{g}', 'g',
+                                    'k_{d}', 'E_{d}', 'd')
+            else:
+                self.name_params = ('k_{bp}', 'E_{bp}', 'b',
                                 'k_{bs}', 'E_{bs}', 's_1', 's_2',
-                                'k_{g}', 'E_{g}', 'g',
+                                'k_{g}', 'E_{g}', 'g','alpha','beta',
                                 'k_{d}', 'E_{d}', 'd')
 
         self.num_params = len(self.name_params)
@@ -1635,3 +1742,14 @@ class CrystKinetics:
         ddiss_dpar = dmech_dparam(self.dissol, d_par, not growing)
 
         return dbp_dpar, dbs_dpar, dgr_dpar, ddiss_dpar, conc_sat
+    def supports(self, mechanism):
+        if not isinstance(mechanism,list):
+            mechanism = [mechanism]
+        checks = []
+        for m in mechanism:
+            try:
+                checks.append(np.any(self.params[m]))
+            except KeyError:
+                checks.append(False)
+        return any(checks)
+
