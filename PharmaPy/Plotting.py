@@ -180,9 +180,56 @@ def get_state_distrib(result, *state_names, **kwargs_retrieve):
     return out
 
 
+def _state_metadata(di_states, di_fstates) -> dict:
+    """Merge state and function-of-state metadata, treating None as empty.
+
+    Parameters
+    ----------
+    di_states : mapping or None
+        State metadata (``units``, ``dim``, optional ``index``) keyed by
+        state name.
+    di_fstates : mapping or None
+        Function-of-state metadata on the same layout. ``DynamicResult``
+        and units without such quantities leave it None.
+
+    Returns
+    -------
+    dict
+        Combined metadata; a function-of-state entry overrides a state entry
+        of the same name, as the former ``|`` merge did.
+    """
+    return {**(di_states or {}), **(di_fstates or {})}
+
+
 def get_states_result(result, *state_names):
+    """Return the time axis and selected states of a unit result.
+
+    Parameters
+    ----------
+    result : DynamicResult
+        Unit result exposing ``time`` [s], ``di_states``, optional
+        ``di_fstates`` (None is treated as no function-of-state metadata)
+        and one attribute per state in its own units.
+    *state_names : str or tuple
+        A state name, or a ``(name, picks)`` pair selecting entries of an
+        indexed state by index name (case-insensitive) or position.
+
+    Returns
+    -------
+    time : numpy.ndarray
+        ``result.time`` [s], unchanged.
+    out : dict
+        State name mapped to its values in the result's units; picked
+        entries of an indexed state keep the time axis first, with columns
+        in pick order.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If a picked name is not in the state's ``index``.
+    """
     time = result.time
-    states_fstates = result.di_states | result.di_fstates
+    states_fstates = _state_metadata(result.di_states, result.di_fstates)
 
     out = {}
     for key in state_names:
@@ -235,6 +282,35 @@ def set_legend(ax, states_fstates, names, state_names, legend):
 
 def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
                   include_units=True, **fig_kwargs):
+    """Plot selected state profiles of a solved unit against time.
+
+    Parameters
+    ----------
+    uo : object
+        Solved unit exposing ``result`` and ``states_di``; ``fstates_di`` is
+        optional, and a missing or None value means no function-of-state
+        metadata.
+    state_names : sequence of str or tuple
+        States to plot, each a name or a ``(name, picks)`` pair; see
+        :func:`get_states_result`.
+    axes : matplotlib.axes.Axes or numpy.ndarray, optional
+        Axes to draw on; a new figure is created when omitted.
+    fig_map : sequence of int, optional
+        Axis position for each state; defaults to one axis per state.
+    ylabels : sequence of str, optional
+        Axis labels replacing the state names; units from the metadata are
+        appended in parentheses.
+    include_units : bool, optional
+        Retained for API compatibility; units are always appended when the
+        metadata defines them.
+    **fig_kwargs
+        Keyword arguments for ``matplotlib.pyplot.subplots``.
+
+    Returns
+    -------
+    tuple or axes
+        ``(figure, axes)`` when a figure is created, otherwise the axes.
+    """
     time, data = get_states_result(uo.result, *state_names)
 
     if fig_map is None:
@@ -255,7 +331,8 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
     colors = plt.cm.tab10
 
     names = list(data.keys())
-    states_and_fstates = {**uo.states_di, **uo.fstates_di}
+    states_and_fstates = _state_metadata(
+        getattr(uo, 'states_di', None), getattr(uo, 'fstates_di', None))
 
     for ind, idx in enumerate(fig_map):
         name = names[ind]
@@ -322,6 +399,45 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
 
 def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
                  cm_names=None, ylabels=None, legend=True, **fig_kwargs):
+    """Plot distributed states along their internal coordinate or time.
+
+    Parameters
+    ----------
+    uo : object
+        Solved unit exposing ``result`` and ``states_di``; ``fstates_di`` is
+        optional, and a missing or None value means no function-of-state
+        metadata.
+    state_names : sequence of str or tuple
+        Distributed states, each a name or a ``(name, picks)`` pair.
+    x_name : str
+        Result attribute holding the internal coordinate, for example the
+        crystal size grid [um].
+    axes : matplotlib.axes.Axes or numpy.ndarray, optional
+        Axes to draw on; a new figure is created when omitted.
+    times : sequence of float, optional
+        Times [s] at which to plot profiles along ``x_name``.
+    x_vals : float or sequence of float, optional
+        Coordinates, in the units of ``x_name``, at which to plot time
+        profiles; used when ``times`` is None.
+    cm_names : str or sequence of str, optional
+        Matplotlib colormap names, one per plotted state entry.
+    ylabels : sequence of str, optional
+        Axis labels replacing the state names.
+    legend : bool, optional
+        Whether to label indexed states.
+    **fig_kwargs
+        Keyword arguments for ``matplotlib.pyplot.subplots``.
+
+    Returns
+    -------
+    tuple or axes
+        ``(figure, axes)`` when a figure is created, otherwise the axes.
+
+    Raises
+    ------
+    ValueError
+        If both ``times`` and ``x_vals`` are None.
+    """
     if times is None and x_vals is None:
         raise ValueError("Both 'times' and 'x_vals' arguments are None. "
                          "Please specify one of them")
@@ -346,7 +462,8 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
     else:
         ax = ax.flatten()
 
-    states_and_fstates = {**uo.states_di, **uo.fstates_di}
+    states_and_fstates = _state_metadata(
+        getattr(uo, 'states_di', None), getattr(uo, 'fstates_di', None))
 
     if times is not None:
         if len(times) == 1:

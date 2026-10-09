@@ -350,6 +350,11 @@ remaining columns are species mole fractions [-]. Every stage starts at the
 attached liquid composition and its configured activity-model bubble point.
 ``solve_unit`` calls the same preparation after calculating the shortcut design.
 
+Result retrieval and plotting
+=============================
+
+:code:`PharmaPy.Plotting.get_states_result`, :code:`plot_function` and :code:`plot_distrib` treat a result without function-of-state metadata (:code:`di_fstates` is None, or a unit without :code:`fstates_di`) as having none, so plain and indexed states of, for example, a liquid :code:`Mixer` or a :code:`BatchToFlowConnector` result can be retrieved and plotted. Earlier releases raised :code:`TypeError: unsupported operand type(s) for |` for such results, or an :code:`AttributeError` for :code:`plot_distrib` on a unit without :code:`fstates_di`.
+
 Interpolators
 ===============
 
