@@ -88,7 +88,9 @@ once per evaluation, and every measurement reads its own rows.
   sample is *unobserved* for it; nothing is interpolated, extrapolated or
   otherwise invented, also when the grids only partially overlap.
 * **Single sampled point.** A scalar ``x`` (or a one-element array) is a
-  valid measurement, for example one temperature reading.
+  valid measurement, for example one temperature reading. A reactor
+  experiment must still request at least one time after the charge time;
+  see the reactor callback limits under SimulationExec below.
 * **Replicates.** A repeated x value within a measurement denotes replicate
   observations at that x; the k-th replicate maps to the k-th model-grid row
   holding that x, so the callback receives the repeated value. Replicates
@@ -435,7 +437,14 @@ Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request
 order with replicates repeated, so an experiment need not sample the initial
 time: endpoint-only measurements and replicate samples at the charge time
-are supported. Crystallizer callbacks still return the solver rows, which
+are supported. Each reactor experiment must still request at least one time
+after the charge time. A grid made only of charge-time samples, such as
+``[0.0]`` or ``[0.0, 0.0]``, has zero integration duration:
+``SetParamEstimation`` accepts it, but evaluating the objective currently
+fails inside CVode with ``IndexError``. Support for such zero-duration
+experiments is tracked in
+`issue #418 <https://github.com/PharmaPy-org/PharmaPy/issues/418>`__.
+Crystallizer callbacks still return the solver rows, which
 include the charge time, until
 `issue #328 <https://github.com/PharmaPy-org/PharmaPy/issues/328>`__ is
 fixed: their experiment grids must start at the charge time (0 s) without

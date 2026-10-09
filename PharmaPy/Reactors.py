@@ -1171,6 +1171,10 @@ class _BaseReactor:
         so rows are selected by requested time (``_requested_rows``) before
         any sensitivity reordering; a grid that starts at the initial time
         without initial replicates is returned unchanged.
+        ``t_vals`` must contain at least one time after the charge time. A
+        grid made only of charge-time samples, such as ``[0.0]``, has zero
+        integration duration and currently fails inside CVode with
+        ``IndexError`` (issue #418).
         """
         self.reset()
 
