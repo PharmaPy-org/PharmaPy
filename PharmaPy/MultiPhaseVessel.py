@@ -2891,8 +2891,23 @@ class MultiPhaseVessel():
             time,
             completed_state
         ):
-        """Computes enthalpy effects.
+        """Add the heat carried out by each outlet to ``contributions``.
 
+        Parameters
+        ----------
+        contributions : dict
+            Heat rates by source [W]; ``"outlet"`` is updated in place.
+        aux : list of ResolvedPhaseTransfer
+            Resolved outlets, each with its ``species_flow`` [kg/s], the
+            ``stream_phase`` it leaves as and the ``vessel_phase`` it is
+            drawn from.
+        time : float
+            Integration time [s], unused here.
+        completed_state : dict
+            Solver and derived states, unused here.
+
+        Notes
+        -----
         The balance is written for dT/dt, so -- like the inlet term -- each
         outlet enters relative to the vessel phase it is drawn from:
         -F_out * (h_out - h_vessel). A stream leaving at the vessel's own

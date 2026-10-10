@@ -12,6 +12,10 @@ from time import perf_counter
 
 eps = np.finfo(float).eps
 
+# Reaction rates are in kmol/(m**3 s), i.e. mol/(L s), and reaction enthalpies
+# in J/mol, so a rate times an enthalpy needs this exact factor to give W/m**3.
+MOL_PER_KMOL = 1e3  # [mol/kmol]
+
 class Mechanism:
     """
     Base class for any mechanism that contributes material and/or energy.
@@ -335,10 +339,28 @@ class ReactionMechanism(Mechanism):
             time,
             completed_state
         )->TransferResult:
-        "aux must have process field that stores process"
-        # mole_adjust = 1000 if self.molarity_in_L else 1
-        
+        """Species mass rates from the reactions in ``phase``.
 
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Process this mechanism serves; its ``phaseref`` keys the rates.
+        phase : BasePhase
+            Reacting phase, with ``mole_conc`` [kmol/m**3], ``mw``
+            [kg/kmol] and ``vol`` [m**3].
+        time : float
+            Integration time [s], unused here.
+        completed_state : dict
+            Solver and derived states, unused here.
+
+        Returns
+        -------
+        TransferResult
+            Species mass rates [kg/s], shape ``(phase.num_species,)``, and an
+            ``aux`` payload with the ``phase``, the per-reaction
+            ``rxn_rates`` [kmol/(m**3 s)] and the ``process``, which
+            ``get_heat_generation`` reads.
+        """
         temp = phase.temp
 
         mask = np.array([
@@ -383,6 +405,24 @@ class ReactionMechanism(Mechanism):
         return result
     
     def get_heat_generation(self, aux, completed_state, time):
+        """Heat released by the reactions in the owning phase.
+
+        Parameters
+        ----------
+        aux : dict
+            Payload from ``get_solver_state_rates``: the ``phase`` and its
+            per-reaction ``rxn_rates`` [kmol/(m**3 s)], shape ``(n_rxns,)``.
+        completed_state : dict
+            Solver and derived states, unused here.
+        time : float
+            Integration time [s], unused here.
+
+        Returns
+        -------
+        float
+            Heat generation rate [W], positive when the reactions release
+            heat (negative reaction enthalpy).
+        """
         phase = aux['phase']
         temp = phase.temp
         rk = self.kinetics
@@ -398,11 +438,11 @@ class ReactionMechanism(Mechanism):
                 mask,
                 rk.delta_hrxn,
                 rk.tref_hrxn
-            ))
-        # Rates are in kmol/(m3 s) (mole_conc is kmol/m3 = mol/L) and the
-        # volume in m3, so rate*vol is kmol/s. deltah_rxn is J/mol, hence the
-        # 1000 mol/kmol to get W. Negative deltah_rxn (exothermic) heats.
-        q = -(deltah_rxn * aux["rxn_rates"]).sum() * phase.vol * 1000
+            ))  # [J/mol]
+        heat_density = (
+            -(deltah_rxn * aux["rxn_rates"]).sum() * MOL_PER_KMOL
+        )  # [W/m**3]
+        q = heat_density * phase.vol  # [W]
         return q
     
     

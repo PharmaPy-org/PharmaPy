@@ -72,9 +72,21 @@ CHARGE_MASS_SCALING = (1.0, 2.0, 4.0)  # [kg]
 # rather than an exact bitwise match.
 TEMP_RATE_RTOL = 1e-9  # [-]
 
+# Exothermic heat of reaction for the energy-balance tests, a design choice of
+# typical liquid-phase magnitude that only scales the expected heat. The charge
+# sits at RxnKinetics' default 298.15 K enthalpy reference, where the
+# heat-capacity correction in getHeatOfRxn vanishes, so the reaction releases
+# exactly this enthalpy.
+REACTION_ENTHALPY = -5e4  # [J/mol of reaction as written]
+MOL_PER_KMOL = 1e3  # [mol/kmol], exact; molar masses in g/mol are kg/kmol
+# A temperature rate whose exact answer is zero is compared against an absolute
+# floor far below the K/s-scale drift that a misbooked outflow gives here.
+TEMP_RATE_ATOL = 1e-12  # [K/s]
+
 
 def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False,
-                   charge_mass=CHARGE_MASS):
+                   charge_mass=CHARGE_MASS, reactions=REACTIONS,
+                   reaction_enthalpy=0.0, with_utility=True):
     """Construct a vessel charged with the standard A/B mixture.
 
     Parameters
@@ -82,7 +94,7 @@ def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False,
     reactor_cls : type
         ``BatchReactor`` or ``ContinuousReactor``.
     rate_constant : float, optional
-        Pre-exponential factor applied to both reactions [L/mol/s]. When
+        Pre-exponential factor applied to every reaction [L/mol/s]. When
         None, no kinetics are attached and the vessel has no reaction
         source term.
     with_inlet : bool, optional
@@ -90,6 +102,15 @@ def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False,
         composition equals the initial charge composition.
     charge_mass : float, optional
         Initial liquid holdup [kg]. Defaults to ``CHARGE_MASS``.
+    reactions : list of str, optional
+        Reactions to attach with ``rate_constant``. Defaults to
+        ``REACTIONS``.
+    reaction_enthalpy : float, optional
+        Heat of every reaction at the 298.15 K reference [J/mol of reaction
+        as written]. Defaults to 0.
+    with_utility : bool, optional
+        When False, attach no cooling jacket, so the vessel is adiabatic.
+        Defaults to True.
 
     Returns
     -------
@@ -104,16 +125,19 @@ def _build_reactor(reactor_cls, rate_constant=None, with_inlet=False,
     vessel.Phases = LiquidPhase(
         DATA_PATH, mass=charge_mass, mass_frac=CHARGE_MASS_FRAC
     )
-    vessel.Utility = CoolingWater(
-        mass_flow=UTILITY_MASS_FLOW, temp_in=UTILITY_TEMP_IN
-    )
+    if with_utility:
+        vessel.Utility = CoolingWater(
+            mass_flow=UTILITY_MASS_FLOW, temp_in=UTILITY_TEMP_IN
+        )
 
     if rate_constant is not None:
+        num_rxns = len(reactions)
         vessel.RxnKinetics = RxnKinetics(
             path=DATA_PATH,
-            rxn_list=REACTIONS,
-            k_params=np.array([rate_constant, rate_constant]),
-            ea_params=np.array([ACTIVATION_ENERGY, ACTIVATION_ENERGY]),
+            rxn_list=reactions,
+            k_params=np.full(num_rxns, rate_constant),  # [L/mol/s]
+            ea_params=np.full(num_rxns, ACTIVATION_ENERGY),  # [J/mol]
+            delta_hrxn=np.full(num_rxns, reaction_enthalpy),  # [J/mol]
         )
 
     if with_inlet:
@@ -378,3 +402,61 @@ def test_jacket_cooling_rate_is_independent_of_charge_mass():
     assert rates[0] < 0
     for rate in rates[1:]:
         np.testing.assert_allclose(rate, rates[0], rtol=TEMP_RATE_RTOL)
+
+
+@pytest.mark.parametrize("reaction, product", [("A + B --> C", "C")])
+def test_reaction_heat_is_the_enthalpy_released_per_second(reaction, product):
+    """In an adiabatic batch, heat capacity times dT/dt is -dH * extent rate.
+
+    The product forms once per reaction as written, so its molar formation
+    rate is the extent rate. Rates in kmol/(m**3 s) times an enthalpy in J/mol
+    need 1000 mol/kmol to give watts; without it the reaction heat is a
+    thousand times too small.
+    """
+    vessel = _build_reactor(
+        BatchReactor,
+        rate_constant=RATE_CONSTANT_KINETIC,
+        reactions=[reaction],
+        reaction_enthalpy=REACTION_ENTHALPY,
+        with_utility=False,
+    )
+    states = vessel.create_solver_init_states()
+    rates = np.asarray(vessel.unit_model(0.0, states))
+
+    extent_rate = (
+        rates[SPECIES.index(product)] / MOLAR_MASS[product]
+    )  # [kmol/s]
+    # Guard against a vacuous pass in which nothing reacts.
+    assert extent_rate > 0
+    expected_heat = -REACTION_ENTHALPY * extent_rate * MOL_PER_KMOL  # [W]
+
+    heat_capacity = vessel.Phases.get_total_heat_capacity()  # [J/K]
+    np.testing.assert_allclose(
+        rates[-1] * heat_capacity, expected_heat, rtol=TEMP_RATE_RTOL
+    )
+
+
+def test_outflow_at_the_vessel_state_carries_no_heat():
+    """A vessel fed at its own state, with no reaction or jacket, holds T.
+
+    Feed and charge share composition and temperature, and the outlet is
+    drawn at the vessel's own state, so neither stream carries net heat.
+    Booking the outflow's absolute enthalpy, measured from the 273.15 K
+    reference, instead pulls the vessel towards that reference.
+    """
+    vessel = _build_reactor(
+        ContinuousReactor, with_inlet=True, with_utility=False
+    )
+    states = vessel.create_solver_init_states()
+    rates = np.asarray(vessel.unit_model(0.0, states))
+
+    # Guard against a vacuous pass in which nothing flows out.
+    posted = [
+        value
+        for key, value in vessel.controller.operating_conditions.items()
+        if key.name == "vol_flow" and key.port == "outlet"
+    ]
+    assert len(posted) == 1
+    assert posted[0] > 0
+
+    assert abs(rates[-1]) < TEMP_RATE_ATOL
