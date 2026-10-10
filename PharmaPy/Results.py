@@ -347,11 +347,19 @@ class SimulationResult:
             ``SimulationExec.GetRawMaterials``) if a raw inlet's dynamic
             controls cannot be accounted.
 
+        Warns
+        -----
+        RuntimeWarning
+            Forwarded from ``SimulationExec.get_raw_inlets``, once per
+            instantaneous unit whose raw amounts are NaN.
+
         Notes
         -----
         Continuous raw inlet amounts integrate over the receiving unit's
-        reported duration. Instantaneous static mixers have zero duration and
-        hence zero raw usage, while their flow-rate columns remain nonzero.
+        fed duration. An instantaneous unit (a static continuous ``Mixer``)
+        is charged for as long as its single, verified downstream consumer
+        consumed its latest transfer; otherwise its amounts are NaN. See
+        ``SimulationExec.get_raw_inlets`` for the full list of NaN reasons.
         Raw rows come from ``GetRawMaterials(totals=False)``: inlets with a
         ``DynamicInlet`` report the integrated feed the unit consumed, with
         amounts, volume, fractions averaged with the basis flow, the consumed

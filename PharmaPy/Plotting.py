@@ -180,9 +180,97 @@ def get_state_distrib(result, *state_names, **kwargs_retrieve):
     return out
 
 
+def _state_metadata(di_states, di_fstates) -> dict:
+    """Merge state and function-of-state metadata, treating None as empty.
+
+    Parameters
+    ----------
+    di_states : mapping or None
+        State metadata (``units``, ``dim``, optional ``index``) keyed by
+        state name.
+    di_fstates : mapping or None
+        Function-of-state metadata on the same layout. ``DynamicResult``
+        and units without such quantities leave it None.
+
+    Returns
+    -------
+    dict
+        Combined metadata; a function-of-state entry overrides a state entry
+        of the same name, as the former ``|`` merge did.
+    """
+    return {**(di_states or {}), **(di_fstates or {})}
+
+
+def _with_time_axis(values, single_sample: bool, index=None):
+    """Give a single-sample state its leading time axis when it lacks one.
+
+    Parameters
+    ----------
+    values : array-like
+        Published state values in their own units.
+    single_sample : bool
+        Whether the result's time has exactly one sample.
+    index : sequence, optional
+        The state's ``index`` metadata (for example species names).
+
+    Returns
+    -------
+    numpy.ndarray or object
+        For a single-sample result, a 0-d value becomes shape (1,) and a
+        1-D indexed vector of length ``len(index)`` becomes (1, len(index)).
+        Anything else, including every multi-sample result and every state
+        that already has a time axis, is returned unchanged.
+    """
+    if not single_sample:
+        return values
+    array = np.asarray(values)
+    if array.ndim == 0:
+        return array.reshape(1)
+    if index is not None and array.ndim == 1 and len(array) == len(index):
+        return array.reshape(1, -1)
+    return values
+
+
 def get_states_result(result, *state_names):
+    """Return the time axis and selected states of a unit result.
+
+    Parameters
+    ----------
+    result : DynamicResult
+        Unit result exposing ``time`` [s], ``di_states``, optional
+        ``di_fstates`` (None is treated as no function-of-state metadata)
+        and one attribute per state in its own units.
+    *state_names : str or tuple
+        A state name, or a ``(name, picks)`` pair selecting entries of an
+        indexed state by index name (case-insensitive) or position.
+
+    Returns
+    -------
+    time : numpy.ndarray
+        ``result.time`` [s], unchanged.
+    out : dict
+        State name mapped to its values in the result's units; picked
+        entries of an indexed state keep the time axis first, with columns
+        in pick order.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If a picked name is not in the state's ``index``.
+
+    Notes
+    -----
+    Instantaneous units, such as a batch ``Mixer``, may publish a single
+    time sample with states that lack the leading time axis. When
+    ``result.time`` has one sample, a 0-d state is returned with shape (1,)
+    and a 1-D indexed state whose length equals its ``index`` with shape
+    (1, len(index)), so it is handled like a multi-sample profile. States
+    that already have a time axis, and all states of multi-sample results,
+    are returned as published.
+    """
     time = result.time
-    states_fstates = result.di_states | result.di_fstates
+    states_fstates = _state_metadata(result.di_states, result.di_fstates)
+    single_sample = np.size(time) == 1
 
     out = {}
     for key in state_names:
@@ -194,7 +282,8 @@ def get_states_result(result, *state_names):
         else:
             state = key
 
-        y = getattr(result, state)
+        y = _with_time_axis(getattr(result, state), single_sample,
+                            states_fstates.get(state, {}).get('index'))
 
         if idx is not None:
             y = y[:, idx]
@@ -235,6 +324,35 @@ def set_legend(ax, states_fstates, names, state_names, legend):
 
 def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
                   include_units=True, **fig_kwargs):
+    """Plot selected state profiles of a solved unit against time.
+
+    Parameters
+    ----------
+    uo : object
+        Solved unit exposing ``result`` and ``states_di``; ``fstates_di`` is
+        optional, and a missing or None value means no function-of-state
+        metadata.
+    state_names : sequence of str or tuple
+        States to plot, each a name or a ``(name, picks)`` pair; see
+        :func:`get_states_result`.
+    axes : matplotlib.axes.Axes or numpy.ndarray, optional
+        Axes to draw on; a new figure is created when omitted.
+    fig_map : sequence of int, optional
+        Axis position for each state; defaults to one axis per state.
+    ylabels : sequence of str, optional
+        Axis labels replacing the state names; units from the metadata are
+        appended in parentheses.
+    include_units : bool, optional
+        Retained for API compatibility; units are always appended when the
+        metadata defines them.
+    **fig_kwargs
+        Keyword arguments for ``matplotlib.pyplot.subplots``.
+
+    Returns
+    -------
+    tuple or axes
+        ``(figure, axes)`` when a figure is created, otherwise the axes.
+    """
     time, data = get_states_result(uo.result, *state_names)
 
     if fig_map is None:
@@ -255,14 +373,14 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
     colors = plt.cm.tab10
 
     names = list(data.keys())
-    states_and_fstates = {**uo.states_di, **uo.fstates_di}
+    states_and_fstates = _state_metadata(
+        getattr(uo, 'states_di', None), getattr(uo, 'fstates_di', None))
 
     for ind, idx in enumerate(fig_map):
         name = names[ind]
         y = data[name]
         twin = False
 
-        # index_y = False
         index_y = states_and_fstates[name].get('index', False)
 
         if isinstance(state_names[ind], (tuple, list, range)):
@@ -310,10 +428,6 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
     if len(axes) == 1:
         axes = axes[0]
 
-    # for ax in axes:
-    #     if len(ax.lines) == 0:
-    #         ax.remove()
-
     if 'fig' in locals():
         return fig, ax_orig
     else:
@@ -322,6 +436,48 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
 
 def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
                  cm_names=None, ylabels=None, legend=True, **fig_kwargs):
+    """Plot distributed states along their internal coordinate or time.
+
+    Parameters
+    ----------
+    uo : object
+        Solved unit exposing ``result`` and ``states_di``; ``fstates_di`` is
+        optional, and a missing or None value means no function-of-state
+        metadata.
+    state_names : sequence of str or tuple
+        Distributed states, each a name or a ``(name, picks)`` pair.
+    x_name : str
+        Result attribute holding the internal coordinate, for example the
+        crystal size grid [um].
+    axes : matplotlib.axes.Axes or numpy.ndarray, optional
+        Axes to draw on; a new figure is created when omitted.
+    times : sequence of float, optional
+        Times [s] at which to plot profiles along ``x_name``.
+    x_vals : float or sequence of float, optional
+        Coordinates, in the units of ``x_name``, at which to plot time
+        profiles; used when ``times`` is None.
+    cm_names : str or sequence of str, optional
+        Matplotlib colormap names, one per plotted state entry.
+    ylabels : sequence of str, optional
+        Axis labels replacing the state names.
+    legend : bool, optional
+        Whether to label indexed states.
+    **fig_kwargs
+        Keyword arguments for ``matplotlib.pyplot.subplots``.
+
+    Returns
+    -------
+    tuple or axes
+        ``(figure, axes)`` when a figure is created, otherwise the supplied
+        ``axes`` object itself, as in :func:`plot_function`. With
+        ``times``, ``x_name`` labels the x axis as text on the axes' own
+        figure.
+
+    Raises
+    ------
+    ValueError
+        If both ``times`` and ``x_vals`` are None.
+    """
     if times is None and x_vals is None:
         raise ValueError("Both 'times' and 'x_vals' arguments are None. "
                          "Please specify one of them")
@@ -345,8 +501,11 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
         ax = [ax]
     else:
         ax = ax.flatten()
+    # The x label goes on the axes' own figure, created here or supplied.
+    figure = ax[0].figure
 
-    states_and_fstates = {**uo.states_di, **uo.fstates_di}
+    states_and_fstates = _state_metadata(
+        getattr(uo, 'states_di', None), getattr(uo, 'fstates_di', None))
 
     if times is not None:
         if len(times) == 1:
@@ -380,7 +539,7 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
             if len(axis.lines) == 0:
                 axis.remove()
 
-        fig.text(0.5, 0, x_name)
+        figure.text(0.5, 0, x_name)
 
         if len(ax) == 1:
             ax = ax[0]
@@ -413,4 +572,4 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
     if 'fig' in locals():
         return fig, ax
     else:
-        return ax
+        return axes  # the caller's own axes object, as in plot_function

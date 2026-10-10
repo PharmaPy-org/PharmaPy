@@ -6,7 +6,9 @@ Created on Tue Jun 16 15:43:14 2020
 """
 
 from collections.abc import Sequence
-from typing import Union
+from typing import Optional, Union
+
+from numpy.typing import ArrayLike
 
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Connections import interpolate_inputs
@@ -492,8 +494,10 @@ class SlurryStream(Slurry):
         ``mass_slurry`` and ``mass_flow`` [kg/s] equal the constituent flow
         sums. With no distribution or moments supplied, constituent flows
         determine the total, replacing the constructor's flow value.
-        Solid volume uses the inherited ``SolidStream.vol`` [m**3/s]; that
-        stream need not expose a ``vol_flow`` alias. Liquid volume and mass
+        Solid volume uses the inherited ``SolidStream.vol`` [m**3/s], which
+        the stream mirrors in its ``vol_flow`` alias whenever ``vol`` is
+        defined, including the no-distribution branch where the solid stream
+        carries the number rate [#/um/s]. Liquid volume and mass
         use flow aliases because liquid updates delete phase amount attributes.
         """
         if isinstance(phases_list, tuple):
@@ -553,7 +557,6 @@ class SlurryStream(Slurry):
 
                 self.dx = np.diff(x_grid)
 
-            # self.Solid_1.x_distrib = self.x_distrib
             self.moments = self.Solid_1.getMoments(self.x_distrib,
                                                    self.distrib)
 
@@ -642,25 +645,41 @@ class SlurryStream(Slurry):
 
 
 class Cake:
-    def __init__(self, z_external=None, num_discr=50, saturation=None):
-        """ Create a cake object.
+    """Represent a packed filter cake of attached liquid and solid phases.
+
+    The cake is resolved on axial nodes ``z_external`` [m] with a
+    volumetric liquid saturation [-] per node; assigning ``Phases`` derives
+    its porosity [-], cake volume [m**3] and specific resistance from the
+    attached solid. Like the other matter objects, ``y_upstream`` is None
+    for a raw cake and holds the upstream outputs for a cake transferred
+    from a unit operation, which is how raw-material reporting tells the
+    two apart.
+    """
+
+    def __init__(self, z_external: Optional[ArrayLike] = None,
+                 num_discr: int = 50,
+                 saturation: Optional[ArrayLike] = None) -> None:
+        """Create a cake object.
 
         Parameters
         ----------
-        z_external : array, optional
-            Array of size N, containing the internal spatial grid
-            of length coordinate of the cakes [m]. The default is None
-        num_discr : integer, optional
-            The number which the cake length coordiante is discretized in. 
-            The default is 50.
-        saturation : array, optional
-            Array of size N (N = num_discr). Volumetric liquid uptake 
-            in each spatial node of the cake. The default is None.
+        z_external : array-like, optional
+            Axial node coordinates of the cake [m], shape (num_nodes,). The
+            default None uses ``num_discr`` nodes evenly spaced over [0, 1] m.
+        num_discr : int, optional
+            Number of axial nodes [-] used when ``z_external`` is None. The
+            default is 50.
+        saturation : array-like, optional
+            Volumetric liquid uptake per node [-], shape (num_nodes,). The
+            default None means fully saturated, ones at every node.
 
-        Returns
-        -------
-        None.
-
+        Notes
+        -----
+        ``y_upstream`` starts as None, like the other matter objects
+        (``LiquidPhase``, ``LiquidStream``, ``Slurry``). A raw Cake keeps
+        None, so raw-material and stream-table reporting classify it as a
+        raw inlet; ``Connection.FeedConnection`` replaces it with the
+        upstream outputs when the Cake is transferred from a unit operation.
         """
     
 
@@ -675,6 +694,7 @@ class Cake:
             self.saturation = saturation
 
         self.mass_concentr = None
+        self.y_upstream = None
 
     @property
     def Phases(self):

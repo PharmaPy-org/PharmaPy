@@ -243,6 +243,30 @@ class ContinuousHoldup:
 
 
 class Mixer:
+    """Mix liquid, slurry or cake inlets by algebraic mass and energy balances.
+
+    The balances are evaluated at the times of the inputs; static inputs
+    give one result sample at 0 s and no processing time.
+
+    Parameters
+    ----------
+    temp_refer : float, optional
+        Reference temperature [K] stored as ``temp_refer``; default
+        298.15 K.
+
+    Attributes
+    ----------
+    is_instantaneous : bool
+        Class-level True: continuous mixing holds no inventory and passes
+        its feed on as it arrives, so ``SimulationExec`` raw-material
+        accounting charges the raw inlets of a static (single-sample)
+        continuous solve for the time its outlet is consumed downstream;
+        see ``SimulationExec.get_raw_inlets``. Batch mixing is accounted
+        from its charged inventories [kg] and is unaffected.
+    """
+
+    is_instantaneous = True
+
     def __init__(self, temp_refer=298.15):
 
         self._Inlets = []
@@ -284,7 +308,11 @@ class Mixer:
         Notes
         -----
         Species metadata comes from the first inlet's liquid phase, whether
-        supplied directly or attached to a slurry or cake.
+        supplied directly or attached to a slurry or cake. The liquid
+        ``states_di`` declares the amount [kg] or flow [kg/s], the
+        dimensionless ``mass_frac`` [-] with one entry per species, and the
+        temperature [K]; ``dim_states`` therefore sums to
+        ``num_species + 2``, the width of one packed liquid state.
         """
         incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
         flow_flags = [hasattr(inlet, 'mass_flow')
@@ -315,20 +343,21 @@ class Mixer:
         self.bipartite.append(None)
 
         liquid_inlet = getattr(self.Inlets[0], 'Liquid_1', self.Inlets[0])
+        # Dimensionless per-species fractions, as in the solids branch.
+        mass_frac_di = {'units': '', 'dim': len(liquid_inlet.name_species),
+                        'index': liquid_inlet.name_species, 'type': 'alg'}
 
         if flow_flag:
             self.states_di = {
                 'mass_flow': {'units': 'kg/s', 'dim': 1, 'type': 'alg'},
-                'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': liquid_inlet.name_species, 'type': 'alg'},
+                'mass_frac': mass_frac_di,
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
         else:
             self.states_di = {
                 'mass': {'units': 'kg', 'dim': 1, 'type': 'alg'},
-                'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': liquid_inlet.name_species, 'type': 'alg'},
+                'mass_frac': mass_frac_di,
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
@@ -1223,6 +1252,31 @@ class DynamicCollector:
     The inlet phase type selects either a liquid-mixer balance or a delegated
     semibatch crystallizer model. State labels and result retrieval therefore
     follow the selected model's declared state layout.
+
+    A slurry inlet always delegates to an adiabatic ``SemibatchCryst``,
+    which needs two crystallization settings on the collector:
+
+    ``KinCryst``
+        Crystallization kinetics object, such as
+        :class:`PharmaPy.Kinetics.CrystKinetics`, assigned to the delegate's
+        ``Kinetics``. There is no non-crystallizing slurry holdup.
+    ``kwargs_cryst``
+        Mapping (e.g. dict) with the required keys ``'target_ind'``, the
+        zero-based index [-] of the crystallizing species in the inlet
+        liquid's species order, and ``'target_comp'``, its name or a list,
+        tuple or one-dimensional array of names in the property database.
+        ``target_ind`` must index the first of the ``target_comp`` names in
+        that order, the species the delegate crystallizes. Other entries,
+        for example ``'scale'`` [-], are passed to the ``SemibatchCryst``
+        constructor. The collector sets ``method`` and ``adiabatic``, so
+        those keys are rejected, and replaces any ``num_interp_points``
+        entry with its own ``num_interp_points``.
+
+    Only crystallizer sources (``PharmaPy.Crystallizers`` units) supply both
+    automatically through ``Connection``; for any other slurry source, such as
+    a raw ``SlurryStream`` or a solids ``Mixer``, the caller sets them.
+    ``solve_unit`` validates both first, before it rebuilds the inlet layout
+    or builds any phase.
     """
 
     def __init__(self, temp_refer: float = 298.15,
@@ -1384,19 +1438,24 @@ class DynamicCollector:
 
         Notes
         -----
-        When mu_n is an active input, SlurryStream fallback fields come from
-        its own moments and attached liquid concentration. Without an attached
-        liquid phase, concentration retains the generic missing-field default.
-        Connected upstream and dynamic inlet values take precedence for each
-        supplied field. Aliases are installed on a shallow copy so the original
-        stream is unchanged.
+        In a slurry-feed layout, one with an active population (``mu_n`` or
+        ``distrib``), a SlurryStream's fallback ``mass_conc`` comes from its
+        attached liquid phase for moment and 1D-FVM populations alike, and
+        fallback ``mu_n`` from its own moments when ``mu_n`` is active.
+        Without an attached liquid phase, or without an active population,
+        concentration retains the generic missing-field default. Connected
+        upstream and dynamic inlet values take precedence for each supplied
+        field. Aliases are installed on a shallow copy so the original stream
+        is unchanged.
         """
         inlet = self.Inlet
-        if (isinstance(inlet, SlurryStream)
-                and 'mu_n' in self.states_in_dict['Inlet']):
+        active = self.states_in_dict['Inlet']
+        if isinstance(inlet, SlurryStream) and (
+                'mu_n' in active or 'distrib' in active):
             inlet = copy(inlet)
-            inlet.mu_n = self.Inlet.moments  # [m**n/m**3], slurry-volume basis
-            if hasattr(self.Inlet, 'Liquid_1'):
+            if 'mu_n' in active:
+                inlet.mu_n = self.Inlet.moments  # [m**n/m**3], slurry-volume basis
+            if 'mass_conc' in active and hasattr(self.Inlet, 'Liquid_1'):
                 inlet.mass_conc = self.Inlet.Liquid_1.mass_conc  # [kg/m**3 liquid]
         return get_inputs_new(time, inlet, self.states_in_dict)
 
@@ -1462,6 +1521,114 @@ class DynamicCollector:
 
         return dtemp_dt
 
+    def _check_crystallization_settings(self) -> None:
+        """Validate the settings a slurry feed's crystallizer delegate needs.
+
+        Raises
+        ------
+        ValueError
+            If ``KinCryst`` or ``kwargs_cryst`` is None or ``kwargs_cryst``
+            lacks ``'target_ind'`` or ``'target_comp'`` (all missing settings
+            are named together); if ``kwargs_cryst`` sets ``'method'`` or
+            ``'adiabatic'``, which the collector sets; if ``target_comp``
+            names no species or a species absent from the inlet liquid; or if
+            ``target_ind`` is not the index [-] of the first ``target_comp``
+            species in the inlet species order.
+        TypeError
+            If ``kwargs_cryst`` is not a mapping, ``target_comp`` is neither
+            a string nor a list, tuple or one-dimensional NumPy array of
+            strings, or ``target_ind`` is not an integer (Python or NumPy;
+            booleans are rejected).
+
+        Notes
+        -----
+        Missing settings raise ``ValueError``, like a solve without an end
+        time: the collector is not configured, rather than given an object
+        of the wrong type. ``target_comp`` accepts the forms the
+        crystallizers document and use (a name, or a sequence or
+        one-dimensional array of names; their plots index its first entry).
+        The delegate ``SemibatchCryst`` derives its own target index as the
+        first inlet species named in ``target_comp``, while the collector
+        uses ``target_ind`` for the seed crystal composition, so a
+        disagreement would seed one species and crystallize another and is
+        rejected. A ``'num_interp_points'`` entry is accepted but replaced by
+        the collector's ``num_interp_points`` in the delegate's options.
+        """
+        source_note = (
+            'Only crystallizer sources (PharmaPy.Crystallizers units) supply '
+            'KinCryst and kwargs_cryst automatically through a Connection; '
+            'set them on the collector for any other slurry source.')
+        missing = []
+        if self.KinCryst is None:
+            missing.append('KinCryst (crystallization kinetics, e.g. '
+                           'PharmaPy.Kinetics.CrystKinetics)')
+        settings = self.kwargs_cryst
+        if settings is None:
+            missing.append("kwargs_cryst (mapping, e.g. dict, with "
+                           "'target_ind' and 'target_comp')")
+        elif not isinstance(settings, Mapping):
+            raise TypeError(
+                "DynamicCollector.kwargs_cryst must be a mapping (e.g. dict) "
+                "with 'target_ind' and 'target_comp'; got "
+                f'{type(settings).__name__}.')
+        else:
+            absent = [key for key in ('target_ind', 'target_comp')
+                      if key not in settings]
+            if absent:
+                missing.append(f'kwargs_cryst keys {absent}')
+        if missing:
+            raise ValueError(
+                'A slurry-fed DynamicCollector delegates to a SemibatchCryst '
+                'and needs crystallization settings; missing: '
+                + '; '.join(missing) + '. ' + source_note)
+
+        reserved = [key for key in ('method', 'adiabatic') if key in settings]
+        if reserved:
+            raise ValueError(
+                f'kwargs_cryst keys {reserved} are set by the DynamicCollector '
+                "(method from the inlet population, adiabatic=True); remove "
+                'them.')
+
+        target_comp = settings['target_comp']
+        if isinstance(target_comp, str):
+            targets = [target_comp]
+        elif ((isinstance(target_comp, Sequence)
+               or (isinstance(target_comp, np.ndarray)
+                   and target_comp.ndim == 1))
+              and all(isinstance(name, str) for name in target_comp)):
+            targets = list(target_comp)
+        else:
+            raise TypeError(
+                "kwargs_cryst['target_comp'] must be a species name or a "
+                'list, tuple or one-dimensional array of names; got '
+                f'{target_comp!r}.')
+        species = list(self.name_species)
+        if not targets:
+            raise ValueError(
+                "kwargs_cryst['target_comp'] must name at least one species "
+                f'from the inlet species {species}.')
+        unknown = [name for name in targets if name not in species]
+        if unknown:
+            raise ValueError(
+                f"kwargs_cryst['target_comp'] = {target_comp!r} must name "
+                f'inlet species from {species}; unknown: {unknown}.')
+
+        expected_ind = min(species.index(name) for name in targets)  # [-]
+        target_ind = settings['target_ind']
+        if (isinstance(target_ind, (bool, np.bool_))
+                or not isinstance(target_ind, (int, np.integer))):
+            raise TypeError(
+                f"kwargs_cryst['target_ind'] must be the integer index of "
+                f"{species[expected_ind]!r}, the first target_comp species "
+                f'in the inlet species order {species}: {expected_ind}; got '
+                f'{target_ind!r}.')
+        if target_ind != expected_ind:
+            raise ValueError(
+                f"kwargs_cryst['target_ind'] = {target_ind!r} must be the "
+                f"index of {species[expected_ind]!r}, the first target_comp "
+                f'species in the inlet species order {species}: '
+                f'{expected_ind}.')
+
     def solve_unit(self, runtime: Optional[float] = None,
                    time_grid: Optional[Sequence[float]] = None,
                    verbose: bool = True,
@@ -1512,9 +1679,16 @@ class DynamicCollector:
         ------
         ValueError
             If a liquid-mixer solve receives neither ``runtime`` nor
-            ``time_grid`` and therefore has no integration end time [s].
+            ``time_grid`` and therefore has no integration end time [s], or
+            if a slurry solve lacks valid crystallization settings; see
+            :meth:`_check_crystallization_settings`.
+        TypeError
+            If a slurry solve's ``kwargs_cryst``, its ``target_comp`` or its
+            ``target_ind`` has an unsupported type; see
+            :meth:`_check_crystallization_settings`.
         """
         if self.model_type == 'crystallizer':
+            self._check_crystallization_settings()
 
             moment_mode = self.Inlet.distrib is None
             population_name = 'mu_n' if moment_mode else 'distrib'
