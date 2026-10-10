@@ -473,6 +473,9 @@ class Connection:
 
         self.source_uo = source_uo
         self.destination_uo = destination_uo
+        # Deep copy handed to the destination by PassPhases; SimulationExec
+        # records it to verify raw-material consumption.
+        self.transferred_matter = None
 
     def transfer_data(self):
         self.FeedConnection()
@@ -599,13 +602,53 @@ class Connection:
             converted_states = name_analyzer.convertUnits(self.Matter)
             self.Matter.y_inlet = converted_states
 
-    def PassPhases(self):
+    def PassPhases(self) -> None:
+        """Hand a deep copy of the source outlet to the destination unit.
 
+        Raises
+        ------
+        Exception
+            Any exception raised by the destination's ``Inlets``, ``Inlet``
+            or ``Phases`` setter propagates, for example
+            ``NotImplementedError``/``TypeError``/``ValueError`` when a
+            ``BatchToFlowConnector`` rejects anything other than one liquid
+            batch holdup (issue #423), ``ValueError`` when a ``Mixer``
+            rejects mixing batch inventories [kg] with flow rates [kg/s],
+            or ``RuntimeError`` when a reactor, crystallizer or filter
+            ``Phases`` setter receives a stream or a non-phase object.
+
+        Notes
+        -----
+        The transferred matter is ``copy.deepcopy(self.Matter)``, so the
+        source outlet is never shared, and it is marked
+        ``transferred_from_uo = True`` (raw-material reporting excludes it).
+        It is kept as ``self.transferred_matter`` so ``SimulationExec`` can
+        verify that the destination actually uses it.
+        Dispatch by destination:
+
+        * ``Mixer``: appended to ``Inlets``.
+        * Batch units, including ``BatchToFlowConnector``: assigned to
+          ``Phases``.
+        * ``DynamicCollector``: assigned to ``Inlet``, which selects the
+          collector model from the matter type, with
+          ``material_from_upstream = True``. Only a ``PharmaPy.Crystallizers``
+          source also sets ``KinCryst`` to its ``Kinetics`` and
+          ``kwargs_cryst`` to its ``target_ind``, ``target_comp`` and
+          ``scale``; for other sources caller-set values are kept.
+        * Other semibatch units: assigned to ``Phases`` only if none are
+          set, with ``material_from_upstream = True``; a transfer to an
+          already-charged unit is ignored (issue #438).
+        * Continuous units: assigned to ``Inlet`` (``{'feed': matter}`` for
+          a ``DynamicExtractor``). A batch or semibatch source is handed over
+          as its holdup, not converted to a flow (issue #436); insert a
+          ``BatchToFlowConnector`` to discharge a liquid holdup as a stream.
+        """
         class_destination = self.destination_uo.__class__.__name__
         mode_dest = self.destination_uo.oper_mode
         transfered_matter = copy.deepcopy(self.Matter)
 
         transfered_matter.transferred_from_uo = True
+        self.transferred_matter = transfered_matter
 
         if class_destination == 'Mixer':
             self.destination_uo.Inlets = transfered_matter
@@ -629,17 +672,7 @@ class Connection:
                 self.destination_uo.Phases = transfered_matter
                 self.destination_uo.material_from_upstream = True
 
-        elif mode_dest == 'Continuous':  # Continuous
-            # Transfering from batch to continuous (how to approach this?)
-            if self.source_uo.oper_mode != 'Continuous':
-                pass
-                # TODO: big TODO. We need to define how Batch/Semibatch
-                # followed by continuous will be handled. The most practical
-                # approach would be to solve thhe the downstream continuous
-                # section for a period of time such as the material from the
-                # last discontinuous UO is depleted, as stated in the paper.
-                # Reference date: (2022/06/28)
-
+        elif mode_dest == 'Continuous':
             if class_destination == 'DynamicExtractor':
                 self.destination_uo.Inlet = {'feed': transfered_matter}
             else:

@@ -201,6 +201,36 @@ def _state_metadata(di_states, di_fstates) -> dict:
     return {**(di_states or {}), **(di_fstates or {})}
 
 
+def _with_time_axis(values, single_sample: bool, index=None):
+    """Give a single-sample state its leading time axis when it lacks one.
+
+    Parameters
+    ----------
+    values : array-like
+        Published state values in their own units.
+    single_sample : bool
+        Whether the result's time has exactly one sample.
+    index : sequence, optional
+        The state's ``index`` metadata (for example species names).
+
+    Returns
+    -------
+    numpy.ndarray or object
+        For a single-sample result, a 0-d value becomes shape (1,) and a
+        1-D indexed vector of length ``len(index)`` becomes (1, len(index)).
+        Anything else, including every multi-sample result and every state
+        that already has a time axis, is returned unchanged.
+    """
+    if not single_sample:
+        return values
+    array = np.asarray(values)
+    if array.ndim == 0:
+        return array.reshape(1)
+    if index is not None and array.ndim == 1 and len(array) == len(index):
+        return array.reshape(1, -1)
+    return values
+
+
 def get_states_result(result, *state_names):
     """Return the time axis and selected states of a unit result.
 
@@ -227,9 +257,20 @@ def get_states_result(result, *state_names):
     ------
     PharmaPyValueError
         If a picked name is not in the state's ``index``.
+
+    Notes
+    -----
+    Instantaneous units, such as a batch ``Mixer``, may publish a single
+    time sample with states that lack the leading time axis. When
+    ``result.time`` has one sample, a 0-d state is returned with shape (1,)
+    and a 1-D indexed state whose length equals its ``index`` with shape
+    (1, len(index)), so it is handled like a multi-sample profile. States
+    that already have a time axis, and all states of multi-sample results,
+    are returned as published.
     """
     time = result.time
     states_fstates = _state_metadata(result.di_states, result.di_fstates)
+    single_sample = np.size(time) == 1
 
     out = {}
     for key in state_names:
@@ -241,7 +282,8 @@ def get_states_result(result, *state_names):
         else:
             state = key
 
-        y = getattr(result, state)
+        y = _with_time_axis(getattr(result, state), single_sample,
+                            states_fstates.get(state, {}).get('index'))
 
         if idx is not None:
             y = y[:, idx]
@@ -339,7 +381,6 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
         y = data[name]
         twin = False
 
-        # index_y = False
         index_y = states_and_fstates[name].get('index', False)
 
         if isinstance(state_names[ind], (tuple, list, range)):
@@ -387,10 +428,6 @@ def plot_function(uo, state_names, axes=None, fig_map=None, ylabels=None,
     if len(axes) == 1:
         axes = axes[0]
 
-    # for ax in axes:
-    #     if len(ax.lines) == 0:
-    #         ax.remove()
-
     if 'fig' in locals():
         return fig, ax_orig
     else:
@@ -431,7 +468,10 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
     Returns
     -------
     tuple or axes
-        ``(figure, axes)`` when a figure is created, otherwise the axes.
+        ``(figure, axes)`` when a figure is created, otherwise the supplied
+        ``axes`` object itself, as in :func:`plot_function`. With
+        ``times``, ``x_name`` labels the x axis as text on the axes' own
+        figure.
 
     Raises
     ------
@@ -461,6 +501,8 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
         ax = [ax]
     else:
         ax = ax.flatten()
+    # The x label goes on the axes' own figure, created here or supplied.
+    figure = ax[0].figure
 
     states_and_fstates = _state_metadata(
         getattr(uo, 'states_di', None), getattr(uo, 'fstates_di', None))
@@ -497,7 +539,7 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
             if len(axis.lines) == 0:
                 axis.remove()
 
-        fig.text(0.5, 0, x_name)
+        figure.text(0.5, 0, x_name)
 
         if len(ax) == 1:
             ax = ax[0]
@@ -530,4 +572,4 @@ def plot_distrib(uo, state_names, x_name, axes=None, times=None, x_vals=None,
     if 'fig' in locals():
         return fig, ax
     else:
-        return ax
+        return axes  # the caller's own axes object, as in plot_function

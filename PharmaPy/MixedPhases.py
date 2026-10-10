@@ -557,7 +557,6 @@ class SlurryStream(Slurry):
 
                 self.dx = np.diff(x_grid)
 
-            # self.Solid_1.x_distrib = self.x_distrib
             self.moments = self.Solid_1.getMoments(self.x_distrib,
                                                    self.distrib)
 

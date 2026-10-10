@@ -22,8 +22,9 @@ from PharmaPy.CheckModule import check_modeling_objects
 
 import inspect
 import time
+import warnings
 from collections.abc import Mapping
-from typing import Optional, Sequence, Union
+from typing import Optional, Sequence, Tuple, Union
 
 # Consumed inlet fields used to account dynamic raw feeds, in the order a
 # layout's flow and composition are selected.
@@ -309,6 +310,15 @@ class SimulationExec:
         self.graph = graph
         self.in_degree, self.execution_names = topological_bfs(graph)
 
+        # Raw-material provenance, kept across SolveFlowsheet calls (see
+        # _transfer_to_neighbors): per (source, destination) edge, the latest
+        # transfer as (transferred matter, source result, destination result,
+        # destination first profile segment), all taken at transfer time;
+        # and the transferred copies the destination still holds plus the
+        # latest one.
+        self._transfers = {}
+        self._transfer_history = {}
+
         # Residual counters cover every node, including successor-only units.
         if len(self.execution_names) < len(self.in_degree):
             unscheduled = [name for name, count in self.in_degree.items()
@@ -342,6 +352,19 @@ class SimulationExec:
         count : int
             Next available connection counter after transfers are created.
 
+        Notes
+        -----
+        Each transfer also updates the persistent raw-material provenance,
+        which survives later ``SolveFlowsheet`` calls. ``_transfers[edge]``
+        for ``edge = (name, successor)`` is overwritten with a tuple of the
+        transferred matter object, the source's ``result``, the
+        destination's ``result`` (or None) and the destination's first
+        retained profile segment (``profiles_runs[0]``, or None), all taken
+        at transfer time. ``_transfer_history[edge]`` keeps only the
+        transferred copies the destination still holds, plus the latest
+        one, so discarded copies are freed while copies a ``Mixer`` keeps
+        appending remain countable (issue #441). Only
+        :meth:`_consumed_duration` reads these records.
         """
         # Successor-only units are graph nodes without an adjacency entry.
         for uo_next in self.graph.get(name, ()):
@@ -356,6 +379,20 @@ class SimulationExec:
             connections[conn_name] = connection
 
             connection.transfer_data()
+            edge = (name, uo_next)
+            source, destination = getattr(self, name), getattr(self, uo_next)
+            # Results are compared by identity only, so untimed (algebraic)
+            # results such as a BatchExtractor's are recorded safely.
+            self._transfers[edge] = (connection.transferred_matter,
+                                     source.result,
+                                     getattr(destination, 'result', None),
+                                     self._first_profile(destination))
+            held = self._used_inputs(destination)
+            self._transfer_history[edge] = [
+                matter for matter in self._transfer_history.get(edge, [])
+                if any(matter is item for item in held)
+                and matter is not connection.transferred_matter] + [
+                    connection.transferred_matter]
 
             count += 1
 
@@ -1430,6 +1467,230 @@ class SimulationExec:
         return {get_name_object(inlet): self._account_dynamic_stream(
             inlet, fields, controlled, time, basis)}
 
+    def _unit_name(self, uo) -> Optional[str]:
+        """Return the flowsheet name of a solved unit instance.
+
+        Parameters
+        ----------
+        uo : object
+            Unit operation instance.
+
+        Returns
+        -------
+        str or None
+            Its key in ``uos_instances``, or None if it is not part of the
+            solved flowsheet.
+        """
+        return next((name for name, instance in self.uos_instances.items()
+                     if instance is uo), None)
+
+    @staticmethod
+    def _is_instantaneous(uo) -> bool:
+        """Return whether a solved unit is an instantaneous pass-through.
+
+        Parameters
+        ----------
+        uo : object
+            Solved unit operation with ``result.time`` [s].
+
+        Returns
+        -------
+        bool
+            True if the unit's class declares ``is_instantaneous = True``
+            (``Mixer``, ``BatchToFlowConnector``) and its result spans zero
+            time. Any other unit, including a dynamic unit solved for 0 s,
+            is accounted by its own time span.
+        """
+        if not getattr(uo, 'is_instantaneous', False):
+            return False
+        time = getattr(getattr(uo, 'result', None), 'time', None)  # [s]
+        if time is None:
+            return False
+        time = np.atleast_1d(np.asarray(time, dtype=float))  # [s]
+        return not time[-1] > time[0]
+
+    @staticmethod
+    def _first_profile(uo):
+        """Return the first retained profile segment of a unit, if any.
+
+        Parameters
+        ----------
+        uo : object
+            Unit operation.
+
+        Returns
+        -------
+        object or None
+            ``uo.profiles_runs[0]``, the oldest solve segment a continuing
+            unit (reactors, crystallizers, evaporators) keeps, or None if
+            the unit keeps no segments. A reset or fresh run replaces it.
+        """
+        return (getattr(uo, 'profiles_runs', None) or [None])[0]
+
+    @staticmethod
+    def _used_inputs(consumer, names=('Inlets', 'Inlet', 'Phases')) -> list:
+        """Return the matter objects a unit uses as inputs.
+
+        Parameters
+        ----------
+        consumer : object
+            Unit operation.
+        names : sequence of str, optional
+            Attributes to read; by default the feeds ``Inlets`` and
+            ``Inlet`` and the holdup ``Phases``.
+
+        Returns
+        -------
+        list
+            The objects of the requested attributes, in that order: a list
+            or tuple contributes its elements and a dictionary its values.
+        """
+        used = []
+        for name in names:
+            value = getattr(consumer, name, None)
+            if isinstance(value, dict):
+                used.extend(value.values())
+            elif isinstance(value, (list, tuple)):
+                used.extend(value)
+            elif value is not None:
+                used.append(value)
+        return used
+
+    def _consumed_duration(self, uo) -> Tuple[float, Optional[str]]:
+        """Return how long a unit's static continuous feed is consumed [s].
+
+        Parameters
+        ----------
+        uo : object
+            Solved unit operation with ``result.time`` [s].
+
+        Returns
+        -------
+        duration : float
+            Fed duration [s], or NaN when it is undefined.
+        reason : str or None
+            Why the duration is undefined, or None when it is defined.
+
+        Notes
+        -----
+        A unit that is not instantaneous (see :meth:`_is_instantaneous`)
+        consumes its feed from its first result time to its last, or to its
+        recorded ``inlet_stop_time`` [s] if earlier; a dynamic unit solved
+        for 0 s therefore has a defined duration of 0 s.
+
+        An instantaneous unit passes its feed on as it arrives, so its feed
+        is consumed for as long as its outlet is. This is deliberately
+        conservative: the duration is that of its single successor in the
+        flowsheet graph, recursively through chains of instantaneous units,
+        only if the latest transfer on that edge is verified. Transfers are
+        recorded per edge by :meth:`_transfer_to_neighbors` across
+        ``SolveFlowsheet`` calls. The transfer is verified when the source
+        has not been re-solved since it, the successor has been solved
+        since it, the transferred object is among the successor's inputs
+        (identity), and the successor holds no other object transferred on
+        that edge. Otherwise the duration is NaN, with one of these reasons:
+
+        * the unit is not part of the solved flowsheet;
+        * terminal unit, with no successor;
+        * fan-out to several successors, each receiving a full copy of the
+          outlet (issue #437);
+        * the successor was not solved, or no transfer to it is recorded;
+        * the source was re-solved after its outlet was transferred;
+        * the successor was not solved after the transfer;
+        * the successor holds the transferred stream as a holdup
+          (``Phases``) rather than as a feed (issues #436, #438);
+        * the successor no longer holds the transferred outlet: its latest
+          solve ignored the transfer (issue #438), or another transfer
+          replaced it (fan-in, issue #444);
+        * the successor holds several copies of the outlet, for example a
+          ``Mixer`` re-solved in the same flowsheet (issue #441);
+        * the successor keeps several solve segments in ``profiles_runs``,
+          as when a ``CSTR`` or ``ContinuousEvaporator`` continues an
+          earlier solve (issues #278, #443);
+        * the successor keeps ``profiles_runs`` but no segment, for example
+          after ``reset()`` without a new solve;
+        * defensively, its only segment is the one it held at the transfer.
+
+        A finite duration therefore needs a successor result from exactly
+        one solve after the transfer: either the successor keeps no
+        ``profiles_runs`` and its result changed after the transfer, or it
+        keeps exactly one segment, which is not the one held at transfer
+        time (a first, fresh, ``reset()`` or ``reset_states=True`` run).
+        That solve's own span is used, capped by its ``inlet_stop_time``.
+        """
+        time = np.atleast_1d(np.asarray(uo.result.time, dtype=float))  # [s]
+        if not self._is_instantaneous(uo):
+            start_time, end_time = time[0], time[-1]  # [s]
+            stop_time = getattr(uo, 'inlet_stop_time', None)  # [s]
+            if stop_time is not None:
+                end_time = min(end_time, stop_time)  # [s], inlet shut
+            return end_time - start_time, None  # [s]
+
+        name = self._unit_name(uo)
+        if name is None:
+            return np.nan, 'it is not part of the solved flowsheet'
+        successors = list(self.graph.get(name, ()))
+        if not successors:
+            return np.nan, ('no downstream unit consumes its outlet '
+                            '(terminal unit)')
+        if len(successors) > 1:
+            return np.nan, (
+                f'its outlet feeds {len(successors)} units {successors}, each '
+                'receiving a full copy of it (fan-out, issue #437)')
+        successor = successors[0]
+        consumer = self.uos_instances.get(successor)
+        record = getattr(self, '_transfers', {}).get((name, successor))
+        if consumer is None or not hasattr(getattr(consumer, 'result', None),
+                                           'time'):
+            return np.nan, f"downstream unit '{successor}' was not solved"
+        if record is None:
+            return np.nan, ('no transfer to downstream unit '
+                            f"'{successor}' is recorded")
+        matter, source_result, consumer_result, first = record
+        if uo.result is not source_result:
+            return np.nan, ('it was re-solved after its outlet was '
+                            f"transferred to downstream unit '{successor}'")
+        if consumer.result is consumer_result:
+            return np.nan, (f"downstream unit '{successor}' was not solved "
+                            'after the transfer')
+        used = self._used_inputs(consumer)
+        feeds = self._used_inputs(consumer, ('Inlets', 'Inlet'))
+        if not any(item is matter for item in feeds):
+            if any(item is matter for item in used):
+                return np.nan, (f"downstream unit '{successor}' holds its "
+                                'outlet stream as a holdup (Phases), not as '
+                                'a feed (issues #436, #438)')
+            return np.nan, (
+                f"downstream unit '{successor}' no longer holds the "
+                'transferred outlet (it ignored the transfer, see issue '
+                '#438, or another transfer replaced it, see issue #444)')
+        history = self._transfer_history.get((name, successor), [])
+        copies = sum(any(item is old for old in history) for item in used)
+        if copies > 1:
+            return np.nan, (f"downstream unit '{successor}' holds {copies} "
+                            'copies of its outlet (issue #441)')
+        runs = getattr(consumer, 'profiles_runs', None)
+        if not self._is_instantaneous(consumer) and runs is not None:
+            # Only a result from exactly one solve after the transfer is
+            # charged; continuation conventions differ between units.
+            if not runs:
+                return np.nan, (f"downstream unit '{successor}' keeps no "
+                                'record of the solve behind its result')
+            if len(runs) > 1:
+                return np.nan, (
+                    f"downstream unit '{successor}' keeps {len(runs)} solve "
+                    'segments (profiles_runs), so the share consumed from '
+                    'this transfer is not defined (issues #278, #443)')
+            if runs[0] is first:
+                # Defensive: a new result without a new segment.
+                return np.nan, (
+                    f"downstream unit '{successor}' keeps only the solve "
+                    'segment it already held at the transfer')
+        duration, reason = self._consumed_duration(consumer)  # [s]
+        if reason is not None:
+            return np.nan, f"via downstream unit '{successor}': {reason}"
+        return duration, None
+
     def get_raw_inlets(self, uo, basis: str = 'mass') -> dict:
         """Collect raw inlet data for a unit operation.
 
@@ -1455,17 +1716,46 @@ class SimulationExec:
         ------
         ValueError
             If ``basis`` is not ``'mass'`` or ``'mole'``, a phase of a mixed
-            raw inlet has its own ``DynamicInlet``, or a dynamic inlet cannot
-            be accounted (see :meth:`_account_dynamic_inlet`).
+            raw inlet has its own ``DynamicInlet``, a dynamic inlet cannot
+            be accounted (see :meth:`_account_dynamic_inlet`), or a raw inlet
+            of an instantaneous unit has a controller that supplies fields.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the unit is instantaneous and its consumed duration is
+            undefined, so its static continuous totals are NaN. The message
+            names the unit and the reason: not part of the solved flowsheet;
+            terminal unit; fan-out (issue #437); successor not solved or no
+            transfer recorded; source re-solved after the transfer;
+            successor not solved after the transfer; outlet held as a
+            holdup rather than a feed (issues #436, #438); transferred
+            outlet no longer held by the successor (issues #438, #444);
+            several outlet copies held by the successor (issue #441);
+            several solve segments kept by the successor (issues #278,
+            #443); no solve segment kept by the successor (for example
+            after ``reset()``); or, defensively, only the segment it held
+            at the transfer. See :meth:`_consumed_duration`.
 
         Notes
         -----
         Continuous raw inlets with a ``DynamicInlet`` are accounted from the
         feed the unit consumes at each of its result times. Batch and static
         continuous records are read from the stream's stored state; static
-        continuous totals are the flow times the fed duration. Both stop at
-        a unit's recorded ``inlet_stop_time`` [s], set by an ``Evaporator``
-        with ``stop_at_maxvol=False`` when its volume event shuts the inlet.
+        continuous totals are the flow times the fed duration
+        (:meth:`_consumed_duration`). Both stop at a unit's recorded
+        ``inlet_stop_time`` [s], set by an ``Evaporator`` with
+        ``stop_at_maxvol=False`` when its volume event shuts the inlet.
+        An instantaneous unit (``is_instantaneous`` class flag and a result
+        spanning 0 s, such as a static continuous ``Mixer``) is charged for
+        the time its outlet is consumed by its single, verified successor;
+        otherwise its totals are NaN with a warning rather than a silent
+        zero (see :meth:`_consumed_duration`, which is deliberately
+        conservative pending issues #437 and #438). A ``DynamicInlet``
+        that controls no field on such a unit feeds the static stream and
+        is accounted the same way; one that controls fields cannot reach an
+        instantaneous ``Mixer``, which rejects it at solve time, and raises
+        ``ValueError`` here.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -1487,6 +1777,7 @@ class SimulationExec:
                 if val is not None and val.y_upstream is None}  # raw inlets
 
         out = {}
+        fed_duration = None  # [s], computed once for static continuous feeds
 
         for name, inlet in raws.items():
             if inlet.__module__ == 'PharmaPy.MixedPhases':
@@ -1503,10 +1794,26 @@ class SimulationExec:
             else:
                 streams = [inlet]
 
-            if (uo.oper_mode != 'Batch'
-                    and getattr(inlet, 'DynamicInlet', None) is not None):
-                out[name] = self._account_dynamic_inlet(uo, inlet, basis)
-                continue
+            dynamic = getattr(inlet, 'DynamicInlet', None)
+            if uo.oper_mode != 'Batch' and dynamic is not None:
+                if not self._is_instantaneous(uo):
+                    out[name] = self._account_dynamic_inlet(uo, inlet, basis)
+                    continue
+                # An instantaneous unit evaluates its feed at its single
+                # time. A Mixer rejects non-empty DynamicInput controls
+                # without a multi-sample grid, so only a controller that
+                # supplies no field can reach here; it feeds the static
+                # stream, accounted below over the consumed duration.
+                probe_time = float(np.atleast_1d(uo.result.time)[0])  # [s]
+                controlled = list(dynamic.evaluate_inputs(probe_time))
+                if controlled:
+                    raise ValueError(
+                        f"Raw inlet '{get_name_object(inlet)}' of "
+                        f'instantaneous {type(uo).__name__} has a '
+                        f'DynamicInlet controlling {controlled}, which the '
+                        'unit evaluated at a single time; its consumed feed '
+                        'over the downstream duration is undefined. Remove '
+                        'the controls or connect a multi-sample profile.')
 
             stream_data = {}
             for stream in streams:
@@ -1528,12 +1835,18 @@ class SimulationExec:
                         stream_data[name_stream] = {'moles': total}
                         fields += ['mole_frac']
                 else:
-                    start_time = uo.result.time[0]  # [s]
-                    end_time = uo.result.time[-1]  # [s]
-                    stop_time = getattr(uo, 'inlet_stop_time', None)  # [s]
-                    if stop_time is not None:
-                        end_time = min(end_time, stop_time)  # [s], inlet shut
-                    time = end_time - start_time  # [s], fed duration
+                    if fed_duration is None:
+                        fed_duration, reason = self._consumed_duration(
+                            uo)  # [s]
+                        if reason is not None:
+                            unit_name = (self._unit_name(uo)
+                                         or type(uo).__name__)
+                            warnings.warn(
+                                f"Raw inlets of instantaneous unit "
+                                f"'{unit_name}' have no defined fed duration: "
+                                f'{reason}; their totals are reported as NaN.',
+                                RuntimeWarning, stacklevel=2)
+                    time = fed_duration  # [s], fed duration
                     if basis == 'mass':
                         flow = stream.mass_flow  # [kg/s]
                         total = flow*time  # [kg]
@@ -1630,6 +1943,12 @@ class SimulationExec:
             If ``basis`` is not ``'mass'`` or ``'mole'``, or a raw inlet's
             dynamic controls cannot be accounted.
 
+        Warns
+        -----
+        RuntimeWarning
+            From :meth:`get_raw_inlets`, once per instantaneous unit whose
+            raw totals are NaN.
+
         Notes
         -----
         Continuous raw inlets with a ``DynamicInlet`` are accounted from the
@@ -1637,6 +1956,9 @@ class SimulationExec:
         integrated with the trapezoidal rule; see :meth:`get_raw_inlets`.
         Continuous raw feed stops at a unit's recorded ``inlet_stop_time``
         [s], such as an ``Evaporator`` inlet shut by its volume event.
+        The raw totals of an instantaneous unit, such as a static
+        continuous ``Mixer``, are NaN unless it has a single, verified
+        consumer (see :meth:`_consumed_duration`; issues #437, #438, #441).
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -1806,6 +2128,18 @@ class SimulationExec:
             width other than one or the raw-material table width, or if
             ``GetRawMaterials`` cannot account a raw inlet's dynamic controls.
 
+        Warns
+        -----
+        RuntimeWarning
+            From :meth:`get_raw_inlets`, once per instantaneous unit whose
+            raw totals are NaN.
+
+        Notes
+        -----
+        ``raw_cost`` prices the ``GetRawMaterials`` totals, so the entries
+        of an instantaneous unit without a single, verified consumer are NaN
+        like its totals (see :meth:`_consumed_duration`; issues #437, #438,
+        #441).
         """
 
         opex_items = ('duties', 'raw_materials', 'labor')

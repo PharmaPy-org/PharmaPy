@@ -280,7 +280,8 @@ SOURCE_NOTE = ('Only crystallizer sources (PharmaPy.Crystallizers units) '
                'source.')
 KINETICS_ITEM = ('KinCryst (crystallization kinetics, e.g. '
                  'PharmaPy.Kinetics.CrystKinetics)')
-KWARGS_ITEM = "kwargs_cryst (dict with 'target_ind' and 'target_comp')"
+KWARGS_ITEM = ("kwargs_cryst (mapping, e.g. dict, with 'target_ind' and "
+               "'target_comp')")
 SETTINGS_CASES = {
     'none': (False, None, f'{KINETICS_ITEM}; {KWARGS_ITEM}'),
     'no-kinetics': (False, dict(TARGET_SETTINGS), KINETICS_ITEM),
@@ -358,7 +359,8 @@ INCONSISTENT_CASES = {
                                 'target_comp': np.array([['A']])},
                                TypeError, r"one-dimensional array of names"),
     'non-mapping': ([('target_ind', 0), ('target_comp', 'A')], TypeError,
-                    r'kwargs_cryst must be a dict .*; got list\.$'),
+                    r'kwargs_cryst must be a mapping \(e\.g\. dict\) .*; '
+                    r'got list\.$'),
     'reserved-method': (dict(TARGET_SETTINGS, method='moments'), ValueError,
                         r"^kwargs_cryst keys \['method'\] are set by the "
                         r"DynamicCollector"),

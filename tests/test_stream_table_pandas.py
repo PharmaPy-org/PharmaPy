@@ -3,8 +3,10 @@
 Real batch and continuous Mixer chains cover the public result handoff without
 Assimulo. Pure feeds of A, solvent, and B have unequal amounts; reversing the
 thermo database order checks that composition columns retain their meaning.
-Instantaneous continuous mixing has zero duration, so its raw usage is zero
-while its reported flow rates are nonzero. Separation holdup issue #311 is
+Instantaneous continuous mixing is charged for as long as its outlet is
+consumed downstream (issue #430); this Mixer chain has no consumer, so its
+raw amounts are NaN, with a warning naming each Mixer, while its reported
+flow rates are finite. Separation holdup issue #311 is
 outside these liquid-only fixtures. An unknown ``basis`` must raise
 ``ValueError`` rather than fail on an unbound local.
 """
@@ -61,7 +63,20 @@ def test_stream_table_preserves_order_and_material_basis(
     sim.A_SECOND.Inlets = feeds[2]
     sim.SolveFlowsheet(verbose=False)
 
-    table = sim.result.GetStreamTable(basis=basis)
+    if continuous:
+        with pytest.warns(RuntimeWarning) as caught:
+            table = sim.result.GetStreamTable(basis=basis)
+        messages = {str(item.message) for item in caught
+                    if item.category is RuntimeWarning}
+        terminal = "no downstream unit consumes its outlet (terminal unit)"
+        assert messages == {
+            "Raw inlets of instantaneous unit 'Z_FIRST' have no defined fed "
+            f"duration: via downstream unit 'A_SECOND': {terminal}; their "
+            "totals are reported as NaN.",
+            "Raw inlets of instantaneous unit 'A_SECOND' have no defined fed "
+            f"duration: {terminal}; their totals are reported as NaN."}
+    else:
+        table = sim.result.GetStreamTable(basis=basis)
     assert table.index.nlevels == 3
     assert table.index.droplevel(2).tolist() == [
         ("Z_FIRST", "Inlet_0"), ("Z_FIRST", "Inlet_1"), ("Z_FIRST", "Outlet"),
@@ -94,9 +109,9 @@ def test_stream_table_preserves_order_and_material_basis(
     if continuous:
         reported_quantity = f"{basis}_flow"
         raw_rows = table.index.get_level_values(1) != "Outlet"
-        # A single-time static Mixer has no integration interval [s].
+        # A terminal instantaneous Mixer chain has no fed duration [s].
         inventory_column = "mass" if basis == "mass" else "moles"
-        np.testing.assert_array_equal(table.loc[raw_rows, inventory_column], 0)
+        assert np.isnan(table.loc[raw_rows, inventory_column].to_numpy()).all()
     np.testing.assert_allclose(table[reported_quantity], expected_totals, rtol=REL_TOL, atol=0)
     np.testing.assert_allclose(table["temp"], TEMPERATURE, rtol=REL_TOL, atol=0)
     np.testing.assert_allclose(table["pres"], PRESSURE, rtol=REL_TOL, atol=0)

@@ -77,8 +77,12 @@ class BatchToFlowConnector:
     rejected inputs. The transfer is instantaneous: ``result`` and
     ``outputs`` hold one sample at time 0 s (see :meth:`retrieve_results`).
     ``has_solids`` is retained for compatibility and is always False for an
-    accepted holdup.
+    accepted holdup. The class-level ``is_instantaneous = True`` is
+    declared for consistency with the ``Mixer`` (its result spans 0 s); it
+    has no raw-material effect, because the connector has no raw inlets.
     """
+
+    is_instantaneous = True
 
     def __init__(self, cycle_time: float, flow_mult: float = 1) -> None:
         """Create an unconnected batch-to-flow connector.

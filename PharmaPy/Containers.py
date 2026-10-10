@@ -243,6 +243,30 @@ class ContinuousHoldup:
 
 
 class Mixer:
+    """Mix liquid, slurry or cake inlets by algebraic mass and energy balances.
+
+    The balances are evaluated at the times of the inputs; static inputs
+    give one result sample at 0 s and no processing time.
+
+    Parameters
+    ----------
+    temp_refer : float, optional
+        Reference temperature [K] stored as ``temp_refer``; default
+        298.15 K.
+
+    Attributes
+    ----------
+    is_instantaneous : bool
+        Class-level True: continuous mixing holds no inventory and passes
+        its feed on as it arrives, so ``SimulationExec`` raw-material
+        accounting charges the raw inlets of a static (single-sample)
+        continuous solve for the time its outlet is consumed downstream;
+        see ``SimulationExec.get_raw_inlets``. Batch mixing is accounted
+        from its charged inventories [kg] and is unaffected.
+    """
+
+    is_instantaneous = True
+
     def __init__(self, temp_refer=298.15):
 
         self._Inlets = []
@@ -1237,10 +1261,10 @@ class DynamicCollector:
         :class:`PharmaPy.Kinetics.CrystKinetics`, assigned to the delegate's
         ``Kinetics``. There is no non-crystallizing slurry holdup.
     ``kwargs_cryst``
-        Dictionary with the required keys ``'target_ind'``, the zero-based
-        index [-] of the crystallizing species in the inlet liquid's species
-        order, and ``'target_comp'``, its name or a list, tuple or
-        one-dimensional array of names in the property database.
+        Mapping (e.g. dict) with the required keys ``'target_ind'``, the
+        zero-based index [-] of the crystallizing species in the inlet
+        liquid's species order, and ``'target_comp'``, its name or a list,
+        tuple or one-dimensional array of names in the property database.
         ``target_ind`` must index the first of the ``target_comp`` names in
         that order, the species the delegate crystallizes. Other entries,
         for example ``'scale'`` [-], are passed to the ``SemibatchCryst``
@@ -1540,12 +1564,13 @@ class DynamicCollector:
                            'PharmaPy.Kinetics.CrystKinetics)')
         settings = self.kwargs_cryst
         if settings is None:
-            missing.append("kwargs_cryst (dict with 'target_ind' and "
-                           "'target_comp')")
+            missing.append("kwargs_cryst (mapping, e.g. dict, with "
+                           "'target_ind' and 'target_comp')")
         elif not isinstance(settings, Mapping):
             raise TypeError(
-                "DynamicCollector.kwargs_cryst must be a dict with "
-                f"'target_ind' and 'target_comp'; got {type(settings).__name__}.")
+                "DynamicCollector.kwargs_cryst must be a mapping (e.g. dict) "
+                "with 'target_ind' and 'target_comp'; got "
+                f'{type(settings).__name__}.')
         else:
             absent = [key for key in ('target_ind', 'target_comp')
                       if key not in settings]

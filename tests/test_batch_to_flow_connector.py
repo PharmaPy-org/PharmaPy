@@ -264,6 +264,9 @@ REJECTED_INPUTS = {
     'two-liquids-tuple': (lambda path: (_liquid(path), _liquid(path)),
                           UNSUPPORTED, "'LiquidPhase', 'LiquidPhase'"),
     'bare-vapor': (_vapor, UNSUPPORTED, "'VaporPhase'"),
+    'bare-solid': (lambda path: _phases(path)[1], UNSUPPORTED, "'SolidPhase'"),
+    'bare-solid-stream': (lambda path: _slurry_stream(path).Solid_1,
+                          NOT_HOLDUP, "'SolidStream'"),
     'slurry-stream': (_slurry_stream, NOT_HOLDUP, "'SlurryStream'"),
     'liquid-solid-stream-list': (
         lambda path: [_liquid(path), _slurry_stream(path).Solid_1],

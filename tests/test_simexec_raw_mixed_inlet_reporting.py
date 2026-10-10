@@ -17,8 +17,11 @@ densities follow the ideal mass-basis mixing rule
 1 / rho = sum_i w_i / rho_i.
 
 Unit tests solve instantaneous ``Mixer`` flowsheets and need no ODE
-backend; a Mixer has zero processing time, so its continuous raw totals
-are zero. Tests marked ``assimulo`` integrate the issue #405 ``MSMPR``
+backend. A continuous Mixer is charged for as long as its outlet is consumed
+downstream (issue #430); these one-unit flowsheets have no consumer, so its
+continuous raw totals are NaN with a warning naming the Mixer, while its
+flow-rate columns are finite. Tests marked ``assimulo`` integrate the issue
+#405 ``MSMPR``
 flowsheet for 10 s with CVode to check nonzero totals and ``GetOPEX``.
 ``GetOPEX`` of a duty-free (Mixer-only) flowsheet fails in ``GetDuties``
 (issue #261), so the Cake OPEX check adds a disconnected MSMPR that
@@ -97,14 +100,10 @@ PRICE = 3.0  # [USD/kg], arbitrary raw-material price, not unity
 # Relative tolerance [-] for independently recomputed float64 sums,
 # products and trapezoidal moments; no physical uncertainty is involved.
 RTOL = 1e-10
-# Absolute tolerance for expected values that are exactly zero, applied
-# only to them (see _assert_rows); nonzero values use RTOL alone. The only
-# such values are the raw totals of an instantaneous Mixer: amounts [kg] or
-# [mol] and volumes [m**3], each a flow times the 0 s fed duration, hence
-# 0.0 in float64. The smallest nonzero quantities they could become are the
-# solid flows of 1e-5 m**3/s, 0.0123 kg/s and 0.123 mol/s, so any fed
-# duration above 1e-10 s gives totals above 1e-15 in each unit.
-ZERO_ATOL = 1e-15
+# Warning of a terminal instantaneous Mixer, whose raw totals are NaN.
+TERMINAL_WARNING = (r"^Raw inlets of instantaneous unit 'M01' have no defined "
+                    r"fed duration: no downstream unit consumes its outlet "
+                    r"\(terminal unit\); their totals are reported as NaN\.$")
 
 
 @pytest.fixture
@@ -312,7 +311,7 @@ def _expected_slurry_rows(database, distrib, vol_flow, grid, kv,
     liquid_composition : numpy.ndarray
         Liquid mass fractions [-], shape (num_species,).
     duration : float
-        Fed duration [s].
+        Fed duration [s]; NaN when undefined (terminal instantaneous unit).
     basis : {'mass', 'mole'}
         Reporting basis.
 
@@ -360,14 +359,13 @@ def _assert_rows(rows, expected):
 
     Notes
     -----
-    Nonzero values are compared with the relative tolerance RTOL [-];
-    exactly zero expected values with the absolute tolerance ZERO_ATOL, in
-    the unit of their column.
+    Finite values are compared with the relative tolerance RTOL [-]; a NaN
+    expectation (an undefined fed duration) requires a NaN entry.
     """
     for (_, row), values in zip(rows.iterrows(), expected):
         for column, value in values.items():
-            if value == 0:
-                assert row[column] == pytest.approx(0.0, abs=ZERO_ATOL), column
+            if np.isnan(value):
+                assert np.isnan(row[column]), column
             else:
                 assert row[column] == pytest.approx(value, rel=RTOL), column
 
@@ -450,14 +448,16 @@ def test_mixer_raw_slurry_stream_reports_solid_volume_flow(path, database,
     for construction in ('solid-number-rate', 'slurry-distribution'):
         sim = _continuous_mixer_flowsheet(path, construction)
         assert sim.time_processing == {'M01': 0.0}
-        raws[construction] = sim.GetRawMaterials(basis=basis, totals=False)
-        tables[construction] = sim.result.GetStreamTable(basis=basis)
+        with pytest.warns(RuntimeWarning, match=TERMINAL_WARNING):
+            raws[construction] = sim.GetRawMaterials(basis=basis, totals=False)
+        with pytest.warns(RuntimeWarning, match=TERMINAL_WARNING):
+            tables[construction] = sim.result.GetStreamTable(basis=basis)
         assert [key[:2] for key in raws[construction].index] == [
             ('M01', 'Inlet_0'), ('M01', 'Inlet_1'), ('M01', 'Inlet_1')]
 
     expected = _expected_slurry_rows(
         database, SLURRY_DISTRIB, SLURRY_VOL_FLOW, GRID, SLURRY_KV,
-        SLURRY_LIQUID_COMPOSITION, 0.0, basis)  # instantaneous: 0 s fed
+        SLURRY_LIQUID_COMPOSITION, np.nan, basis)  # terminal: undefined
     fraction = 'mass_frac' if basis == 'mass' else 'mole_frac'
     for construction, table in tables.items():
         rows = _inlet_rows(table, 'M01', 'Inlet_1')
@@ -478,10 +478,11 @@ def test_mixer_raw_slurry_stream_reports_solid_volume_flow(path, database,
     first, second = (_inlet_rows(table, 'M01', 'Inlet_1').reset_index(drop=True)
                      for table in tables.values())
     assert list(first.columns) == list(second.columns)
-    # Zero totals and the machine-epsilon fractions that PharmaPy stores
-    # for absent species are identical in both routes, so RTOL suffices.
+    # NaN totals sit in the same cells, and the machine-epsilon fractions
+    # PharmaPy stores for absent species are identical in both routes.
     np.testing.assert_allclose(first.to_numpy(dtype=float),
-                               second.to_numpy(dtype=float), rtol=RTOL)
+                               second.to_numpy(dtype=float), rtol=RTOL,
+                               equal_nan=True)
 
 
 # ---------- Issue #406: raw and connected Cake Mixer inlets
