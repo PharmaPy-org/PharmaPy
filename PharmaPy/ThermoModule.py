@@ -19,6 +19,51 @@ _DatabasePath = Union[str, pathlib.Path]
 
 VALID_ACTIVITY_MODELS = ('ideal', 'UNIFAC', 'UNIQUAC')
 
+# Database key of the pure-component heat-capacity polynomial of each phase.
+_CP_PROPERTY_BY_PHASE = {'liquid': 'cp_liq', 'solid': 'cp_solid',
+                         'vapor': 'cp_vapor'}
+
+# Meaning of the list-valued properties that the property methods evaluate,
+# and the output unit and coefficient convention of each correlation, quoted
+# in missing-data errors. Temperatures T are in [K].
+_LIST_PROPERTY_DESCRIPTIONS = {
+    'cp_liq': 'liquid heat-capacity coefficients',
+    'cp_solid': 'solid heat-capacity coefficients',
+    'cp_vapor': 'vapor heat-capacity coefficients',
+    'visc_liq': 'liquid-viscosity coefficients',
+    'p_vap': 'Antoine vapor-pressure coefficients',
+    'diffusivity': 'diffusivities',
+}
+_LIST_PROPERTY_UNITS = {
+    'cp_liq': '(cp [J/mol/K] = sum_k c_k * T**k)',
+    'cp_solid': '(cp [J/mol/K] = sum_k c_k * T**k)',
+    'cp_vapor': '(cp [J/mol/K] = sum_k c_k * T**k)',
+    'visc_liq': '(log10(mu / [mPa*s]) = A + B/T + C*T + D*T**2)',
+    'p_vap': '(log10(p / [Pa]) = A - B/(T + C))',
+    'diffusivity': '([m**2/s], one column per reference species)',
+}
+# Coefficient count of each fixed-form correlation above (Antoine A, B, C;
+# viscosity A, B, C, D), used to shape the all-NaN rows of a property that
+# no species supplies. Polynomials and diffusivity rows take any length.
+_CORRELATION_WIDTHS = {'p_vap': 3, 'visc_liq': 4}
+
+
+class MissingPropertyError(AttributeError):
+    """Property data that a result needs are missing for some species.
+
+    Raised by the property methods when a needed species has no data for a
+    property (a NaN row, see ``ParseDatabase``, or a property that the
+    database lacks entirely). The message names the species and the
+    property. It subclasses ``AttributeError``, the type raised for a
+    missing property before #414, so existing handlers still catch it.
+    Reactor solves (``Reactors._BaseReactor._simulate``) use the subclass to
+    recognize it and re-raise it, chained from the CVode error, when the
+    solver hides the original exception. In other solver-based unit
+    operations such an error can still be lost behind the solver's error,
+    or stall the solver, which issue #435 tracks; the exception-type policy
+    across the property methods is issue #424.
+    """
+
 
 def validate_activity_model(model: str, param_name: str = 'gamma_model') -> None:
     """Validate a case-sensitive activity-coefficient model selector.
@@ -79,7 +124,9 @@ def ParseDatabase(
     KeyError
         If a structured property lacks its required ``value`` field.
     TypeError
-        If a structured property value cannot be converted to a float array.
+        If a structured property value cannot be converted to a float array,
+        or a species supplies a scalar for a property that another species
+        supplies as a list; the message names the species and the property.
     OverflowError
         If a numeric property lies outside the representable float range.
 
@@ -88,6 +135,39 @@ def ParseDatabase(
     Only ``ValueError`` indicates the established non-numeric-property case.
     Structural and range errors propagate so malformed scientific data are not
     silently returned on a different representation or basis.
+
+    Missing data are marked with NaN, for scalar and list-valued properties
+    alike. A scalar property such as ``t_crit`` or ``henry_constant`` is NaN
+    for a species that omits it. A list-valued property, such as the
+    correlation coefficients ``cp_liq``, ``cp_solid``, ``cp_vapor``,
+    ``visc_liq`` or ``p_vap``, or ``diffusivity`` rows, becomes a float array
+    of shape ``(num_species, num_coefficients)`` in species order, where
+    ``num_coefficients`` is the length of the longest supplied list. A species
+    that supplies no coefficients (key absent, ``null`` or an empty list)
+    gets a row of NaN. A NaN row cannot be mistaken for coefficients, unlike
+    the row of zeros that earlier releases stored, which evaluated as, for
+    example, a zero heat capacity. The property methods of
+    ``ThermoPhysicalManager`` raise ``MissingPropertyError`` (a subclass of
+    ``AttributeError``) naming the species and the property when a result
+    needs a NaN row.
+
+    A property that no species supplies creates no key: an omitted key, and
+    also a list-valued key (one that some species gives as a list, or one of
+    ``cp_liq``, ``cp_solid``, ``cp_vapor``, ``visc_liq``, ``p_vap`` and
+    ``diffusivity``) for which every species gives ``null`` or an empty
+    list. The property methods then report the property as missing for every
+    species that needs it.
+
+    A shorter list is padded with trailing zeros. For the correlation
+    coefficients ``cp_liq``, ``cp_solid``, ``cp_vapor``, ``visc_liq`` and
+    ``p_vap`` this is exact, because a trailing zero is an absent term: of
+    the ascending heat-capacity polynomial, of the four-term ``visc_liq``
+    correlation, or ``C = 0`` of a two-term Antoine list. A short
+    ``diffusivity`` row is padded the same way; that is unchanged legacy
+    behavior, not a physical statement. Once one species supplies a list,
+    every species that supplies the property must supply a list. Scalars for
+    every species keep the scalar representation. With ``to_arrays=False``,
+    the raw values, including ``None`` and empty lists, are returned.
     """
     if isinstance(path_datafile, (list, tuple)):
         with open(path_datafile[0]) as file:
@@ -133,20 +213,34 @@ def ParseDatabase(
         if len(tref_hvap) > 0:
             dd['tref_hvap'] = tref_hvap
 
-    # Convert to arrays  # TODO: improve this
+    # Convert to arrays
     if to_arrays:
         dd_arrays = {}
+        names = list(original_data.keys())
         for key, vals in dd.items():
 
             islist = [type(val) is list for val in vals]
             lengths = [len(val) for val in vals if isinstance(val, list)]
+            is_empty = [val is None or (isinstance(val, list) and not val)
+                        for val in vals]
+
+            if all(is_empty) and (any(islist)
+                                  or key in _LIST_PROPERTY_DESCRIPTIONS):
+                # No species supplies coefficients: same as an omitted key.
+                continue
 
             if any(islist):  # there is multidimensional data
-                length = max(lengths)
+                length = max(lengths)  # [-], number of coefficients
                 props = []
-                for val in vals:
-                    if val is None:
-                        props.append([0] * length)
+                for name, val, empty in zip(names, vals, is_empty):
+                    if empty:
+                        # Missing-data sentinel, as for scalar properties
+                        props.append(np.full(length, np.nan))
+                    elif not isinstance(val, list):
+                        raise TypeError(
+                            f"Property {key!r} of species {name!r} must be a "
+                            "list, as other species supply a list for it; "
+                            f"got {val!r}")
                     else:
                         val_array = np.zeros(length)
                         val_array[:len(val)] = val
@@ -217,16 +311,224 @@ class ThermoPhysicalManager:
     def set_object(self):
         self.cpLiqPure = self.getCpLiqPure(temp=5)
 
-    def getCpPure(self, temp, phase='liquid'):
+    def _property_rows(self, prop_name: str) -> np.ndarray:
+        """Return a list-valued property as per-species coefficient rows.
+
+        Parameters
+        ----------
+        prop_name : str
+            Database key of the property, for example ``'cp_liq'``.
+
+        Returns
+        -------
+        ndarray
+            ``np.atleast_2d`` of the stored property, the representation that
+            the property methods index by species, with the property's units:
+            shape ``(num_species, num_coefficients)`` for parsed list-valued
+            data. A NaN row marks a species without data (see
+            ``ParseDatabase``). A property that every species omits gives
+            NaN of shape ``(num_species, num_coefficients)``, with the
+            coefficient count of ``_CORRELATION_WIDTHS`` (one for a
+            polynomial or a diffusivity column), so it takes the same
+            missing-data path and the correlations still unpack it.
+        """
+        if not hasattr(self, prop_name):
+            width = _CORRELATION_WIDTHS.get(prop_name, 1)  # [-]
+            return np.full((len(self.name_species), width), np.nan)
+
+        return np.atleast_2d(getattr(self, prop_name))
+
+    def _check_species_rows(self, prop_name: str, rows: np.ndarray,
+                            species_idx: Sequence[int], needed: np.ndarray,
+                            reason: str, remedy: str = '') -> np.ndarray:
+        """Flag missing property rows and reject those a result needs.
+
+        Parameters
+        ----------
+        prop_name : str
+            Database key of the list-valued property, a key of
+            ``_LIST_PROPERTY_DESCRIPTIONS``.
+        rows : ndarray
+            Property rows of the selected species, in ``species_idx`` order,
+            shape ``(num_selected, num_coefficients)``; units of the property.
+        species_idx : sequence of int
+            Database index of each selected species, shape
+            ``(num_selected,)``.
+        needed : ndarray of bool
+            True for a selected species whose data the result uses, shape
+            ``(num_selected,)``.
+        reason : str
+            Clause completing "Species [...] <reason> needs <property>", for
+            example ``'carry a nonzero fraction, so the mixture enthalpy'``.
+        remedy : str, optional
+            Alternative to supplying the data, appended to the message.
+
+        Returns
+        -------
+        ndarray of bool
+            True where a selected species has no data (its row contains NaN),
+            shape ``(num_selected,)``. Callers give such species exactly zero
+            weight when they are not needed, instead of letting NaN times a
+            zero fraction turn the result into NaN.
+
+        Raises
+        ------
+        MissingPropertyError
+            If a needed species has no data. The message names the species
+            and the property, as for a property that the database lacks
+            entirely. It is an ``AttributeError``.
+        """
+        missing = np.isnan(rows).any(axis=1)
+        lacking = np.flatnonzero(missing & needed)
+        if lacking.size > 0:
+            names = [self.name_species[species_idx[ind]] for ind in lacking]
+            raise MissingPropertyError(
+                f"Species {names} {reason} needs "
+                f"{_LIST_PROPERTY_DESCRIPTIONS[prop_name]} '{prop_name}' "
+                f"{_LIST_PROPERTY_UNITS[prop_name]}, which the property "
+                f"database {self.path_data!r} does not supply for them; add "
+                f"'{prop_name}' for these species{remedy}")
+
+        return missing
+
+    @staticmethod
+    def _needed_by_weights(weights: Optional[np.ndarray],
+                           num_species: int) -> np.ndarray:
+        """Mark the species that a weighted sum needs.
+
+        Parameters
+        ----------
+        weights : ndarray or None
+            Weights of the per-species values [any basis], shape
+            ``(num_species,)`` or ``(num_rows, num_species)``; ``None`` means
+            every species is needed.
+        num_species : int
+            Number of species columns.
+
+        Returns
+        -------
+        ndarray of bool
+            True for a species whose weight is nonzero in some row, shape
+            ``(num_species,)``. Nonzero is bitwise: a round-off-level weight
+            counts as present, and NaN counts as nonzero.
+        """
+        if weights is None:
+            return np.ones(num_species, dtype=bool)
+
+        return np.atleast_2d(np.asarray(weights) != 0).any(axis=0)
+
+    def _cp_rows(self, phase: str) -> tuple:
+        """Return the heat-capacity property of a phase and its rows.
+
+        Parameters
+        ----------
+        phase : {'liquid', 'solid', 'vapor'}
+            Phase whose heat-capacity polynomial is requested.
+
+        Returns
+        -------
+        prop_name : str
+            ``'cp_liq'``, ``'cp_solid'`` or ``'cp_vapor'``.
+        cp_cts : ndarray
+            Ascending polynomial coefficients [J/mol/K/K**k], shape
+            ``(num_species, num_coefficients)``; NaN rows mark species
+            without data.
+
+        Raises
+        ------
+        ValueError
+            If ``phase`` is not one of the three phases.
+        """
+        if phase not in _CP_PROPERTY_BY_PHASE:
+            raise ValueError(
+                f"phase must be one of {tuple(_CP_PROPERTY_BY_PHASE)}, "
+                f"got {phase!r}")
+
+        prop_name = _CP_PROPERTY_BY_PHASE[phase]
+        return prop_name, self._property_rows(prop_name)
+
+    def getCpPure(self, temp: Union[float, np.ndarray],
+                  phase: str = 'liquid',
+                  weights: Optional[np.ndarray] = None) -> tuple:
+        """Evaluate pure-component heat capacities.
+
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature [K], scalar or shape ``(num_temps,)``.
+        phase : {'liquid', 'solid', 'vapor'}, optional
+            Selects the ``cp_liq``, ``cp_solid`` or ``cp_vapor`` polynomial;
+            default liquid.
+        weights : ndarray, optional
+            Amounts by which the caller weights the returned values [any
+            basis, e.g. mol/L], shape ``(num_species,)`` or
+            ``(num_rows, num_species)``. When given, only species with a
+            nonzero weight in some row need coefficients.
+
+        Returns
+        -------
+        cp_mass : ndarray
+            Heat capacities [J/kg/K], shape ``(num_species,)`` for one
+            temperature and ``(num_temps, num_species)`` otherwise.
+        cp_mole : ndarray
+            Heat capacities [J/mol/K], same shape as ``cp_mass``.
+
+        Raises
+        ------
+        ValueError
+            If ``phase`` is not one of the three phases.
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a needed species has no coefficients for the phase. Without
+            ``weights`` every species is returned, so every species is
+            needed.
+
+        Notes
+        -----
+        With ``weights``, a species without coefficients whose weight is zero
+        in every row is returned as exactly 0, so that the caller's weighted
+        sum is exact (never NaN times zero). That 0 is a placeholder for a
+        zero-weight term, not a heat capacity. Nonzero is bitwise: a
+        round-off-level weight counts as present.
+        """
+        prop_name, cp_cts = self._cp_rows(phase)  # [J/mol/K/K**k], ascending k
+        num_sp = len(cp_cts)
+        if weights is None:
+            reason = 'are evaluated as pure components, so their heat capacity'
+        else:
+            reason = 'carry a nonzero weight, so their heat capacity'
+
+        missing = self._check_species_rows(
+            prop_name, cp_cts, np.arange(num_sp),
+            self._needed_by_weights(weights, num_sp), reason)
+        cp_mass, cp_mole = self._evaluate_cp_pure(temp, cp_cts)  # [J/kg/K], [J/mol/K]
+
+        return (np.where(missing, 0.0, cp_mass),
+                np.where(missing, 0.0, cp_mole))
+
+    def _evaluate_cp_pure(self, temp: Union[float, np.ndarray],
+                          cp_cts: np.ndarray) -> tuple:
+        """Evaluate heat-capacity polynomials without checking for data.
+
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature [K], scalar or shape ``(num_temps,)``.
+        cp_cts : ndarray
+            Ascending polynomial coefficients [J/mol/K/K**k], shape
+            ``(num_species, num_coefficients)``.
+
+        Returns
+        -------
+        cp_mass : ndarray
+            Heat capacities [J/kg/K], shape ``(num_species,)`` for one
+            temperature and ``(num_temps, num_species)`` otherwise; NaN for a
+            species with a NaN row.
+        cp_mole : ndarray
+            Heat capacities [J/mol/K], same shape as ``cp_mass``.
+        """
         temp = np.atleast_1d(temp)
         num_temp = len(temp)
-
-        if phase == 'liquid':
-            cp_cts = np.atleast_2d(self.cp_liq)
-        elif phase == 'solid':
-            cp_cts = np.atleast_2d(self.cp_solid)
-        elif phase == 'vapor':
-            cp_cts = np.atleast_2d(self.cp_vapor)
 
         num_sp = len(cp_cts)
         ind_poly = np.arange(cp_cts.shape[1])
@@ -272,48 +574,160 @@ class ThermoPhysicalManager:
         Raises
         ------
         ValueError
-            If basis is neither 'mass' nor 'mole'.
+            If basis is neither 'mass' nor 'mole', or ``phase`` is unknown.
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a species with a nonzero fraction in some composition row has
+            no coefficients for the phase. A species whose fraction is zero
+            in every row needs none and contributes exactly zero. Nonzero is
+            bitwise: a round-off-level fraction counts as present.
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be 'mass' or 'mole'")
-        cp_mass, cp_mole = self.getCpPure(temp, phase=phase)
+        prop_name, cp_cts = self._cp_rows(phase)  # [J/mol/K/K**k], ascending k
+        cp_mass, cp_mole = self._evaluate_cp_pure(temp, cp_cts)  # [J/kg/K], [J/mol/K]
 
         if basis == 'mass':
             if mass_frac is None:
                 mass_frac = self.frac_to_frac(mole_frac=mole_frac)
 
-            if mass_frac.ndim == 1:
-                cpMix = np.dot(cp_mass, mass_frac)
-            elif mass_frac.ndim == 2:
-                cpMix = (mass_frac * cp_mass).sum(axis=1)
+            frac = mass_frac  # [-]
+            cp_pure = cp_mass  # [J/kg/K]
 
         elif basis == 'mole':
             if mole_frac is None:
                 mole_frac = self.frac_to_frac(mass_frac)
 
-            if mole_frac.ndim == 1:
-                cpMix = np.dot(cp_mole, mole_frac)
-            elif mole_frac.ndim == 2:
-                cpMix = (mole_frac * cp_mole).sum(axis=1)
+            frac = mole_frac  # [-]
+            cp_pure = cp_mole  # [J/mol/K]
+
+        # Only species present in some composition row need coefficients;
+        # absent species without them contribute exactly zero, not NaN * 0.
+        needed = np.atleast_2d(np.asarray(frac) != 0).any(axis=0)
+        missing = self._check_species_rows(
+            prop_name, cp_cts, np.arange(len(cp_cts)), needed,
+            'carry a nonzero fraction, so the mixture heat capacity')
+        cp_pure = np.where(missing, 0.0, cp_pure)  # [J/kg/K] or [J/mol/K]
+
+        if frac.ndim == 1:
+            cpMix = np.dot(cp_pure, frac)  # [J/kg/K] or [J/mol/K]
+        elif frac.ndim == 2:
+            cpMix = (frac * cp_pure).sum(axis=1)  # [J/kg/K] or [J/mol/K]
 
         return cpMix
 
-    def getEnthalpy(self, temp, temp_ref=298.15, mass_frac=None,
-                    mole_frac=None, phase='liquid', basis='mass', idx=None,
-                    total_h=True):
+    def getEnthalpy(self, temp: Union[float, np.ndarray],
+                    temp_ref: float = 298.15,
+                    mass_frac: Optional[np.ndarray] = None,
+                    mole_frac: Optional[np.ndarray] = None,
+                    phase: str = 'liquid', basis: str = 'mass',
+                    idx: Optional[Sequence[int]] = None,
+                    total_h: bool = True,
+                    weights: Optional[np.ndarray] = None
+                    ) -> Union[float, np.ndarray]:
+        """Integrate pure-component heat capacities into sensible enthalpies.
+
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature [K], scalar or shape ``(num_temps,)``.
+        temp_ref : float, optional
+            Lower limit of the heat-capacity integral [K]; default 298.15 K.
+        mass_frac, mole_frac : ndarray, optional
+            Species fractions [-], shape ``(num_species,)`` for a fixed
+            composition or ``(num_rows, num_species)`` for a composition
+            profile. Used only when ``total_h`` is ``True``. The fraction
+            matching ``basis`` is used when supplied; otherwise the other one
+            is converted.
+        phase : {'liquid', 'solid', 'vapor'}, optional
+            Selects the ``cp_liq``, ``cp_solid`` or ``cp_vapor`` heat-capacity
+            polynomial [J/mol/K]; default liquid.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned enthalpy and of the weighting
+            fractions; default mass.
+        idx : array-like of int, optional
+            Species indices to evaluate, in the requested order. All species
+            are evaluated when ``None``. The matching fraction columns weight
+            the selected species without renormalization.
+        total_h : bool, optional
+            If ``True`` (default), return the fraction-weighted sum over the
+            selected species. If ``False``, return the species enthalpies.
+        weights : ndarray, optional
+            Used only with ``total_h=False``: amounts by which the caller
+            weights the returned species enthalpies [any basis, e.g. mol/L],
+            shape ``(num_species,)`` or ``(num_rows, num_species)`` in
+            database order. When given, only selected species with a nonzero
+            weight in some row need coefficients, and the others are returned
+            as exactly 0 if they have none.
+
+        Returns
+        -------
+        float or ndarray
+            Sensible enthalpy, [J/kg] for ``basis='mass'`` and [J/mol] for
+            ``basis='mole'``. With ``total_h=True``, one value per
+            temperature or composition row: the ``(num_temps,
+            num_selected_species)`` species enthalpies broadcast against the
+            fractions, giving shape ``(num_temps,)`` for a fixed composition,
+            ``(num_rows,)`` for a single temperature with a profile, and
+            row-paired ``(num_temps,)`` when ``num_temps == num_rows``. A
+            scalar is returned only when that result has one entry, that is,
+            a single temperature with a fixed composition or a one-row
+            profile. With ``total_h=False``, shape ``(num_temps,
+            num_selected_species)``, including ``(1, num_selected_species)``
+            for a scalar temperature.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole'. The check precedes any
+            computation and applies to both ``total_h`` modes. NumPy also
+            raises it, for ``total_h=True``, when ``num_temps`` and
+            ``num_rows`` differ and neither is one. Also raised for an
+            unknown ``phase``.
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a selected species that the result needs has no
+            coefficients for the phase (a NaN row, see ``ParseDatabase``).
+            With ``total_h=False`` every selected species is needed, or,
+            with ``weights``, every one with a nonzero weight. With
+            ``total_h=True`` only species with a nonzero fraction in some
+            composition row are; the others contribute exactly zero.
+            Nonzero is bitwise: a round-off-level fraction or weight counts
+            as present, including round-off that a solver leaves in a
+            fraction that should be zero; reactors therefore pass a
+            structural presence mask as ``weights``.
+
+        Notes
+        -----
+        With ascending coefficients ``cp = sum_k c_k * T**k`` [J/mol/K], the
+        species molar enthalpy is
+        ``sum_k c_k / (k + 1) * (temp**(k + 1) - temp_ref**(k + 1))`` [J/mol].
+        The mass basis multiplies it by ``1000 / mw`` [g/kg / (g/mol)].
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
+
         temp = np.atleast_1d(temp)
 
         if idx is None:
             idx = np.arange(len(self.mw))
 
-        if phase == 'liquid':
-            cp_cts = np.atleast_2d(self.cp_liq)
-        elif phase == 'solid':
-            cp_cts = np.atleast_2d(self.cp_solid)
-        elif phase == 'vapor':
-            cp_cts = np.atleast_2d(self.cp_vapor)
+        prop_name, cp_cts = self._cp_rows(phase)  # [J/mol/K/K**k], ascending k
+        cp_cts = cp_cts[idx]  # [J/mol/K/K**k], ascending k
+        species_idx = np.asarray(idx)
 
-        cp_cts = cp_cts[idx]
+        if not total_h:
+            if weights is None:
+                needed = np.ones(len(cp_cts), dtype=bool)
+                reason = ('are evaluated individually (total_h=False), so '
+                          'their enthalpy')
+            else:
+                needed = self._needed_by_weights(
+                    np.asarray(weights)[..., species_idx], len(cp_cts))
+                reason = 'carry a nonzero weight, so their enthalpy'
+
+            missing = self._check_species_rows(
+                prop_name, cp_cts, species_idx, needed, reason)
 
         ind_poly = np.arange(cp_cts.shape[1])
         exp = ind_poly + 1
@@ -332,22 +746,31 @@ class ThermoPhysicalManager:
                     mass_frac = self.frac_to_frac(mole_frac=mole_frac, ind=ind)
 
                 if mass_frac.ndim == 1:
-                    mass_fr = mass_frac[idx]
+                    frac_selected = mass_frac[idx]  # [-]
                 else:
-                    mass_fr = mass_frac[:, idx]
+                    frac_selected = mass_frac[:, idx]  # [-]
 
-                enthalpyOut = (integralMass * mass_fr).sum(axis=1)
+                h_selected = integralMass  # [J/kg]
             elif basis == 'mole':
                 if mole_frac is None:
                     mole_frac = self.frac_to_frac(mass_frac, ind=ind)
 
                 if mole_frac.ndim == 1:
-                    mole_fr = mole_frac[idx]
+                    frac_selected = mole_frac[idx]  # [-]
                 else:
-                    mole_fr = mole_frac[:, idx]
+                    frac_selected = mole_frac[:, idx]  # [-]
 
-                # enthalpyOut = np.dot(integral, mole_fr.T)
-                enthalpyOut = (integral * mole_fr).sum(axis=1)
+                h_selected = integral  # [J/mol]
+
+            # Only species present in some composition row need coefficients;
+            # absent species without them contribute exactly zero.
+            needed = np.atleast_2d(frac_selected != 0).any(axis=0)
+            missing = self._check_species_rows(
+                prop_name, cp_cts, species_idx, needed,
+                'carry a nonzero fraction, so the mixture enthalpy')
+            h_selected = np.where(missing, 0.0, h_selected)  # [J/kg] or [J/mol]
+
+            enthalpyOut = (h_selected * frac_selected).sum(axis=1)  # [J/kg] or [J/mol]
 
             if len(enthalpyOut) == 1:
                 enthalpyOut = enthalpyOut[0]
@@ -359,17 +782,61 @@ class ThermoPhysicalManager:
             else:
                 integralOut = integral
 
-            return integralOut
+            # Zero-weight species without data: exact 0 for weighted sums.
+            return np.where(missing, 0.0, integralOut)  # [J/kg] or [J/mol]
 
-    def getHeatOfRxn(self, stoich_matrix, temp, mask, heat_rxn_ref, tref_hrxn):
+    def getHeatOfRxn(self, stoich_matrix: np.ndarray,
+                     temp: Union[float, np.ndarray], mask: np.ndarray,
+                     heat_rxn_ref: Union[float, np.ndarray],
+                     tref_hrxn: float) -> np.ndarray:
+        """Correct reference heats of reaction to the requested temperature.
 
+        Parameters
+        ----------
+        stoich_matrix : ndarray
+            Stoichiometric coefficients [-], shape
+            ``(num_reactions, num_participating_species)``, columns in the
+            order of the species that ``mask`` selects.
+        temp : float or array-like
+            Temperature [K], scalar or shape ``(num_temps,)``.
+        mask : ndarray of bool or int
+            Selects the participating species from the database order, as an
+            index into ``cp_liq``.
+        heat_rxn_ref : float or ndarray
+            Heats of reaction at ``tref_hrxn`` [J/mol of reaction as
+            written], scalar or shape ``(num_reactions,)``.
+        tref_hrxn : float
+            Reference temperature of ``heat_rxn_ref`` [K].
+
+        Returns
+        -------
+        ndarray
+            Heats of reaction [J/mol of reaction as written],
+            ``heat_rxn_ref + sum_j nu_rj * integral(cp_liq_j, tref_hrxn,
+            temp)``: shape ``(num_reactions,)`` for one temperature and
+            ``(num_temps, num_reactions)`` otherwise.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a selected species with a nonzero stoichiometric coefficient
+            in some reaction has no ``cp_liq`` coefficients. A selected
+            species that no reaction involves needs none and contributes
+            exactly zero.
+        """
         temp = np.atleast_1d(temp)
         temp_ref = tref_hrxn
 
         n_temp = len(temp)
         n_rxns, n_species = stoich_matrix.shape
 
-        cp_cts = np.atleast_2d(self.cp_liq[mask])
+        cp_cts = self._property_rows('cp_liq')[mask]  # [J/mol/K/K**k], ascending k
+        reacting = (np.asarray(stoich_matrix) != 0).any(axis=0)
+        missing = self._check_species_rows(
+            'cp_liq', cp_cts, np.arange(len(self.name_species))[mask],
+            reacting, 'take part in a reaction (nonzero stoichiometric '
+            'coefficient), so the heat of reaction')
 
         ind_poly = np.arange(cp_cts.shape[1])
         exp = ind_poly + 1
@@ -378,6 +845,9 @@ class ThermoPhysicalManager:
         for ind, val in enumerate(temp):
             temp_term = val**exp - temp_ref**exp
             integral[ind] = np.dot(cp_cts / exp, temp_term)  # J/mol_j
+
+        # Species that no reaction involves contribute exactly zero.
+        integral = np.where(missing, 0.0, integral)  # [J/mol]
 
         delta_cp = np.dot(integral, stoich_matrix.T)
         heat_of_rxn = heat_rxn_ref + delta_cp
@@ -397,8 +867,47 @@ class ThermoPhysicalManager:
 
         return rhoMass, rhoMole
 
-    def getDensityMix(self, mass_frac=None, mole_frac=None, phase='liquid',
-                      temp=None, basis='mass'):
+    def getDensityMix(self, mass_frac: Optional[np.ndarray] = None,
+                      mole_frac: Optional[np.ndarray] = None,
+                      phase: str = 'liquid', temp: Optional[float] = None,
+                      basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Mix pure-component densities assuming ideal (additive) volumes.
+
+        Parameters
+        ----------
+        mass_frac, mole_frac : ndarray, optional
+            Species fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``. The fraction matching ``basis`` is
+            used when supplied; otherwise the other one is converted.
+        phase : {'liquid', 'solid'}, optional
+            Selects the ``rho_liq`` or ``rho_solid`` pure density
+            [kg/m**3]; default liquid.
+        temp : float, optional
+            Temperature [K]; defaults to ``self.temp``. The pure densities
+            are temperature independent, so it does not change the result.
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned density; default mass.
+
+        Returns
+        -------
+        float or ndarray
+            Mixture density, [kg/m**3] for ``basis='mass'`` and [kmol/m**3]
+            (equivalently [mol/L]) for ``basis='mole'``. Scalar for a
+            one-dimensional composition, shape ``(num_points,)`` otherwise.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole'. The check precedes any
+            computation.
+
+        Notes
+        -----
+        ``1 / rho_mix = sum_i frac_i / rho_i`` on the selected basis, with
+        pure molar densities ``rho_i / mw_i`` [kmol/m**3].
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
 
         if temp is None:
             temp = self.temp
@@ -438,20 +947,27 @@ class ThermoPhysicalManager:
         phase : {'liquid', 'vapor'}, optional
             Phase whose pure viscosities are requested.
         temp : float or ndarray, optional
-            Temperature [K]. The liquid branch accepts a scalar only and
-            defaults to the phase temperature. The vapor branch ignores it.
+            Temperature [K], scalar or shape ``(num_temps,)``, for the liquid
+            branch; defaults to the phase temperature. The vapor branch
+            ignores it.
 
         Returns
         -------
         ndarray
-            Pure viscosities [Pa*s], shape (num_species,). Vapor values come
-            directly from the database's ``visc_gas`` entries in species order.
+            Pure viscosities [Pa*s]. Liquid: shape ``(num_species,)`` for a
+            scalar temperature and ``(num_temps, num_species)`` for an array.
+            Vapor: shape ``(num_species,)``, the database's ``visc_gas``
+            entries in species order.
 
         Raises
         ------
         ValueError
             If ``phase`` is unknown, or vapor ``visc_gas`` data [Pa*s] are
             absent or contain NaN entries for missing species.
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If any species has no liquid ``visc_liq`` coefficients; every
+            species is returned, so every species needs them.
 
         Notes
         -----
@@ -465,13 +981,13 @@ class ThermoPhysicalManager:
                 f"phase must be one of ('liquid', 'vapor'), got {phase!r}")
 
         if phase == 'liquid':
-            if temp is None:
-                temp = self.temp  # [K]
-
-            visc_cts = np.atleast_2d(self.visc_liq)
-            temp_term = np.array([1, 1/temp, temp, temp**2])
-
-            viscosity = 10**(np.dot(visc_cts, temp_term))/1000  # Pa*s
+            visc_cts = self._property_rows('visc_liq')  # [-], [K], [1/K], [1/K**2]
+            num_sp = len(visc_cts)
+            self._check_species_rows(
+                'visc_liq', visc_cts, np.arange(num_sp),
+                np.ones(num_sp, dtype=bool),
+                'are evaluated as pure components, so their liquid viscosity')
+            viscosity = self._evaluate_liquid_viscosity(temp, visc_cts)  # [Pa*s]
 
         elif phase == 'vapor':
             if (not hasattr(self, 'visc_gas')
@@ -484,6 +1000,44 @@ class ThermoPhysicalManager:
 
         return viscosity
 
+    def _evaluate_liquid_viscosity(self,
+                                   temp: Optional[Union[float, np.ndarray]],
+                                   visc_cts: np.ndarray) -> np.ndarray:
+        """Evaluate the liquid-viscosity correlation without checking data.
+
+        Parameters
+        ----------
+        temp : float, numpy.ndarray or None
+            Temperature [K], scalar or shape ``(num_temps,)``; the phase
+            temperature when ``None``.
+        visc_cts : ndarray
+            Coefficients ``A, B, C, D`` of
+            ``log10(mu / [mPa*s]) = A + B/T + C*T + D*T**2``, with units
+            [-], [K], [1/K] and [1/K**2]; shape ``(num_species, 4)``.
+
+        Returns
+        -------
+        ndarray
+            Pure liquid viscosities [Pa*s], shape ``(num_species,)`` for a
+            scalar temperature and ``(num_temps, num_species)`` otherwise;
+            NaN for a species with a NaN row.
+        """
+        if temp is None:
+            temp = self.temp  # [K]
+
+        if np.ndim(temp) == 0:
+            temp_term = np.array([1, 1/temp, temp, temp**2])  # [-], [1/K], [K], [K**2]
+            log_visc = np.dot(visc_cts, temp_term)  # [-], log10(mu/[mPa*s])
+        else:
+            temp = np.asarray(temp, dtype=float)  # [K], shape (num_temps,)
+            temp_term = np.stack([np.ones_like(temp), 1/temp, temp, temp**2],
+                                 axis=-1)  # [-], [1/K], [K], [K**2]
+            log_visc = temp_term @ visc_cts.T  # [-], (num_temps, num_species)
+
+        viscosity = 10**log_visc/1000  # [Pa*s], 1000 mPa*s per Pa*s
+
+        return viscosity
+
     def getViscosityMix(self, temp: Optional[Union[float, np.ndarray]] = None,
                         mass_frac: Optional[np.ndarray] = None,
                         mole_frac: Optional[np.ndarray] = None,
@@ -493,8 +1047,9 @@ class ThermoPhysicalManager:
         Parameters
         ----------
         temp : float or ndarray, optional
-            Temperature [K]. The liquid branch accepts a scalar only and
-            defaults to the phase temperature. The vapor branch ignores it.
+            Temperature [K], scalar or shape ``(num_temps,)``, for the liquid
+            branch; defaults to the phase temperature. The vapor branch
+            ignores it.
         mass_frac, mole_frac : ndarray, optional
             Mass or mole fractions [-], shape (num_species,) or
             (num_points, num_species). Mole fractions take precedence;
@@ -505,14 +1060,25 @@ class ThermoPhysicalManager:
         Returns
         -------
         float or ndarray
-            Mixture viscosity [Pa*s], scalar for one composition or shape
-            (num_points,) for a composition profile.
+            Mixture viscosity [Pa*s]. With a scalar temperature: a scalar
+            for one composition or shape (num_points,) for a composition
+            profile. With a temperature array, the liquid viscosities of each
+            temperature are mixed with the composition as in
+            ``getEnthalpy``: shape ``(num_temps,)`` for one composition, and
+            row-paired when ``num_temps == num_points``.
 
         Raises
         ------
         ValueError
             If ``phase`` is unknown, or required vapor ``visc_gas`` data
             [Pa*s] are absent or contain NaN entries for missing species.
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            For the liquid, if a species with a nonzero mole fraction in some
+            composition row has no ``visc_liq`` coefficients. A species whose
+            fraction is zero in every row needs none and contributes exactly
+            zero to the logarithmic mixing rule. Nonzero is bitwise: a
+            round-off-level fraction counts as present.
 
         Notes
         -----
@@ -524,8 +1090,11 @@ class ThermoPhysicalManager:
         / sqrt(8*(1 + M_i/M_j))``. The rule assumes a low-pressure gas;
         molar masses use the same units for every species.
         """
-
-        visc_comp = self.getViscosityPure(phase, temp)  # [Pa*s]
+        if phase == 'liquid':
+            visc_cts = self._property_rows('visc_liq')  # [-], [K], [1/K], [1/K**2]
+            visc_comp = self._evaluate_liquid_viscosity(temp, visc_cts)  # [Pa*s]
+        else:
+            visc_comp = self.getViscosityPure(phase, temp)  # [Pa*s]
 
         if mass_frac is None and mole_frac is None:
             mole_frac = self.mole_frac
@@ -534,8 +1103,18 @@ class ThermoPhysicalManager:
 
         # Mixing rules
         if phase == 'liquid':
-            viscMix = np.exp(
-                np.dot(mole_frac, np.log(visc_comp)))
+            # Absent species without coefficients contribute exactly zero.
+            needed = np.atleast_2d(np.asarray(mole_frac) != 0).any(axis=0)
+            missing = self._check_species_rows(
+                'visc_liq', visc_cts, np.arange(len(visc_cts)), needed,
+                'carry a nonzero fraction, so the mixture viscosity')
+            log_visc = np.where(missing, 0.0, np.log(visc_comp))  # [-], ln(mu/[Pa*s])
+            if log_visc.ndim == 1:
+                viscMix = np.exp(
+                    np.dot(mole_frac, log_visc))
+            else:
+                # One row per temperature, paired with composition rows.
+                viscMix = np.exp((log_visc * mole_frac).sum(axis=-1))  # [Pa*s]
 
         elif phase == 'vapor':
             if visc_comp.ndim == 1:
@@ -551,9 +1130,42 @@ class ThermoPhysicalManager:
 
         return viscMix
 
-    def getDiffusivityPure(self, wrt, temp=None):
-        diffusivity = self.diffusivity[:, wrt]
-       # diffusivity =  0.00442005
+    def getDiffusivityPure(self, wrt: int,
+                           temp: Optional[float] = None) -> np.ndarray:
+        """Return species diffusivities with respect to one species.
+
+        Parameters
+        ----------
+        wrt : int
+            Index of the reference species, usually the solvent; selects a
+            column of the ``diffusivity`` rows.
+        temp : float, optional
+            Temperature [K]; unused, the stored values are constants.
+
+        Returns
+        -------
+        ndarray
+            Diffusivity of every species in ``wrt`` [m**2/s], shape
+            ``(num_species,)``.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If any species has no ``diffusivity`` data in column ``wrt``;
+            every species is returned, so every species needs it.
+        """
+        rows = self._property_rows('diffusivity')  # [m**2/s]
+        if hasattr(self, 'diffusivity'):
+            rows = rows[:, [wrt]]  # [m**2/s], the values returned below
+
+        num_sp = len(rows)
+        self._check_species_rows(
+            'diffusivity', rows, np.arange(num_sp),
+            np.ones(num_sp, dtype=bool),
+            'are evaluated as pure components, so their diffusivity')
+
+        diffusivity = self.diffusivity[:, wrt]  # [m**2/s]
         return diffusivity
 
     def frac_to_conc(self, mass_frac=None, mole_frac=None, basis='mole'):
@@ -810,8 +1422,86 @@ class ThermoPhysicalManager:
 
         return molvolMix
 
-    def AntoineEquation(self, temp=None, pres=None):
-        a_ct, b_ct, c_ct = self.p_vap.T
+    def AntoineEquation(self, temp: Optional[Union[float, np.ndarray]] = None,
+                        pres: Optional[Union[float, np.ndarray]] = None,
+                        idx: Optional[Sequence[int]] = None) -> np.ndarray:
+        """Evaluate the Antoine equation for saturation pressure or temperature.
+
+        Parameters
+        ----------
+        temp : float or ndarray, optional
+            Temperature [K], used when ``pres`` is ``None``. An array of any
+            shape gains a trailing species axis.
+        pres : float or ndarray, optional
+            Pressure [Pa]. When given, the saturation temperature is returned
+            instead; an array gains a trailing species axis.
+        idx : sequence of int, optional
+            Species indices to evaluate, in the requested order, as a list,
+            tuple or one-dimensional integer array; all species when
+            ``None``.
+
+        Returns
+        -------
+        ndarray
+            Saturation pressure [Pa] at ``temp``, or saturation temperature
+            [K] at ``pres``, with the selected species on the last axis.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a selected species has no ``p_vap`` coefficients; every
+            selected species is returned, so every one needs them.
+        TypeError
+            If ``idx`` does not hold integers.
+
+        Notes
+        -----
+        ``log10(p / [Pa]) = A - B / (T + C)`` with ``p_vap = [A, B, C]`` in
+        [-], [K] and [K].
+        """
+        p_vap_cts = self._property_rows('p_vap')  # [-], [K], [K]
+        species_idx = np.arange(len(p_vap_cts))
+        if idx is not None:
+            # A tuple would otherwise index several array axes.
+            idx = np.asarray(idx).ravel()
+            if idx.size == 0:
+                idx = idx.astype(np.intp)
+            elif idx.dtype.kind not in 'iu':
+                raise TypeError(
+                    f"idx must hold integer species indices, got {idx!r}")
+
+            p_vap_cts = p_vap_cts[idx]  # [-], [K], [K]
+            species_idx = species_idx[idx]
+
+        self._check_species_rows(
+            'p_vap', p_vap_cts, species_idx, np.ones(len(p_vap_cts), dtype=bool),
+            'are evaluated as pure components, so their saturation pressure '
+            'or temperature')
+
+        return self._evaluate_antoine(p_vap_cts, temp, pres)
+
+    def _evaluate_antoine(self, p_vap_cts: np.ndarray,
+                          temp: Optional[Union[float, np.ndarray]] = None,
+                          pres: Optional[Union[float, np.ndarray]] = None
+                          ) -> np.ndarray:
+        """Evaluate the Antoine equation without checking for data.
+
+        Parameters
+        ----------
+        p_vap_cts : ndarray
+            Antoine coefficients ``A`` [-], ``B`` [K], ``C`` [K] of the
+            evaluated species, shape ``(num_selected, 3)``.
+        temp, pres : float or ndarray, optional
+            Temperature [K] or pressure [Pa], as in ``AntoineEquation``.
+
+        Returns
+        -------
+        ndarray
+            Saturation pressure [Pa] or temperature [K], species on the last
+            axis; NaN for a species with a NaN row.
+        """
+        a_ct, b_ct, c_ct = p_vap_cts.T
 
         if pres is None:
             if isinstance(temp, np.ndarray):
@@ -828,6 +1518,54 @@ class ThermoPhysicalManager:
             temp_sat = b_ct / (a_ct - np.log10(pres)) - c_ct
 
             return temp_sat
+
+    def _antoine_seed(self, mole_frac: np.ndarray,
+                      temp: Optional[float] = None,
+                      pres: Optional[float] = None) -> float:
+        """Weight Antoine saturation values into a bubble or dew-point seed.
+
+        Parameters
+        ----------
+        mole_frac : ndarray
+            Mole fractions [-], shape ``(num_species,)``.
+        temp : float, optional
+            Temperature [K]; seeds a bubble pressure when ``pres`` is None.
+        pres : float, optional
+            Pressure [Pa]; seeds a bubble or dew temperature.
+
+        Returns
+        -------
+        float
+            ``sum_i x_i * psat_i`` [Pa] or ``sum_i x_i * Tsat_i`` [K].
+
+        Notes
+        -----
+        Initial guess only; it matches the pre-#414 seed so convergence
+        paths are unchanged. A species without ``p_vap`` data is evaluated
+        with zero Antoine coefficients, exactly as the zero rows of earlier
+        releases were: ``Tsat = -0`` K and ``psat = 1`` Pa. A seed is not a
+        result; the converged root is checked with ``getKeqVLE``.
+        """
+        p_vap_cts = self._legacy_antoine_rows()  # [-], [K], [K]
+        saturation = self._evaluate_antoine(p_vap_cts, temp, pres)  # [Pa] or [K]
+
+        return np.dot(mole_frac, saturation)
+
+    def _legacy_antoine_rows(self) -> np.ndarray:
+        """Return Antoine rows with missing rows replaced by zeros.
+
+        Returns
+        -------
+        ndarray
+            Antoine ``A`` [-], ``B`` [K], ``C`` [K], shape
+            ``(num_species, 3)``. A species without ``p_vap`` data gets zero
+            coefficients, the rows of releases before #414, which evaluate to
+            ``psat = 1`` Pa. Use them only for solver iterates and seeds and
+            for zero-weight terms, never for a returned property of a needed
+            species.
+        """
+        p_vap_cts = self._property_rows('p_vap')  # [-], [K], [K]
+        return np.where(np.isnan(p_vap_cts), 0.0, p_vap_cts)
 
     def getKeqVLE(self, temp: Optional[Union[float, np.ndarray]] = None,
                   pres: Optional[float] = None,
@@ -864,7 +1602,18 @@ class ThermoPhysicalManager:
         Raises
         ------
         ValueError
-            If ``gamma_model`` is not a supported, case-sensitive selector.
+            If ``gamma_model`` is not a supported, case-sensitive selector,
+            or if ``temp`` has several entries and ``x_liq`` several rows in
+            unequal numbers.
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            If a species lacks ``p_vap`` coefficients in a row where it is
+            at or below its critical temperature (or has no ``t_crit``) and
+            has a nonzero ``x_liq`` entry. Rows pair as in the returned
+            ratios: temperature ``i`` with composition row ``i``, a single
+            temperature or composition applying to every row. A species
+            present only in rows where it is above ``t_crit`` uses its Henry
+            constant there and needs none.
 
         Notes
         -----
@@ -877,6 +1626,50 @@ class ThermoPhysicalManager:
         (num_points, num_species). UNIQUAC with a temperature vector and a
         one-dimensional composition mis-indexes the temperature profile; this
         pre-existing limitation remains a follow-up, not a supported contract.
+
+        ``x_liq`` is the composition the caller weights the ratios by, such
+        as ``y = K * x`` or ``sum x * K``; a dew-point caller passes the
+        vapor composition. A species whose entry is zero in every row needs
+        no Antoine data: without data its ratio is computed from zero
+        coefficients (``p = 1`` Pa), the value of releases before #414. That
+        finite placeholder keeps zero-weight terms, including ``y / K``,
+        exactly zero; it is not a vapor pressure. Nonzero is bitwise: a
+        round-off-level fraction counts as present. A fraction integrated by
+        a solver can carry round-off where it should be zero, so a unit
+        operation other than a reactor needs data for every species it
+        carries as a state.
+        """
+        return self._vle_ratios(temp, pres, x_liq, gamma_model, check=True)
+
+    def _vle_ratios(self, temp: Optional[Union[float, np.ndarray]],
+                    pres: Optional[float], x_liq: Optional[np.ndarray],
+                    gamma_model: str, check: bool) -> np.ndarray:
+        """Evaluate VLE ratios, optionally checking the Antoine data.
+
+        Parameters
+        ----------
+        temp, pres, x_liq, gamma_model
+            As in ``getKeqVLE``: temperature [K], pressure [Pa], weighting
+            mole fractions [-] and activity model.
+        check : bool
+            If True, apply the missing-data rule of ``getKeqVLE``. If False,
+            every species without Antoine data uses the zero-coefficient
+            placeholder; for solver iterates only, whose converged root the
+            caller then checks with ``getKeqVLE``.
+
+        Returns
+        -------
+        ndarray
+            Ratios ``y_i/x_i`` [-], shaped as in ``getKeqVLE``.
+
+        Raises
+        ------
+        ValueError
+            If ``gamma_model`` is not a supported selector, or the rows of
+            ``temp`` and ``x_liq`` cannot pair (see ``getKeqVLE``).
+        MissingPropertyError
+            A subclass of ``AttributeError``.
+            With ``check``, as in ``getKeqVLE``.
         """
         validate_activity_model(gamma_model)
 
@@ -889,17 +1682,42 @@ class ThermoPhysicalManager:
         if x_liq is None:
             x_liq = self.mole_frac
 
+        # Rows pair temperature i with composition row i.
+        num_temps = np.size(temp) if np.ndim(temp) == 1 else 1  # [-]
+        num_rows = np.shape(x_liq)[0] if np.ndim(x_liq) == 2 else 1  # [-]
+        if num_temps > 1 and num_rows > 1 and num_temps != num_rows:
+            raise ValueError(
+                "getKeqVLE pairs temperature i with composition row i: temp "
+                f"has {num_temps} entries but x_liq has {num_rows} rows; pass "
+                "a single temperature, a single composition, or equal counts")
+
+        p_vap_cts = self._legacy_antoine_rows()  # [-], [K], [K]
         crit = isinstance(temp, np.ndarray) and temp.ndim == 1
         if crit:
-            p_vap = self.AntoineEquation(temp)  # [Pa]
+            p_vap = self._evaluate_antoine(p_vap_cts, temp)  # [Pa]
             supercrit = temp[:, np.newaxis] > self.t_crit
             if np.any(supercrit):
                 p_vap = np.where(supercrit, self.henry_constant, p_vap)  # [Pa]
         else:
             supercrit = temp > self.t_crit
-            p_vap = self.AntoineEquation(temp)  # [Pa]
+            p_vap = self._evaluate_antoine(p_vap_cts, temp)  # [Pa]
             if any(supercrit):
                 p_vap[supercrit] = self.henry_constant[supercrit]
+
+        if check:
+            # Antoine data are needed where a species is at or below t_crit
+            # in a row whose weighting fraction is nonzero; rows pair as in
+            # the returned ratios.
+            num_sp = len(p_vap_cts)
+            uses_antoine = np.atleast_2d(~supercrit)  # [-]
+            weighted = np.atleast_2d(np.asarray(x_liq) != 0)  # [-]
+            needed = (uses_antoine & weighted).any(axis=0)
+            self._check_species_rows(
+                'p_vap', self._property_rows('p_vap'), np.arange(num_sp),
+                needed,
+                'carry a nonzero fraction and are at or below t_crit (or '
+                'have no t_crit) at a requested temperature, so their VLE '
+                'ratio')
 
         if gamma_model == 'ideal':
             gamma = np.ones_like(x_liq)

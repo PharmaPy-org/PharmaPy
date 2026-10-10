@@ -194,11 +194,12 @@ def test_getenthalpy_mass_basis_weights_full_species_axis(vapor_phase):
 
     This is the failure reported in issue #101: the mass-basis latent heat
     reached ``np.dot`` with fewer columns than the mass-fraction vector had
-    entries. The temperature count has to equal the species count here,
-    because ``getEnthalpy`` separately compares ``temp`` against ``t_crit``
-    elementwise and cannot yet accept a differing number of temperatures.
+    entries. Four temperatures against three species keep the temperature
+    and species axes distinguishable; this count was pinned to the species
+    count until ``getEnthalpy`` classified each temperature separately
+    (issue #178).
     """
-    temps = np.array([660.0, 665.0, 670.0])  # [K], one per species
+    temps = SUPERCRIT_TEMPS  # [K]
 
     enthalpy_mass = vapor_phase.getEnthalpy(temp=temps, basis="mass")  # [J/kg]
     enthalpy_mole = vapor_phase.getEnthalpy(temp=temps, basis="mole")  # [J/mol]
