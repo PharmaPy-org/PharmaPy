@@ -838,5 +838,5 @@ def test_population_balance_follows_a_handed_over_liquid():
     )
     np.testing.assert_allclose(
         float(_liquid(vessel).vol), 2.0 * float(placeholder.vol),
-        rtol=1e-9,
+        rtol=ALGEBRAIC_RTOL,
     )

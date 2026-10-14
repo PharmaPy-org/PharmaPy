@@ -2565,10 +2565,25 @@ class MultiPhaseVessel():
         ):
         """Dilute per-volume mechanism states as the vessel volume changes.
 
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material rates being assembled; the dilution goes into its inlet
+            bucket.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+        resolved_inlets, resolved_outlets : list
+            Resolved connections, each a list of per-phase transfers with a
+            ``vol_flow`` [m**3/s].
+
+        Notes
+        -----
         A population carried per m3 of slurry is diluted by every inflow,
         including a feed with no crystals, which never reaches the solid
         phase's inlet hook. The rate of volume change is taken as the
-        difference between the volumetric inflow and outflow.
+        volumetric inflow minus outflow; see
+        ``PopulationBalanceMechanism.get_dilution_contributions`` for what
+        that leaves out.
         """
         vol_in = sum(transfer.vol_flow or 0.0
                      for connection in resolved_inlets

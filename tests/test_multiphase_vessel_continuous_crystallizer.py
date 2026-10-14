@@ -1,6 +1,7 @@
-"""Withdrawal and flow contracts for the continuous crystallizer.
+"""Withdrawal and flow contracts for the continuous and semibatch crystallizers.
 
-Tests evaluate ``unit_model`` at t = 0, so they need no integrator.
+Tests evaluate ``unit_model`` at t = 0, so they need no integrator, except one
+that integrates a fed semibatch crystallizer with SciPy.
 
 Units: charge mass [kg], temp [K], x_grid [um], distrib [#/(um m**3)],
 feed [kg/s], vol_flow [m**3/s], residence time [s], d(mass_j)/dt [kg/s],
@@ -16,7 +17,9 @@ import os
 import numpy as np
 import pytest
 
-from PharmaPy.Crystallizers_Refactored import ContinuousCrystallizer
+from PharmaPy.Crystallizers_Refactored import (ContinuousCrystallizer,
+                                               SemiBatchCrystallizer)
+from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Mechanisms import OneDFVMMechanism
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
@@ -499,7 +502,8 @@ def test_crystal_inflow_is_scaled_by_the_slurry_volume():
     rates = mechanism.get_inlet_contributions(
         _feed_solid(feed_distrib), solid, FEED_SLURRY_VOL_FLOW, {}
     )
-    (rate,) = rates.values()
+    assert list(rates) == [mechanism._flow_state_key()]
+    rate = rates[mechanism._flow_state_key()]
 
     # Anti-vacuity: the crystals are a small part of the slurry, so the
     # crystal volume and the slurry volume differ by orders of magnitude.
@@ -526,7 +530,9 @@ def test_crystal_inflow_reaches_a_vessel_without_crystals():
     rates = mechanism.get_inlet_contributions(
         _feed_solid(feed_distrib), solid, FEED_SLURRY_VOL_FLOW, {}
     )
-    (rate,) = rates.values()
+    # A vessel without crystals used to get no inlet term at all.
+    assert list(rates) == [mechanism._flow_state_key()]
+    rate = rates[mechanism._flow_state_key()]
 
     np.testing.assert_allclose(
         rate,
@@ -553,17 +559,58 @@ def test_check_module_sees_a_connected_inlet():
         check_modeling_objects(_build_crystallizer(with_feed=False), "CR01")
 
 
-def test_semibatch_feed_dilutes_the_population():
-    """A liquid feed into a semibatch crystallizer dilutes its crystals.
+# Integrating a fed semibatch crystallizer. The runtime is a design choice:
+# the feed adds half the charge mass, so the slurry volume grows by about
+# half and a missing dilution term would raise the crystal count by as much.
+DILUTION_RUNTIME = 50.0  # [s]
+# Tight solver settings, so the check probes the balance and not the error
+# control. At the population's declared absolute tolerance of 1e4
+# #/(um m**3) the uncontrolled tails of the seed alone move the crystal count
+# by 1e-5; at 1 #/(um m**3) and this relative tolerance it holds to 3e-9.
+DILUTION_ABS_TOL = 1.0  # [#/(um m**3)]
+DILUTION_SOLVER_RTOL = 1e-10  # [-]
+# A budget far below the 50 % that a missing dilution term gives and well
+# above the 3e-9 measured with the settings above.
+COUNT_CONSERVATION_RTOL = 1e-7  # [-]
+# Over DILUTION_RUNTIME the slurry grows by a factor of about 1.47; a guard a
+# little below that shows the feed acted without pinning its exact value.
+MIN_VOLUME_GROWTH = 1.4  # [-]
 
-    With no outlet and no crystals in the feed, d(n V)/dt = 0, so the
-    population per m**3 of slurry falls as dn/dt = -(Q_in / V_slurry) * n.
-    Without this term the growing volume multiplied the crystal mass.
+
+def _semibatch_feed():
+    """Return a liquid feed matching the charge in composition and temperature.
+
+    Returns
+    -------
+    LiquidStream
+        Feed of ``FEED_MASS_FLOW`` [kg/s] at ``WARM_TEMP`` [K].
     """
-    from PharmaPy.Crystallizers_Refactored import SemiBatchCrystallizer
+    return LiquidStream(
+        DATA_PATH, mass_flow=FEED_MASS_FLOW, mass_frac=CHARGE_MASS_FRAC,
+        temp=WARM_TEMP,
+    )
 
+
+def _build_semibatch(integrator=None, abs_tol=None):
+    """Build a seeded semibatch crystallizer fed with its own liquid.
+
+    Parameters
+    ----------
+    integrator : IntegratorBackend, optional
+        Backend for a solve. Defaults to None, for solver-free evaluation.
+    abs_tol : float, optional
+        Absolute tolerance on the number density [#/(um m**3)]. Defaults to
+        the population's own.
+
+    Returns
+    -------
+    SemiBatchCrystallizer
+        Vessel with its array layout compiled. Undersaturated, so only the
+        feed acts on the crystals, and the feed matches the charge in
+        composition and temperature, so it does not change the density.
+    """
     vessel = SemiBatchCrystallizer(
-        integrator=None, h_conv=0, diam=VESSEL_DIAMETER, isothermal=True
+        integrator=integrator, h_conv=0, diam=VESSEL_DIAMETER, isothermal=True
     )
     liquid = LiquidPhase(
         DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC, temp=WARM_TEMP
@@ -577,6 +624,7 @@ def test_semibatch_feed_dilutes_the_population():
         solvent_name="solvent",
         x_grid=_size_grid(),
         distrib_init=_seed_distribution(),
+        abs_tol=abs_tol,
     )
     vessel.Phases = [liquid, solid]
     vessel.CrystKinetics = CrystKinetics(
@@ -586,13 +634,20 @@ def test_semibatch_feed_dilutes_the_population():
         growth=GROWTH,
         solubility_type="apelblat",
     )
-    feed = LiquidStream(
-        DATA_PATH, mass_flow=FEED_MASS_FLOW, mass_frac=CHARGE_MASS_FRAC,
-        temp=WARM_TEMP,
-    )
-    feed_vol_flow = float(feed.vol_flow)  # [m**3/s]
-    vessel.Inlet = feed
+    vessel.Inlet = _semibatch_feed()
     vessel.compile_structure()
+    return vessel
+
+
+def test_semibatch_feed_dilutes_the_population():
+    """A liquid feed into a semibatch crystallizer dilutes its crystals.
+
+    With no outlet and no crystals in the feed, d(n V)/dt = 0, so the
+    population per m**3 of slurry falls as dn/dt = -(Q_in / V_slurry) * n.
+    Without this term the growing volume multiplied the crystal mass.
+    """
+    vessel = _build_semibatch()
+    feed_vol_flow = float(_semibatch_feed().vol_flow)  # [m**3/s]
 
     mechanism = _mechanism(vessel)
     held = np.array(getattr(mechanism, mechanism.distribution_state_name))
@@ -602,5 +657,34 @@ def test_semibatch_feed_dilutes_the_population():
     _, distrib_rate = _derivatives(vessel)
 
     np.testing.assert_allclose(
-        distrib_rate, -(feed_vol_flow / vol_slurry) * held, rtol=1e-9
+        distrib_rate, -(feed_vol_flow / vol_slurry) * held,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_semibatch_feed_keeps_the_crystal_count():
+    """Fed with its own liquid, a semibatch crystallizer keeps its crystals.
+
+    Undersaturated, nothing nucleates, grows or dissolves, and the feed
+    carries no crystals, so the total count, the population per m**3 of
+    slurry times the slurry volume, stays put while the volume grows.
+    """
+    vessel = _build_semibatch(
+        ScipyBackend(options={"rtol": DILUTION_SOLVER_RTOL}),
+        abs_tol=DILUTION_ABS_TOL,
+    )
+    vessel.solve_unit(runtime=DILUTION_RUNTIME, verbose=False)
+
+    mechanism = _mechanism(vessel)
+    density = np.asarray(vessel.result.distrib_solid0)  # [#/(um m**3)]
+    count_per_volume = np.array([
+        mechanism.integrate_over_size(row) for row in density
+    ])  # [#/m**3 of slurry]
+    vol_slurry = np.asarray(vessel.result.vessel_vol).ravel()  # [m**3]
+    crystal_count = count_per_volume * vol_slurry  # [#]
+
+    # Guard against a vacuous pass: the feed did grow the slurry.
+    assert vol_slurry[-1] > MIN_VOLUME_GROWTH * vol_slurry[0]
+    np.testing.assert_allclose(
+        crystal_count, crystal_count[0], rtol=COUNT_CONSERVATION_RTOL
     )

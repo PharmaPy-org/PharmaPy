@@ -189,9 +189,21 @@ class Mechanism:
         return {}
 
     def get_dilution_contributions(self, net_vol_flow, completed_state):
-        """Rate of change of an intensive state as the vessel volume changes.
+        """Rate of change of a per-volume state as the vessel volume changes.
 
-        Only mechanisms whose state is a density per unit volume need it.
+        Parameters
+        ----------
+        net_vol_flow : float
+            Rate of change of the vessel volume [m**3/s].
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        dict
+            State rates keyed by ``StateKey``, in the state's units per
+            second. Empty here: only a mechanism whose state is a density per
+            unit volume needs the term.
         """
         return {}
 
@@ -1079,7 +1091,27 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
     def get_inlet_contributions(self, stream_phase, vessel_phase, amount,
                                 completed_state):
+        """Crystal inflow carried by a slurry feed.
 
+        Parameters
+        ----------
+        stream_phase : BasePhase
+            Feed phase whose population mechanism publishes the feed
+            population per m**3 of feed slurry.
+        vessel_phase : BasePhase
+            Solid phase of the vessel, which owns this mechanism.
+        amount : float
+            Volumetric flow of the whole feed slurry [m**3/s].
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        dict
+            ``{flow state key: (amount / V_slurry) * n_in}``, in the
+            population's units per second; empty when there is no feed, no
+            feed population or no slurry volume.
+        """
         if not amount:
             return {}
 
@@ -1134,6 +1166,23 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     def get_dilution_contributions(self, net_vol_flow, completed_state):
         """Dilution of the population as the slurry volume changes.
 
+        Parameters
+        ----------
+        net_vol_flow : float
+            Rate of change of the slurry volume, taken as the volumetric
+            inflow minus outflow [m**3/s].
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        dict
+            ``{flow state key: -(net_vol_flow / V_slurry) * n}``, in the
+            population's units per second; empty when the volume is constant
+            or unknown.
+
+        Notes
+        -----
         The state n is per m3 of slurry, so from d(n V)/dt = Q_in n_in - Q_out n
 
             dn/dt = (Q_in n_in - Q_out n) / V  -  n (dV/dt) / V
@@ -1143,6 +1192,11 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         an MSMPR whose volume is held, but in a semibatch crystallizer fed
         with liquid it is what keeps the growing volume from multiplying the
         crystal mass.
+
+        dV/dt = Q_in - Q_out holds while the slurry density does not change,
+        so n V is conserved exactly for a feed of the vessel's own liquid. A
+        feed of another density, a temperature change and the volume change
+        of crystallization itself are not counted in dV/dt.
         """
         if not net_vol_flow:
             return {}

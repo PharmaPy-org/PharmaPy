@@ -149,19 +149,27 @@ class _BaseCrystallizer(MultiPhaseVessel):
         """
         self.integrator.set_linear_solver("dense")
     def _post_set_phases(self):
+        """Re-bind the population balance after the phases are replaced.
+
+        Re-setting Phases after CrystKinetics, which is what SimulationExec
+        does when it hands the upstream liquid to a batch or semibatch
+        crystallizer, replaces the liquid object. The population balance
+        must follow it, or its slurry volume, crystal mass and outlet split
+        keep coming from the discarded placeholder.
+        """
         super()._post_set_phases()
-        # Re-setting Phases after CrystKinetics (which is what SimulationExec
-        # does when it hands the upstream liquid to a batch or semibatch
-        # crystallizer) replaces the liquid object, so the population
-        # balance must follow it. Otherwise its slurry volume, crystal mass
-        # and outlet split keep coming from the discarded placeholder.
         self._bind_population_balance_liquid()
 
     def _bind_population_balance_liquid(self):
         """Point the solid's population balance at the vessel's live liquid.
 
-        Does nothing until CrystKinetics has given the mechanism its
-        liquid_phase_ref, or when the vessel has no solid or liquid.
+        Notes
+        -----
+        Does nothing before the phases are set, when the vessel has no
+        solid or no population balance, or until CrystKinetics has given
+        the mechanism its ``liquid_phase_ref``. A crystallizer cannot be
+        left holding a solid without its liquid: assigning such phases
+        already fails before this runs.
         """
         try:
             solid = self.Phases.get_phase_from_ref(PhaseRef('solid', 0))
