@@ -604,6 +604,44 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     # per moment order, matching SolidPhase.getMoments.
     MOMENT_UNIT_FACTOR = 1e-6
 
+    @staticmethod
+    def _per_slurry_volume(population, vol_slurry):
+        """An old total (or flow) population as a density per m3 of slurry.
+
+        Parameters
+        ----------
+        population : array-like
+            Population of an old solid: a total in the vessel for a phase, or
+            a flow for a stream, in any per-size or per-moment unit.
+        vol_slurry : float or None
+            Slurry volume [m**3] of the phase, or slurry volumetric flow
+            [m**3/s] of the stream.
+
+        Returns
+        -------
+        numpy.ndarray
+            The population per m**3 of slurry.
+
+        Raises
+        ------
+        ValueError
+            If the population is not empty and ``vol_slurry`` is missing or
+            not positive.
+        """
+        population = np.asarray(population, dtype=float)
+
+        if not np.any(population):
+            return population
+
+        if vol_slurry is None or not vol_slurry > 0:
+            raise ValueError(
+                "Converting an old solid needs the volume, or volumetric "
+                "flow, of the slurry it belongs to: its crystals are a total "
+                "or a flow, and this stack stores them per m3 of slurry. "
+                "Convert the whole slurry with MixedPhase.from_legacy.")
+
+        return population / vol_slurry
+
     def compute_moments(
         self,
         distrib,
@@ -1392,15 +1430,46 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         }
 
     @classmethod
-    def from_legacy_phase(cls, legacy_phase, owning_phase, **kwargs):
-        """Rebuild the mechanism from an old SolidPhase's own attributes."""
+    def from_legacy_phase(cls, legacy_phase, owning_phase, vol_slurry=None,
+                          **kwargs):
+        """Rebuild the mechanism from an old SolidPhase or SolidStream.
+
+        Parameters
+        ----------
+        legacy_phase : SolidPhase or SolidStream
+            Old solid. Its ``distrib`` is the total count in the vessel
+            [#/um] for a phase, or the crystal flow [#/(um s)] for a stream.
+        owning_phase : SolidPhase
+            Refactored solid that will own the mechanism.
+        vol_slurry : float, optional
+            Slurry volume [m**3] of the phase, or slurry volumetric flow
+            [m**3/s] of the stream, from
+            ``MixedPhase.legacy_slurry_volume``. Needed unless there are no
+            crystals.
+        **kwargs
+            Passed to the constructor, e.g. ``target_components``.
+
+        Returns
+        -------
+        OneDFVMMechanism or None
+            Mechanism holding the number density [#/(um m**3 slurry)], or
+            None when the old solid carries no distribution.
+
+        Raises
+        ------
+        ValueError
+            If there are crystals and ``vol_slurry`` is missing.
+        """
         if not cls.claims_legacy_phase(legacy_phase):
             return None
+
+        density = cls._per_slurry_volume(
+            legacy_phase.distrib, vol_slurry)  # [#/(um m**3)]
 
         return cls(
             owning_phase=owning_phase,
             x_grid=np.asarray(legacy_phase.x_distrib),
-            distrib_init=np.asarray(legacy_phase.distrib),
+            distrib_init=density,
             kv=getattr(legacy_phase, 'kv', 1),
             **kwargs,
         )
@@ -1858,13 +1927,47 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         }
 
     @classmethod
-    def from_legacy_phase(cls, legacy_phase, owning_phase, **kwargs):
+    def from_legacy_phase(cls, legacy_phase, owning_phase, vol_slurry=None,
+                          **kwargs):
+        """Rebuild the mechanism from an old solid that carries only moments.
+
+        Parameters
+        ----------
+        legacy_phase : SolidPhase or SolidStream
+            Old solid. Its ``moments`` are totals in the vessel [m**k] for a
+            phase, or flows [m**k/s] for a stream.
+        owning_phase : SolidPhase
+            Refactored solid that will own the mechanism.
+        vol_slurry : float, optional
+            Slurry volume [m**3] of the phase, or slurry volumetric flow
+            [m**3/s] of the stream, from
+            ``MixedPhase.legacy_slurry_volume``. Needed unless there are no
+            crystals.
+        **kwargs
+            Passed to the constructor, e.g. ``target_components``.
+
+        Returns
+        -------
+        MomentsPopulationBalance or None
+            Mechanism holding the moments [um**k/m**3 slurry], or None when
+            the old solid does not carry moments alone.
+
+        Raises
+        ------
+        ValueError
+            If there are crystals and ``vol_slurry`` is missing.
+        """
         if not cls.claims_legacy_phase(legacy_phase):
             return None
 
+        moments = np.asarray(legacy_phase.moments, dtype=float)  # [m**k]
+        orders = np.arange(len(moments))
+        moments_um = moments / cls.MOMENT_UNIT_FACTOR ** orders  # [um**k]
+
         return cls(
             owning_phase=owning_phase,
-            moments_init=np.asarray(legacy_phase.moments),
+            moments_init=cls._per_slurry_volume(
+                moments_um, vol_slurry),  # [um**k/m**3]
             kv=getattr(legacy_phase, 'kv', 1),
             **kwargs,
         )

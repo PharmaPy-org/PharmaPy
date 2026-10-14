@@ -241,11 +241,56 @@ class MixedPhase:
         return BasePhase.from_legacy(legacy_phase, **mechanism_kwargs)
 
     @staticmethod
+    def legacy_slurry_volume(members):
+        """Slurry volume of old phases, or slurry volumetric flow of old streams.
+
+        An old SolidPhase holds its crystals as a total count, and an old
+        SolidStream as a flow of crystals, while this stack holds a density
+        per m3 of slurry. The factor between them belongs to the whole
+        slurry, not to the solid: an old liquid stream has a ``vol_flow``
+        but no ``vol``, and a solid on its own has no slurry at all.
+
+        Parameters
+        ----------
+        members : sequence
+            Old phases, or old streams, that make up one slurry.
+
+        Returns
+        -------
+        float
+            Slurry volume [m**3] of phases, or slurry volumetric flow
+            [m**3/s] of streams.
+        """
+        streams = all(type(member).__name__.endswith('Stream')
+                      for member in members)
+        name = 'vol_flow' if streams else 'vol'
+
+        return sum(float(getattr(member, name, None) or 0.0)
+                   for member in members)
+
+    @staticmethod
     def from_legacy(legacy_matter, **mechanism_kwargs):
-        """An old Slurry, or a bare old phase, into this stack."""
+        """An old Slurry, or a bare old phase, into this stack.
+
+        Parameters
+        ----------
+        legacy_matter : Slurry, SlurryStream or old phase
+            Material from the pre-refactor stack.
+        **mechanism_kwargs
+            Passed to each phase's mechanism, e.g. ``target_components`` and
+            ``solvent_name``. ``vol_slurry`` defaults to
+            ``legacy_slurry_volume`` of the members.
+
+        Returns
+        -------
+        MixedPhase
+            The members converted, in the same order.
+        """
         phases = getattr(legacy_matter, 'Phases', None)
         members = phases if isinstance(phases, (list, tuple)) \
             else [legacy_matter]
+        mechanism_kwargs.setdefault(
+            'vol_slurry', MixedPhase.legacy_slurry_volume(members))
 
         return MixedPhase([MixedPhase.phase_from_legacy(m, **mechanism_kwargs)
                            for m in members])

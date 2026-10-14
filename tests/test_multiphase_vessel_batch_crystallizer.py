@@ -2,7 +2,8 @@
 
 Tests evaluate ``unit_model`` at t = 0, so they need no integrator, except
 the tolerance handoff test, which stops a SciPy solve at its first
-``solve_ivp`` call.
+``solve_ivp`` call. Conversions of the crystals to and from the pre-refactor
+phases and streams are covered too.
 
 Units: charge mass [kg], temp [K], x_grid [um], distrib [#/(um m**3)],
 conc and solubility [kg/m**3 of PURE SOLVENT], supersat [-] relative,
@@ -18,13 +19,21 @@ import os
 import numpy as np
 import pytest
 
+from PharmaPy.Connections import Connection
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.DataClasses import PhaseRef
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Mechanisms import MomentsPopulationBalance, OneDFVMMechanism
+from PharmaPy.MixedPhases import Slurry as OldSlurry
+from PharmaPy.MixedPhases import SlurryStream as OldSlurryStream
+from PharmaPy.MixedPhases_Refactored import MixedPhase
+from PharmaPy.Phases import LiquidPhase as OldLiquidPhase
+from PharmaPy.Phases import SolidPhase as OldSolidPhase
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
 from PharmaPy.ProcessControl_Refactored import SimpleTemperatureController
+from PharmaPy.Streams import LiquidStream as OldLiquidStream
+from PharmaPy.Streams import SolidStream as OldSolidStream
 
 pytestmark = pytest.mark.unit
 
@@ -662,6 +671,197 @@ def test_legacy_conversion_refuses_crystals_without_a_slurry_volume():
 
     with pytest.raises(ValueError, match="slurry volume is unknown"):
         solid.to_legacy()
+
+
+# The case-study charge, used as the liquid of an old slurry.
+OLD_LIQUID_VOL = 0.06  # [m**3]
+# Slurry flow of an old MSMPR product stream. Only its ratio to the crystal
+# flow enters the conversion, so any positive value serves.
+OLD_SLURRY_VOL_FLOW = 2.0e-5  # [m**3/s]
+OLD_SOLID_MASS_FRAC = [0.0, 0.0, 1.0, 0.0, 0.0]  # [-], pure C
+MICRONS_PER_METRE = 1e6  # [um/m], exact
+
+
+def _old_solid(distrib=None, moments=None):
+    """Return an old SolidPhase on the module's size grid.
+
+    Parameters
+    ----------
+    distrib : numpy.ndarray, optional
+        Total crystal count in the vessel [#/um].
+    moments : numpy.ndarray, optional
+        Total moments in the vessel [m**k], used instead of a distribution.
+
+    Returns
+    -------
+    PharmaPy.Phases.SolidPhase
+        Old solid of pure C at ``WARM_TEMP``.
+    """
+    if moments is not None:
+        return OldSolidPhase(DATA_PATH, moments=moments,
+                             mass_frac=OLD_SOLID_MASS_FRAC, temp=WARM_TEMP)
+
+    return OldSolidPhase(DATA_PATH, x_distrib=_size_grid(), distrib=distrib,
+                         mass_frac=OLD_SOLID_MASS_FRAC, temp=WARM_TEMP)
+
+
+def _old_slurry(solid):
+    """Put an old solid in an old slurry with the case-study liquid volume.
+
+    Parameters
+    ----------
+    solid : PharmaPy.Phases.SolidPhase
+        Old solid.
+
+    Returns
+    -------
+    tuple
+        The old ``Slurry`` and its volume [m**3], liquid plus crystals.
+    """
+    liquid = OldLiquidPhase(DATA_PATH, temp=WARM_TEMP,
+                            mass_frac=CHARGE_MASS_FRAC, vol=OLD_LIQUID_VOL,
+                            name_solv="solvent")
+    slurry = OldSlurry()
+    slurry.Phases = (liquid, solid)
+    return slurry, float(liquid.vol) + float(solid.vol)
+
+
+def _held(converted, mechanism_cls):
+    """Return the population a converted solid holds.
+
+    Parameters
+    ----------
+    converted : MixedPhase or SolidPhase
+        Converted material, or the converted solid itself.
+    mechanism_cls : type
+        ``OneDFVMMechanism`` or ``MomentsPopulationBalance``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Number density [#/(um m**3)] or moments [um**k/m**3], per m**3 of
+        slurry.
+    """
+    solid = converted
+    if hasattr(converted, "get_phase_from_ref"):
+        solid = converted.get_phase_from_ref(PhaseRef("solid", 0))
+
+    mechanism = solid.get_mechanism(mechanism_cls)
+    name = getattr(mechanism, "distribution_state_name", None) \
+        or mechanism.moments_state_name
+    return mechanism.true_state(np.asarray(getattr(mechanism, name)))
+
+
+def test_old_slurry_arrives_as_a_density_per_slurry_volume():
+    """An old total crystal count becomes a density per m**3 of slurry.
+
+    The old SolidPhase holds the crystals in the vessel, this stack the
+    crystals per m**3 of slurry. Copying one into the other scaled the
+    crystal count by the slurry volume, about 0.06 for the case-study charge.
+    """
+    count = OLD_LIQUID_VOL * _seed_distribution()  # [#/um] in the vessel
+    slurry, vol_slurry = _old_slurry(_old_solid(distrib=count))
+
+    converted = MixedPhase.from_legacy(
+        slurry, target_components=TARGET, solvent_name="solvent")
+
+    np.testing.assert_allclose(
+        _held(converted, OneDFVMMechanism), count / vol_slurry,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_crystals_survive_a_round_trip_through_the_old_stack():
+    """Converting a vessel's phases to the old stack and back keeps them.
+
+    The seed is zeroed at the first and last node, where the old trapezoid
+    and the mechanism's rectangle rule would otherwise weight the end cells
+    differently.
+    """
+    seed = _seed_distribution()  # [#/(um m**3)]
+    seed[[0, -1]] = 0.0
+    vessel = _build_crystallizer(WARM_TEMP, distrib=seed)
+
+    back = MixedPhase.from_legacy(
+        vessel.Phases.to_legacy(), target_components=TARGET,
+        solvent_name="solvent")
+
+    np.testing.assert_allclose(
+        _held(back, OneDFVMMechanism), seed, rtol=ALGEBRAIC_RTOL)
+
+
+def test_old_slurry_stream_arrives_as_a_feed_density():
+    """An old crystal flow becomes a density per m**3 of feed slurry.
+
+    Built the way the old MSMPR builds its product: the slurry stream takes a
+    density per m**3 and hands its solid the crystal flow. That flow is
+    divided by the slurry volumetric flow of the liquid and solid streams
+    together; the old liquid stream has no volume to add up.
+    """
+    density = _seed_distribution()  # [#/(um m**3)] of feed slurry
+    stream = OldSlurryStream(vol_flow=OLD_SLURRY_VOL_FLOW,
+                             x_distrib=_size_grid(), distrib=density)
+    stream.Phases = (
+        # As the old MSMPR builds it: the slurry stream sets the flows.
+        OldLiquidStream(DATA_PATH, mass_frac=CHARGE_MASS_FRAC, temp=WARM_TEMP,
+                        check_input=False),
+        OldSolidStream(DATA_PATH, mass_frac=OLD_SOLID_MASS_FRAC),
+    )
+
+    converted = MixedPhase.from_legacy(
+        stream, target_components=TARGET, solvent_name="solvent")
+
+    np.testing.assert_allclose(
+        _held(converted, OneDFVMMechanism), density, rtol=ALGEBRAIC_RTOL)
+
+
+def test_old_moments_arrive_in_microns_per_slurry_volume():
+    """Old moments, totals in m**k, become um**k per m**3 of slurry."""
+    count = OLD_LIQUID_VOL * _seed_distribution()  # [#/um] in the vessel
+    moments = np.asarray(_old_solid(distrib=count).moments)  # [m**k]
+    slurry, vol_slurry = _old_slurry(_old_solid(moments=moments))
+
+    converted = MixedPhase.from_legacy(
+        slurry, target_components=TARGET, solvent_name="solvent")
+
+    expected = (
+        moments * MICRONS_PER_METRE ** np.arange(len(moments)) / vol_slurry
+    )  # [um**k/m**3]
+    np.testing.assert_allclose(
+        _held(converted, MomentsPopulationBalance), expected,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_old_crystals_need_the_slurry_they_belong_to():
+    """Old crystals without their slurry cannot become a density per m**3.
+
+    A solid without crystals needs no slurry volume.
+    """
+    with pytest.raises(ValueError, match="slurry it belongs to"):
+        MixedPhase.phase_from_legacy(
+            _old_solid(distrib=_seed_distribution()),
+            target_components=TARGET, solvent_name="solvent")
+
+    empty = MixedPhase.phase_from_legacy(
+        _old_solid(distrib=np.zeros(NUM_GRID)),
+        target_components=TARGET, solvent_name="solvent")
+
+    np.testing.assert_array_equal(_held(empty, OneDFVMMechanism), 0.0)
+
+
+def test_flowsheet_handoff_brings_old_crystals_in_per_slurry_volume():
+    """A legacy unit's slurry reaches a refactored crystallizer per m**3."""
+    count = OLD_LIQUID_VOL * _seed_distribution()  # [#/um] in the vessel
+    slurry, vol_slurry = _old_slurry(_old_solid(distrib=count))
+    connection = Connection(None, _build_crystallizer(WARM_TEMP))
+
+    converted = connection._legacy_to_refactored(slurry)
+
+    np.testing.assert_allclose(
+        _held(converted, OneDFVMMechanism), count / vol_slurry,
+        rtol=ALGEBRAIC_RTOL,
+    )
 
 
 def test_population_state_declares_its_own_absolute_tolerance():

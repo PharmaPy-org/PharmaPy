@@ -521,10 +521,24 @@ class Connection:
     def _legacy_to_refactored(self, matter):
         """Old material into the refactored stack.
 
+        Parameters
+        ----------
+        matter : Slurry, SlurryStream or old phase
+            Material handed over by a pre-refactor unit.
+
+        Returns
+        -------
+        BasePhase or MixedPhase
+            A single converted phase, or the converted members together.
+
+        Notes
+        -----
         A mechanism needs things the old phase never carried -- which
         species crystallizes, which is the solvent. Those are taken from
         the destination's own configured phases, which is the only place
-        that knows them.
+        that knows them. The slurry volume, which turns the old total
+        crystal count into a density per m3 of slurry, comes from all the
+        members together.
         """
         from PharmaPy.MixedPhases_Refactored import MixedPhase
 
@@ -532,6 +546,7 @@ class Connection:
 
         phases = getattr(matter, 'Phases', None)
         members = phases if isinstance(phases, (list, tuple)) else [matter]
+        kwargs.setdefault('vol_slurry', MixedPhase.legacy_slurry_volume(members))
 
         converted = [MixedPhase.phase_from_legacy(member, **kwargs)
                      for member in members]
