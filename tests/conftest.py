@@ -144,7 +144,8 @@ def drying_cake_factory(drying_thermo_path):
     -------
     callable
         Factory accepting size grid [um], number distribution [#/um],
-        saturation [-], and condensed temperature [K].
+        saturation [-], condensed temperature [K], and an optional
+        ``thermo_path`` that replaces the synthetic database.
     """
     from PharmaPy.MixedPhases import Cake
     from PharmaPy.Phases import LiquidPhase, SolidPhase
@@ -153,7 +154,8 @@ def drying_cake_factory(drying_thermo_path):
             size_grid_um=DRYING_SIZE_GRID_UM,
             csd_number=DRYING_CSD_NUMBER,
             saturation=0.55,
-            temperature=302.0):
+            temperature=302.0,
+            thermo_path=None):
         """Construct a real ``Cake`` containing real PharmaPy phases.
 
         Parameters
@@ -166,20 +168,23 @@ def drying_cake_factory(drying_thermo_path):
             Initial liquid saturation [-].
         temperature : float, optional
             Common condensed-phase temperature [K].
+        thermo_path : str or pathlib.Path, optional
+            Property database; the synthetic drying database when None.
 
         Returns
         -------
         Cake
             Packed cake with real liquid and solid phases.
         """
+        path = str(thermo_path or drying_thermo_path)
         liquid = LiquidPhase(
-            str(drying_thermo_path),
+            path,
             temp=temperature,
             mass=1.0e-3,  # [kg]
             mass_frac=DRYING_LIQUID_MASS_FRACTION,
         )
         solid = SolidPhase(
-            str(drying_thermo_path),
+            path,
             temp=temperature,
             x_distrib=np.asarray(size_grid_um),  # [um]
             distrib=np.asarray(csd_number),  # [#/um], total basis
@@ -210,7 +215,9 @@ def drying_unit_factory(drying_thermo_path, drying_cake_factory):
     -------
     callable
         Factory accepting node count [-], size grid [um], number distribution
-        [#/um], saturation [-], and phase temperatures [K].
+        [#/um], saturation [-], phase temperatures [K], and an optional
+        ``thermo_path`` that replaces the synthetic database for every
+        phase and the gas inlet.
     """
     from PharmaPy.Drying_Model import Drying
     from PharmaPy.Phases import VaporPhase
@@ -222,7 +229,8 @@ def drying_unit_factory(drying_thermo_path, drying_cake_factory):
             csd_number=DRYING_CSD_NUMBER,
             saturation=0.55,
             condensed_temperature=302.0,
-            gas_temperature=300.0):
+            gas_temperature=300.0,
+            thermo_path=None):
         """Construct a ``Drying`` unit with real phases, cake, and inlet.
 
         Parameters
@@ -239,26 +247,30 @@ def drying_unit_factory(drying_thermo_path, drying_cake_factory):
             Initial liquid-solid temperature [K].
         gas_temperature : float, optional
             Initial and inlet gas temperature [K].
+        thermo_path : str or pathlib.Path, optional
+            Property database; the synthetic drying database when None.
 
         Returns
         -------
         Drying
             Configured production drying model.
         """
+        path = str(thermo_path or drying_thermo_path)
         cake = drying_cake_factory(
             size_grid_um=size_grid_um,
             csd_number=csd_number,
             saturation=saturation,
             temperature=condensed_temperature,
+            thermo_path=path,
         )
         gas_phase = VaporPhase(
-            str(drying_thermo_path),
+            path,
             temp=gas_temperature,
             mass=1.0e-4,  # [kg]
             mass_frac=DRYING_GAS_MASS_FRACTION,
         )
         gas_inlet = VaporStream(
-            str(drying_thermo_path),
+            path,
             temp=gas_temperature,
             mass_flow=1.0e-4,  # [kg/s]
             mass_frac=DRYING_GAS_MASS_FRACTION,

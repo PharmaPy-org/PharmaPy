@@ -450,7 +450,7 @@ class SolidStream(SolidPhase):
                  mass_flow: float = 0, mass_frac: Optional[ArrayLike] = None,
                  distrib: Optional[ArrayLike] = None,
                  x_distrib: Optional[ArrayLike] = None,
-                 kv: float = 1) -> None:
+                 kv: float = 1, temp_ref: float = 298.15) -> None:
         """Initialize a solid stream and its flow-basis aliases.
 
         Parameters
@@ -475,6 +475,12 @@ class SolidStream(SolidPhase):
         kv : float, optional
             Volumetric shape factor [-]; default one represents cubic
             particles.
+        temp_ref : float, optional
+            Enthalpy reference temperature [K], default 298.15 K, forwarded
+            to ``SolidPhase`` and stored as a Python float. ``getEnthalpy``
+            uses it when its own ``temp_ref`` is omitted; an explicit method
+            argument takes precedence. It follows the existing parameters, so
+            positional calls keep their meaning.
 
         Raises
         ------
@@ -491,8 +497,19 @@ class SolidStream(SolidPhase):
         ``SolidPhase`` sets when a distribution is supplied. A stream built
         from composition alone gains both once a later update sets its
         amount, for example through ``SlurryStream.Phases``.
+
+        Unit operations do not apply one outlet ``temp_ref`` policy (issue
+        #422). Outlets they construct, such as the solids ``Mixer``,
+        ``DynamicCollector``, ``MSMPR`` and ``ThreePhaseSettler`` outlets,
+        use the 298.15 K default. Outlets they copy from a holdup solid, such
+        as the ``BatchCryst``, semibatch crystallizer, ``Filter``,
+        ``DeliquoringStep`` and ``DisplacementWashing`` outlets, keep that
+        solid's ``temp_ref``. The difference affects only direct
+        ``getEnthalpy()`` calls on an outlet solid: ``Slurry``,
+        ``SlurryStream`` and ``Cake`` pass one common reference to the liquid
+        and the solid, so it does not enter their energy balances.
         """
-        super().__init__(path_thermo, temp, pres=pres,
+        super().__init__(path_thermo, temp, temp_ref=temp_ref, pres=pres,
                          mass=mass_flow, mass_frac=mass_frac,
                          distrib=distrib, x_distrib=x_distrib, kv=kv)
 
