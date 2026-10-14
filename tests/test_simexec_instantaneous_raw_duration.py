@@ -7,9 +7,10 @@ flowsheet graph and that successor verifiably uses the transferred outlet:
 for the successor's fed duration, recursively through chains of
 instantaneous units, so a consumer solved for 0 s gives a total of 0.
 Otherwise the totals are NaN with a ``RuntimeWarning`` naming the unit and
-the reason: a terminal unit, fan-out to several successors (each receives a
-full copy, issue #437), or a successor that no longer holds the transfer,
-such as a charged ``SemibatchReactor`` (issue #438). Units without the
+the reason: a terminal unit, or a successor that no longer holds the
+transfer, such as a charged ``SemibatchReactor`` (issue #438). Fan-out to
+several successors is rejected by ``SolveFlowsheet`` before any unit is
+solved (issue #437), so nothing is charged for it. Units without the
 flag, such as a ``DynamicCollector`` solved for 0 s, keep their own (zero)
 fed duration for static and controlled feeds. Batch inlets are unchanged.
 A raw inlet with a ``DynamicInput`` that controls no field feeds the static
@@ -52,6 +53,7 @@ import numpy as np
 import pytest
 
 from PharmaPy.Containers import DynamicCollector, Mixer
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.Phases import LiquidPhase
 from PharmaPy.ProcessControl import DynamicInput
 from PharmaPy.SimExec import SimulationExec
@@ -315,31 +317,27 @@ def test_chained_mixers_follow_to_the_consumer(path):
         rtol=RTOL)
 
 
-@pytest.mark.assimulo
-@pytest.mark.integration
-def test_fan_out_reports_nan(path):
-    """Report NaN, not a duration, when two units each copy the outlet.
+@pytest.mark.unit
+def test_fan_out_is_rejected_so_nothing_is_charged(path):
+    """Charge nothing, not NaN or a copy per branch, for a rejected fan-out.
 
-    Provisional: each successor receives a full copy of the outlet (issue
-    #437), so no total is defensible. Once #437 splits fan-out, expect a
-    per-branch charge instead.
+    Each successor would receive a full copy of the outlet (issue #437), so
+    ``SolveFlowsheet`` rejects the graph before solving any unit and no
+    raw material is reported.
     """
-    pytest.importorskip('assimulo')
-    sim = SimulationExec(path, {'M01': ['C01', 'C02'], 'C01': [], 'C02': []})
+    sim = SimulationExec(path, {'M01': ['M02', 'M03'], 'M02': [], 'M03': []})
     sim.M01 = _mixer(path)
-    sim.C01 = DynamicCollector()
-    sim.C02 = DynamicCollector()
-    sim.SolveFlowsheet(kwargs_run={
-        'C01': {'runtime': SHORT_RUNTIME, 'verbose': False},
-        'C02': {'runtime': RUNTIME, 'verbose': False}}, verbose=False)
+    sim.M02, sim.M03 = Mixer(), Mixer()
+    with pytest.raises(PharmaPyNonImplementedError,
+                       match=r"'M01' feeds \['M02', 'M03'\]"):
+        sim.SolveFlowsheet(verbose=False)
 
-    reason = (r"its outlet feeds 2 units \['C01', 'C02'\], each receiving a "
-              r"full copy of it \(fan-out, issue #437\)")
-    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
-            unit='M01', reason=reason)):
-        _, totals = _raw_amounts(sim.GetRawMaterials(), 'mass')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        raw = sim.GetRawMaterials()
 
-    assert np.isnan(totals).all()
+    assert sim.uos_instances == {}
+    assert raw.empty
 
 
 @pytest.mark.assimulo

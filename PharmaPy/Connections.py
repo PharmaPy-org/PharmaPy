@@ -482,7 +482,21 @@ class Connection:
         self.ConvertUnits()
         self.PassPhases()
 
-    def FeedConnection(self):
+    def FeedConnection(self) -> None:
+        """Select the source outlet and attach its upstream profile.
+
+        Notes
+        -----
+        ``self.Matter`` is the source's whole ``Outlet``, or
+        ``Outlet[default_output]`` when the outlet is a dictionary. Its
+        ``y_upstream`` is set to the source's ``outputs`` and its
+        ``time_upstream`` to the source's result times [s] (continuous
+        source) or final time [s] (batch source). The outlet is never
+        split, so a source connected to several destinations would hand
+        each of them the full flow [kg/s] or inventory [kg];
+        ``SimulationExec.SolveFlowsheet`` therefore rejects such fan-out
+        graphs before solving (issue #437).
+        """
         self.Matter = self.source_uo.Outlet
         if isinstance(self.Matter, dict):
             self.Matter = self.Matter[self.source_uo.default_output]

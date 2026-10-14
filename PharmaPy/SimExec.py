@@ -398,6 +398,53 @@ class SimulationExec:
 
         return count
 
+    def _check_fan_out(self) -> None:
+        """Reject graph units whose single outlet feeds several successors.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If any unit lists two or more successors. The message names
+            every such unit with its successors, in graph declaration
+            order, and says to connect one successor only, because
+            splitting one outlet among several units is not implemented
+            (per-edge routing, issue #340). ``NotImplementedError`` is
+            used, as for recycles in ``__init__``, because the topology is
+            a valid process intent that PharmaPy cannot yet model, not a
+            malformed input.
+
+        Notes
+        -----
+        ``Connection.FeedConnection`` hands every successor a copy of the
+        source's whole outlet, and no split specification exists, so each
+        branch would receive the full flow [kg/s] or inventory [kg] and the
+        flowsheet would create mass (issue #437). The count is of
+        adjacency entries, so a successor listed twice, as in
+        ``{'A': ['B', 'B']}``, is rejected too: it would receive two full
+        copies of the outlet. ``topological_bfs`` accepts and schedules
+        such graphs, so ``__init__``, ``execution_names`` and the
+        flowsheet diagram remain available for them.
+
+        The whole graph is checked, irrespective of ``pick_units``: a
+        unit transfers its outlet whenever it is picked or already solved,
+        so a partial solve would duplicate the outlet as soon as it, or a
+        later call, reaches a branch.
+        """
+        # str() keeps names readable for NumPy string successor arrays.
+        fanned_out = {str(name): [str(successor) for successor in successors]
+                      for name, successors in self.graph.items()
+                      if len(successors) > 1}
+        if fanned_out:
+            details = '; '.join(f'{name!r} feeds {successors}'
+                                for name, successors in fanned_out.items())
+            raise PharmaPyNonImplementedError(
+                'Flowsheet units connect one outlet to several successors: '
+                f'{details}. Every successor would receive a full copy of '
+                'the outlet stream, duplicating its mass, because PharmaPy '
+                'has no stream-split contract. Connect each of these units '
+                'to one successor only; splitting an outlet among several '
+                'units (per-edge routing, issue #340) is not supported yet.')
+
     def SolveFlowsheet(self, kwargs_run=None, pick_units=None, verbose=True,
                        steady_state_di=None, tolerances_ss=None, ss_time=0):
         """
@@ -412,7 +459,8 @@ class SimulationExec:
         ----------
         kwargs_run : dict, optional
             Keyword arguments passed to each unit operation ``solve_unit`` call,
-            keyed by unit operation name.
+            keyed by unit operation name, in the units each ``solve_unit``
+            documents (for example ``runtime`` [s]).
         pick_units : sequence of str, optional
             Unit operation names to solve. If omitted, all unit operations in
             the execution order are solved.
@@ -420,18 +468,43 @@ class SimulationExec:
             If true, print progress messages for each solved unit operation.
         steady_state_di : dict, optional
             Steady-state event configuration keyed by unit operation name.
+            Each value holds keyword arguments of
+            ``PharmaPy.Commons.check_steady_state``, such as ``time_stop``
+            [s], ``tau`` [s], ``num_tau`` [-] and ``threshold`` (in the
+            units of the state derivatives' norms); missing ``time_stop``
+            and ``tau`` are filled in (see Notes). Ignored for a ``Mixer``.
         tolerances_ss : dict, optional
-            Reserved steady-state tolerance mapping.
+            Reserved; accepted for API compatibility and not read.
         ss_time : float, optional
-            Initial steady-state time horizon accumulator.
+            Initial value [s] of the residence-time accumulator used as the
+            default steady-state ``time_stop``; default 0 s.
 
         Returns
         -------
         None
-            Results are stored on ``time_processing``, ``result``, and
+            Results are stored on ``time_processing`` (time span [s] of each
+            solved unit with a timed result, keyed by name), ``result``, and
             ``connections`` attributes.
 
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            Before any unit is solved, if a unit's outlet feeds several
+            successors, which would each receive the full outlet (issue
+            #437); see :meth:`_check_fan_out`.
+
+        Notes
+        -----
+        For each picked unit listed in ``steady_state_di`` (except a
+        ``Mixer``), its residence time ``tau`` [s] from ``_get_tau`` (0 s if
+        the unit has none) is added to ``ss_time`` [s]. The running total
+        and ``tau`` become the defaults of ``time_stop`` and ``tau`` in the
+        unit's ``steady_state_di`` entry, which is updated in place; a
+        ``check_steady_state`` event is appended to the unit's
+        ``state_event_list``, and ``any_event=False`` is passed to its
+        ``solve_unit`` (and stored in its ``kwargs_run`` entry, if any).
         """
+        self._check_fan_out()
 
         if kwargs_run is None:
             kwargs_run = {}
@@ -451,7 +524,6 @@ class SimulationExec:
         connections = {}
         count = 1
 
-        # ss_time = 0
         for ind, name in enumerate(self.execution_names):
             instance = getattr(self, name)
 
@@ -471,18 +543,17 @@ class SimulationExec:
                 if name in steady_state_di:
                     kw_ss = steady_state_di[name]
 
-                    tau = 0
+                    tau = 0  # [s], no residence time without _get_tau
                     if hasattr(instance, '_get_tau'):
-                        tau = instance._get_tau()
+                        tau = instance._get_tau()  # [s]
 
-                    ss_time += tau
+                    ss_time += tau  # [s], cumulative residence time
 
                     if instance.__class__.__name__ == 'Mixer':
                         pass
                     else:
-                        defaults = {'time_stop': ss_time,
-                                    # 'threshold': 1e-6,
-                                    'tau': tau}
+                        defaults = {'time_stop': ss_time,  # [s]
+                                    'tau': tau}  # [s]
 
                         for key, val in defaults.items():
                             kw_ss.setdefault(key, val)
@@ -493,11 +564,9 @@ class SimulationExec:
                                     'kwargs': kw_ss
                                     }
 
-                        # instance.state_event_list = [ss_event]
                         instance.state_event_list.append(ss_event)
                         kwargs_uo['any_event'] = False
 
-                # check_modeling_objects(instance, name)
                 instance.solve_unit(**kwargs_uo)
 
                 uo_type = instance.__module__
@@ -516,7 +585,7 @@ class SimulationExec:
                 # Processing times
                 if hasattr(instance.result, 'time'):
                     time_prof = instance.result.time
-                    time_processing[name] = time_prof[-1] - time_prof[0]
+                    time_processing[name] = time_prof[-1] - time_prof[0]  # [s]
 
             # instance is already solved, pass data to connection
             elif isinstance(instance.outputs, dict):
@@ -1588,12 +1657,13 @@ class SimulationExec:
         has not been re-solved since it, the successor has been solved
         since it, the transferred object is among the successor's inputs
         (identity), and the successor holds no other object transferred on
-        that edge. Otherwise the duration is NaN, with one of these reasons:
+        that edge. ``SolveFlowsheet`` rejects a graph in which any unit has
+        several successors before solving it (issue #437), so a unit of the
+        solved flowsheet has at most one. Otherwise the duration is NaN,
+        with one of these reasons:
 
         * the unit is not part of the solved flowsheet;
         * terminal unit, with no successor;
-        * fan-out to several successors, each receiving a full copy of the
-          outlet (issue #437);
         * the successor was not solved, or no transfer to it is recorded;
         * the source was re-solved after its outlet was transferred;
         * the successor was not solved after the transfer;
@@ -1633,11 +1703,7 @@ class SimulationExec:
         if not successors:
             return np.nan, ('no downstream unit consumes its outlet '
                             '(terminal unit)')
-        if len(successors) > 1:
-            return np.nan, (
-                f'its outlet feeds {len(successors)} units {successors}, each '
-                'receiving a full copy of it (fan-out, issue #437)')
-        successor = successors[0]
+        successor = successors[0]  # the only one; fan-out is never solved
         consumer = self.uos_instances.get(successor)
         record = getattr(self, '_transfers', {}).get((name, successor))
         if consumer is None or not hasattr(getattr(consumer, 'result', None),
@@ -1726,11 +1792,11 @@ class SimulationExec:
             If the unit is instantaneous and its consumed duration is
             undefined, so its static continuous totals are NaN. The message
             names the unit and the reason: not part of the solved flowsheet;
-            terminal unit; fan-out (issue #437); successor not solved or no
-            transfer recorded; source re-solved after the transfer;
-            successor not solved after the transfer; outlet held as a
-            holdup rather than a feed (issues #436, #438); transferred
-            outlet no longer held by the successor (issues #438, #444);
+            terminal unit; successor not solved or no transfer recorded;
+            source re-solved after the transfer; successor not solved
+            after the transfer; outlet held as a holdup rather than a feed
+            (issues #436, #438); transferred outlet no longer held by the
+            successor (issues #438, #444);
             several outlet copies held by the successor (issue #441);
             several solve segments kept by the successor (issues #278,
             #443); no solve segment kept by the successor (for example
@@ -1751,7 +1817,7 @@ class SimulationExec:
         the time its outlet is consumed by its single, verified successor;
         otherwise its totals are NaN with a warning rather than a silent
         zero (see :meth:`_consumed_duration`, which is deliberately
-        conservative pending issues #437 and #438). A ``DynamicInlet``
+        conservative pending issue #438). A ``DynamicInlet``
         that controls no field on such a unit feeds the static stream and
         is accounted the same way; one that controls fields cannot reach an
         instantaneous ``Mixer``, which rejects it at solve time, and raises
@@ -1958,7 +2024,7 @@ class SimulationExec:
         [s], such as an ``Evaporator`` inlet shut by its volume event.
         The raw totals of an instantaneous unit, such as a static
         continuous ``Mixer``, are NaN unless it has a single, verified
-        consumer (see :meth:`_consumed_duration`; issues #437, #438, #441).
+        consumer (see :meth:`_consumed_duration`; issues #438, #441).
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -2138,7 +2204,7 @@ class SimulationExec:
         -----
         ``raw_cost`` prices the ``GetRawMaterials`` totals, so the entries
         of an instantaneous unit without a single, verified consumer are NaN
-        like its totals (see :meth:`_consumed_duration`; issues #437, #438,
+        like its totals (see :meth:`_consumed_duration`; issues #438,
         #441).
         """
 
