@@ -1920,10 +1920,47 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
                 and getattr(legacy_phase, 'distrib', None) is None)
 
     def to_legacy_state(self):
+        """The moments, spelled the way an old SolidPhase holds them.
+
+        Returns
+        -------
+        dict
+            Keyword arguments for ``PharmaPy.Phases.SolidPhase``:
+            ``moments``, the total moments in the vessel [m**k], shape
+            ``(num_mom,)``; ``num_mom``; and ``kv``, the volume shape
+            factor [-].
+
+        Raises
+        ------
+        ValueError
+            If the population is not empty but no slurry volume is known, so
+            the moments cannot be turned into totals.
+
+        Notes
+        -----
+        This mechanism stores moments per m3 of slurry in microns
+        [um**k/m3], but the old SolidPhase holds total moments in metres
+        [m**k]: its mass is kv * rho * mu_3 with no volume factor. Copying
+        the array unchanged misstated mu_3 by a factor of 1e18 / V_slurry.
+        """
+        moments = self.true_state(np.asarray(
+            getattr(self, self.moments_state_name),
+            dtype=float))  # [um**k/m3 slurry]
+        vol_slurry = self._slurry_volume(moments)  # [m3]
+
+        if vol_slurry <= 0 and np.any(moments != 0):
+            raise ValueError(
+                'Cannot express the crystal moments as totals for the '
+                'pre-refactor SolidPhase: the slurry volume is unknown. '
+                'Attach the solid to a vessel with a liquid phase.')
+
+        orders = np.arange(len(moments))
+
         return {
-            'moments': np.asarray(getattr(self, self.moments_state_name)),
+            'moments': (moments * vol_slurry
+                        * self.MOMENT_UNIT_FACTOR ** orders),  # [m**k]
             'num_mom': self.num_mom,
-            'kv': self.kv,
+            'kv': self.kv,  # [-]
         }
 
     @classmethod

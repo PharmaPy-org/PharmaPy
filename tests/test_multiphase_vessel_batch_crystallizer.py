@@ -752,6 +752,115 @@ def _held(converted, mechanism_cls):
     return mechanism.true_state(np.asarray(getattr(mechanism, name)))
 
 
+def _seed_moments():
+    """Return the first four moments of the seed distribution.
+
+    Returns
+    -------
+    numpy.ndarray
+        Moments per m**3 of slurry [um**k/m**3], orders 0 to 3, by the
+        rectangle rule on the module's uniform grid.
+    """
+    grid = _size_grid()  # [um]
+    spacing = grid[1] - grid[0]  # [um]
+    seed = _seed_distribution()  # [#/(um m**3)]
+    return np.array([np.sum(seed * grid**order) * spacing
+                     for order in range(4)])
+
+
+def _build_moments_crystallizer(moments):
+    """Build a batch crystallizer that carries its crystals as moments.
+
+    Parameters
+    ----------
+    moments : numpy.ndarray
+        Initial moments per m**3 of slurry [um**k/m**3], shape ``(4,)``.
+
+    Returns
+    -------
+    tuple
+        The ``BatchCrystallizer``, at ``WARM_TEMP``, and its solid phase.
+    """
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=OLD_SOLID_MASS_FRAC, temp=WARM_TEMP
+    )
+    solid.mechanisms = MomentsPopulationBalance(
+        owning_phase=solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        moments_init=moments,
+    )
+    vessel = BatchCrystallizer(
+        integrator=None,
+        h_conv=HEAT_TRANSFER_COEFF,
+        diam=VESSEL_DIAMETER,
+        controller=SimpleTemperatureController(temp_func=lambda time: WARM_TEMP),
+    )
+    vessel.Phases = [
+        LiquidPhase(DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC,
+                    temp=WARM_TEMP),
+        solid,
+    ]
+    vessel.CrystKinetics = CrystKinetics(
+        APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=NUCL_SEC,
+        growth=GROWTH, solubility_type="apelblat",
+        solubility_basis="mass_per_volume_solvent",
+    )
+    return vessel, solid
+
+
+def test_moments_reach_the_old_stack_as_totals_in_metres():
+    """Moments per m**3 of slurry in microns become totals in metres.
+
+    The old SolidPhase holds total moments [m**k]; this stack holds them per
+    m**3 of slurry in microns. The slurry volume is the liquid's plus the
+    crystals', kv * mu_3 of each m**3 of it.
+    """
+    moments = _seed_moments()  # [um**k/m**3]
+    vessel, solid = _build_moments_crystallizer(moments)
+    mechanism = solid.get_mechanism(MomentsPopulationBalance)
+    crystal_fraction = (
+        mechanism.kv * moments[3] / MICRONS_PER_METRE**3
+    )  # [-], crystal volume per m**3 of slurry
+    vol_slurry = float(_liquid(vessel).vol) / (1.0 - crystal_fraction)  # [m**3]
+
+    legacy = solid.to_legacy()
+
+    expected = (
+        moments * vol_slurry / MICRONS_PER_METRE ** np.arange(len(moments))
+    )  # [m**k], total in the vessel
+    np.testing.assert_allclose(legacy.moments, expected, rtol=ALGEBRAIC_RTOL)
+
+
+def test_moments_survive_a_round_trip_through_the_old_stack():
+    """Converting a moments vessel to the old stack and back keeps them."""
+    moments = _seed_moments()  # [um**k/m**3]
+    vessel, _ = _build_moments_crystallizer(moments)
+
+    back = MixedPhase.from_legacy(
+        vessel.Phases.to_legacy(), target_components=TARGET,
+        solvent_name="solvent")
+
+    np.testing.assert_allclose(
+        _held(back, MomentsPopulationBalance), moments, rtol=ALGEBRAIC_RTOL)
+
+
+def test_moments_without_a_slurry_volume_cannot_reach_the_old_stack():
+    """A moments solid that belongs to no vessel has no volume to count in."""
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=OLD_SOLID_MASS_FRAC, temp=WARM_TEMP
+    )
+    solid.mechanisms = MomentsPopulationBalance(
+        owning_phase=solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        moments_init=_seed_moments(),
+    )
+
+    with pytest.raises(ValueError, match="slurry volume is unknown"):
+        solid.to_legacy()
+
+
 def test_old_slurry_arrives_as_a_density_per_slurry_volume():
     """An old total crystal count becomes a density per m**3 of slurry.
 
