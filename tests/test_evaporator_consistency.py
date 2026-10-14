@@ -43,14 +43,16 @@ GAS_CONSTANT = 8.314  # [J/mol/K], retained value of PharmaPy.Evaporators.gas_ct
 DURATION = 1.0  # [s], short trajectory with negligible depletion
 
 
-@pytest.fixture
-def thermo_path(tmp_path):
+def write_uniquac_binary(directory):
     """Write a synthetic binary with equal UNIQUAC sizes and unlike tau=1/2.
+
+    Shared by this module's ``thermo_path`` fixture and other evaporator
+    flowsheet tests.
 
     Parameters
     ----------
-    tmp_path : pathlib.Path
-        Test directory inside the working tree (pytest --basetemp).
+    directory : pathlib.Path
+        Existing directory for the JSON file.
 
     Returns
     -------
@@ -62,9 +64,26 @@ def thermo_path(tmp_path):
         species.update(ri=1.0, qi=1.0, qip=1.0)  # [-], equal molecular sizes
     interaction = GAS_CONSTANT * TEMPERATURE * np.log(2)  # [J/mol], tau=1/2 at T
     data['interaction'] = {'amk': [[0, interaction], [interaction, 0]]}
-    path = tmp_path / 'thermo.json'
+    path = directory / 'thermo.json'
     path.write_text(json.dumps(data))
     return str(path)
+
+
+@pytest.fixture
+def thermo_path(tmp_path):
+    """Return the synthetic UNIQUAC binary of :func:`write_uniquac_binary`.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Test directory inside the working tree (pytest --basetemp).
+
+    Returns
+    -------
+    str
+        Thermodynamic JSON path.
+    """
+    return write_uniquac_binary(tmp_path)
 
 
 def make_unit(thermo_path, unit_class=Evaporator, **kwargs):
