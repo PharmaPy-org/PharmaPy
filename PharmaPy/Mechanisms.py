@@ -439,8 +439,14 @@ class ReactionMechanism(Mechanism):
                 rk.delta_hrxn,
                 rk.tref_hrxn
             ))  # [J/mol]
+        # rxn_rates are per extent of each reaction divided by its first
+        # reactant's coefficient, so the enthalpy, per reaction as written,
+        # goes on that basis too, as the legacy reactors do (#22).
+        deltah_rate_basis = (
+            deltah_rxn / rk.stoich_normalization
+        )  # [J/mol of normalized extent]
         heat_density = (
-            -(deltah_rxn * aux["rxn_rates"]).sum() * MOL_PER_KMOL
+            -(deltah_rate_basis * aux["rxn_rates"]).sum() * MOL_PER_KMOL
         )  # [W/m**3]
         q = heat_density * phase.vol  # [W]
         return q

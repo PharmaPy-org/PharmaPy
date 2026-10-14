@@ -404,14 +404,21 @@ def test_jacket_cooling_rate_is_independent_of_charge_mass():
         np.testing.assert_allclose(rate, rates[0], rtol=TEMP_RATE_RTOL)
 
 
-@pytest.mark.parametrize("reaction, product", [("A + B --> C", "C")])
+@pytest.mark.parametrize("reaction, product", [
+    ("A + B --> C", "C"),
+    # Mass conserving (2 x 50 = 100 g/mol); the first reactant's coefficient
+    # of 2 separates the kinetic extent from the reaction as written.
+    ("2 B --> A", "A"),
+])
 def test_reaction_heat_is_the_enthalpy_released_per_second(reaction, product):
     """In an adiabatic batch, heat capacity times dT/dt is -dH * extent rate.
 
     The product forms once per reaction as written, so its molar formation
     rate is the extent rate. Rates in kmol/(m**3 s) times an enthalpy in J/mol
     need 1000 mol/kmol to give watts; without it the reaction heat is a
-    thousand times too small.
+    thousand times too small. RxnKinetics reports rates per extent of the
+    reaction divided by its first reactant's coefficient, so for 2 B --> A an
+    enthalpy per reaction as written that is not halved doubles the heat.
     """
     vessel = _build_reactor(
         BatchReactor,
