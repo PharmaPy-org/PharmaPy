@@ -802,3 +802,41 @@ def test_zero_crystal_mass_empties_moments_left_with_noise():
     np.testing.assert_array_equal(
         getattr(mechanism, mechanism.moments_state_name), 0.0
     )
+
+
+def test_population_balance_follows_a_handed_over_liquid():
+    """Replacing the liquid after CrystKinetics re-binds the population balance.
+
+    SimulationExec charges a batch crystallizer by setting its Phases to the
+    upstream liquid, after the kinetics were set on a placeholder. The
+    population balance converts its per-m**3-of-slurry state with the liquid
+    volume, so it has to use the liquid that is now in the vessel.
+    """
+    vessel = _build_crystallizer(WARM_TEMP)
+    mechanism = _mechanism(vessel)
+    placeholder = _liquid(vessel)
+
+    from PharmaPy.MixedPhases_Refactored import MixedPhase
+
+    # Stamped the way Connections.PassPhases stamps upstream material, which
+    # makes the vessel swap its liquid and keep its solid.
+    handed_over = MixedPhase([
+        LiquidPhase(DATA_PATH, mass=2.0 * CHARGE_MASS,
+                    mass_frac=CHARGE_MASS_FRAC, temp=WARM_TEMP)
+    ])
+    handed_over.transferred_from_uo = True
+    vessel.Phases = handed_over
+
+    assert _liquid(vessel) is not placeholder
+    assert mechanism.liquid_phase is _liquid(vessel)
+
+    # Unseeded, so the slurry is all liquid.
+    empty = getattr(mechanism, mechanism.distribution_state_name)
+    np.testing.assert_allclose(
+        mechanism._slurry_volume(empty), float(_liquid(vessel).vol),
+        rtol=ALGEBRAIC_RTOL,
+    )
+    np.testing.assert_allclose(
+        float(_liquid(vessel).vol), 2.0 * float(placeholder.vol),
+        rtol=1e-9,
+    )

@@ -444,3 +444,163 @@ def test_product_stream_carries_both_phases():
     families = [phase.phase_family for phase in vessel.Outlet.Phases]
     assert "liquid" in families
     assert "solid" in families
+
+
+# Slurry flow of a crystal-laden feed. Only its ratio to the vessel volume
+# enters the inlet term, so any positive value serves.
+FEED_SLURRY_VOL_FLOW = 1.0e-5  # [m**3/s]
+
+
+def _feed_solid(distrib):
+    """Return a solid phase carrying a feed crystal population.
+
+    Parameters
+    ----------
+    distrib : numpy.ndarray
+        Feed number density per m**3 of feed slurry [#/(um m**3)], on the
+        vessel's size grid.
+
+    Returns
+    -------
+    SolidPhase
+        Phase whose mechanism publishes ``distrib`` as the inlet population.
+    """
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=[0.0, 0.0, 1.0, 0.0, 0.0], temp=WARM_TEMP
+    )
+    solid.mechanisms = OneDFVMMechanism(
+        solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        x_grid=_size_grid(),
+        distrib_init=distrib,
+    )
+    return solid
+
+
+def test_crystal_inflow_is_scaled_by_the_slurry_volume():
+    """A crystal-laden feed enters as ``(Q / V_slurry) * n_in``.
+
+    Q is the whole slurry flow of the feed, so it is divided by the vessel's
+    slurry volume. Dividing it by the volume of the solid phase, which is the
+    crystal volume ``phi * V_slurry``, overstates the inflow by ``1 / phi``.
+    """
+    from PharmaPy.DataClasses import PhaseRef
+
+    vessel = _build_crystallizer(distrib=_seed_distribution(), with_feed=False)
+    mechanism = _mechanism(vessel)
+    solid = vessel.Phases.get_phase_from_ref(PhaseRef("solid", 0))
+
+    held = getattr(mechanism, mechanism.distribution_state_name)
+    phi = mechanism.solid_volume_fraction(held)  # [-]
+    vol_slurry = float(_liquid(vessel).vol) / (1.0 - phi)  # [m**3]
+    feed_distrib = _seed_distribution(scale=0.5)  # [#/(um m**3)]
+
+    rates = mechanism.get_inlet_contributions(
+        _feed_solid(feed_distrib), solid, FEED_SLURRY_VOL_FLOW, {}
+    )
+    (rate,) = rates.values()
+
+    # Anti-vacuity: the crystals are a small part of the slurry, so the
+    # crystal volume and the slurry volume differ by orders of magnitude.
+    assert 0.0 < phi < 0.1
+    np.testing.assert_allclose(
+        rate, FEED_SLURRY_VOL_FLOW / vol_slurry * feed_distrib,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_crystal_inflow_reaches_a_vessel_without_crystals():
+    """Feed crystals enter a vessel that holds none yet.
+
+    With no crystals the slurry is all liquid, so the inlet term is
+    ``(Q / V_liquid) * n_in``, not zero.
+    """
+    from PharmaPy.DataClasses import PhaseRef
+
+    vessel = _build_crystallizer(with_feed=False)
+    mechanism = _mechanism(vessel)
+    solid = vessel.Phases.get_phase_from_ref(PhaseRef("solid", 0))
+    feed_distrib = _seed_distribution()  # [#/(um m**3)]
+
+    rates = mechanism.get_inlet_contributions(
+        _feed_solid(feed_distrib), solid, FEED_SLURRY_VOL_FLOW, {}
+    )
+    (rate,) = rates.values()
+
+    np.testing.assert_allclose(
+        rate,
+        FEED_SLURRY_VOL_FLOW / float(_liquid(vessel).vol) * feed_distrib,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_check_module_sees_a_connected_inlet():
+    """A fed vessel passes the modeling-object check without a warning.
+
+    The refactored vessels store their feeds in ``inlet_connections``; their
+    ``Inlet`` attribute is write-only, so it cannot be read to find them.
+    """
+    import warnings
+
+    from PharmaPy.CheckModule import check_modeling_objects
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        check_modeling_objects(_build_crystallizer(with_feed=True), "CR01")
+
+    with pytest.warns(UserWarning, match="Inlet"):
+        check_modeling_objects(_build_crystallizer(with_feed=False), "CR01")
+
+
+def test_semibatch_feed_dilutes_the_population():
+    """A liquid feed into a semibatch crystallizer dilutes its crystals.
+
+    With no outlet and no crystals in the feed, d(n V)/dt = 0, so the
+    population per m**3 of slurry falls as dn/dt = -(Q_in / V_slurry) * n.
+    Without this term the growing volume multiplied the crystal mass.
+    """
+    from PharmaPy.Crystallizers_Refactored import SemiBatchCrystallizer
+
+    vessel = SemiBatchCrystallizer(
+        integrator=None, h_conv=0, diam=VESSEL_DIAMETER, isothermal=True
+    )
+    liquid = LiquidPhase(
+        DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC, temp=WARM_TEMP
+    )
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=[0.0, 0.0, 1.0, 0.0, 0.0], temp=WARM_TEMP
+    )
+    solid.mechanisms = OneDFVMMechanism(
+        solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        x_grid=_size_grid(),
+        distrib_init=_seed_distribution(),
+    )
+    vessel.Phases = [liquid, solid]
+    vessel.CrystKinetics = CrystKinetics(
+        APELBLAT_COEFFS,
+        nucl_prim=NUCL_PRIM,
+        nucl_sec=NUCL_SEC,
+        growth=GROWTH,
+        solubility_type="apelblat",
+    )
+    feed = LiquidStream(
+        DATA_PATH, mass_flow=FEED_MASS_FLOW, mass_frac=CHARGE_MASS_FRAC,
+        temp=WARM_TEMP,
+    )
+    feed_vol_flow = float(feed.vol_flow)  # [m**3/s]
+    vessel.Inlet = feed
+    vessel.compile_structure()
+
+    mechanism = _mechanism(vessel)
+    held = np.array(getattr(mechanism, mechanism.distribution_state_name))
+    phi = mechanism.solid_volume_fraction(held)  # [-]
+    vol_slurry = float(_liquid(vessel).vol) / (1.0 - phi)  # [m**3]
+
+    _, distrib_rate = _derivatives(vessel)
+
+    np.testing.assert_allclose(
+        distrib_rate, -(feed_vol_flow / vol_slurry) * held, rtol=1e-9
+    )
