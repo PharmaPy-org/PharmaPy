@@ -656,6 +656,16 @@ class Connection:
           a ``DynamicExtractor``). A batch or semibatch source is handed over
           as its holdup, not converted to a flow (issue #436); insert a
           ``BatchToFlowConnector`` to discharge a liquid holdup as a stream.
+
+        Only a ``Mixer`` combines several transfers into one mass- and
+        energy-balanced mixture. A later transfer to any other destination
+        replaces its ``Inlet`` or ``Phases``, is ignored (a charged
+        semibatch unit), or, for a ``BatchCryst`` or ``Drying`` unit, is
+        stacked with the earlier phases into a holdup list that is not a
+        mixture of the feeds (a ``Slurry`` replaces a ``BatchCryst``'s
+        phases instead). ``SimulationExec.SolveFlowsheet`` therefore
+        rejects several predecessors of a non-``Mixer`` unit before
+        solving (issue #444).
         """
         class_destination = self.destination_uo.__class__.__name__
         mode_dest = self.destination_uo.oper_mode

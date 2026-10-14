@@ -8,7 +8,8 @@ for the successor's fed duration, recursively through chains of
 instantaneous units, so a consumer solved for 0 s gives a total of 0.
 Otherwise the totals are NaN with a ``RuntimeWarning`` naming the unit and
 the reason: a terminal unit, or a successor that no longer holds the
-transfer, such as a charged ``SemibatchReactor`` (issue #438). Fan-out to
+transfer, such as a charged ``SemibatchReactor`` (issue #438) or a
+collector whose inlet was replaced by hand and solved again. Fan-out to
 several successors is rejected by ``SolveFlowsheet`` before any unit is
 solved (issue #437), so nothing is charged for it. Units without the
 flag, such as a ``DynamicCollector`` solved for 0 s, keep their own (zero)
@@ -367,8 +368,8 @@ def test_successor_ignoring_the_transfer_reports_nan(data_path):
     assert sim.R01.Inlet is own_inlet  # the transfer was not installed
 
     reason = (r"downstream unit 'R01' no longer holds the transferred outlet "
-              r"\(it ignored the transfer, see issue #438, or another "
-              r"transfer replaced it, see issue #444\)")
+              r"\(it ignored the transfer, see issue #438, or its input was "
+              r"replaced after the transfer\)")
     with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
             unit='M01', reason=reason)):
         raw = sim.GetRawMaterials(include_holdups=False)
@@ -379,6 +380,37 @@ def test_successor_ignoring_the_transfer_reports_nan(data_path):
     # The reactor's own raw inlet is charged for its own run.
     assert totals[2] == pytest.approx(own_inlet.mass_flow * REACTOR_RUNTIME,
                                       rel=RTOL)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_consumer_inlet_replaced_after_the_transfer_reports_nan(path):
+    """Report NaN when the consumer is re-solved on a replaced inlet.
+
+    ``SolveFlowsheet`` rejects fan-in to a non-Mixer unit (issue #444),
+    but a user can still replace the collector's inlet by hand and solve
+    it again, after which it no longer consumes the Mixer outlet.
+    """
+    pytest.importorskip('assimulo')
+    sim = SimulationExec(path, {'M01': ['C01'], 'C01': []})
+    sim.M01 = _mixer(path)
+    sim.C01 = DynamicCollector()
+    sim.SolveFlowsheet(kwargs_run={'C01': {'runtime': RUNTIME,
+                                           'verbose': False}}, verbose=False)
+    sim.C01.Inlet = _stream(path, COMPOSITION_C, FLOW_C)
+    sim.C01.solve_unit(runtime=RUNTIME, verbose=False)
+
+    reason = (r"downstream unit 'C01' no longer holds the transferred outlet "
+              r"\(it ignored the transfer, see issue #438, or its input was "
+              r"replaced after the transfer\)")
+    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
+            unit='M01', reason=reason)):
+        keys, totals = _raw_amounts(sim.GetRawMaterials(), 'mass')
+
+    assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1'), ('C01', 'Inlet_0')]
+    assert np.isnan(totals[:2]).all()
+    # The replacing raw stream is charged for the collector's own run.
+    assert totals[2] == pytest.approx(FLOW_C * RUNTIME, rel=RTOL)
 
 
 @pytest.mark.assimulo

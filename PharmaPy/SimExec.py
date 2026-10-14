@@ -14,7 +14,7 @@ from PharmaPy.StatsModule import StatisticsClass
 
 from PharmaPy.Connections import (Connection, convert_str_flowsheet,
                                   get_inputs_new, topological_bfs)
-from PharmaPy.Errors import PharmaPyNonImplementedError
+from PharmaPy.Errors import PharmaPyNonImplementedError, PharmaPyValueError
 from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_object
 
 from PharmaPy.Commons import trapezoidal_rule, check_steady_state
@@ -492,6 +492,10 @@ class SimulationExec:
             Before any unit is solved, if a unit's outlet feeds several
             successors, which would each receive the full outlet (issue
             #437); see :meth:`_check_fan_out`.
+        PharmaPyValueError
+            Before any unit is solved, if a unit other than a ``Mixer`` is
+            fed by several units, whose streams it would replace, drop or
+            stack unmixed (issue #444); see :meth:`_check_fan_in`.
 
         Notes
         -----
@@ -517,6 +521,8 @@ class SimulationExec:
 
         if tolerances_ss is None:
             tolerances_ss = {}
+
+        self._check_fan_in()
 
         time_processing = {}
 
@@ -596,6 +602,69 @@ class SimulationExec:
 
         self.result = SimulationResult(self)
         self.connections = connections
+
+    def _check_fan_in(self) -> None:
+        """Reject non-Mixer units that receive streams from several units.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a unit other than a ``Mixer`` has two or more distinct
+            predecessors. The message names every such unit, in order of
+            first appearance as a successor, with its class and its
+            predecessors in graph declaration order, and says to combine
+            the predecessors in a ``Mixer`` first. ``ValueError`` is used
+            because the flowsheet specification is inconsistent with a
+            destination that does not mix its inlets, and the remedy, a
+            ``Mixer``, already exists in PharmaPy.
+        AttributeError
+            If such a destination has not been assigned to the executor,
+            as when ``SolveFlowsheet`` reaches an unassigned unit.
+
+        Notes
+        -----
+        Only a ``Mixer`` combines the streams it receives into one mass- and
+        energy-balanced mixture: ``Connection.PassPhases`` appends each
+        transfer to its ``Inlets``. Any other destination would replace
+        its ``Inlet`` or ``Phases`` with each further transfer, ignore it
+        (an already charged semibatch unit), or, for a ``BatchCryst`` or
+        ``Drying`` unit, stack the transferred phases into a holdup list
+        that is not a mixture of the feeds (a ``Slurry`` replaces a
+        ``BatchCryst``'s phases instead), so a predecessor's flow [kg/s]
+        or inventory [kg] would be dropped or left unmixed (issue #444).
+        A ``Mixer`` is identified by its class name, as in
+        ``Connection.PassPhases``. Predecessors are counted once each, so
+        a duplicated adjacency entry is left to :meth:`_check_fan_out`.
+
+        The whole graph is checked, irrespective of ``pick_units``: an
+        already solved predecessor transfers whenever its destination is
+        picked, so a partial solve could still replace a stream.
+        """
+        predecessors = {}
+        for name, successors in self.graph.items():
+            for successor in successors:
+                # str() keeps names readable for NumPy string arrays.
+                sources = predecessors.setdefault(str(successor), [])
+                if str(name) not in sources:
+                    sources.append(str(name))
+
+        merged = {}
+        for name, sources in predecessors.items():
+            if len(sources) > 1:
+                unit_class = type(getattr(self, name)).__name__
+                if unit_class != 'Mixer':
+                    merged[name] = (unit_class, sources)
+        if merged:
+            details = '; '.join(
+                f'{name!r} ({unit_class}) receives {sources}'
+                for name, (unit_class, sources) in merged.items())
+            raise PharmaPyValueError(
+                'Flowsheet units that are not a Mixer are fed by several '
+                f'units: {details}. Only a Mixer combines several inlets '
+                'into one balanced mixture; any other unit would replace '
+                'or ignore all but one transferred stream, or stack them '
+                'unmixed. Connect the predecessors to a Mixer and the '
+                'Mixer to the unit.')
 
     def SetParamEstimation(self, x_data, y_data=None, y_spectra=None,
                            fit_spectra=False,
@@ -1670,8 +1739,10 @@ class SimulationExec:
         * the successor holds the transferred stream as a holdup
           (``Phases``) rather than as a feed (issues #436, #438);
         * the successor no longer holds the transferred outlet: its latest
-          solve ignored the transfer (issue #438), or another transfer
-          replaced it (fan-in, issue #444);
+          solve ignored the transfer (issue #438), or its input was
+          replaced after the transfer, for example by assigning a new
+          ``Inlet`` and solving it again (``SolveFlowsheet`` rejects
+          several predecessors of a non-``Mixer`` unit, issue #444);
         * the successor holds several copies of the outlet, for example a
           ``Mixer`` re-solved in the same flowsheet (issue #441);
         * the successor keeps several solve segments in ``profiles_runs``,
@@ -1729,7 +1800,7 @@ class SimulationExec:
             return np.nan, (
                 f"downstream unit '{successor}' no longer holds the "
                 'transferred outlet (it ignored the transfer, see issue '
-                '#438, or another transfer replaced it, see issue #444)')
+                '#438, or its input was replaced after the transfer)')
         history = self._transfer_history.get((name, successor), [])
         copies = sum(any(item is old for old in history) for item in used)
         if copies > 1:
@@ -1796,7 +1867,7 @@ class SimulationExec:
             source re-solved after the transfer; successor not solved
             after the transfer; outlet held as a holdup rather than a feed
             (issues #436, #438); transferred outlet no longer held by the
-            successor (issues #438, #444);
+            successor (issue #438, or an input replaced after the transfer);
             several outlet copies held by the successor (issue #441);
             several solve segments kept by the successor (issues #278,
             #443); no solve segment kept by the successor (for example
