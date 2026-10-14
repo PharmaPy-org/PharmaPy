@@ -119,7 +119,7 @@ Chemical selection
 		}
 	}
 
-It should be noted that supplying the values for the molecular weight, liquid density, and solid density of the species is mandatory for the analysis to be run. However, it should also be noted that while the basis analysis with PharmaPy may run without the other values, other in-depth analysis of the system may be inaccurate without the other chemical and thermodynamic properties.
+It should be noted that supplying the values for the molecular weight, liquid density, and solid density of the species is mandatory for the analysis to be run. Only these are always required. For the list-valued correlation coefficients (:code:`cp_liq`, :code:`cp_solid`, :code:`cp_vapor`, :code:`visc_liq`, :code:`p_vap` and :code:`diffusivity`), a calculation that needs coefficients that a species omits raises :code:`MissingPropertyError`, which names the species and the property; see :ref:`Missing property data <missing-property-data>` in the advanced features. Missing scalar properties follow the method-specific behavior documented there; a unified policy is tracked in `issue 424 <https://github.com/PharmaPy-org/PharmaPy/issues/424>`_.
 
 The other properties, :code:`t_crit`, :code:`cp_liq`, :code:`cp_solid`, :code:`p_vap`, :code:`delta_hvap`, and :code:`tref_hvap`, are needed for the Drying unit operations. However, they are not needed for the scope of this example.
 

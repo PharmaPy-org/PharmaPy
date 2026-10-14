@@ -319,22 +319,83 @@ class LiquidStream(LiquidPhase):
 
 
 class SolidStream(SolidPhase):
-    def __init__(self, path_thermo=None, temp=298.15, pres=101325,
-                 mass_flow=0, mass_frac=None,
-                 distrib=None, x_distrib=None, kv=1):
+    """Represent a flowing solid phase on a per-second basis.
 
-        super().__init__(path_thermo, temp, pres=pres,
+    ``SolidStream`` reuses the ``SolidPhase`` amount attributes as flow-rate
+    storage: ``mass`` [kg/s], ``moles`` [mol/s], ``vol`` [m**3/s], and a
+    ``distrib`` number-rate distribution [#/um/s]. The flow-named aliases
+    ``mass_flow`` [kg/s] and ``mole_flow`` [mol/s] mirror ``mass`` and
+    ``moles`` and are refreshed by :meth:`updatePhase`. A ``vol_flow``
+    [m**3/s] alias exists only when an earlier step created it, for example
+    ``SlurryStream.Phases``; :meth:`updatePhase` then refreshes it from
+    ``vol``.
+    """
+
+    def __init__(self, path_thermo: Optional[str] = None,
+                 temp: float = 298.15, pres: float = 101325,
+                 mass_flow: float = 0, mass_frac: Optional[ArrayLike] = None,
+                 distrib: Optional[ArrayLike] = None,
+                 x_distrib: Optional[ArrayLike] = None,
+                 kv: float = 1, temp_ref: float = 298.15) -> None:
+        """Initialize a solid stream and its flow-basis aliases.
+
+        Parameters
+        ----------
+        path_thermo : str, optional
+            Path to the thermodynamic property database.
+        temp : float, optional
+            Temperature [K]; default 298.15 K is the reference condition.
+        pres : float, optional
+            Pressure [Pa], default one standard atmosphere (101325 Pa).
+        mass_flow : float, optional
+            Solid mass flow [kg/s]. Zero derives the flow from the number-rate
+            distribution; a positive value scales ``distrib`` as normalized
+            bin weights, as in ``SolidPhase`` with ``mass``.
+        mass_frac : array-like
+            Species mass fractions [-], shape ``(num_species,)``.
+        distrib : array-like, optional
+            Shape ``(num_sizes,)``: crystal number rate [#/um/s] when
+            ``mass_flow`` is zero, otherwise bin weights [-].
+        x_distrib : array-like, optional
+            Crystal sizes [um], shape ``(num_sizes,)``.
+        kv : float, optional
+            Volumetric shape factor [-]; default one represents cubic
+            particles.
+        temp_ref : float, optional
+            Enthalpy reference temperature [K], default 298.15 K, forwarded
+            to ``SolidPhase`` and stored as a Python float. ``getEnthalpy``
+            uses it when its own ``temp_ref`` is omitted; an explicit method
+            argument takes precedence. It follows the existing parameters, so
+            positional calls keep their meaning.
+
+        Raises
+        ------
+        ValueError
+            Propagated from ``SolidPhase`` for missing ``mass_frac``, an
+            invalid grid, or a ``kv`` that is not finite and positive.
+        RuntimeError
+            Propagated from ``SolidPhase`` if the mass fractions sum to less
+            than its composition threshold.
+
+        Notes
+        -----
+        Unit operations do not apply one outlet ``temp_ref`` policy (issue
+        #422). Outlets they construct, such as the solids ``Mixer``,
+        ``DynamicCollector``, ``MSMPR`` and ``ThreePhaseSettler`` outlets,
+        use the 298.15 K default. Outlets they copy from a holdup solid, such
+        as the ``BatchCryst``, semibatch crystallizer, ``Filter``,
+        ``DeliquoringStep`` and ``DisplacementWashing`` outlets, keep that
+        solid's ``temp_ref``. The difference affects only direct
+        ``getEnthalpy()`` calls on an outlet solid: ``Slurry``,
+        ``SlurryStream`` and ``Cake`` pass one common reference to the liquid
+        and the solid, so it does not enter their energy balances.
+        """
+        super().__init__(path_thermo, temp, temp_ref=temp_ref, pres=pres,
                          mass=mass_flow, mass_frac=mass_frac,
-                         # moments=moments,
                          distrib=distrib, x_distrib=x_distrib, kv=kv)
 
-        self.mass_flow = self.mass
-        # self.vol_flow = self.vol
-        self.mole_flow = self.moles
-
-        # del self.mass
-        # # del self.vol
-        # del self.moles
+        self.mass_flow = self.mass  # [kg/s]
+        self.mole_flow = self.moles  # [mol/s]
 
     def updatePhase(self, x_distrib: Optional[np.ndarray] = None,
                     distrib: Optional[np.ndarray] = None,
