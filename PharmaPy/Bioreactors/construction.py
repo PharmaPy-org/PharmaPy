@@ -15,7 +15,7 @@ from pathlib import Path
 import numpy as np
 
 from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef
-from PharmaPy.IntegratorBackends import FixedStepBackend, SciPyBackend
+from PharmaPy.IntegratorBackends import FixedStepBackend, ScipyBackend
 from PharmaPy.Metabolic import MetabolicNetworkDefinition
 from PharmaPy.Phases_Refactored import LiquidPhase
 from PharmaPy.Reactors_Refactored import BatchReactor, SemiBatchReactor, ContinuousReactor
@@ -352,7 +352,9 @@ def _integrator(numerics):
     Returns
     -------
     IntegratorBackend
-        ``FixedStepBackend`` or ``SciPyBackend``.
+        ``FixedStepBackend``, or upstream ``ScipyBackend`` with
+        ``inventory_boundaries=True`` so depleted pools are held at a
+        boundary instead of being throttled by the vessel limiter.
 
     Raises
     ------
@@ -381,7 +383,7 @@ def _integrator(numerics):
         for name in ("jacobian_relative_step", "jacobian_state_scale"):
             if name in numerics:
                 options[name] = numerics[name]
-        return SciPyBackend(options)
+        return ScipyBackend(options, inventory_boundaries=True)
     raise ValueError(f"unsupported native bioreactor backend {backend!r}")
 
 

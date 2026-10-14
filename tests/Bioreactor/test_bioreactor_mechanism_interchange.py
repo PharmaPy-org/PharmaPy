@@ -32,6 +32,7 @@ from PharmaPy.Bioreactors import ConfiguredRates, PathwayMetabolism, build_biore
 
 EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
 BIOMASS = 'biomass'
+
 # Absolute and relative agreement with the closed form. The cases solve with
 # rtol 1e-9; 1e-6 matches the existing generic-example analytical test. The
 # observed error is below 2e-7 against the closed form and 2e-10 between routes.
@@ -210,6 +211,25 @@ def _closed_form(mechanism, time_h):
             fed += added * after
     biomass = biomass0 * np.exp(growth * time_h)  # [kgDW]
     return nutrient0 + fed - (biomass - biomass0) / yield_, biomass
+
+
+@pytest.mark.parametrize('nutrient', [0., 1e-6])
+def test_configured_consumption_rejects_empty_inventory(tmp_path, nutrient):
+    """Reject constant uptake at initial or subsequently depleted substrate.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Isolated configuration directory.
+    nutrient : float
+        Initial nutrient inventory [mol].
+    """
+    case, mechanism, thermo = _load('generic_batch')
+    mechanism['state']['species']['amounts']['nutrient'] = nutrient
+    configured, thermo_path = _configured(case, mechanism, thermo, 1., tmp_path)
+    assembly = build_bioreactor(case, configured, thermo_path)
+    with pytest.raises(RuntimeError, match='negative rate at empty inventory'):
+        assembly.solve()
 
 
 @pytest.mark.parametrize('biomass_mw', [1000., 24.6])  # [g/mol], bookkeeping only

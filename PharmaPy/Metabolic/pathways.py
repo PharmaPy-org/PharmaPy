@@ -400,8 +400,9 @@ class ConfiguredPathwayModel:
         HiGHS feasibility tolerances are set to 1e-9, one order tighter than the
         1e-8 audit tolerance, so that a solved vector passes the audit. Ties are
         broken lexicographically by pathway identifier (each pathway minimized in
-        turn on the optimal face), or by the declared scaled minimum norm. Fixed
-        fluxes with magnitude <= 1e-10 are set to zero to remove solver noise.
+        turn on the optimal face), or by the declared scaled minimum norm.
+        Fixed fluxes retain their solved values: a small pathway coordinate can
+        carry a significant physical rate when its exchange coefficients are large.
         """
         if isinstance(concentrations, Mapping):
             if set(concentrations) != set(self.state_names):
@@ -500,8 +501,6 @@ class ConfiguredPathwayModel:
             if not deterministic_result.success:
                 raise MetabolicNumericalError(f"Pathway LP tie-break failed for {pathway!r}.")
             fixed = float(deterministic_result.x[index])
-            if abs(fixed) <= 1.0e-10:
-                fixed = 0.0
             deterministic_bounds[index] = (fixed, fixed)
 
         fluxes = _readonly_vector(

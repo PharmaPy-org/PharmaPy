@@ -125,13 +125,17 @@ the checkout; this is a verification procedure, not a separate runtime API.
 
 F10/F11 is the selected baseline. The source workbook identifies the nominal
 profile and logged additions as the same glucose feed; the current one-counted
-solution-volume inputs are retained. The nominal/logged dose discrepancy still
-requires experimental clarification. See the [source audit and oxygen limits](../../examples/bioreactors/ecoli_ye_fed_batch/README.md#feed-volume-source-audit).
+solution-volume inputs are retained as the published-model reproduction. The
+logged feed is gravimetric, and the delivered glucose dose (about 83-102 g) cannot
+be resolved from available records; it is recorded as input uncertainty. See the
+[source audit and decisions](../../examples/bioreactors/ecoli_ye_fed_batch/README.md#feed-volume-source-audit).
 
 Direct F10/F11 kinetics report source Eq. 19 oxygen demand through optional
 native algebraic output fields. No dissolved-oxygen inventory, transfer/control
-validation or oxygen-limitation feedback is claimed. The recorded DOT excursions
-prevent assuming universally nonlimiting oxygen from the controller target alone.
+validation or oxygen-limitation feedback is claimed; this demand-plus-applicability
+treatment is the WP3.1 decision because transfer and control records are
+unavailable. The recorded DOT excursions prevent assuming universally
+nonlimiting oxygen from the controller target alone.
 
 `predict_measurements` supplies exact-time concentration predictions. The plain
 JSON forward-record adapter adopts #351 identity, ordering, units, source and
@@ -154,9 +158,9 @@ comparison figures are not distributed.
 | Shared change | Why WP3.1 needs it | Verification |
 | --- | --- | --- |
 | Requested outlet rates and exact finite-step transport limit | Reserve withdrawal before metabolic feasibility; avoid smoothing down an exactly feasible outlet. Default assembly/limiting remains unchanged. | Chemostat depletion, volume and failure checks. |
-| Owned SciPy derivative arrays | Native buffers are reused; copying prevents later evaluations overwriting retained derivatives. | Aliasing regression, analytical CSTR balances and upstream backend tests. |
+| Owned depletion-rate arrays | Native buffers are reused; the boundary rate evaluator returns copies so retained derivatives are not overwritten (upstream's right-hand side already copies). | Aliasing regression, analytical CSTR balances and upstream backend tests. |
 | Inlet rates passed only to requesting mechanisms | Feasibility includes incoming material rather than treating a supplied empty pool as unavailable. | Reconciliation supply and operating-transition cases. |
-| Explicit depletion checks and limiter bypass | Fixed-step infeasibility is reported; adaptive depletion events provide the configured boundary policy. | Material-rate limiting and small-pool tests. |
+| Explicit depletion checks and limiter bypass | Fixed-step infeasibility is reported; adaptive depletion events (`ScipyBackend(inventory_boundaries=True)`) provide the configured boundary policy. | Material-rate limiting, small-pool tests and the 18-case backend equivalence check. |
 | Paired transfer and outlet scaling | Species, working volume and transferred heat use the same accepted transfer amount. | `test_material_rate_limiting.py`. |
 | Independent replay buffers | Reconstructing output histories cannot overwrite the live solve's numerical workspaces. | Public native solve and result-history tests. |
 | Differential initialization and complete DAE residual packing | Initial derivatives do not evaluate algebraic constraints; every declared equation must be supplied. | `test_bioreactor_dae.py`, including optional IDA runs. |
@@ -167,28 +171,41 @@ comparison figures are not distributed.
 | Explicit callback binding | Module-level reconciliation and inventory callbacks replace nested definitions while retaining bounds, scales and mutable depletion state. | Reconciliation regressions, small-pool tests and the complete fallback suite. |
 | Optional IDA test marker | New IDA integration checks can be selected separately from the core lane. | Explicit `assimulo` tests including native continuous dilution; existing upstream tests are unchanged. |
 
-The unrelated crystallizer annotation edit is excluded. Backend consolidation
-remains deferred under the compatibility-first decision. `SciPyBackend` now copies native derivative buffers to preserve the solver callback
-contract; upstream `ScipyBackend` remains unchanged. Consolidation is not included.
+The unrelated crystallizer annotation edit is excluded.
 
-The D4 trial exposed a numerical-policy conflict: the reference adaptive backend
-rounds negative output residues in its accepted numerical band to zero, while the
-planned consolidation requires no output clipping. Removing that step produced
-roundoff-scale negative inventories (one observed value was approximately
-`-6.4e-27` in native units) that the next recipe segment correctly rejected as an
-invalid initial inventory. Consolidation is therefore incomplete; the duplicate
-class is retained and no equivalence claim is made. The compatibility-first policy retains the existing bioreactor backend until
-native integration preserves all required capabilities and demonstrated examples.
-This retention does not establish that its absolute clipping cutoff is a rigorous
-roundoff bound. Any consolidation still requires independent Jacobian, depletion,
-event and failure checks, plus unchanged upstream behavior with options off.
+**Backend consolidation (D4).** The bioreactor builder now uses upstream
+`ScipyBackend`; the duplicate `SciPyBackend` class is removed. Two opt-in
+capabilities were added to `ScipyBackend`, both off by default so every other
+unit keeps upstream behavior:
 
-A direct native-backend check completed the generic batch and fed-batch examples
-on identical output grids, with maximum species-inventory differences of about
-`5.1e-12 kg`. This is a compatibility observation, not an independent correctness
-proof. The batch dFBA and F10/F11 inputs explicitly configure controlled Jacobians,
-which upstream `ScipyBackend` does not support. Their options must not be silently
-dropped merely to replace the backend class.
+- `jacobian_relative_step` / `jacobian_state_scale` options: a forward-difference
+  Jacobian with fixed perturbations `step * max(|y|, scale)`, replacing scipy's
+  adaptive probes, which can run away when rates carry optimizer noise.
+- `inventory_boundaries=True`: states flagged `limit_negative_inventory` stop at a
+  depletion event, are set to zero and restart. The model must limit uptake to
+  available supply: a materially negative net rate at an empty inventory raises
+  rather than being masked independently of growth or product formation. Only
+  stationary rates within `boundary_tolerance / solve_duration` are zeroed.
+  The vessel limiter is bypassed for that solve. Depletion roots are restarts, not
+  unit events, and are not added to the output. Upstream state events, arming and
+  restart budgets are unchanged.
+
+The existing output policy is retained under the boundary option: constrained
+values below -1e-12 raise, and values in [-1e-12, 0) are reported as zero. That
+absolute cutoff is a carried-over numerical policy, not a proven
+scale-independent roundoff bound.
+
+Evidence: all 18 bioreactor inputs that select the SciPy backend (examples and
+reconciliation fixtures, including dFBA, F10/F11 and the coupled depletion cases)
+were solved with the removed class and with the consolidated backend. Seventeen
+are bitwise identical in every reported field; F10 reconciliation differs by
+4e-28 kg. Without the boundary option, seven depletion cases fail, so the option
+is required, not cosmetic. Upstream `ScipyBackend` tests pass unchanged, and
+`tests/test_scipy_backend_controlled_jacobian.py` covers the Jacobian option
+(exact values, handoff, trajectory agreement, rejected inputs). The SciPy default
+tolerances differ between the classes (upstream 1e-6/1e-6, scipy's own
+1e-3/1e-6); the builder always declares both, and the one direct test that did
+not now states scipy's values explicitly.
 
 ## Interchangeability evidence
 

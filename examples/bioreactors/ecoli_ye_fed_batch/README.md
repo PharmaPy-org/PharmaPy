@@ -45,7 +45,7 @@ Source: Schröder-Kleeberg et al. (2025), [Modelling of Escherichia coli Batch a
 - Acetate production has the positive sign implied by the source's definition of net production; the printed balance has an inconsistent sign.
 - Scheduled feed adds 0.1725 L containing 103.5 g glucose per run. The saved source volume history is consistent with also applying most logged glucose-feed volumes as nutrient-free dilution. That second volume contribution is excluded here.
 - Base additions and samples remain separate. Final volumes are 1.1061 L (F10) and 1.1008 L (F11).
-- Stock density 1.336 kg/L and base density 1 kg/L are declared assumptions affecting carrier mass, not prescribed feed volume or glucose dose. Base is modeled as a nutrient-free addition, without ionic chemistry. Evaporation is omitted.
+- Stock density 1.336 kg/L is the authors' feed-logging mass-to-volume factor (see the feed record basis below), not a documented stock density; with base density 1 kg/L it affects carrier mass, not prescribed feed volume or glucose dose. Base is modeled as a nutrient-free addition, without ionic chemistry. Evaporation is omitted.
 - The configured BDF Jacobian perturbations avoid a failure near depletion. Absolute tolerance is 1e-15 in native solver units because the initial biomass inventory is only 7.4e-8 kg; relative tolerance is 1e-10. These are numerical settings, not fitted biological coefficients.
 
 ## Results and limits
@@ -91,7 +91,7 @@ parameters were changed by this audit.
 | --- | ---: | ---: |
 | Nominal profile integral, glucose [g] | 103.5 | 103.5 |
 | Nominal solution volume at 600 g/L [L] | 0.1725 | 0.1725 |
-| Sum of logged glucose-feed additions [L] | 0.125374 | 0.125524 |
+| Sum of logged glucose-feed additions [L] (balance mass / 1336 g/L) | 0.125374 | 0.125524 |
 | Separate base additions [L] | 0.0696 | 0.0643 |
 | Samples removed [L] | 0.136 | 0.136 |
 | Current final liquid volume [L] | 1.1061 | 1.1008 |
@@ -104,55 +104,62 @@ an inference from input identities and saved volume histories, not a source-code
 trace. The recorded induction addition occurs at the endpoint of this
 pre-induction model and is not added to improve agreement.
 
-**The nominal profile and logged dose still disagree.** The 103.5 g value is the
-configured profile integral, not proof of the experimentally delivered dose.
-An experiment owner must resolve that discrepancy before claiming a validated
-actual-feed reconstruction. Adding both volumes or selecting the interpretation
-with lower biomass RMSE would not resolve it. The retained scenario reproduces
-the nominal source-model feed schedule without duplicate dilution.
+**The nominal profile and logged dose disagree.** The 103.5 g value is the
+configured profile integral, not proof of the experimentally delivered dose, so
+this example does not claim a validated actual-feed reconstruction. Adding both
+volumes or selecting the interpretation with lower biomass RMSE would not
+resolve it. The retained scenario reproduces the nominal source-model feed
+schedule without duplicate dilution.
 
-### Stock-basis hypothesis (pending experiment-owner confirmation)
+### Feed record basis and glucose-dose uncertainty
 
-One explanation for the dose discrepancy is that the stock was 60 % glucose by
-mass at the declared 1.336 kg/L, i.e. 0.60 x 1336 = 801.6 g/L, rather than the
-published 600 g/L. The `Profile` channel is a glucose mass rate [g/h]
-(4.8 g/h / 600 g/L = 0.008 L/h, the configured first flow), so each logged
-half-hour `Feed` volume can be compared with the volume the profile implies
-under either basis:
+The logged glucose-feed channel is gravimetric. Every `Feed` value multiplied by
+1336 is an exact multiple of 0.1 g in both runs, while base and sample volumes are
+exact multiples of 0.1 mL. The logged "volumes" are therefore balance masses
+divided by 1336 g/L, and the 1.336 kg/L used for the configured stock is that
+processing factor, not a documented stock density. The logs fix the delivered
+solution mass, 167.5 g (F10) and 167.7 g (F11). They do not fix the delivered
+glucose (mass fraction x mass) or volume (mass / true density).
 
-| F10 interval [h] | Logged [mL] | At 600 g/L [mL] | At 801.6 g/L [mL] |
-| --- | ---: | ---: | ---: |
-| 18.675-19.175 | 9.81 | 12.38 | 9.26 |
-| 20.175-23.675 | 13.10 | 17.40 | 13.03 |
-| 24.175-24.675 | 13.62 | 18.00 | 13.47 |
-| 25.175-25.675 | 13.32 | 18.00 | 13.47 |
-| All 14 logged intervals (16.175-26.175) | 125.37 | 170.88 | 127.90 |
+The `Profile` channel is read here as the glucose mass-rate setpoint [g/h]
+(4.8 g/h / 600 g/L = 0.008 L/h, the configured first flow). Over the logged
+window it integrates to 102.53 g, about 0.61 of the logged solution mass. On the
+21.6 g/h plateau (23.675-25.675 h) the setpoint glucose is 0.59-0.61 of the
+logged solution mass in every half hour, consistent with a dosing controller
+that assumed a 60 % w/w stock. Logged mass in the ramp intervals is 1-10 % above
+that relationship, and the first and last
+intervals deviate strongly, consistent with transitions shifted from the nominal
+schedule. With otherwise nominal rates, the last interval implies the final
+reduction at about 25.80-25.81 h instead of 26 h. Half-hour logging cannot
+resolve the other transition times.
 
-F11 behaves the same (125.52 mL logged; 170.89 and 127.91 mL predicted). Steady
-intervals agree within 1-2 % at 801.6 g/L, while 600 g/L is about 33 % high
-throughout. The first, ramp and last intervals deviate more, consistent with
-actual pump transitions (pause near 20.08 h, final reduction near 25.82 h)
-differing from the nominal schedule.
+The nominal scenario retained above (103.5 g glucose in 172.5 mL) is not
+consistent with the logged mass under either plausible composition: it would
+require about 230 g of solution at 1.336 kg/L. Scenarios consistent with the
+logged mass bound the effect. Densities are assumptions: 1.217 kg/L at
+49.3 % w/w is interpolated from tabulated pure glucose at 20 °C (about
+1.219 kg/L at 50 % w/w), and 1.27 kg/L at 60 % w/w is extrapolated.
 
-This is not yet a confirmed correction:
+| F10 scenario (not adopted inputs) | Glucose [g] | Feed [mL] | Final volume [L] | Largest prediction change |
+| --- | ---: | ---: | ---: | --- |
+| Retained nominal, 600 g/L | 103.5 | 172.5 | 1.1061 | reference |
+| Stock 60 % w/w, 1.27 kg/L | 101.5 | 133.1 | 1.0667 | glucose 7.6 %, acetate 18 % |
+| Stock truly 600 g/L (49.3 % w/w), controller assumed 60 % | 83.4 | 138.9 | 1.0725 | biomass 11.5 %; glucose and acetate up to about 90 % at low concentrations |
 
-- The 1.336 kg/L density is a declared assumption without a cited source. For
-  reference, tabulated pure glucose solutions are about 1.22 kg/L at 50 % w/w
-  (20 °C), and 600 g/L corresponds to roughly 49 % w/w; 1.336 kg/L fits neither
-  basis well unless it was measured.
-- If the logger recorded feed mass and converted it with 1.336 kg/L, the logged
-  volumes would match 801.6 g/L whatever the true stock concentration.
-- An unlabelled workbook flow of 36 alongside a 21.6 g/h profile does not
-  discriminate: 36 g/h solution at 60 % w/w and 36 mL/h at 0.600 g/mL both give
-  21.6 g/h glucose.
+F11 is similar (largest changes 7.7 % and 18 % for the 60 % w/w stock; 11.7 %
+biomass and up to 93 % glucose for a true 600 g/L stock). The largest effect is
+therefore the glucose dose (about 83-102 g), not the solution volume. The
+coefficients were calibrated by the authors under their own feed accounting, so
+fit quality cannot decide between these scenarios.
 
-Sensitivity (not an adopted input): keeping the glucose mass-rate profile and
-1.336 kg/L, and scaling each flow by 600/801.6, lowers the glucose-feed volume
-to 129.12 mL and the final volume to 1.0627 L (F10) and 1.0574 L (F11).
-Predictions at the measurement times rise by at most 3.6 %; RMSE changes from
-1.79 to 2.06 g/L (biomass), 1.87 to 1.94 (glucose) and 0.107 to 0.116 (acetate)
-for F10, and similarly for F11. The published coefficients were calibrated under
-the authors' feed accounting, so fit quality cannot decide the stock basis.
+**Decision (WP3.1).** Source records that could settle the stock preparation,
+the dosing controller's assumed concentration, or the meaning of the 1336 g/L
+conversion are not available. The nominal 600 g/L scenario is therefore
+retained as the published-model reproduction, and the 83-102 g delivered-dose
+range is a documented, unresolved input uncertainty. Agreement with the F10/F11
+measurements is reported as reproduction under that assumption, not as
+validation of the delivered feed. Any recalibration (WP3.3) must carry this
+uncertainty rather than fixing a single dose.
 
 ## Oxygen uptake and its limits
 
@@ -178,9 +185,14 @@ itself establish the actual variable-agitation response. The original
 [processed oxygen observations](reference/oxygen_observations.json) fall to
 2% and 5.1% air saturation in F10/F11 despite the nominal 30% control target;
 therefore we do not assume oxygen was always nonlimiting. Sensor readings
-alone do not establish the magnitude of growth limitation. A dynamic oxygen
-inventory and limitation feedback remain unqualified until their required
-transfer/control evidence is established.
+alone do not establish the magnitude of growth limitation.
+
+**Decision (WP3.1).** Oxygen is represented by the reported Eq. 19 demand plus
+this applicability statement; no dissolved-oxygen state is added. The transfer
+coefficient, agitation and aeration control records needed for Eq. 20-21 are not
+available, and adding them would require unsourced parameters. Predictions
+during the recorded low-DOT periods may therefore overstate growth if oxygen
+limited it; that limitation is neither modeled nor excluded.
 
 ## Forward provenance
 

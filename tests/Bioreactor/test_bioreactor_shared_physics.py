@@ -10,7 +10,7 @@ import pytest
 from PharmaPy.Bioreactors import PathwayMetabolism, build_bioreactor
 from PharmaPy.Bioreactors.inventory import LinearInventoryAvailability
 from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef
-from PharmaPy.IntegratorBackends import FixedStepBackend, SciPyBackend
+from PharmaPy.IntegratorBackends import FixedStepBackend, ScipyBackend
 from PharmaPy.Metabolic import MetabolicNetworkDefinition, ReactionDefinition
 from PharmaPy.Metabolic.closures.base import FluxSolution, MetabolicEnvironment, MetabolicInfeasibleError, MetabolicNumericalError
 from PharmaPy.Metabolic.closures.reconciled import RateReconciledMFAClosure, ReconciliationTarget
@@ -20,6 +20,29 @@ from PharmaPy.Phases_Refactored import LiquidPhase
 
 
 EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
+
+
+@pytest.mark.parametrize('coordinate_scale', [1., 1e10])
+def test_pathway_tie_break_preserves_small_physical_flux(coordinate_scale):
+    """Rescaling a pathway coordinate must preserve its physical optimum.
+
+    Parameters
+    ----------
+    coordinate_scale : float
+        Pathway-coordinate conversion factor [-].
+    """
+    definition = PathwayModelDefinition(
+        ('A', 'B'), ('a', 'b'),
+        np.diag([-coordinate_scale, -1.]),
+        np.array([coordinate_scale, 1.]), np.array([coordinate_scale, 1.]),
+        parameters={'capA': .5, 'capB': 1.},  # [mol/(kgDW h)]
+        uptake_constraints=tuple(
+            {'identifier': name, 'type': 'constant', 'species': name,
+             'maximum_parameter': 'cap' + name} for name in ('A', 'B')))
+    result = ConfiguredPathwayModel(definition).solve_fluxes([1., 1.], biomass=1.)
+    # Independent capacities uniquely imply these physical exchange rates.
+    np.testing.assert_allclose(result.extracellular_rates, [-.5, -1.], atol=1e-8)
+    assert result.primary_objective == pytest.approx(1.5, abs=1e-8)
 
 
 def _model(matrix=((-1.,), (-1.,), (0.,))):
@@ -40,7 +63,8 @@ def test_missing_uptake_rule_cannot_create_growth_from_empty_resource(backend, a
     mechanism = PathwayMetabolism(_model(), 1e-4, flux_time_unit='1/s')
     phase.mechanisms = mechanism
     integrator = (FixedStepBackend() if backend == 'fixed-step' else
-                  SciPyBackend({'rtol': 1e-9, 'atol': 1e-13, 'max_step': .02}))
+                  ScipyBackend({'rtol': 1e-9, 'atol': 1e-13, 'max_step': .02},
+                               inventory_boundaries=True))
     unit = MultiPhaseVessel(integrator=integrator, isothermal=True)
     unit.Phases = phase
     unit.intraphase_processes = [IntraPhaseProcess(PhaseRef('liquid', 0), mechanism)]

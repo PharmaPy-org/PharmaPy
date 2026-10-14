@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef, StateEvent, StateKey, StateVariable, TransferResult
-from PharmaPy.IntegratorBackends import AssimuloBackend, AssimuloDAEBackend, SciPyBackend, FixedStepBackend
+from PharmaPy.IntegratorBackends import AssimuloBackend, AssimuloDAEBackend, ScipyBackend, FixedStepBackend
 from PharmaPy.Mechanisms import Mechanism
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Phases_Refactored import LiquidPhase
@@ -58,7 +58,7 @@ def test_unit_model_dae_modes_and_ode_guard(vessel):
     np.testing.assert_allclose(AssimuloDAEBackend().make_residual(vessel)(0., states, derivatives), expected)
     constraints = vessel.unit_model(0., states, alg_bce=True)
     np.testing.assert_allclose(constraints[StateKey("constraint", PhaseRef("liquid", 0))], 998.5)
-    for backend in (AssimuloBackend(), SciPyBackend(), FixedStepBackend()):
+    for backend in (AssimuloBackend(), ScipyBackend(inventory_boundaries=True), FixedStepBackend()):
         with pytest.raises(NotImplementedError, match="algebraic"):
             backend.compile_integrator(vessel)
     # Returned derivative guesses must survive later evaluations using the buffers.

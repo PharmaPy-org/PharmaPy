@@ -7,7 +7,7 @@ import numpy as np
 from PharmaPy.Bioreactors import PathwayMetabolism, build_bioreactor
 from PharmaPy.DataClasses import (IntraPhaseProcess, PhaseRef, StateKey,
                                   StateVariable, TransferResult)
-from PharmaPy.IntegratorBackends import AssimuloBackend, SciPyBackend
+from PharmaPy.IntegratorBackends import AssimuloBackend, ScipyBackend
 from PharmaPy.Mechanisms import Mechanism
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Phases_Refactored import LiquidPhase
@@ -149,7 +149,9 @@ def test_adaptive_backend_enforces_depletion_as_a_hard_boundary():
                         verbose=False)
     mechanism = PathwayMetabolism(payload, 1e-6, flux_time_unit="1/s")
     phase.mechanisms = mechanism
-    unit = MultiPhaseVessel(integrator=SciPyBackend({"max_step": 0.1}), isothermal=True)
+    # rtol/atol are scipy's own defaults, which this case used before consolidation.
+    unit = MultiPhaseVessel(integrator=ScipyBackend({"max_step": 0.1, "rtol": 1e-3, "atol": 1e-6},
+                                                    inventory_boundaries=True), isothermal=True)
     unit.Phases = phase
     ref = PhaseRef("liquid", 0)
     unit.intraphase_processes = [IntraPhaseProcess(ref, mechanism)]

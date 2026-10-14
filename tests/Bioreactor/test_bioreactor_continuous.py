@@ -218,7 +218,7 @@ def test_native_rhs_callback_does_not_alias_previous_derivative(tmp_path):
     unit.compile_structure()
     states = unit.create_solver_init_states()
     settings = dict(constrained=np.array([],dtype=int), boundary_tolerance=np.zeros_like(states),
-                    unit=unit, rate_tolerance=np.zeros_like(states), active=set())
+                    unit=unit, rate_tolerance=np.zeros_like(states))
     first = _inventory_rates(0., states, **settings)
     saved = first.copy()
     changed = states.copy()
