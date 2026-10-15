@@ -19,6 +19,7 @@ from PharmaPy.Crystallizers import SemibatchCryst
 from PharmaPy.Connections import get_inputs_new
 
 from PharmaPy.Commons import unpack_states
+from PharmaPy.Errors import PharmaPyTypeError
 
 from PharmaPy.Results import DynamicResult
 
@@ -78,6 +79,15 @@ class ContinuousHoldup:
             Liquid inventory with mass [kg], mass fractions [-] and
             temperature [K]; its mass stays constant during the solve.
 
+        Raises
+        ------
+        PharmaPyTypeError
+            If ``phase`` is neither a list or tuple nor a
+            ``PharmaPy.Phases`` object, for example a stream, a dict or a
+            string; the message names the received type and the accepted
+            ones, and the held charge is unchanged (issue #461). It is a
+            ``TypeError``.
+
         Notes
         -----
         A deep copy of ``Liquid_1`` is kept as ``__original_phase__``, the
@@ -89,8 +99,13 @@ class ContinuousHoldup:
         """
         if isinstance(phase, (list, tuple)):
             self._Phases = phase
-        elif phase.__module__ == 'PharmaPy.Phases':
+        elif getattr(phase, '__module__', None) == 'PharmaPy.Phases':
             self._Phases = [phase]
+        else:
+            raise PharmaPyTypeError(
+                'ContinuousHoldup.Phases takes a LiquidPhase (a '
+                'PharmaPy.Phases object) or a list or tuple of phases; got '
+                f'{type(phase).__name__}.')
 
         classify_phases(self)
         self.nomenclature()
