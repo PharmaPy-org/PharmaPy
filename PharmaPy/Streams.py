@@ -272,7 +272,15 @@ class BatchToFlowConnector:
         -----
         The outlet ``LiquidStream`` carries the holdup's temperature [K],
         pressure [Pa] and mass fractions [-] with mass flow
-        ``Liquid_1.mass / cycle_time * flow_mult`` [kg/s].
+        ``Liquid_1.mass / cycle_time * flow_mult`` [kg/s]. When the holdup's
+        concentrations are authoritative (``Liquid_1.concentration_basis``),
+        the outlet is built from its ``mole_conc`` [mol/L] and the volume
+        flow ``Liquid_1.vol / cycle_time * flow_mult`` [m**3/s] instead, so
+        it keeps those concentrations and the same mass flow (issue #439);
+        before, the ideal-mixing density re-derived its volume and
+        concentrations from the mass fractions. The published ``outputs``
+        names are unchanged; ``NameAnalyzer`` converts this single-sample
+        discharge with the outlet's inventory density.
 
         The transfer itself is instantaneous, like the solids ``Mixer``:
         ``outputs`` (a dictionary) and ``result`` (a ``DynamicResult``
@@ -293,9 +301,19 @@ class BatchToFlowConnector:
         liquid = self.Liquid_1
         num_species = len(liquid.name_species)
         mass_flow = liquid.mass / self.cycle_time * self.flow_mult  # [kg/s]
-        outlet = LiquidStream(liquid.path_data, temp=liquid.temp,
-                              pres=liquid.pres, mass_frac=liquid.mass_frac,
-                              mass_flow=mass_flow)
+        if liquid.concentration_basis:
+            # Authoritative concentrations (issue #439): discharge the held
+            # volume so the outlet keeps them; its mass flow is mass_flow.
+            vol_flow = (liquid.vol / self.cycle_time
+                        * self.flow_mult)  # [m**3/s]
+            outlet = LiquidStream(liquid.path_data, temp=liquid.temp,
+                                  pres=liquid.pres,
+                                  mole_conc=liquid.mole_conc,
+                                  vol_flow=vol_flow)
+        else:
+            outlet = LiquidStream(liquid.path_data, temp=liquid.temp,
+                                  pres=liquid.pres, mass_frac=liquid.mass_frac,
+                                  mass_flow=mass_flow)
 
         outputs = {
             'temp': np.array(liquid.temp, dtype=float).reshape(1),  # [K]

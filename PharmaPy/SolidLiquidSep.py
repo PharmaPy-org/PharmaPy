@@ -1452,8 +1452,11 @@ class Filter:
 
         self.c_solids = vol_slurry * solid_conc / vol_filtrate
 
-        # Physical properties
-        dens_liq = self.Liquid_1.getDensity()
+        # Physical properties. dens_liq converts this liquid's own volumes
+        # to masses (filtrate, holdup, cake), so it is the inventory density:
+        # sum(mass_conc) for authoritative concentrations, else ideal mixing
+        # as before (issue #439).
+        dens_liq = self.Liquid_1.getInventoryDensity()  # [kg/m**3]
         visc_liq = self.Liquid_1.getViscosityMix()
         surf_liq = self.Liquid_1.getSurfTension()
 
@@ -1571,7 +1574,8 @@ class Filter:
         states : ndarray
             Filtrate and remaining liquid masses [kg], shape (num_times, 2).
         dens_liq, dens_sol : float
-            Liquid and solid mixture densities [kg/m**3].
+            Liquid inventory density (``LiquidPhase.getInventoryDensity``)
+            and solid mixture density [kg/m**3].
         epsilon : float
             Packed-cake porosity [-].
         mass_solids : float

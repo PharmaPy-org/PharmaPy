@@ -14,6 +14,7 @@ from PharmaPy.StatsModule import StatisticsClass
 
 from PharmaPy.Connections import (Connection, convert_str_flowsheet,
                                   get_inputs_new, topological_bfs)
+from PharmaPy.NameAnalysis import held_state_rows
 from PharmaPy.Errors import (PharmaPyNonImplementedError, PharmaPyTypeError,
                              PharmaPyValueError)
 from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_object
@@ -1381,8 +1382,16 @@ class SimulationExec:
         normalized) and multiplied by the mass or molar flow, or by the
         volume flow times the density of each sample's composition and
         temperature. Volume is the consumed volume flow, or mass flow over
-        that density. Without a consumed composition, the static mass
-        fractions are used. Samples whose composition is exactly zero, such
+        a density: the sample's total mass concentration [kg/m**3] for a
+        concentration composition (authoritative, issue #439; earlier
+        releases used ideal mixing); the stream's ``getInventoryDensity``
+        for fraction samples that repeat its own stored fractions, such as
+        an uncontrolled composition (see
+        :func:`PharmaPy.NameAnalysis.held_state_rows`); otherwise the
+        ``getDensity`` of the sample's fractions and temperature. Without a
+        consumed composition,
+        the static mass fractions are used. Samples whose composition is
+        exactly zero, such
         as a stopped feed, contribute no material; they add no volume when
         volume is derived from the mass or molar flow, whereas a consumed
         ``vol_flow`` is reported as supplied. Non-finite values propagate to
@@ -1446,10 +1455,25 @@ class SimulationExec:
                 mole_frac = converted  # [-]
 
             density = np.zeros(num_times)  # [kg/m**3], zero for unfed rows
-            if fed.any():
-                density[fed] = _broadcast_samples(stream.getDensity(
-                    mass_frac=mass_frac[fed], temp=temp[fed]),
-                    (np.count_nonzero(fed),))  # [kg/m**3]
+            if fed.any() and comp_name == 'mass_conc':
+                # Authoritative concentrations (issue #439): the total
+                # mass concentration is the sample's density.
+                density[fed] = row_total[fed]  # [kg/m**3]
+            elif fed.any() and comp_name == 'mole_conc':
+                density[fed] = composition[fed] @ molar_mass  # [kg/m**3]
+            elif fed.any():
+                # Rows repeating the stream's own fractions, such as an
+                # uncontrolled composition, are its held state: its
+                # inventory density applies (issue #439), ideal mixing to
+                # any other row.
+                held = fed & held_state_rows(stream, composition, comp_name)
+                ideal = fed & ~held
+                if held.any():
+                    density[held] = stream.getInventoryDensity()  # [kg/m**3]
+                if ideal.any():
+                    density[ideal] = _broadcast_samples(stream.getDensity(
+                        mass_frac=mass_frac[ideal], temp=temp[ideal]),
+                        (np.count_nonzero(ideal),))  # [kg/m**3]
 
             if flow_name == 'mole_flow':
                 species_moles = flow[:, np.newaxis] * mole_frac  # [mol/s]
@@ -1936,6 +1960,9 @@ class SimulationExec:
         (:meth:`_consumed_duration`). Both stop at a unit's recorded
         ``inlet_stop_time`` [s], set by an ``Evaporator`` with
         ``stop_at_maxvol=False`` when its volume event shuts the inlet.
+        Their volume [m**3] is the total over the phase's density, for a
+        liquid ``getInventoryDensity``: the sum of its authoritative
+        concentrations, or the ideal-mixing density (issue #439).
         An instantaneous unit (``is_instantaneous`` class flag and a result
         spanning 0 s, such as a static continuous ``Mixer``) is charged for
         the time its outlet is consumed by its single, verified successor;
@@ -2013,7 +2040,12 @@ class SimulationExec:
 
                 stream_data[name_stream] = {}
 
-                dens = stream.getDensity(basis=basis)  # [kg/m**3] or [mol/L]
+                # A liquid's own amount converts to volume through its
+                # inventory density, which follows authoritative
+                # concentrations (issue #439); other phases use getDensity.
+                density_method = getattr(stream, 'getInventoryDensity',
+                                         stream.getDensity)
+                dens = density_method(basis=basis)  # [kg/m**3] or [mol/L]
 
                 if uo.oper_mode == 'Batch':
                     if basis == 'mass':

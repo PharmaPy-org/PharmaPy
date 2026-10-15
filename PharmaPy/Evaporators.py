@@ -166,6 +166,44 @@ def _flash_states_di(name_species: Sequence[str],
     return states_di
 
 
+def _model_liquid_volume(liquid) -> float:
+    """Return the liquid volume the evaporator models assign to a charge.
+
+    Parameters
+    ----------
+    liquid : LiquidPhase
+        Evaporator liquid holdup with ``moles`` [mol], ``mole_frac`` [-]
+        and ``temp`` [K].
+
+    Returns
+    -------
+    float
+        Liquid volume [m**3] on the models' own basis: the moles over the
+        ideal-mixing molar density of their composition,
+        ``moles / getDensity(mole_frac, temp, basis='mole') / 1000``
+        (1000 L/m**3), as ``material_balances`` evaluates it.
+
+    Notes
+    -----
+    The evaporator states are moles and mole fractions, closed by ideal
+    mixing. A liquid on the ideal-mixing basis (fractions, or concentrations
+    with ``name_solv``) already stores that volume, which is returned
+    unchanged so its results stay bit-identical. A liquid whose
+    concentrations are authoritative and do not close ideal mixing
+    (``LiquidPhase.concentration_basis``, issue #439) keeps its moles but
+    occupies its ideal-mixing volume in the evaporator model; seeding the
+    stored volume instead would leave an inconsistent initial volume and
+    energy balance.
+    """
+    if not getattr(liquid, 'concentration_basis', False):
+        return liquid.vol  # [m**3]
+
+    molar_density = liquid.getDensity(mole_frac=liquid.mole_frac,
+                                      temp=liquid.temp,
+                                      basis='mole')  # [mol/L]
+    return liquid.moles / molar_density / 1000  # [m**3]
+
+
 class IsothermalFlash:
         
     """
@@ -1540,8 +1578,18 @@ class Evaporator:
             times drum volume [m**3]. This root-surface allowance covers
             roundoff on both sides of the event. Reset or drain before
             continuing; no state is advanced on rejection.
+
+        Notes
+        -----
+        The initial liquid volume [m**3], which sets the headspace and the
+        fill checks, is taken on the model's ideal-mixing basis by
+        :func:`_model_liquid_volume`: the stored volume for fraction and
+        ``name_solv`` charges, the ideal-mixing volume of the moles for a
+        charge whose concentrations are authoritative (issue #439).
         """
-        liquid_volume = self.Liquid_1.vol  # [m**3], checked on every initialization path
+        # [m**3], model basis (see _model_liquid_volume), checked on every
+        # initialization path
+        liquid_volume = _model_liquid_volume(self.Liquid_1)
         volume_tolerance = np.sqrt(eps) * self.vol_tot  # [m**3], root-surface roundoff allowance
         if not np.isfinite(liquid_volume) or liquid_volume >= self.vol_tot:
             raise ValueError("Drum volume must exceed the finite liquid volume [m**3]")
@@ -1587,7 +1635,7 @@ class Evaporator:
 
         # Moles of phases
         mol_liq = self.Liquid_1.moles  # [mol]
-        vol_liq = self.Liquid_1.vol  # [m**3]
+        vol_liq = liquid_volume  # [m**3], model basis
 
         vol_vap = self.vol_tot - vol_liq  # [m**3]
         if vol_vap < 0:
@@ -1629,7 +1677,9 @@ class Evaporator:
             temp_init = FlashInit.LiquidOut.temp  # [K]
 
             mol_liq = FlashInit.LiquidOut.moles  # [mol]
-            dens_liq = self.Liquid_1.getDensity(basis='mole')  # [mol/L]
+            # The flash liquid's own moles to volume (issue #439); it is
+            # built from fractions, so this is its ideal-mixing density.
+            dens_liq = self.Liquid_1.getInventoryDensity(basis='mole')  # [mol/L]
             vol_liq = mol_liq / dens_liq / 1000  # [m**3]
             vol_vap = self.vol_tot - vol_liq  # [m**3]
 
@@ -2753,6 +2803,12 @@ class ContinuousEvaporator:
         ------
         ValueError
             If the liquid volume exceeds the drum volume [m**3].
+
+        Notes
+        -----
+        The initial liquid volume [m**3] is taken on the model's
+        ideal-mixing basis by :func:`_model_liquid_volume`, as in
+        :meth:`Evaporator.init_unit` (issue #439).
         """
         temp_bubble_init, y_init = self.Liquid_1.getBubblePoint(
             pres=self.pres, y_vap=True,
@@ -2764,7 +2820,8 @@ class ContinuousEvaporator:
 
         # Moles of phases
         mol_liq = self.Liquid_1.moles  # [mol]
-        vol_liq = self.Liquid_1.vol  # [m**3]
+        # [m**3], model basis (see _model_liquid_volume)
+        vol_liq = _model_liquid_volume(self.Liquid_1)
 
         vol_vap = self.vol_tot - vol_liq  # [m**3]
         if vol_vap < 0:

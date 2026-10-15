@@ -1,9 +1,17 @@
-"""Per-sample density in dynamic flow-basis conversion (#219).
+"""Per-sample density in dynamic flow-basis conversion (#219, #439).
 
 ``NameAnalyzer.convertUnits`` turns upstream volume flows [m**3/s] into mass
 [kg/s] or molar [mol/s] flows, and molar flows back into volume flows. Each
-dynamic sample must use the density of its own composition and temperature,
-while static (scalar) sources keep the stored-state result.
+dynamic sample must use the density of its own composition and temperature.
+Since #439, upstream concentrations are authoritative, for static (scalar)
+and dynamic sources alike: with ``mole_conc`` [mol/L] or ``mass_conc``
+[kg/m**3] the density of a sample is its total mass concentration
+``sum_i C_i MW_i`` [kg/m**3] and its molar density ``1000 sum_i C_i``
+[mol/m**3], not the ideal-mixing value of its normalized fractions nor the
+transferred stream's stored density. The concentration cases below were
+changed by design for that contract; their expected flows come from the row
+totals ``TOTAL_CONC`` and ``TOTAL_MASS_CONC`` or from ``CONCENTRATIONS``.
+Fraction cases keep the #219 ideal-mixing expectations.
 
 Liquid cases use the shipped PFR test database, whose species A (1230 kg/m**3,
 105.52 g/mol) and B (864.7 kg/m**3, 99.1741 g/mol) have unequal densities.
@@ -17,16 +25,18 @@ temperature-dependent density. Dynamic profiles carried by a real
 ``SlurryStream`` (per-phase densities) and unknown composition bases must
 raise explicit errors instead of returning unphysical flows.
 
-On the milestone base (71f918a) the ``_guard`` tests, which protect the
-static result, and two parametrized cases of
+On the #219 milestone base (71f918a) two parametrized cases of
 ``test_dynamic_liquid_mass_mole_flow_uses_sample_molar_mass``
 (``mass_frac-mass_flow-mole_flow`` and ``mass_frac-mole_flow-mass_flow``,
-whose base conversion already used each sample's molar mass) pass; every
-other test fails there. Stopped samples (exactly zero composition) convert
+whose base conversion already used each sample's molar mass) passed, as did
+the static stored-state guard that #439 replaced with
+``test_static_concentration_flow_uses_upstream_totals``; every other #219
+test failed there. Stopped samples (exactly zero composition) convert
 to zero flow; ``test_non_finite_sample_still_propagates`` pins that a NaN
 sample still yields NaN.
 
-Related issues: https://github.com/PharmaPy-org/PharmaPy/issues/219
+Related issues: https://github.com/PharmaPy-org/PharmaPy/issues/219,
+https://github.com/PharmaPy-org/PharmaPy/issues/439
 (coordination: https://github.com/PharmaPy-org/PharmaPy/issues/260)
 """
 
@@ -92,6 +102,44 @@ def ideal_mixing(mole_frac):
     mass_frac = mole_frac * MW / mw_av[:, np.newaxis]  # [-]
     density = 1 / (mass_frac @ (1 / RHO_LIQ))  # [kg/m**3]
     return mass_frac, mw_av, density
+
+
+def expected_concentration_flow(comp_name, down, vol_flow, mw_av, num_rows):
+    """Convert volume flow with the upstream concentration totals (#439).
+
+    Parameters
+    ----------
+    comp_name : {'mole_conc', 'mass_conc'}
+        Upstream composition basis built by ``upstream_composition``.
+    down : {'mass_flow', 'mole_flow'}
+        Requested downstream basis.
+    vol_flow : numpy.ndarray
+        Volume flows [m**3/s], shape (num_rows,).
+    mw_av : numpy.ndarray
+        Average molar masses [g/mol] of the rows, shape (num_rows,).
+    num_rows : int
+        Number of leading rows of ``TOTAL_CONC`` or ``TOTAL_MASS_CONC`` used.
+
+    Returns
+    -------
+    numpy.ndarray
+        Mass flow [kg/s] or molar flow [mol/s]. For ``mole_conc`` rows
+        ``C = x * TOTAL_CONC``: ``sum C MW = TOTAL_CONC * mw_av`` [kg/m**3]
+        and ``1000 sum C = 1000 TOTAL_CONC`` [mol/m**3]. For ``mass_conc``
+        rows ``w * TOTAL_MASS_CONC``: ``TOTAL_MASS_CONC`` [kg/m**3] and
+        ``1000 TOTAL_MASS_CONC / mw_av`` [mol/m**3], since
+        ``sum_i w_i / MW_i = 1 / mw_av``.
+    """
+    if comp_name == 'mole_conc':
+        total = TOTAL_CONC[:num_rows]  # [mol/L]
+        mass_density = total * mw_av  # [kg/m**3]
+        molar_density = total * 1000  # [mol/m**3], 1000 L/m**3
+    else:
+        mass_density = TOTAL_MASS_CONC[:num_rows]  # [kg/m**3]
+        molar_density = mass_density * 1000 / mw_av  # [mol/m**3], 1000 g/kg
+    if down == 'mass_flow':
+        return vol_flow * mass_density  # [kg/s]
+    return vol_flow * molar_density  # [mol/s]
 
 
 def expected_flow(down, vol_flow, mw_av, density):
@@ -205,28 +253,69 @@ def test_dynamic_volume_flow_uses_each_sample_density(comp_name, down, reverse):
                             [down_comp, down, 'temp'], len(MW))
     converted = analyzer.convertUnits(stream)
     mass_frac, mw_av, density = ideal_mixing(mole_frac)
+    if comp_name in ('mole_conc', 'mass_conc'):
+        # Changed by #439: concentrations, not ideal mixing, set the density.
+        # upstream_composition scales row i by TOTAL_CONC[i] or
+        # TOTAL_MASS_CONC[i] whatever the row order.
+        expected = expected_concentration_flow(
+            comp_name, down, vol_flow, mw_av, len(vol_flow))  # [kg/s] or [mol/s]
+    else:
+        expected = expected_flow(down, vol_flow, mw_av, density)  # [kg/s] or [mol/s]
     assert converted[down].shape == (len(vol_flow),)
-    np.testing.assert_allclose(converted[down],
-                               expected_flow(down, vol_flow, mw_av, density), rtol=RTOL)
+    np.testing.assert_allclose(converted[down], expected, rtol=RTOL)
     expected_comp = mass_frac if down_comp == 'mass_frac' else mole_frac  # [-]
     assert converted[down_comp].shape == expected_comp.shape
     np.testing.assert_allclose(converted[down_comp], expected_comp, rtol=RTOL, atol=0)
     np.testing.assert_array_equal(converted['temp'], PROFILE_TEMPS[order])
 
 
+FRACTION_CARRIER_MASS_FRAC = np.array([0.4, 0.1, 0.2, 0.3])  # [-], asymmetric
+FRACTION_CARRIER_MASS_FLOW = 1e-3  # [kg/s]
+
+
 @pytest.mark.unit
+@pytest.mark.parametrize('carrier', ['concentrations', 'fractions'])
+@pytest.mark.parametrize('comp_name', ['mole_conc', 'mass_conc'])
 @pytest.mark.parametrize('down', ['mass_flow', 'mole_flow'])
-def test_static_volume_flow_keeps_stored_state_density_guard(down):
-    stream = liquid_stream()
-    stream.y_upstream = {'mole_conc': CONCENTRATIONS, 'vol_flow': VOL_FLOWS[0],
+def test_static_concentration_flow_uses_upstream_totals(down, comp_name, carrier):
+    """Convert a static concentration source with its own totals (#439).
+
+    The static upstream state gives ``CONCENTRATIONS`` [mol/L] (or the
+    matching mass concentrations [kg/m**3]) and a volume flow [m**3/s]; they
+    do not close ideal mixing (sum C_i v_i = 0.435). Concentrations are
+    authoritative, so the flows are ``vol_flow * sum C_i MW_i`` [kg/s] and
+    ``1000 * vol_flow * sum C_i`` [mol/s], whatever stream carries them: one
+    built from the same concentrations, or one built from unrelated
+    fractions, whose stored density must not be used. Before #439 this test
+    pinned the stored-state ideal-mixing density.
+
+    Parameters
+    ----------
+    down : {'mass_flow', 'mole_flow'}
+        Requested downstream flow basis.
+    comp_name : {'mole_conc', 'mass_conc'}
+        Upstream concentration basis.
+    carrier : {'concentrations', 'fractions'}
+        How the transferred stream itself was built.
+    """
+    if carrier == 'concentrations':
+        stream = liquid_stream()
+    else:
+        stream = LiquidStream(THERMO_PATH, temp=TEMPERATURE,
+                              mass_frac=FRACTION_CARRIER_MASS_FRAC,
+                              mass_flow=FRACTION_CARRIER_MASS_FLOW)
+    composition = (CONCENTRATIONS if comp_name == 'mole_conc'
+                   else CONCENTRATIONS * MW)  # [mol/L] or [kg/m**3]
+    stream.y_upstream = {comp_name: composition, 'vol_flow': VOL_FLOWS[0],
                          'temp': TEMPERATURE}
     down_comp = 'mole_frac' if down == 'mole_flow' else 'mass_frac'
-    analyzer = NameAnalyzer(['mole_conc', 'vol_flow', 'temp'],
+    analyzer = NameAnalyzer([comp_name, 'vol_flow', 'temp'],
                             [down_comp, down, 'temp'], len(MW))
     converted = analyzer.convertUnits(stream)
-    stored = (CONCENTRATIONS / CONCENTRATIONS.sum())[np.newaxis]  # [-]
-    _, mw_av, density = ideal_mixing(stored)
-    expected = expected_flow(down, VOL_FLOWS[:1], mw_av, density)[0]  # [kg/s] or [mol/s], per down
+    if down == 'mass_flow':
+        expected = VOL_FLOWS[0] * (CONCENTRATIONS @ MW)  # [kg/s]
+    else:
+        expected = VOL_FLOWS[0] * CONCENTRATIONS.sum() * 1000  # [mol/s], 1000 L/m**3
     assert np.ndim(converted[down]) == 0
     assert converted[down] == pytest.approx(expected, rel=RTOL)
 
@@ -249,9 +338,11 @@ def test_connection_converts_cstr_volume_flow_profile(destination):
     connection.transfer_data()
     converted = connection.Matter.y_inlet
     vol_flow = np.full(len(times), REACTOR_VOLUME / RESIDENCE_TIME)  # [m**3/s], held inlet
-    mass_frac, mw_av, density = ideal_mixing(MOLE_FRAC_ROWS)
-    np.testing.assert_allclose(converted[down],
-                               expected_flow(down, vol_flow, mw_av, density), rtol=RTOL)
+    mass_frac, mw_av, _ = ideal_mixing(MOLE_FRAC_ROWS)
+    # Changed by #439: the published mole_conc rows set the densities.
+    expected = expected_concentration_flow(
+        'mole_conc', down, vol_flow, mw_av, len(times))  # [kg/s] or [mol/s]
+    np.testing.assert_allclose(converted[down], expected, rtol=RTOL)
     expected_comp = mass_frac if comp == 'mass_frac' else MOLE_FRAC_ROWS  # [-]
     np.testing.assert_allclose(converted[comp], expected_comp, rtol=RTOL, atol=0)
     np.testing.assert_allclose(converted['temp'], TEMPERATURE, rtol=RTOL)
@@ -342,9 +433,9 @@ def test_mixer_consumes_converted_mass_conc_profile():
     mixer.Inlets = [stream]
     mass_flow, mass_frac, temp = mixer.solve_unit()
     row_mass_frac = mass_conc / mass_conc.sum(axis=1, keepdims=True)  # [-]
-    density = 1 / (row_mass_frac @ (1 / RHO_LIQ))  # [kg/m**3], ideal mixing
+    # Changed by #439: each row's total mass concentration is its density.
     np.testing.assert_allclose(mixer.result.time, times, rtol=RTOL)
-    np.testing.assert_allclose(mass_flow, VOL_FLOWS * density, rtol=RTOL)
+    np.testing.assert_allclose(mass_flow, VOL_FLOWS * TOTAL_MASS_CONC, rtol=RTOL)
     np.testing.assert_allclose(mass_frac, row_mass_frac, rtol=RTOL, atol=0)
     np.testing.assert_allclose(temp, PROFILE_TEMPS, rtol=RTOL)
 
