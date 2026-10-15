@@ -413,6 +413,47 @@ def test_summary_counts_the_adiabatic_flash_without_nitrogen(path,
                    'AdiabaticFlash']
 
 
+@pytest.mark.parametrize('case', ['isothermal-flash', 'adiabatic-flash'])
+def test_flash_fed_a_phase_reports_its_amount(path, case):
+    """Report a raw LiquidPhase feed of a flash as its amount.
+
+    A flash also separates a batch inventory [mol]; its raw feed is then an
+    amount without a flow rate, and its products are phases.
+    """
+    charge = FLOW_1 + FLOW_2  # [mol], same numbers as the 1.5 mol/s feed
+    species_moles, species_mass = _species_inflow(path)  # [mol], [kg]
+    sim = SimulationExec(path, {'U01': []})
+    sim.U01 = UNITS[case][0]()
+    sim.U01.Inlet = LiquidPhase(path, temp=TEMP, pres=PRESSURE, moles=charge,
+                                mole_frac=species_moles / charge)
+    sim.SolveFlowsheet(verbose=False)
+
+    for basis, amount, frac, expected in (
+            ('mass', 'mass', 'mass_frac', species_mass),
+            ('mole', 'moles', 'mole_frac', species_moles)):
+        raw = sim.GetRawMaterials(basis=basis)
+        assert [key[:2] for key in raw.index] == [('U01', 'Inlet_0')]
+        assert raw.index[0][2].split('.')[0] == 'LiquidPhase'
+        assert raw[amount].iloc[0] == pytest.approx(expected.sum(),
+                                                    rel=BALANCE_RTOL)
+        reported = raw[['%s_%s' % (amount, comp)
+                        for comp in sim.NamesSpecies]].to_numpy()[0]
+        np.testing.assert_allclose(reported, expected, rtol=0,
+                                   atol=BALANCE_RTOL * expected.sum())
+
+        table = sim.result.GetStreamTable(basis=basis)
+        assert table.index.droplevel(2).tolist() == [
+            ('U01', 'Inlet_0'), ('U01', 'Outlet_liquid'),
+            ('U01', 'Outlet_vapor')]
+        amounts = table[amount].to_numpy()  # [kg] or [mol]
+        fractions = table[['%s_%s' % (frac, comp)
+                           for comp in sim.NamesSpecies]].to_numpy()  # [-]
+        for rows in (slice(0, 1), slice(1, 3)):  # the feed, the products
+            np.testing.assert_allclose(
+                amounts[rows] @ fractions[rows], expected, rtol=0,
+                atol=BALANCE_RTOL * expected.sum())
+
+
 def test_empty_unit_summary_prints_its_header():
     """Print the header and separators of a summary without units."""
     lines = pprint({}, SUMMARY_ITEMS, SUMMARY_HEADERS, str_out=False)

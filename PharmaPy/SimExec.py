@@ -1955,8 +1955,12 @@ class SimulationExec:
         -----
         Continuous raw inlets with a ``DynamicInlet`` are accounted from the
         feed the unit consumes at each of its result times. Batch and static
-        continuous records are read from the stream's stored state; static
-        continuous totals are the flow times the fed duration
+        continuous records are read from the stream's stored state. A raw
+        inlet that is a phase, an amount [kg] without a flow rate, is
+        reported as its amount for any unit, including a steady-state flash
+        fed a ``LiquidPhase``; earlier releases raised ``AttributeError``
+        for it. Static continuous stream totals are the flow times the fed
+        duration
         (:meth:`_consumed_duration`). Both stop at a unit's recorded
         ``inlet_stop_time`` [s], set by an ``Evaporator`` with
         ``stop_at_maxvol=False`` when its volume event shuts the inlet.
@@ -2047,7 +2051,11 @@ class SimulationExec:
                                          stream.getDensity)
                 dens = density_method(basis=basis)  # [kg/m**3] or [mol/L]
 
-                if uo.oper_mode == 'Batch':
+                # A phase is an amount whatever the unit's mode: a flash,
+                # a continuous unit, also separates a LiquidPhase inlet
+                # (issue #445). Stream inlets keep the mode's branch.
+                is_amount = not hasattr(stream, 'mass_flow')
+                if uo.oper_mode == 'Batch' or is_amount:
                     if basis == 'mass':
                         total = stream.mass  # [kg]
                         stream_data[name_stream] = {'mass': total}
