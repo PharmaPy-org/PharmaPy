@@ -742,8 +742,27 @@ class BasePhase(ThermoPhysicalManager):
 
     @overridable
     def getDensity(self,*args,**kwargs):
-        
-        if "mass_frac" not in kwargs:
+        """Ideal-mixing density at the phase's composition or a requested one.
+
+        Parameters
+        ----------
+        *args, **kwargs
+            Passed to ``ThermoPhysicalManager.getDensityMix``. ``mass_frac``
+            or ``mole_frac`` [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``, selects the composition; with
+            neither, the phase's own mass fractions are used. ``phase``
+            defaults to the phase family.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Density [kg/m**3], or [kmol/m**3] with ``basis='mole'``, one value
+            per composition row.
+        """
+
+        # A composition the caller asks for, on either basis, is not
+        # overridden by the stored one.
+        if "mass_frac" not in kwargs and "mole_frac" not in kwargs:
             kwargs["mass_frac"]=self.mass_frac
         if 'phase' not in kwargs:
             kwargs['phase'] = self.phase_family
