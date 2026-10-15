@@ -260,7 +260,8 @@ def test_batch_extractor_reports_both_liquid_amounts(path):
     """Report the inherited heavy and light rows of a BatchExtractor charge.
 
     The batch extractor separates an inventory [mol], so its rows carry
-    amounts instead of flows; heavy plus light equals the charge.
+    amounts instead of flows; heavy plus light equals the charge, which is
+    reported first as the unit's initial holdup (issue #456).
     """
     charge = FLOW_1 + FLOW_2  # [mol], same numbers as the 1.5 mol/s feed
     species_moles, species_mass = _species_inflow(path)  # [mol], [kg]
@@ -276,10 +277,13 @@ def test_batch_extractor_reports_both_liquid_amounts(path):
             ('mole', 'moles', 'mole_frac', species_moles)):
         table = sim.result.GetStreamTable(basis=basis)
         assert table.index.droplevel(2).tolist() == [
-            ('X01', 'Outlet_heavy'), ('X01', 'Outlet_light')]
+            ('X01', 'Initial_holdup'), ('X01', 'Outlet_heavy'),
+            ('X01', 'Outlet_light')]
         amounts = table[amount].to_numpy()  # [kg] or [mol]
         fractions = table[['%s_%s' % (frac, comp)
                            for comp in sim.NamesSpecies]].to_numpy()  # [-]
         assert np.all(amounts > 0)
-        np.testing.assert_allclose(amounts @ fractions, expected, rtol=0,
-                                   atol=BALANCE_RTOL * expected.sum())
+        for rows in (slice(0, 1), slice(1, 3)):  # the charge, the products
+            np.testing.assert_allclose(
+                amounts[rows] @ fractions[rows], expected, rtol=0,
+                atol=BALANCE_RTOL * expected.sum())

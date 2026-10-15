@@ -5,6 +5,8 @@ Created on Mon Jun 29 14:55:22 2020
 @author: dcasasor
 """
 
+import copy
+
 import numpy as np
 from scipy.optimize import newton
 
@@ -448,13 +450,33 @@ class BatchExtractor(ContinuousExtractor):
 
     @property
     def Phases(self):
+        """Liquid charge of the extractor (``LiquidPhase``), or None."""
         return self._Phases
 
     @Phases.setter
     def Phases(self, instance):
+        """Charge the extractor with the liquid inventory to separate.
+
+        Parameters
+        ----------
+        instance : LiquidPhase
+            Liquid charge with mole fractions [-], amount [mol],
+            temperature [K] and pressure [Pa].
+
+        Notes
+        -----
+        A deep copy of the charge is kept as ``__original_phase__``, the
+        initial-holdup snapshot that ``SimulationExec.get_holdup`` reports
+        as a raw material unless the charge was transferred from an
+        upstream unit (``transferred_from_uo``), whose source is charged
+        instead. Earlier releases kept no snapshot, so a user charge was
+        missing from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
+        """
         fields = material_setter(instance, oper_mode=self.oper_mode)
         self._Phases = instance
         self.matter = self._Phases
 
         for key, val in fields.items():
             setattr(self, key, val)
+
+        self.__original_phase__ = copy.deepcopy(instance)

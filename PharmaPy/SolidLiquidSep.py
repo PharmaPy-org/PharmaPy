@@ -1167,6 +1167,13 @@ class Filter:
         pressure-dependent callables, until solve_unit resolves them. The
         log_params option transforms only supplied estimation parameters.
 
+        The slurry is kept as a deep copy, ``__original_phase__``, the
+        initial-holdup snapshot that ``SimulationExec.get_holdup`` reports
+        per phase as raw materials, skipping phases transferred from an
+        upstream unit (``transferred_from_uo``), whose source is charged
+        instead. Earlier releases kept no snapshot, so a user charge was
+        missing from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
+
         Raises
         ------
         RuntimeError
@@ -1217,6 +1224,8 @@ class Filter:
         self.dim_states = [a['dim'] for a in self.states_di.values()]
 
         self.nomenclature()
+
+        self.__original_phase__ = copy.deepcopy(self.SlurryPhase)
 
     def nomenclature(self):
         self.names_states_in = ['mass', 'temp', 'mass_frac', 'total_distrib']

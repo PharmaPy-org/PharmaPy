@@ -14,6 +14,7 @@ from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
 
+import copy
 import math
 import numbers
 import warnings
@@ -108,7 +109,9 @@ class BatchToFlowConnector:
     ``has_solids`` is retained for compatibility and is always False for an
     accepted holdup. The class-level ``is_instantaneous = True`` is
     declared for consistency with the ``Mixer`` (its result spans 0 s); it
-    has no raw-material effect, because the connector has no raw inlets.
+    has no raw-material effect, because the connector has no raw inlets. A
+    holdup charged by the user is reported as the connector's initial
+    holdup (issue #456).
     """
 
     is_instantaneous = True
@@ -191,6 +194,14 @@ class BatchToFlowConnector:
         Those holdups are rejected rather than reduced to their liquid,
         because the liquid-only outlet would drop the rest from the
         flowsheet mass balance.
+
+        An accepted holdup is also kept as a deep copy,
+        ``__original_phase__``, the initial-holdup snapshot that
+        ``SimulationExec.get_holdup`` reports as a raw material unless the
+        holdup was transferred from an upstream unit
+        (``transferred_from_uo``), whose source is charged instead.
+        Earlier releases kept no snapshot, so a user charge was missing
+        from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
         """
         candidates = (list(phases) if isinstance(phases, (list, tuple))
                       else [phases])
@@ -224,6 +235,9 @@ class BatchToFlowConnector:
         # a LiquidPhase subclass whose name lacks 'Liquid'.
         classify_phases(self, names=['Liquid_1'])
         self.nomenclature()
+
+        # Initial-holdup snapshot for raw-material accounting (issue #456).
+        self.__original_phase__ = copy.deepcopy(self.Liquid_1)
 
     def nomenclature(self) -> None:
         """Declare the published outlet states and their metadata.

@@ -6,7 +6,7 @@ Created on Mon Apr 27 14:26:50 2020
 """
 
 from typing import Mapping, Optional, Sequence, Tuple, Union
-from copy import copy
+from copy import copy, deepcopy
 
 from PharmaPy._assimulo import CVode, Explicit_Problem
 
@@ -65,10 +65,28 @@ class ContinuousHoldup:
 
     @property
     def Phases(self):
+        """Liquid inventory of the holdup, as a list, or None."""
         return self._Phases
 
     @Phases.setter
     def Phases(self, phase):
+        """Charge the holdup with its liquid inventory.
+
+        Parameters
+        ----------
+        phase : LiquidPhase or sequence of LiquidPhase
+            Liquid inventory with mass [kg], mass fractions [-] and
+            temperature [K]; its mass stays constant during the solve.
+
+        Notes
+        -----
+        A deep copy of ``Liquid_1`` is kept as ``__original_phase__``, the
+        initial-holdup snapshot that ``SimulationExec.get_holdup`` reports
+        as a raw material. It is taken before any solve, which updates
+        ``Liquid_1`` in place, so the reported charge keeps the charged
+        composition. Earlier releases kept no snapshot, so the charge was
+        missing from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
+        """
         if isinstance(phase, (list, tuple)):
             self._Phases = phase
         elif phase.__module__ == 'PharmaPy.Phases':
@@ -76,7 +94,9 @@ class ContinuousHoldup:
 
         classify_phases(self)
         self.nomenclature()
-        self.mass = self.Liquid_1.mass
+        self.mass = self.Liquid_1.mass  # [kg]
+
+        self.__original_phase__ = deepcopy(self.Liquid_1)
 
     def nomenclature(self) -> None:
         """Declare holdup composition, temperature, and outlet-flow metadata.
