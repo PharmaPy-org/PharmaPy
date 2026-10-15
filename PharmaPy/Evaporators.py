@@ -135,12 +135,14 @@ class IsothermalFlash:
     ----------
     temp_drum : float, optional
         equipment temperature [K]. If None, temperature will be taken from
-        the Inlet object aggregated to the flash (from PharmaPy.Phases or
-        PharmaPy.Streams modules). The default is None.
+        the current Inlet object aggregated to the flash (from
+        PharmaPy.Phases or PharmaPy.Streams modules), every time an inlet
+        is assigned and every time the flash is solved. The default is
+        None.
     pres_drum : float, optional
         equipment pressure [Pa]. If None, pressure will be taken from
-        the Inlet object aggregated to the flash (from PharmaPy.Phases or
-        PharmaPy.Streams modules). The default is None.
+        the current Inlet object, as for ``temp_drum``. The default is
+        None.
     gamma_method : str, optional
         one of 'ideal', 'UNIFAC' or 'UNIQUAC'. If 'UNIFAC' or 'UNIQUAC' is
         passed, the pure-component .json file must have the interaction
@@ -159,9 +161,12 @@ class IsothermalFlash:
         Parameters
         ----------
         temp_drum : float, optional
-            Drum temperature [K]; None uses the inlet temperature.
+            Drum temperature [K]; None uses the current inlet temperature.
+            Kept as ``temp_drum``; the effective drum temperature is
+            ``temp``.
         pres_drum : float, optional
-            Drum pressure [Pa]; None uses the inlet pressure.
+            Drum pressure [Pa]; None uses the current inlet pressure. Kept
+            as ``pres_drum``; the effective drum pressure is ``pres``.
         gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
             Liquid activity model, with parameters supplied by the inlet.
 
@@ -183,12 +188,19 @@ class IsothermalFlash:
         separates the upstream outlet's final state. It publishes
         ``LiquidOut`` and ``VaporOut`` but no ``Outlet`` or time profile,
         so it cannot be a flowsheet source.
+
+        The user's drum settings stay in ``temp_drum`` [K] and
+        ``pres_drum`` [Pa]; the effective drum conditions ``temp`` [K] and
+        ``pres`` [Pa] are derived from them and the current ``Inlet`` on
+        every ``Inlet`` assignment and at the start of every
+        ``solve_unit`` (issue #452).
         """
         validate_activity_model(gamma_method, param_name='gamma_method')
 
-        self.temp = temp_drum  # [K]
-        self.pres = pres_drum  # [Pa]
+        self.temp_drum = temp_drum  # [K], or None to follow the inlet
+        self.pres_drum = pres_drum  # [Pa], or None to follow the inlet
         self._Inlet = None
+        self._update_drum_conditions()
         self.gamma_method = gamma_method
 
         self.oper_mode = 'Continuous'
@@ -231,24 +243,63 @@ class IsothermalFlash:
         """
         return {'liquid': self.LiquidOut, 'vapor': self.VaporOut}
 
+    def _update_drum_conditions(self) -> None:
+        """Derive the effective drum temperature and pressure.
+
+        Sets ``temp`` [K] to ``temp_drum`` when the user set it, otherwise
+        to the current ``Inlet`` temperature, and ``pres`` [Pa] likewise
+        from ``pres_drum`` or the ``Inlet`` pressure. Without an ``Inlet``,
+        an unset value stays None.
+
+        Notes
+        -----
+        The user's settings are never overwritten, so a re-assigned inlet,
+        or an inlet changed in place before a new solve, is flashed at its
+        own conditions. Earlier releases stored the first inlet's values
+        as the drum settings and flashed every later inlet at them
+        (issue #452).
+        """
+        inlet = self._Inlet
+        temp_inlet = None if inlet is None else inlet.temp  # [K]
+        pres_inlet = None if inlet is None else inlet.pres  # [Pa]
+
+        self.temp = (self.temp_drum if self.temp_drum is not None
+                     else temp_inlet)  # [K]
+        self.pres = (self.pres_drum if self.pres_drum is not None
+                     else pres_inlet)  # [Pa]
+
     @property
     def Inlet(self):
+        """Feed of the flash (``LiquidPhase`` or ``LiquidStream``).
+
+        Returns
+        -------
+        LiquidPhase or LiquidStream or None
+            The assigned feed, or None before one is assigned.
+        """
         return self._Inlet
 
     @Inlet.setter
     def Inlet(self, instance):
+        """Attach the feed and derive the effective drum conditions.
+
+        Parameters
+        ----------
+        instance : LiquidPhase or LiquidStream
+            Feed with mole fractions [-], temperature [K], pressure [Pa],
+            and inventory [mol] or flow [mol/s].
+
+        Notes
+        -----
+        ``temp`` [K] and ``pres`` [Pa] are derived again from ``temp_drum``
+        and ``pres_drum`` and this feed (see ``_update_drum_conditions``).
+        """
         self._Inlet = instance
 
-        if self.temp is None:
-            self.temp = self._Inlet.temp
+        self._update_drum_conditions()
 
-        if self.pres is None:
-            self.pres = self._Inlet.pres
-
-        # self.pres = self._Inlet.pres
         self.num_comp = self._Inlet.num_species
 
-        # if self.k_func is None:
         self.k_func = self.Inlet.getKeqVLE
 
         if self.Inlet.__module__ == 'PharmaPy.Streams':
@@ -330,7 +381,15 @@ class IsothermalFlash:
             If the solve does not converge or fails residual/phase-bound checks.
         ValueError
             If residual_tolerance is not finite and positive.
+
+        Notes
+        -----
+        The effective drum temperature ``temp`` [K] and pressure ``pres``
+        [Pa] are derived from ``temp_drum``, ``pres_drum`` and the current
+        ``Inlet`` before solving, so an inlet changed in place since its
+        assignment is flashed at its current conditions.
         """
+        self._update_drum_conditions()
 
         # Set seeds
         l_seed = 0.5
@@ -341,12 +400,8 @@ class IsothermalFlash:
 
         seed = np.concatenate(([l_seed], x_seed, y_seed, [v_seed]))
 
-        # # Set jacobian
-        # jac_eqns = jacauto(self.unit_model)
-
         # Solve nonlinear system
         solution = _solve_flash(self.unit_model, seed, -1, residual_tolerance)
-        # fprime=jac_eqns,
 
         # Retrieve solution
         liq_flash = solution[0] * self.in_flow
