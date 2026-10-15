@@ -8,7 +8,13 @@ account that holdup per phase: the user's seed is a raw material of the
 crystallizer, and the liquid is charged once, to the Mixer that received
 it. A holdup transferred as a whole, here the slurry of a seeded
 crystallizer charging a second one, is charged to its sources only, and a
-holdup charged wholly by the user is reported in full.
+holdup charged wholly by the user is reported in full. A solve grows the
+held seed in place and a flowsheet re-solve keeps it while it replaces the
+transferred liquid, so the re-solved crystallizer must still report the
+seed as charged, not the previous solve's crystals, for a seeded and an
+empty (zero-population) seed (milestone review of issues #441/#455). A
+seed the user edits after a solve, in place or by assigning a new object,
+is a new charge and is reported as edited.
 
 Fixture (the triage reproduction of the issue): the shipped five-species
 database (tests/Flowsheet/data/compound_database.json), a 0.5 L liquid of
@@ -22,8 +28,13 @@ seed mass is rho_solid(A) kv mu_3, with mu_3 the trapezoidal third moment
 of the population (PharmaPy's quadrature, checked by
 tests/test_distribution_quadrature_contract.py) converted from um**3 to
 m**3; molar amounts divide species masses by the database molar masses.
-The crystallizers are integrated with CVode, so every case is marked
-``assimulo``.
+The re-solve cases make the seed grow with
+``CrystKinetics(coeff_solub=[50.], growth=(1., 0., 1.))`` and, for the
+empty seed, primary nucleation ``nucl_prim=(1e8, 0., 1.)``, both synthetic
+rate constants chosen only so that the crystals change within the 10 s
+runs. An edited seed scales the population by 2 or 3, which scales its
+mass, rho_solid kv mu_3, by the same factor. The crystallizers are
+integrated with CVode, so every case is marked ``assimulo``.
 """
 
 import json
@@ -58,6 +69,16 @@ TANK = 2e-3  # [m**3], semibatch vessel
 FEED = 1e-5  # [m**3/s], own liquid feed of the semibatch crystallizer
 RUNTIME = 100.0  # [s], issue #455 triage run
 UM3_TO_M3 = 1e-18  # [m**3/um**3], exact SI conversion
+# Re-solve cases: synthetic kinetics that change the crystals in 10 s.
+GROWTH_SOLUBILITY = [50.]  # [kg/m**3], supersaturated for A
+GROWTH = (1., 0., 1.)  # [um/s], [J/mol], [-]: rate constant, energy, order
+NUCLEATION = (1e8, 0., 1.)  # [#/m**3/s], [J/mol], [-], for the empty seed
+GROWTH_RUNTIME = 10.0  # [s], each re-solve
+SEMIBATCH_GROWTH_FEED = 1e-6  # [m**3/s], small own feed of the semibatch
+RESOLVES = 2  # [-], first solve and one re-solve
+EDIT_FACTOR = 2.0  # [-], population scale of a seed edited in place
+NEW_SEED_FACTOR = 3.0  # [-], population scale of a newly assigned seed
+GROWTH_RUN = {'CR01': {'runtime': GROWTH_RUNTIME, 'verbose': False}}
 G_TO_KG = 1e-3  # [kg/g], exact SI conversion
 # [-], float64 roundoff of the reported conversions: the initial holdups
 # and the raw inlets are read from the stored charges and feeds, not from
@@ -325,6 +346,160 @@ def test_wholly_transferred_slurry_is_not_a_raw_material(path):
         ('M01', 'Inlet_0', 'LiquidPhase', _expected_species(path, 'liquid')),
         ('CR01', 'Initial_holdup', 'SolidPhase',
          _expected_species(path, 'seed'))])
+
+
+def _growth_flowsheet(path, cls, empty=False, reset_states=False):
+    """Build a batch Mixer completing a crystallizer seed that grows.
+
+    Parameters
+    ----------
+    path : str
+        Database path.
+    cls : type
+        ``BatchCryst`` or ``SemibatchCryst``; the semibatch unit also has
+        its own small liquid feed.
+    empty : bool, optional
+        Charge a zero population and nucleate instead of growing a seed.
+    reset_states : bool, optional
+        Crystallizer setting: restore the charge before every solve.
+
+    Returns
+    -------
+    sim : SimulationExec
+        Unsolved ``M01 --> CR01`` flowsheet.
+    seed : SolidPhase
+        The user's seed object held by ``CR01``.
+    """
+    kwargs = {'vol_tank': TANK} if cls is SemibatchCryst else {}
+    sim = SimulationExec(path, {'M01': ['CR01'], 'CR01': []})
+    sim.M01 = Mixer()
+    sim.M01.Inlets = _liquid(path)
+    unit = cls('A', method='1D-FVM', reset_states=reset_states, **kwargs)
+    kinetics = {'coeff_solub': GROWTH_SOLUBILITY, 'growth': GROWTH}
+    if empty:
+        kinetics['nucl_prim'] = NUCLEATION
+    unit.Kinetics = CrystKinetics(**kinetics)
+    unit.Utility = CoolingWater(vol_flow=UTILITY_FLOW, temp_in=UTILITY_TEMP)
+    population = np.zeros_like(SEED) if empty else SEED.copy()  # [#/um]
+    seed = SolidPhase(path, temp=TEMP, x_distrib=GRID.copy(),
+                      distrib=population, kv=SHAPE_FACTOR, mass_frac=SOLID)
+    unit.Phases = seed
+    if cls is SemibatchCryst:
+        unit.Inlet = LiquidStream(path, temp=TEMP, mass_frac=COMPOSITION,
+                                  vol_flow=SEMIBATCH_GROWTH_FEED)
+    sim.CR01 = unit
+    return sim, seed
+
+
+def _assert_seed_row(sim, expected):
+    """Assert the crystallizer reports one seed row with given amounts.
+
+    Parameters
+    ----------
+    sim : SimulationExec
+        Solved flowsheet.
+    expected : dict
+        ``{'mass': kg, 'mole': mol}`` species amounts of the seed.
+    """
+    raw = _raw(sim)
+    rows = [key[:2] for key in raw['mass'].index]
+    assert rows.count(('CR01', 'Initial_holdup')) == 1
+    assert ('M01', 'Inlet_0') in rows
+    position = rows.index(('CR01', 'Initial_holdup'))
+    for basis, amount in (('mass', 'mass'), ('mole', 'moles')):
+        table = raw[basis]
+        assert table.index[position][2].split('.')[0] == 'SolidPhase'
+        reported = table[['%s_%s' % (amount, name) for name in
+                          ('A', 'B', 'C', 'D', 'solvent')]]
+        np.testing.assert_allclose(
+            reported.to_numpy(dtype=float)[position], expected[basis],
+            rtol=RTOL, atol=RTOL * expected[basis].sum())
+
+
+def _scaled_seed(path, factor):
+    """Return the species amounts of the seed scaled by ``factor``.
+
+    Parameters
+    ----------
+    path : str
+        Database path.
+    factor : float
+        Population scale [-]; 0 for the empty seed.
+
+    Returns
+    -------
+    dict
+        ``{'mass': kg, 'mole': mol}`` species amounts.
+    """
+    return {basis: amounts * factor for basis, amounts
+            in _expected_species(path, 'seed').items()}
+
+
+@pytest.mark.parametrize('empty', [False, True], ids=['seeded', 'empty'])
+@pytest.mark.parametrize('cls', [BatchCryst, SemibatchCryst],
+                         ids=['batch', 'semibatch'])
+def test_resolve_reports_the_charged_seed(path, cls, empty):
+    """Report the seed as charged after a re-solve grew it in place."""
+    sim, _ = _growth_flowsheet(path, cls, empty)
+    seed = _scaled_seed(path, 0 if empty else 1)
+    for _ in range(RESOLVES):
+        sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+        # The held crystals changed: they are no longer the charge.
+        assert sim.CR01.Solid_1.mass != pytest.approx(
+            seed['mass'].sum(), rel=RTOL, abs=RTOL)
+        _assert_seed_row(sim, seed)
+
+
+@pytest.mark.parametrize('route', ['reassign-same', 'resolve-only'])
+def test_seed_edited_after_a_solve_is_reported_as_edited(path, route):
+    """Report a seed the user scaled in place after the first solve."""
+    sim, seed = _growth_flowsheet(path, BatchCryst)
+    sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+    seed.updatePhase(distrib=EDIT_FACTOR * SEED)  # [#/um]
+    edited = _scaled_seed(path, EDIT_FACTOR)
+    if route == 'reassign-same':
+        sim.CR01.Phases = [sim.CR01.Liquid_1, seed]
+        _assert_seed_row(sim, edited)
+    sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+    _assert_seed_row(sim, edited)
+
+
+@pytest.mark.parametrize('solves', [1, RESOLVES])
+def test_reassigned_unedited_seed_is_a_new_charge(path, solves):
+    """Snapshot a direct user assignment afresh, even of a held object.
+
+    Only a connection re-transfer keeps the charge-time copy; assigning
+    the grown seed object again makes its current state the charge. After
+    a re-solve the re-transfer's list of kept phases must be gone, or the
+    user's assignment would keep the charge-time copy.
+    """
+    sim, seed = _growth_flowsheet(path, BatchCryst)
+    for _ in range(solves):
+        sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+    assert '_retained_by_transfer' not in vars(sim.CR01)
+    grown = seed.mass  # [kg], the crystals after the last solve
+    sim.CR01.Phases = [sim.CR01.Liquid_1, seed]
+
+    raw = sim.GetRawMaterials(basis='mass')
+    rows = [key[:2] for key in raw.index]
+    assert raw['mass'].iloc[rows.index(('CR01', 'Initial_holdup'))] == (
+        pytest.approx(grown, rel=RTOL))
+    assert grown != pytest.approx(_scaled_seed(path, 1)['mass'].sum(),
+                                  rel=RTOL)
+
+
+def test_new_seed_object_is_reported(path):
+    """Report a new seed object assigned after the first solve."""
+    sim, _ = _growth_flowsheet(path, BatchCryst)
+    sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+    new_seed = SolidPhase(path, temp=TEMP, x_distrib=GRID.copy(),
+                          distrib=NEW_SEED_FACTOR * SEED, kv=SHAPE_FACTOR,
+                          mass_frac=SOLID)
+    sim.CR01.Phases = [sim.CR01.Liquid_1, new_seed]
+    expected = _scaled_seed(path, NEW_SEED_FACTOR)
+    _assert_seed_row(sim, expected)
+    sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+    _assert_seed_row(sim, expected)
 
 
 def test_user_charge_is_reported_in_full(path):

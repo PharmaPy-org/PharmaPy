@@ -1130,6 +1130,10 @@ class Connection:
         from the destination's ``Phases`` list in place, so setters that add
         to the held list (``BatchCryst``, ``Drying``) do not keep the
         earlier transfer. Setters that replace their phases are unaffected.
+        During that assignment only, the destination's
+        ``_retained_by_transfer`` lists the phases it keeps, so a
+        crystallizer can keep the records of a kept seed taken when it was
+        charged (see ``_BaseCryst._kept_from_charge``).
         A destination whose ``Phases`` is not a list, or a transfer without
         ``replaced_matter``, is assigned directly.
 
@@ -1156,6 +1160,9 @@ class Connection:
                  for phase in original]
         held[:] = [phase for phase in held
                    if not any(phase is old for old in stale)]
+        # The phases this re-transfer keeps, for this assignment only: a
+        # crystallizer keeps their charge-time records (_kept_from_charge).
+        destination._retained_by_transfer = tuple(held)
         try:
             destination.Phases = matter
         except Exception:
@@ -1166,3 +1173,5 @@ class Connection:
                 if name is not _UNNAMED:
                     phase.name = name
             raise
+        finally:
+            vars(destination).pop('_retained_by_transfer', None)
