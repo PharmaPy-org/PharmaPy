@@ -169,13 +169,40 @@ class IsothermalFlash:
         ------
         ValueError
             If ``gamma_method`` is not a supported selector.
+
+        Notes
+        -----
+        The flash is a steady-state stream unit, so it declares the
+        flowsheet destination contract of a continuous unit (issue #445):
+        ``oper_mode = 'Continuous'``, ``is_continuous = True`` and
+        ``names_states_in``, the stream fields it reads from its ``Inlet``:
+        mole fractions [-], molar flow [mol/s], and the temperature [K] and
+        pressure [Pa] used when ``temp_drum`` or ``pres_drum`` is None. It
+        reads them from the stored state of the ``Inlet`` object, so a
+        connected upstream time profile is not resolved: the flash
+        separates the upstream outlet's final state. It publishes
+        ``LiquidOut`` and ``VaporOut`` but no ``Outlet`` or time profile,
+        so it cannot be a flowsheet source.
         """
         validate_activity_model(gamma_method, param_name='gamma_method')
 
-        self.temp = temp_drum
-        self.pres = pres_drum
+        self.temp = temp_drum  # [K]
+        self.pres = pres_drum  # [Pa]
         self._Inlet = None
         self.gamma_method = gamma_method
+
+        self.oper_mode = 'Continuous'
+        self.is_continuous = True
+        self.names_states_in = ['mole_frac', 'mole_flow', 'temp', 'pres']
+
+    def flatten_states(self) -> None:
+        """Do nothing: the steady-state flash keeps no state profiles.
+
+        Notes
+        -----
+        ``SimulationExec.SolveFlowsheet`` calls ``flatten_states`` on every
+        solved unit outside ``PharmaPy.Containers``.
+        """
 
     @property
     def Inlet(self):
@@ -380,18 +407,44 @@ class AdiabaticFlash:
         ------
         ValueError
             If ``gamma_method`` is not a supported selector.
+
+        Notes
+        -----
+        The flash is a steady-state stream unit, so it declares the
+        flowsheet destination contract of a continuous unit (issue #445):
+        ``oper_mode = 'Continuous'``, ``is_continuous = True`` and
+        ``names_states_in``, the stream fields it reads from its ``Inlet``:
+        mole fractions [-], molar flow [mol/s] and temperature [K]; the
+        drum pressure is ``pres_drum``. It reads them from the stored state
+        of the ``Inlet`` object, so a connected upstream time profile is
+        not resolved: the flash separates the upstream outlet's final
+        state. It publishes ``LiquidOut`` and ``VaporOut`` but no
+        ``Outlet`` or time profile, so it cannot be a flowsheet source.
         """
         validate_activity_model(gamma_method, param_name='gamma_method')
- 
-        self.pres = pres_drum
 
-        self.div_energybce = div_energybce
-        self.mult_midfun = mult_midfun
+        self.pres = pres_drum  # [Pa]
+
+        self.div_energybce = div_energybce  # [-]
+        self.mult_midfun = mult_midfun  # [-]
         self.seed_basedon_input = seed_basedon_input
 
         self._Inlet = None
 
         self.gamma_method = gamma_method
+
+        self.oper_mode = 'Continuous'
+        self.is_continuous = True
+        self.names_states_in = ['mole_frac', 'mole_flow', 'temp']
+
+    def flatten_states(self) -> None:
+        """Do nothing: the steady-state flash keeps no state profiles.
+
+        Notes
+        -----
+        ``SimulationExec.SolveFlowsheet`` calls ``flatten_states`` on every
+        solved unit outside ``PharmaPy.Containers``.
+        """
 
     @property
     def Inlet(self):

@@ -23,14 +23,36 @@ from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 class ThreePhaseSettler:
     def __init__(self, d_impeller, d_vessel,
                  target_compound, agit_rate=1000/60):
+        """Create a continuous three-phase settler.
 
-        self.d_impeller = d_impeller
-        self.d_vessel = d_vessel
+        Parameters
+        ----------
+        d_impeller : float
+            Impeller diameter [m].
+        d_vessel : float
+            Vessel diameter [m].
+        target_compound : str
+            Name of the solid compound tracked in the feed's liquid species.
+        agit_rate : float, optional
+            Agitation rate [1/s], revolutions per second as used in the
+            impeller Reynolds and Froude numbers; the default, 1000/60,
+            is 1000 rpm.
+
+        Notes
+        -----
+        The settler takes a continuous slurry feed and publishes an outlet
+        stream, so it declares ``oper_mode = 'Continuous'`` and
+        ``is_continuous = True`` for flowsheet connections (issue #445).
+        """
+
+        self.d_impeller = d_impeller  # [m]
+        self.d_vessel = d_vessel  # [m]
         self.target_compound = target_compound
-        self.agit_rate = agit_rate
+        self.agit_rate = agit_rate  # [1/s]
 
         self.outputs = None
         self.oper_mode = 'Continuous'
+        self.is_continuous = True
 
     def nomenclature(self):
         self.name_states = ['solid_conc']

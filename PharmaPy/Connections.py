@@ -8,6 +8,7 @@ Created on Mon Mar  2 15:36:35 2020
 from collections import deque
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
+from PharmaPy.Errors import PharmaPySpecificationError
 from PharmaPy.NameAnalysis import NameAnalyzer, get_dict_states
 from PharmaPy.Interpolation import local_newton_interpolation
 
@@ -471,10 +472,39 @@ def convert_str_flowsheet(flowsheet):
 # Marks a held object without a ``name`` before a failed batch assignment.
 _UNNAMED = object()
 
+# Operating modes by which PassPhases routes matter into a destination other
+# than a Mixer, which derives its own mode from the basis of its inlets.
+DESTINATION_MODES = ('Batch', 'Semibatch', 'Continuous')
+
+# Attributes every flowsheet source must declare: FeedConnection reads its
+# outlet, published states and operating flags (issue #445).
+SOURCE_CONTRACT = ('Outlet', 'outputs', 'is_continuous', 'oper_mode')
+
+
+def _unit_label(unit: object, name: Union[str, None]) -> str:
+    """Return a unit's flowsheet name and class for error messages.
+
+    Parameters
+    ----------
+    unit : object
+        Unit operation instance.
+    name : str or None
+        Flowsheet name of the unit, if known.
+
+    Returns
+    -------
+    str
+        ``"'NAME' (Class)"``, or ``"Class"`` without a name.
+    """
+    class_name = type(unit).__name__
+    if name is None:
+        return class_name
+    return f"'{name}' ({class_name})"
+
 
 class Connection:
     def __init__(self, source_uo, destination_uo, replaced_matter=None,
-                 replaced_phases=()):
+                 replaced_phases=(), source_name=None, destination_name=None):
         """Connect a solved source unit's outlet to a destination unit.
 
         Parameters
@@ -498,21 +528,143 @@ class Connection:
             destination may later add its own phases to the transferred
             cake's live ``Phases`` list (``Drying`` keeps that list as its
             own). Empty by default.
+        source_name, destination_name : str, optional
+            Flowsheet names of the two units, used only to name them in
+            error messages; by default the messages name their classes.
         """
         self.source_uo = source_uo
         self.destination_uo = destination_uo
         self.replaced_matter = replaced_matter
         self.replaced_phases = tuple(replaced_phases)
+        self.source_name = source_name
+        self.destination_name = destination_name
         # Deep copy handed to the destination by PassPhases, and the phases
         # it carried at that time; SimulationExec records both to replace
         # the copy on a later transfer and to verify raw-material use.
         self.transferred_matter = None
         self.transferred_phases = ()
 
-    def transfer_data(self):
+    def transfer_data(self) -> None:
+        """Check the connection, then hand the source outlet downstream.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If either unit lacks the connection contract; see
+            :meth:`_check_contract`.
+
+        Notes
+        -----
+        The contract is checked before :meth:`FeedConnection`, so a
+        rejected connection leaves the source outlet and the destination
+        unchanged. Then :meth:`FeedConnection` attaches the source profile,
+        :meth:`ConvertUnits` converts it to the destination's input names
+        and :meth:`PassPhases` installs a copy in the destination.
+        """
+        self._check_contract()
         self.FeedConnection()
         self.ConvertUnits()
         self.PassPhases()
+
+    def _conversion_flags(self) -> Tuple[bool, bool]:
+        """Return which name conversion :meth:`ConvertUnits` applies.
+
+        Returns
+        -------
+        flow_flag : bool
+            True if the source's ``oper_mode`` is ``'Continuous'`` and the
+            destination's is not ``'Batch'``: stream states are converted
+            to the destination's ``names_states_in``.
+        btf_flag : bool
+            True if the source is a ``BatchToFlowConnector``, whose
+            discharge stream is converted likewise.
+        """
+        flow_flag = (self.source_uo.oper_mode == 'Continuous'
+                     and self.destination_uo.oper_mode != 'Batch')
+        btf_flag = (self.source_uo.__class__.__name__
+                    == 'BatchToFlowConnector')
+        return flow_flag, btf_flag
+
+    def _check_contract(self) -> None:
+        """Reject units that lack the attributes the connection reads.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If the source lacks ``Outlet``, ``outputs``, ``result.time``,
+            ``is_continuous`` or ``oper_mode``; if the destination lacks
+            ``oper_mode``; if the states are converted (see
+            :meth:`_conversion_flags`) and the source lacks
+            ``names_states_out`` or the destination ``names_states_in``.
+            The message names each unit, its class and the missing
+            attributes. Also if a destination other than a ``Mixer``
+            declares an ``oper_mode`` outside ``DESTINATION_MODES``, such
+            as the lowercase ``'batch'`` default of
+            ``PharmaPy.MetaModeler.MetaModelingClass``, for which
+            :meth:`PassPhases` would install nothing; that message names
+            the unit, its class and the mode.
+
+        Notes
+        -----
+        ``PharmaPySpecificationError`` subclasses ``AttributeError``, which
+        such connections raised before this check (issue #445), and the
+        defect is in the unit's specification for flowsheet use, not in
+        the values it holds. A unit whose outlet or published time profile
+        is missing, such as a flash or extractor, can still be the last
+        unit of a flowsheet, but not a source.
+
+        The check covers what real units can lack. Every PharmaPy unit
+        that declares a supported mode also declares the ``Inlet`` or
+        ``Phases`` setter of that mode (a ``Mixer`` its ``Inlets``), and
+        the only unit with a dictionary ``Outlet``, ``DynamicExtractor``,
+        declares its ``default_output``, so neither is checked.
+        """
+        source, destination = self.source_uo, self.destination_uo
+        is_mixer = destination.__class__.__name__ == 'Mixer'
+
+        missing_source = [name for name in SOURCE_CONTRACT
+                          if not hasattr(source, name)]
+        if not hasattr(getattr(source, 'result', None), 'time'):
+            missing_source.append('result.time')
+
+        missing_destination = [] if hasattr(destination, 'oper_mode') else [
+            'oper_mode']
+        mode = getattr(destination, 'oper_mode', None)
+        if not is_mixer and not missing_destination and (
+                mode not in DESTINATION_MODES):
+            raise PharmaPySpecificationError(
+                f'{_unit_label(destination, self.destination_name)} '
+                f'declares oper_mode {mode!r}; a flowsheet destination '
+                'other than a Mixer must declare one of '
+                f'{list(DESTINATION_MODES)} so that Connection can install '
+                'the transferred matter.')
+
+        if 'oper_mode' not in missing_source + missing_destination:
+            flow_flag, btf_flag = self._conversion_flags()
+            if flow_flag or btf_flag:
+                if not hasattr(source, 'names_states_out'):
+                    missing_source.append('names_states_out')
+                if not hasattr(destination, 'names_states_in'):
+                    missing_destination.append('names_states_in')
+
+        problems = []
+        if missing_source:
+            problems.append(
+                f'source {_unit_label(source, self.source_name)} lacks '
+                f'{missing_source}, which a flowsheet source must publish')
+        if missing_destination:
+            problems.append(
+                'destination '
+                f'{_unit_label(destination, self.destination_name)} lacks '
+                f'{missing_destination}, which a flowsheet destination must '
+                'declare')
+        if problems:
+            raise PharmaPySpecificationError(
+                'Cannot connect these units: ' + '; '.join(problems)
+                + '. The unit class does not implement the connection '
+                'contract for this role; use it standalone (assign its '
+                'Inlet or Phases and call solve_unit) or connect a unit '
+                'that implements it.')
 
     def FeedConnection(self) -> None:
         """Select the source outlet and attach its upstream profile.
@@ -594,11 +746,7 @@ class Connection:
         A ``DynamicCollector`` destination receives the input names of the
         model its inlet selects, from :meth:`_collector_input_names`.
         """
-        mode_source = self.source_uo.oper_mode
-        mode_dest = self.destination_uo.oper_mode
-
-        flow_flag = (mode_source == 'Continuous' and mode_dest != 'Batch')
-        btf_flag = self.source_uo.__class__.__name__ == 'BatchToFlowConnector'
+        flow_flag, btf_flag = self._conversion_flags()
 
         if flow_flag or btf_flag:
             names_states_in = self.destination_uo.names_states_in

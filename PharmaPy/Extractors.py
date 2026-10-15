@@ -89,6 +89,18 @@ class ContinuousExtractor:
             and return distribution coefficients ``K_i`` [-].
         gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
             Activity-coefficient method used by the default ``k_fun``.
+
+        Notes
+        -----
+        The extractor declares the flowsheet destination contract of a
+        continuous unit (issue #445): ``oper_mode = 'Continuous'``,
+        ``is_continuous = True`` and ``names_states_in``, the stream fields
+        it reads from its ``Inlet``: mole fractions [-], molar flow
+        [mol/s], temperature [K] and pressure [Pa]. It reads them from the
+        stored state of the ``Inlet`` object, so a connected upstream time
+        profile is not resolved: the extractor splits the upstream outlet's
+        final state. It publishes ``Liquid_2`` and ``Liquid_3`` but no
+        ``Outlet``, so it cannot be a flowsheet source.
         """
         validate_gamma_method(gamma_method)
 
@@ -99,6 +111,8 @@ class ContinuousExtractor:
         self.gamma_method = gamma_method
 
         self.oper_mode = 'Continuous'
+        self.is_continuous = True
+        self.names_states_in = ['mole_frac', 'mole_flow', 'temp', 'pres']
 
     @property
     def Inlet(self):
@@ -369,11 +383,30 @@ class ContinuousExtractor:
 
 class BatchExtractor(ContinuousExtractor):
     def __init__(self, k_fun=None, gamma_method='UNIQUAC'):
+        """Create a batch extractor.
+
+        Parameters
+        ----------
+        k_fun : callable, optional
+            Equilibrium function. It must accept two liquid mole-fraction
+            vectors ``x1`` [-] and ``x2`` [-] plus temperature ``temp`` [K],
+            and return distribution coefficients ``K_i`` [-].
+        gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Activity-coefficient method used by the default ``k_fun``.
+
+        Notes
+        -----
+        A batch destination is charged through ``Phases`` with an inventory
+        [mol], so ``is_continuous`` is False. The extractor publishes no
+        ``Outlet`` and an untimed result, so it cannot be a flowsheet
+        source (issue #445).
+        """
         super().__init__(k_fun, gamma_method)
 
         # ``super`` sets the continuous default; batch extraction must keep
         # amount semantics [mol] for Phases and downstream result objects.
         self.oper_mode = 'Batch'
+        self.is_continuous = False
         self._Phases = None
 
     @property

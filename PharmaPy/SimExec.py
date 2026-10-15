@@ -379,7 +379,8 @@ class SimulationExec:
                 source_uo=getattr(self, name),
                 destination_uo=getattr(self, uo_next),
                 replaced_matter=None if previous is None else previous[0],
-                replaced_phases=() if previous is None else previous[4])
+                replaced_phases=() if previous is None else previous[4],
+                source_name=name, destination_name=uo_next)
 
             conn_name = 'CONN%i' % count
             connections[conn_name] = connection
@@ -500,6 +501,11 @@ class SimulationExec:
             Before any unit is solved, if a unit other than a ``Mixer`` is
             fed by several units, whose streams it would replace, drop or
             stack unmixed (issue #444); see :meth:`_check_fan_in`.
+        PharmaPySpecificationError
+            After a source is solved and before its outlet is transferred,
+            if the source or its successor lacks the attributes the
+            connection reads (issue #445); see
+            ``PharmaPy.Connections.Connection._check_contract``.
 
         Notes
         -----
@@ -592,13 +598,14 @@ class SimulationExec:
                 count = self._transfer_to_neighbors(
                     name, connections, count, pick_units)
 
-                # Processing times
-                if hasattr(instance.result, 'time'):
+                # Processing times; steady-state units such as a flash
+                # publish no timed result.
+                if hasattr(getattr(instance, 'result', None), 'time'):
                     time_prof = instance.result.time
                     time_processing[name] = time_prof[-1] - time_prof[0]  # [s]
 
             # instance is already solved, pass data to connection
-            elif isinstance(instance.outputs, dict):
+            elif isinstance(getattr(instance, 'outputs', None), dict):
                 count = self._transfer_to_neighbors(
                     name, connections, count, pick_units)
 
@@ -1740,6 +1747,9 @@ class SimulationExec:
         * the unit is not part of the solved flowsheet;
         * terminal unit, with no successor;
         * the successor was not solved, or no transfer to it is recorded;
+        * the successor has no timed result, because its solve failed or
+          it is a steady-state unit without a time profile, such as a
+          flash (issue #445);
         * the source was re-solved after its outlet was transferred;
         * the successor was not solved after the transfer;
         * the successor holds the transferred stream as a holdup
@@ -1785,9 +1795,12 @@ class SimulationExec:
         successor = successors[0]  # the only one; fan-out is never solved
         consumer = self.uos_instances.get(successor)
         record = getattr(self, '_transfers', {}).get((name, successor))
-        if consumer is None or not hasattr(getattr(consumer, 'result', None),
-                                           'time'):
+        if consumer is None:
             return np.nan, f"downstream unit '{successor}' was not solved"
+        if not hasattr(getattr(consumer, 'result', None), 'time'):
+            return np.nan, (f"downstream unit '{successor}' has no timed "
+                            'result: its solve failed, or it is a '
+                            'steady-state unit such as a flash')
         if record is None:
             return np.nan, ('no transfer to downstream unit '
                             f"'{successor}' is recorded")
@@ -1872,6 +1885,8 @@ class SimulationExec:
             undefined, so its static continuous totals are NaN. The message
             names the unit and the reason: not part of the solved flowsheet;
             terminal unit; successor not solved or no transfer recorded;
+            successor without a timed result (failed solve, or a
+            steady-state unit such as a flash, issue #445);
             source re-solved after the transfer; successor not solved
             after the transfer; outlet held as a holdup rather than a feed
             (issues #436, #438); transferred outlet no longer held by the
