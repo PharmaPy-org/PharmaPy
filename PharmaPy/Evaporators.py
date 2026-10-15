@@ -123,6 +123,49 @@ def _validate_flash_solution(model, solution: np.ndarray, status: int,
     return solution
 
 
+def _flash_states_di(name_species: Sequence[str],
+                     adiabatic: bool = False) -> dict:
+    """Describe the algebraic unknowns of a steady-state flash.
+
+    Parameters
+    ----------
+    name_species : sequence of str
+        Names of the N species in the solved composition blocks, in
+        database order: every feed species for ``IsothermalFlash``, the
+        species that are not supercritical for ``AdiabaticFlash``.
+    adiabatic : bool, optional
+        If True, append the drum temperature, the extra unknown of
+        ``AdiabaticFlash``.
+
+    Returns
+    -------
+    dict
+        State metadata in the order of the solved unknown vector: the
+        liquid fraction of the feed ``frac_liq`` [-], the liquid mole
+        fractions ``x_liq`` [-] and vapor mole fractions ``y_vap`` [-]
+        (N each, indexed by species), the vapor fraction of the feed
+        ``frac_vap`` [-] and, if ``adiabatic``, the temperature ``temp``
+        [K]. Every state is algebraic (``'type': 'alg'``), so a flash has
+        2N + 2 unknowns, or 2N + 3 when adiabatic.
+
+    Notes
+    -----
+    ``SimulationResult`` reads this metadata for its unit-operation
+    summary (issue #457).
+    """
+    names = list(name_species)
+    states_di = {
+        'frac_liq': {'dim': 1, 'type': 'alg', 'units': ''},
+        'x_liq': {'dim': len(names), 'type': 'alg', 'units': '',
+                  'index': names},
+        'y_vap': {'dim': len(names), 'type': 'alg', 'units': '',
+                  'index': names},
+        'frac_vap': {'dim': 1, 'type': 'alg', 'units': ''}}
+    if adiabatic:
+        states_di['temp'] = {'dim': 1, 'type': 'alg', 'units': 'K'}
+    return states_di
+
+
 class IsothermalFlash:
         
     """
@@ -293,12 +336,15 @@ class IsothermalFlash:
         -----
         ``temp`` [K] and ``pres`` [Pa] are derived again from ``temp_drum``
         and ``pres_drum`` and this feed (see ``_update_drum_conditions``).
+        ``states_di`` describes the flash unknowns for this feed's species
+        (see ``_flash_states_di``).
         """
         self._Inlet = instance
 
         self._update_drum_conditions()
 
         self.num_comp = self._Inlet.num_species
+        self.states_di = _flash_states_di(self._Inlet.name_species)
 
         self.k_func = self.Inlet.getKeqVLE
 
@@ -557,6 +603,7 @@ class AdiabaticFlash:
 
     @property
     def Inlet(self):
+        """Feed of the flash (``LiquidPhase`` or ``LiquidStream``), or None."""
         return self._Inlet
 
     @Inlet.setter
@@ -569,9 +616,17 @@ class AdiabaticFlash:
             Feed with mole fractions [-], temperature [K], pressure [Pa],
             and inventory [mol] or flow [mol/s]. The vapor placeholder uses
             its species order and composition until the flash is solved.
+
+        Notes
+        -----
+        ``states_di`` describes the flash unknowns for this feed: the
+        species that are not supercritical at the feed temperature, which
+        the solve keeps in its composition blocks, and the drum
+        temperature (see ``_active_states_di``).
         """
         self._Inlet = instance
         self.num_comp = self._Inlet.num_species
+        self.states_di = self._active_states_di(self._supercritical_mask())
 
         path = self.Inlet.path_data
 
@@ -585,6 +640,38 @@ class AdiabaticFlash:
             self.in_flow = self.Inlet.mole_flow
         else:
             self.in_flow = self.Inlet.moles
+
+    def _supercritical_mask(self) -> np.ndarray:
+        """Flag the feed species the solve removes as supercritical.
+
+        Returns
+        -------
+        numpy.ndarray of bool, shape (num_species,)
+            True for each species whose critical temperature [K] is below
+            the current ``Inlet`` temperature [K]; ``solve_unit`` removes
+            these species from the liquid and vapor composition unknowns.
+        """
+        return self.Inlet.temp > self.Inlet.t_crit
+
+    def _active_states_di(self, is_supercritic: np.ndarray) -> dict:
+        """Describe the unknowns of the flash for its active species.
+
+        Parameters
+        ----------
+        is_supercritic : numpy.ndarray of bool, shape (num_species,)
+            Supercritical flags of the feed species, as returned by
+            ``_supercritical_mask``.
+
+        Returns
+        -------
+        dict
+            ``_flash_states_di`` for the species that are not
+            supercritical, with the drum temperature [K]: 2N + 3
+            algebraic unknowns for N such species.
+        """
+        active = [name for name, flag in zip(self.Inlet.name_species,
+                                             is_supercritic) if not flag]
+        return _flash_states_di(active, adiabatic=True)
 
     def material_balances(self, liq, vap, x_i, y_i, z_i, temp):
 
@@ -684,7 +771,7 @@ class AdiabaticFlash:
             x_seed = np.ones(self.num_comp) * 1 / self.num_comp
             y_seed = x_seed
 
-        is_supercritic = self.Inlet.temp > self.Inlet.t_crit
+        is_supercritic = self._supercritical_mask()
 
         if any(is_supercritic):
             x_seed = x_seed[~is_supercritic]
@@ -694,6 +781,8 @@ class AdiabaticFlash:
             self.z_super = self.Inlet.mole_frac[is_supercritic]
 
         self.is_supercritic = is_supercritic
+        # The feed may have changed in place since it was assigned.
+        self.states_di = self._active_states_di(is_supercritic)
 
         l_seed = 1 - v_seed
 

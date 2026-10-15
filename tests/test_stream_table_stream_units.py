@@ -6,8 +6,18 @@ two products (``LiquidOut``/``VaporOut``, ``Liquid_2``/``Liquid_3``) and no
 ``SimulationResult.GetStreamTable`` reports them through their
 ``get_reported_outlets`` hook, as the rows ``Outlet_liquid`` and
 ``Outlet_vapor`` (flashes) or ``Outlet_heavy`` and ``Outlet_light``
-(extractor). A flowsheet of flashes alone, which declare no ``states_di``,
-prints an empty unit summary instead of failing in ``SolveFlowsheet``.
+(extractor). The flashes declare ``states_di`` for their algebraic
+unknowns, so the unit summary lists them (issue #457): 2N + 2 for
+``IsothermalFlash`` and 2N + 3 for ``AdiabaticFlash``, with N the number
+of database species. The metadata keys, species index and dimensions
+are checked against the unknown vector ``solve_unit`` returns (liquid
+fraction, liquid and vapor mole fractions, vapor fraction, then the
+adiabatic temperature), whose blocks are matched to the published
+products; ``AdiabaticFlash`` drops species that are supercritical at the
+feed temperature from that vector, so a feed with 1 % nitrogen
+(data/evaporator/props_nitrogen.json, critical temperature 126.14 K)
+added to the database lists the five other species only. A summary
+without units still prints its header instead of failing (issue #451).
 
 Fixture: the shipped five-species database
 (tests/Flowsheet/data/compound_database.json) and the feeds of
@@ -25,6 +35,7 @@ composition. No ODE backend is needed.
 """
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -34,6 +45,7 @@ from PharmaPy.Containers import Mixer
 from PharmaPy.Evaporators import AdiabaticFlash, IsothermalFlash
 from PharmaPy.Extractors import BatchExtractor, ContinuousExtractor
 from PharmaPy.Phases import LiquidPhase
+from PharmaPy.Results import pprint
 from PharmaPy.SimExec import SimulationExec
 from PharmaPy.Streams import LiquidStream
 
@@ -56,10 +68,28 @@ BALANCE_RTOL = 1e-7
 # [-], PharmaPy's vapor density uses R = 8.314 J/mol/K, truncated from the
 # CODATA value used here (relative difference 5.6e-5).
 IDEAL_GAS_RTOL = 1e-4
-# Column headers of the unit summary of SimulationResult; with no rows,
-# PharmaPy.Results.pprint pads each header with two spaces.
-SUMMARY_HEADERS = ('Unit operation', 'Diff eqns', 'Alg eqns', 'Model type',
-                   'PharmaPy type')
+# Column headers of the unit summary of SimulationResult and their format
+# codes; with no rows, PharmaPy.Results.pprint pads each header with two
+# spaces.
+SUMMARY_HEADERS = {'Diff eqns': 'd', 'Alg eqns': 'd', 'Model type': 's',
+                   'PharmaPy type': 's'}
+SUMMARY_ITEMS = 'Unit operation'
+# Algebraic unknowns of a flash per species: liquid and vapor mole
+# fractions; plus the liquid and vapor fractions of the feed, and the
+# temperature of the adiabatic flash.
+FLASH_UNKNOWNS = {'isothermal-flash': (2, 2), 'adiabatic-flash': (2, 3)}
+# Packaged nitrogen properties, supercritical at TEMP (t_crit 126.14 K).
+NITROGEN_PATH = (Path(__file__).resolve().parents[1] / 'data' / 'evaporator'
+                 / 'props_nitrogen.json')
+NITROGEN_FRACTION = 0.01  # [-], trace nitrogen in the feed
+# [-], each of the five database species in the nitrogen-bearing feed
+NITROGEN_FEED_REST = (1 - NITROGEN_FRACTION) / 5
+# [K], below the 126.14 K critical temperature of nitrogen; the feed is
+# only assigned at this temperature, never flashed.
+NITROGEN_SUBCRITICAL_TEMP = 100.0
+# [-], float64 roundoff between the solution vector and the products built
+# from it (multiplied by the feed flow, or copied).
+SOLUTION_RTOL = 1e-12
 
 UNITS = {
     'isothermal-flash': (lambda: IsothermalFlash(pres_drum=PRESSURE),
@@ -240,20 +270,158 @@ def test_stream_table_reports_both_products(path, case, with_mixer):
         assert molar_density['Outlet_liquid'].iloc[0] > ideal_gas
 
 
-@pytest.mark.parametrize('case', ['isothermal-flash', 'adiabatic-flash'])
-def test_flash_only_flowsheet_prints_an_empty_unit_summary(path, case):
-    """Solve a flash-only flowsheet whose unit summary has no rows."""
-    sim = _solved_flowsheet(path, case, with_mixer=False)
+@pytest.mark.parametrize('with_mixer', [True, False],
+                         ids=['mixer-fed', 'single-unit'])
+@pytest.mark.parametrize('case', list(FLASH_UNKNOWNS))
+def test_unit_summary_lists_the_flash(path, case, with_mixer):
+    """List the flash as an algebraic unit with its unknown count."""
+    sim = _solved_flowsheet(path, case, with_mixer=with_mixer)
+    with open(path) as handle:
+        num_species = len(json.load(handle))  # [-]
+    per_species, extra = FLASH_UNKNOWNS[case]  # [-], [-]
 
-    width = sum(len(header) + 2 for header in SUMMARY_HEADERS)  # [-]
-    separator = '-' * width
-    assert sim.result.out_uos[0] == separator
-    assert sim.result.out_uos[1].split() == ' '.join(SUMMARY_HEADERS).split()
-    assert sim.result.out_uos[2:] == [separator, separator]
-    assert repr(sim.result).endswith(
-        '\n'.join(sim.result.out_uos))
+    lines = sim.result.out_uos
+    rows = {line.split()[0]: line.split() for line in lines[3:-1]}
+    assert list(rows) == (['M01', 'U01'] if with_mixer else ['U01'])
+    assert rows['U01'][1:] == [
+        '0', str(per_species * num_species + extra), 'ALG',
+        type(sim.U01).__name__]
+    assert repr(sim.result).endswith('\n'.join(lines))
     # The hook reports the products without making the flash a source.
     assert not hasattr(sim.U01, 'Outlet')
+
+
+def _nitrogen_database(path, tmp_path):
+    """Write the shipped database with the packaged nitrogen appended.
+
+    Parameters
+    ----------
+    path : str
+        Shipped five-species database path.
+    tmp_path : pathlib.Path
+        Temporary directory.
+
+    Returns
+    -------
+    str
+        Path of the six-species database (nitrogen last).
+    """
+    with open(path) as handle:
+        data = json.load(handle)
+    data.update(json.loads(NITROGEN_PATH.read_text()))
+    target = tmp_path / 'with_nitrogen.json'
+    target.write_text(json.dumps(data))
+    return str(target)
+
+
+FLASH_CASES = {
+    'isothermal-flash': (False, False),
+    'adiabatic-flash': (True, False),
+    'adiabatic-flash-nitrogen': (True, True),
+    }
+
+
+@pytest.mark.parametrize('case', list(FLASH_CASES))
+def test_flash_states_di_matches_the_solved_unknowns(path, tmp_path, case):
+    """Declare one entry per solved unknown, in the solver's order."""
+    adiabatic, nitrogen = FLASH_CASES[case]
+    if nitrogen:
+        path = _nitrogen_database(path, tmp_path)
+        fractions = np.r_[np.full(5, NITROGEN_FEED_REST),
+                          NITROGEN_FRACTION]  # [-]
+    else:
+        fractions = (FLOW_1 * FEED_1 + FLOW_2 * FEED_2) / (FLOW_1 + FLOW_2)  # [-]
+    with open(path) as handle:
+        data = json.load(handle)
+    flow = FLOW_1 + FLOW_2  # [mol/s]
+    # Species the solver keeps: an adiabatic flash removes those whose
+    # critical temperature is below the feed temperature.
+    active = [name for name, value in data.items()
+              if not (adiabatic and value['t_crit'] < TEMP)]
+    mask = np.array([name in active for name in data])
+
+    unit = (AdiabaticFlash if adiabatic else IsothermalFlash)(
+        pres_drum=PRESSURE)
+    unit.Inlet = _feed(path, fractions, flow)
+    solution = unit.solve_unit()
+    if not adiabatic:
+        solution = solution[0]  # (solution, heat duty)
+
+    names = ['frac_liq', 'x_liq', 'y_vap', 'frac_vap'] + (
+        ['temp'] if adiabatic else [])
+    states_di = unit.states_di
+    assert list(states_di) == names
+    assert all(states_di[name]['type'] == 'alg' for name in names)
+    assert {name: states_di[name]['units'] for name in names} == {
+        name: 'K' if name == 'temp' else '' for name in names}
+    for name in ('x_liq', 'y_vap'):
+        assert states_di[name]['index'] == active
+        assert states_di[name]['dim'] == len(active)
+    dims = [states_di[name]['dim'] for name in names]
+    assert sum(dims) == len(solution) == 2 * len(active) + 2 + adiabatic
+
+    blocks = dict(zip(names, np.split(solution, np.cumsum(dims)[:-1])))
+    liquid, vapor = unit.LiquidOut, unit.VaporOut
+    assert blocks['frac_liq'][0] * flow == pytest.approx(
+        liquid.mole_flow, rel=SOLUTION_RTOL)
+    assert blocks['frac_vap'][0] * flow == pytest.approx(
+        vapor.mole_flow, rel=SOLUTION_RTOL)
+    np.testing.assert_allclose(blocks['x_liq'], liquid.mole_frac[mask],
+                               rtol=SOLUTION_RTOL)
+    np.testing.assert_allclose(blocks['y_vap'], vapor.mole_frac[mask],
+                               rtol=SOLUTION_RTOL)
+    if adiabatic:
+        assert blocks['temp'][0] == pytest.approx(vapor.temp,
+                                                  rel=SOLUTION_RTOL)
+
+
+def test_adiabatic_states_di_follows_the_feed_at_solve(path, tmp_path):
+    """Refresh the active species when the feed is heated in place."""
+    path = _nitrogen_database(path, tmp_path)
+    with open(path) as handle:
+        names = list(json.load(handle))
+    fractions = np.r_[np.full(5, NITROGEN_FEED_REST),
+                      NITROGEN_FRACTION]  # [-]
+    inlet = LiquidPhase(path, temp=NITROGEN_SUBCRITICAL_TEMP, pres=PRESSURE,
+                        moles=FLOW_1 + FLOW_2, mole_frac=fractions)
+    unit = AdiabaticFlash(pres_drum=PRESSURE)
+    unit.Inlet = inlet
+    assert unit.states_di['x_liq']['index'] == names
+
+    inlet.updatePhase(temp=TEMP)  # [K], nitrogen is now supercritical
+    solution = unit.solve_unit()
+
+    assert unit.states_di['x_liq']['index'] == names[:-1]
+    assert sum(value['dim'] for value in unit.states_di.values()) == len(
+        solution)
+
+
+def test_summary_counts_the_adiabatic_flash_without_nitrogen(path,
+                                                             tmp_path):
+    """Count 2N + 3 unknowns for the five species that are not removed."""
+    path = _nitrogen_database(path, tmp_path)
+    fractions = np.r_[np.full(5, NITROGEN_FEED_REST),
+                      NITROGEN_FRACTION]  # [-]
+    sim = SimulationExec(path, {'U01': []})
+    sim.U01 = AdiabaticFlash(pres_drum=PRESSURE)
+    sim.U01.Inlet = _feed(path, fractions, FLOW_1 + FLOW_2)
+    sim.SolveFlowsheet(verbose=False)
+
+    row = sim.result.out_uos[3].split()
+    num_active = 5  # [-], the database species; nitrogen is supercritical
+    assert row == ['U01', '0', str(2 * num_active + 3), 'ALG',
+                   'AdiabaticFlash']
+
+
+def test_empty_unit_summary_prints_its_header():
+    """Print the header and separators of a summary without units."""
+    lines = pprint({}, SUMMARY_ITEMS, SUMMARY_HEADERS, str_out=False)
+
+    headers = [SUMMARY_ITEMS] + list(SUMMARY_HEADERS)
+    separator = '-' * sum(len(header) + 2 for header in headers)
+    assert lines[0] == separator
+    assert lines[1].split() == ' '.join(headers).split()
+    assert lines[2:] == [separator, separator]
 
 
 def test_batch_extractor_reports_both_liquid_amounts(path):

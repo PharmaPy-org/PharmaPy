@@ -113,9 +113,9 @@ def pprint(di, name_items, fields, str_out=True):
     items = list(di.keys())
 
     # ---------- Lenghts
-    # Lenght of first column. An empty table (no items, e.g. a flowsheet of
-    # steady-state flashes without ``states_di``) still prints its header,
-    # so the column widths fall back to the header widths.
+    # Lenght of first column. An empty table (no items, e.g. a flowsheet
+    # whose units declare no ``states_di``) still prints its header, so the
+    # column widths fall back to the header widths.
     max_lens = {name_items: max([len(name) for name in items], default=0)}
 
     # Lenght of remaining columns
