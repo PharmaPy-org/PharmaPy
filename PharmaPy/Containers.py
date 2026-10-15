@@ -1530,18 +1530,21 @@ class DynamicCollector:
         Raises
         ------
         NotImplementedError
-            Always; the collector is unchanged. A collector starts empty
-            and collects its ``Inlet``: ``solve_unit`` builds its own
-            starting phases (see :meth:`_set_phases`), so an assigned
-            charge would be silently ignored (issue #459). Starting from
-            an initial holdup is tracked by issue #342.
+            Always; the collector is unchanged. ``solve_unit`` builds its
+            own starting phases from the ``Inlet`` (see
+            :meth:`_set_phases`): a provisional seed of 0.1 s of feed for a
+            liquid inlet, or of a sqrt(float64 epsilon) [m**3] slurry
+            volume for a slurry inlet (issue #342), so an assigned charge
+            would be silently ignored (issue #459). Starting from a user
+            initial holdup is tracked by issue #342.
         """
         raise NotImplementedError(
             'DynamicCollector does not take an initial charge through '
-            'Phases: a collector starts empty and collects its Inlet, so an '
+            'Phases: a collector starts from a small provisional seed that '
+            'it builds from its Inlet and collects the Inlet, so an '
             'assigned charge would be ignored. Remove the Phases assignment; '
-            'starting from an initial holdup is not implemented yet (issue '
-            '#342).')
+            'starting from a user initial holdup is not implemented yet '
+            '(issue #342).')
 
     def _set_phases(self, phases) -> None:
         """Install the phases the collector starts its solve from.

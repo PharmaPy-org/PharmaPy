@@ -1,7 +1,8 @@
 """A DynamicCollector rejects a user initial charge (issue #459).
 
-A ``DynamicCollector`` starts empty and collects its ``Inlet``:
-``solve_unit`` builds the phases it starts from, so a charge assigned
+A ``DynamicCollector`` starts from a small provisional seed built from its
+``Inlet`` (issue #342) and collects the ``Inlet``: ``solve_unit`` builds
+the phases it starts from, so a charge assigned
 through ``Phases`` was silently ignored and disappeared from the holdup
 and the raw materials. The public ``Phases`` setter now raises
 ``NotImplementedError`` naming the unit and pointing to issue #342, which
@@ -33,10 +34,11 @@ TEMP = 300.0  # [K]
 FEED_FLOW = 1.0  # [kg/s], issue #459 feed
 CHARGE_MASS = 2.0  # [kg], issue #459 charge
 MESSAGE = ('DynamicCollector does not take an initial charge through '
-           'Phases: a collector starts empty and collects its Inlet, so an '
+           'Phases: a collector starts from a small provisional seed that '
+           'it builds from its Inlet and collects the Inlet, so an '
            'assigned charge would be ignored. Remove the Phases assignment; '
-           'starting from an initial holdup is not implemented yet (issue '
-           '#342).')
+           'starting from a user initial holdup is not implemented yet '
+           '(issue #342).')
 
 
 def _state(collector):
