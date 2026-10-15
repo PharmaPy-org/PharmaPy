@@ -510,7 +510,9 @@ class SimulationExec:
             After a source is solved and before its outlet is transferred,
             if its successor cannot take the outlet's amount basis: a
             holdup [kg] for a continuous unit or ``DynamicCollector``, or a
-            stream [kg/s] for a batch unit (issue #436); see
+            stream [kg/s] for a batch unit (issue #436), or a stream for a
+            semibatch unit without an initial charge, or a holdup for a
+            semibatch unit charged by the user (issue #438); see
             ``PharmaPy.Connections.Connection._check_route``.
 
         Notes
@@ -643,8 +645,9 @@ class SimulationExec:
         Only a ``Mixer`` combines the streams it receives into one mass- and
         energy-balanced mixture: ``Connection.PassPhases`` appends each
         transfer to its ``Inlets``. Any other destination would replace
-        its ``Inlet`` or ``Phases`` with each further transfer, ignore it
-        (an already charged semibatch unit), or, for a ``BatchCryst`` or
+        its ``Inlet`` or ``Phases`` with each further transfer (a
+        semibatch unit replaces the feed of a stream or the charge it
+        received from a holdup, issue #438), or, for a ``BatchCryst`` or
         ``Drying`` unit, stack the transferred phases into a holdup list
         that is not a mixture of the feeds (a ``Slurry`` replaces a
         ``BatchCryst``'s phases instead), so a predecessor's flow [kg/s]
@@ -678,8 +681,8 @@ class SimulationExec:
             raise PharmaPyValueError(
                 'Flowsheet units that are not a Mixer are fed by several '
                 f'units: {details}. Only a Mixer combines several inlets '
-                'into one balanced mixture; any other unit would replace '
-                'or ignore all but one transferred stream, or stack them '
+                'into one balanced mixture; any other unit would keep '
+                'only one transferred stream, or stack them '
                 'unmixed. Connect the predecessors to a Mixer and the '
                 'Mixer to the unit.')
 
@@ -1758,13 +1761,11 @@ class SimulationExec:
           flash (issue #445);
         * the source was re-solved after its outlet was transferred;
         * the successor was not solved after the transfer;
-        * the successor holds the transferred stream as a holdup
-          (``Phases``) rather than as a feed (issues #436, #438);
-        * the successor no longer holds the transferred outlet: its latest
-          solve ignored the transfer (issue #438), or its input was
-          replaced after the transfer, for example by assigning a new
-          ``Inlet`` and solving it again (``SolveFlowsheet`` rejects
-          several predecessors of a non-``Mixer`` unit, issue #444);
+        * the successor no longer holds the transferred outlet as a feed
+          (``Inlets`` or ``Inlet``): its input was replaced after the
+          transfer, for example by assigning a new ``Inlet`` and solving
+          it again (``SolveFlowsheet`` rejects several predecessors of a
+          non-``Mixer`` unit, issue #444);
         * the successor holds the transferred outlet more than once, which
           only happens when a transferred copy is assigned again by hand,
           for example ``mixer.Inlets = mixer.Inlets[-1]``, before or after
@@ -1820,14 +1821,13 @@ class SimulationExec:
         used = self._used_inputs(consumer)
         feeds = self._used_inputs(consumer, ('Inlets', 'Inlet'))
         if not any(item is matter for item in feeds):
-            if any(item is matter for item in used):
-                return np.nan, (f"downstream unit '{successor}' holds its "
-                                'outlet stream as a holdup (Phases), not as '
-                                'a feed (issues #436, #438)')
+            # Every successor of a continuous outlet holds it as a feed:
+            # Connection rejects a batch successor (issue #436) and gives
+            # a semibatch one the stream as its Inlet (issue #438).
             return np.nan, (
                 f"downstream unit '{successor}' no longer holds the "
-                'transferred outlet (it ignored the transfer, see issue '
-                '#438, or its input was replaced after the transfer)')
+                'transferred outlet as a feed (its input was replaced '
+                'after the transfer)')
         copies = sum(item is matter for item in used)  # [-]
         if copies > 1:
             return np.nan, (f"downstream unit '{successor}' holds the "
@@ -1894,9 +1894,8 @@ class SimulationExec:
             successor without a timed result (failed solve, or a
             steady-state unit such as a flash, issue #445);
             source re-solved after the transfer; successor not solved
-            after the transfer; outlet held as a holdup rather than a feed
-            (issues #436, #438); transferred outlet no longer held by the
-            successor (issue #438, or an input replaced after the transfer);
+            after the transfer; transferred outlet no longer held as a
+            feed by the successor (an input replaced after the transfer);
             transferred outlet held several times by the successor;
             several solve segments kept by the successor (issues #278,
             #443); no solve segment kept by the successor (for example
@@ -1917,7 +1916,7 @@ class SimulationExec:
         the time its outlet is consumed by its single, verified successor;
         otherwise its totals are NaN with a warning rather than a silent
         zero (see :meth:`_consumed_duration`, which is deliberately
-        conservative pending issue #438). A ``DynamicInlet``
+        conservative). A ``DynamicInlet``
         that controls no field on such a unit feeds the static stream and
         is accounted the same way; one that controls fields cannot reach an
         instantaneous ``Mixer``, which rejects it at solve time, and raises
@@ -2124,7 +2123,7 @@ class SimulationExec:
         [s], such as an ``Evaporator`` inlet shut by its volume event.
         The raw totals of an instantaneous unit, such as a static
         continuous ``Mixer``, are NaN unless it has a single, verified
-        consumer (see :meth:`_consumed_duration`; issue #438).
+        consumer (see :meth:`_consumed_duration`; issue #430).
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -2304,7 +2303,7 @@ class SimulationExec:
         -----
         ``raw_cost`` prices the ``GetRawMaterials`` totals, so the entries
         of an instantaneous unit without a single, verified consumer are NaN
-        like its totals (see :meth:`_consumed_duration`; issue #438).
+        like its totals (see :meth:`_consumed_duration`; issue #430).
         """
 
         opex_items = ('duties', 'raw_materials', 'labor')

@@ -2,8 +2,8 @@
 
 Only a ``Mixer`` combines the streams ``Connection.PassPhases`` hands it
 into one balanced mixture; any other destination would replace its
-``Inlet`` or ``Phases``, ignore the transfer, or (``BatchCryst``,
-``Drying``) stack the phases unmixed, so a second predecessor's material
+``Inlet`` or ``Phases`` or (``BatchCryst``, ``Drying``) stack the phases
+unmixed, so a second predecessor's material
 would be silently dropped or left unmixed.
 ``SimulationExec.SolveFlowsheet`` must therefore raise
 ``PharmaPyValueError`` naming the destination, its class and its

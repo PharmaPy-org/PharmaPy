@@ -8,12 +8,14 @@ for the successor's fed duration, recursively through chains of
 instantaneous units, so a consumer solved for 0 s gives a total of 0.
 Otherwise the totals are NaN with a ``RuntimeWarning`` naming the unit and
 the reason: a terminal unit, or a successor that no longer holds the
-transfer, such as a charged ``SemibatchReactor`` (issue #438) or a
-collector whose inlet was replaced by hand and solved again. Fan-out to
-several successors is rejected by ``SolveFlowsheet`` before any unit is
-solved (issue #437), so nothing is charged for it. Units without the
-flag, such as a ``DynamicCollector`` solved for 0 s, keep their own (zero)
-fed duration for static and controlled feeds. Batch inlets are unchanged.
+transfer, such as a collector whose inlet was replaced by hand and solved
+again. A charged ``SemibatchReactor`` consumes the transferred stream as
+its feed (issue #438), so the Mixer is charged for the reactor run.
+Fan-out to several successors is rejected by ``SolveFlowsheet`` before
+any unit is solved (issue #437), so nothing is charged for it. Units
+without the flag, such as a ``DynamicCollector`` solved for 0 s, keep
+their own (zero) fed duration for static and controlled feeds. Batch
+inlets are unchanged.
 A raw inlet with a ``DynamicInput`` that controls no field feeds the static
 stream and follows the same contract; one whose controls were added after
 the solve, which the instantaneous Mixer never consumed, raises
@@ -346,12 +348,13 @@ def test_fan_out_is_rejected_so_nothing_is_charged(path):
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_successor_ignoring_the_transfer_reports_nan(data_path):
-    """Report NaN when a charged semibatch reactor keeps its own inlet.
+def test_semibatch_reactor_consumes_the_mixer_feed(data_path):
+    """Charge the Mixer feeds for the run of a charged semibatch reactor.
 
-    Provisional: the fixture relies on issue #438 (a charged semibatch
-    destination ignores the transferred stream). Once #438 is fixed,
-    replace it with another successor that does not consume the outlet.
+    The issue #438 reproduction: the connection installs the Mixer outlet
+    as the reactor's feed in place of its own pre-set ``Inlet``, which is
+    therefore neither consumed nor reported. Before the fix the reactor
+    ignored the transfer and the Mixer totals were NaN.
     """
     pytest.importorskip('assimulo')
     from PharmaPy.Reactors import SemibatchReactor
@@ -368,21 +371,18 @@ def test_successor_ignoring_the_transfer_reports_nan(data_path):
     own_inlet = sim.R01.Inlet
     sim.SolveFlowsheet(kwargs_run={'R01': {'runtime': REACTOR_RUNTIME,
                                            'verbose': False}}, verbose=False)
-    assert sim.R01.Inlet is own_inlet  # the transfer was not installed
+    assert sim.R01.Inlet is not own_inlet
+    assert sim.R01.Inlet is sim.connections['CONN1'].transferred_matter
 
-    reason = (r"downstream unit 'R01' no longer holds the transferred outlet "
-              r"\(it ignored the transfer, see issue #438, or its input was "
-              r"replaced after the transfer\)")
-    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
-            unit='M01', reason=reason)):
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
         raw = sim.GetRawMaterials(include_holdups=False)
 
     keys, totals = _raw_amounts(raw, 'mass')
-    assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1'), ('R01', 'Inlet_0')]
-    assert np.isnan(totals[:2]).all()
-    # The reactor's own raw inlet is charged for its own run.
-    assert totals[2] == pytest.approx(own_inlet.mass_flow * REACTOR_RUNTIME,
-                                      rel=RTOL)
+    assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1')]
+    np.testing.assert_allclose(
+        totals, [FLOW_A * REACTOR_RUNTIME, FLOW_B * REACTOR_RUNTIME],
+        rtol=RTOL)
 
 
 @pytest.mark.assimulo
@@ -404,8 +404,7 @@ def test_consumer_inlet_replaced_after_the_transfer_reports_nan(path):
     sim.C01.solve_unit(runtime=RUNTIME, verbose=False)
 
     reason = (r"downstream unit 'C01' no longer holds the transferred outlet "
-              r"\(it ignored the transfer, see issue #438, or its input was "
-              r"replaced after the transfer\)")
+              r"as a feed \(its input was replaced after the transfer\)")
     with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
             unit='M01', reason=reason)):
         keys, totals = _raw_amounts(sim.GetRawMaterials(), 'mass')

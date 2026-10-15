@@ -481,6 +481,26 @@ DESTINATION_MODES = ('Batch', 'Semibatch', 'Continuous')
 SOURCE_CONTRACT = ('Outlet', 'outputs', 'is_continuous', 'oper_mode')
 
 
+def _phase_kind(phase: object) -> str:
+    """Return the kind of a phase from its class name.
+
+    Parameters
+    ----------
+    phase : object
+        Phase or stream object.
+
+    Returns
+    -------
+    str
+        ``'Liquid'``, ``'Solid'`` or ``'Vapor'`` if the class name contains
+        it, as ``PharmaPy.Phases.classify_phases`` classifies phases;
+        otherwise the class name.
+    """
+    class_name = type(phase).__name__
+    return next((kind for kind in ('Liquid', 'Solid', 'Vapor')
+                 if kind in class_name), class_name)
+
+
 def _unit_label(unit: object, name: Union[str, None]) -> str:
     """Return a unit's flowsheet name and class for error messages.
 
@@ -680,8 +700,12 @@ class Connection:
             feeds a continuous destination (``oper_mode`` ``'Continuous'``)
             or a ``DynamicCollector``, or if a continuous source feeds a
             batch destination (``oper_mode`` ``'Batch'``, including a
-            ``BatchToFlowConnector``). The message names both units, the
-            basis mismatch and the remedy.
+            ``BatchToFlowConnector``). For another semibatch destination,
+            if a continuous source feeds one without an initial charge
+            (``Phases`` is None), or a source that is not continuous feeds
+            one that holds a charge assigned outside a connection (see
+            :meth:`_holds_user_charge`). The message names both
+            units, the basis mismatch and the remedy.
 
         Notes
         -----
@@ -703,10 +727,19 @@ class Connection:
         as for the fan-in check of ``SimulationExec``, because the
         flowsheet specification is inconsistent and a remedy exists.
 
+        A semibatch destination other than a ``DynamicCollector``, such as
+        a ``SemibatchReactor`` or an ``Evaporator`` with an ``Inlet``, holds
+        an initial charge (``Phases``) and integrates a feed (``Inlet``)
+        (issue #438). A continuous source supplies the feed, so the
+        destination must already be charged: a stream is never installed
+        as an initial holdup. A source that is not continuous supplies the
+        charge, so the destination must not hold a charge of its own: two
+        initial holdups would otherwise be silently replaced or ignored. A
+        crystallizer's seed alone is not a charge of that kind: the
+        transferred liquid completes it (see :meth:`_holds_user_charge`).
+
         A ``Mixer`` destination is not checked: it adopts the basis of its
         inlets and rejects mixing inventories with flow rates itself.
-        Semibatch destinations other than a ``DynamicCollector`` are not
-        checked here.
         """
         destination = self.destination_uo
         class_destination = destination.__class__.__name__
@@ -737,6 +770,81 @@ class Connection:
                 'holdup, an amount [kg], as its Phases. Collect the stream '
                 'for a duration in a DynamicCollector and connect the '
                 'collector, whose holdup can charge the batch unit.')
+
+        if mode != 'Semibatch' or class_destination == 'DynamicCollector':
+            return
+
+        charged = getattr(destination, 'Phases', None) is not None
+        if continuous_source and not charged:
+            raise PharmaPyValueError(
+                f'Destination {destination_label} is a semibatch unit '
+                'without an initial charge: the stream [kg/s] of continuous '
+                f'source {source_label} becomes its Inlet (feed), never its '
+                'initial holdup [kg]. Assign the initial charge to its '
+                'Phases before solving the flowsheet.')
+
+        if not continuous_source and charged and self._holds_user_charge():
+            raise PharmaPyValueError(
+                f'Destination {destination_label} already holds an initial '
+                'charge (Phases) assigned outside the flowsheet, and the '
+                f'holdup [kg] of source {source_label}, which is not '
+                'continuous, would be a second initial charge. Remove the '
+                "destination's own charge so that the transferred holdup "
+                'charges it, or mix both holdups in a batch Mixer connected '
+                'to it.')
+
+    def _holds_user_charge(self) -> bool:
+        """Return whether the destination holds a charge the user assigned.
+
+        Returns
+        -------
+        bool
+            True if the destination already holds an initial charge that
+            no connection installed, which the transferred holdup would
+            duplicate; False if its charge came from a connection, so the
+            transfer may replace it, or if it holds only part of a charge
+            that the transfer completes.
+
+        Notes
+        -----
+        A connection marks its copy ``transferred_from_uo = True``. The
+        ``Phases`` setters of the semibatch units keep a deep copy of a
+        complete charge as ``__original_phase__``, the reference that
+        raw-material accounting also uses to tell a transferred charge
+        from a raw one (``SimulationExec.get_holdup``). When that copy
+        exists, its flag decides, because a unit may replace its phase
+        objects while it solves, as an ``Evaporator`` with a nitrogen
+        blanket does.
+
+        A crystallizer keeps no such copy until it holds a liquid and a
+        solid, because its setter adds single phases to the held ones, as a
+        ``BatchCryst``'s does. A ``SemibatchCryst`` charged by the user
+        with its seed crystals alone is therefore completed by a
+        transferred liquid holdup, as a seeded ``BatchCryst`` is. Without
+        the copy, the destination holds a user charge if it holds a phase
+        of the same kind (liquid, solid or vapor, by class name, as
+        ``PharmaPy.Phases.classify_phases`` reads it) as a transferred
+        phase: a second liquid would otherwise be stacked beside the
+        user's liquid. A transfer that completed a charge leaves the copy,
+        so a re-solve is decided by its flag. ``SimulationExec`` rejects
+        several predecessors of a unit other than a ``Mixer`` (issue #444),
+        so a transferred charge comes from this edge.
+        """
+        destination = self.destination_uo
+        original = getattr(destination, '__original_phase__', None)
+        if original is not None:
+            return not getattr(original, 'transferred_from_uo', False)
+
+        held = destination.Phases
+        held = held if isinstance(held, (list, tuple)) else [held]
+
+        matter = self.source_uo.Outlet
+        if isinstance(matter, dict):
+            matter = matter[self.source_uo.default_output]
+        incoming = getattr(matter, 'Phases', None) or [matter]
+
+        held_kinds = {_phase_kind(phase) for phase in held}
+        return any(_phase_kind(phase) in held_kinds for phase in incoming)
 
     def FeedConnection(self) -> None:
         """Select the source outlet and attach its upstream profile.
@@ -902,9 +1010,14 @@ class Connection:
           source also sets ``KinCryst`` to its ``Kinetics`` and
           ``kwargs_cryst`` to its ``target_ind``, ``target_comp`` and
           ``scale``; for other sources caller-set values are kept.
-        * Other semibatch units: assigned to ``Phases`` only if none are
-          set, with ``material_from_upstream = True``; a transfer to an
-          already-charged unit is ignored (issue #438).
+        * Other semibatch units (issue #438): the stream of a continuous
+          source is assigned to ``Inlet``, the feed of the already charged
+          unit, and replaces an ``Inlet`` assigned before, as for a
+          continuous unit. The holdup of any other source charges
+          ``Phases``, as for a batch unit, with
+          ``material_from_upstream = True``. :meth:`_check_route` has
+          rejected an uncharged destination of a stream and a
+          user-charged destination of a holdup.
         * Continuous units: assigned to ``Inlet`` (``{'feed': matter}`` for
           a ``DynamicExtractor``).
 
@@ -939,11 +1052,10 @@ class Connection:
 
         Only a ``Mixer`` combines several transfers into one mass- and
         energy-balanced mixture. A transfer from a further source to any
-        other destination replaces its ``Inlet`` or ``Phases``, is ignored
-        (a charged semibatch unit), or, for a ``BatchCryst`` or ``Drying``
-        unit, is stacked with the earlier phases into a holdup list that is
-        not a mixture of the feeds (a ``Slurry`` replaces a
-        ``BatchCryst``'s phases instead).
+        other destination replaces its ``Inlet`` or ``Phases``, or, for a
+        ``BatchCryst`` or ``Drying`` unit, is stacked with the earlier
+        phases into a holdup list that is not a mixture of the feeds (a
+        ``Slurry`` replaces a ``BatchCryst``'s phases instead).
         ``SimulationExec.SolveFlowsheet`` therefore rejects several
         predecessors of a non-``Mixer`` unit before solving (issue #444).
         """
@@ -978,8 +1090,11 @@ class Connection:
                         'target_comp': self.source_uo.target_comp,
                         'scale': self.source_uo.scale}
 
-            elif self.destination_uo.Phases is None:
-                self.destination_uo.Phases = transfered_matter
+            elif self.source_uo.is_continuous:
+                # Fed-batch: the stream is the feed of the charged unit.
+                self.destination_uo.Inlet = transfered_matter
+            else:
+                self._assign_batch_phases(transfered_matter)
                 self.destination_uo.material_from_upstream = True
 
         elif mode_dest == 'Continuous':
@@ -989,7 +1104,7 @@ class Connection:
                 self.destination_uo.Inlet = transfered_matter
 
     def _assign_batch_phases(self, matter) -> None:
-        """Assign transferred matter to a batch destination's ``Phases``.
+        """Charge transferred matter to a batch or semibatch ``Phases``.
 
         Parameters
         ----------
