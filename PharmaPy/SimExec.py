@@ -14,7 +14,8 @@ from PharmaPy.StatsModule import StatisticsClass
 
 from PharmaPy.Connections import (Connection, convert_str_flowsheet,
                                   get_inputs_new, topological_bfs)
-from PharmaPy.Errors import PharmaPyNonImplementedError, PharmaPyValueError
+from PharmaPy.Errors import (PharmaPyNonImplementedError, PharmaPyTypeError,
+                             PharmaPyValueError)
 from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_object
 
 from PharmaPy.Commons import trapezoidal_rule, check_steady_state
@@ -283,6 +284,10 @@ class SimulationExec:
             ``PharmaPy.Connections.topological_bfs`` cannot schedule every
             unit, including units that appear only as successors. The
             message names the unscheduled units.
+        PharmaPyTypeError
+            If ``flowsheet`` is neither a dict nor a str, such as a list or
+            None. The message names the received type and the two accepted
+            forms (issue #448). It is a ``TypeError``.
         TypeError
             If a successor collection is a set or frozenset.
 
@@ -306,6 +311,12 @@ class SimulationExec:
             graph = flowsheet
         elif isinstance(flowsheet, str):
             graph = convert_str_flowsheet(flowsheet)
+        else:
+            raise PharmaPyTypeError(
+                "flowsheet must be a dict mapping each unit name to its "
+                "successors, such as {'R01': ['R02'], 'R02': []}, or a "
+                "linear string such as 'R01 --> R02'; got "
+                f"{type(flowsheet).__name__}.")
 
         self.graph = graph
         self.in_degree, self.execution_names = topological_bfs(graph)
