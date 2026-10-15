@@ -14,7 +14,9 @@ transferred liquid, so the re-solved crystallizer must still report the
 seed as charged, not the previous solve's crystals, for a seeded and an
 empty (zero-population) seed (milestone review of issues #441/#455). A
 seed the user edits after a solve, in place or by assigning a new object,
-is a new charge and is reported as edited.
+is a new charge and is reported as edited. The same applies to the state
+``reset()`` restores: after a re-solve it is still the user's seed, and a
+``reset_states=True`` re-solve repeats the first solve (issue #466).
 
 Fixture (the triage reproduction of the issue): the shipped five-species
 database (tests/Flowsheet/data/compound_database.json), a 0.5 L liquid of
@@ -516,3 +518,36 @@ def test_user_charge_is_reported_in_full(path):
          _expected_species(path, 'liquid')),
         ('CR01', 'Initial_holdup', 'SolidPhase',
          _expected_species(path, 'seed'))])
+
+
+@pytest.mark.parametrize('cls', [BatchCryst, SemibatchCryst],
+                         ids=['batch', 'semibatch'])
+def test_reset_after_a_resolve_restores_the_seed(path, cls):
+    """Restore the user's seed, not the previous run's crystals."""
+    sim, seed = _growth_flowsheet(path, cls)
+    seed_mass = _scaled_seed(path, 1)['mass'].sum()  # [kg]
+    for _ in range(RESOLVES):
+        sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+    assert sim.CR01.Solid_1.mass != pytest.approx(seed_mass, rel=RTOL)
+
+    sim.CR01.reset()
+
+    assert sim.CR01.Solid_1 is seed
+    np.testing.assert_array_equal(seed.distrib, SEED)  # [#/um]
+    assert seed.mass == pytest.approx(seed_mass, rel=RTOL)
+
+
+@pytest.mark.parametrize('cls', [BatchCryst, SemibatchCryst],
+                         ids=['batch', 'semibatch'])
+def test_reset_states_resolve_repeats_the_first_solve(path, cls):
+    """Start every reset_states solve from the user's seed."""
+    sim, _ = _growth_flowsheet(path, cls, reset_states=True)
+    finals = []
+    for _ in range(RESOLVES):
+        sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+        np.testing.assert_array_equal(sim.CR01.result.distrib[0],
+                                      SEED)  # [#/um], initial population
+        finals.append((sim.CR01.Solid_1.mass,
+                       sim.CR01.Solid_1.distrib.copy()))  # [kg], [#/um]
+    assert finals[1][0] == pytest.approx(finals[0][0], rel=RTOL)
+    np.testing.assert_allclose(finals[1][1], finals[0][1], rtol=RTOL)

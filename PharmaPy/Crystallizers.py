@@ -388,8 +388,7 @@ class _BaseCryst:
                 self.Slurry.Phases = self._Phases
 
         if self.Slurry is not None:
-            self.__original_phase_dict__ = [
-                copy.deepcopy(phase.__dict__) for phase in self.Slurry.Phases]
+            self.__original_phase_dict__ = self._reset_record()
 
             self.vol_slurry = copy.copy(self.Slurry.vol)
             if isinstance(self.vol_slurry, np.ndarray):
@@ -638,6 +637,36 @@ class _BaseCryst:
                 for current, original in zip(held, originals)]
         self._charge_sources = list(zip(held, snapshot.Phases))
         return snapshot
+
+    def _reset_record(self) -> list:
+        """Record the held phases' states that ``reset`` restores.
+
+        Returns
+        -------
+        list of dict
+            One deep copy of each held phase's ``__dict__``, in
+            ``Slurry.Phases`` order. A phase that keeps its charge-time
+            records (see ``_kept_from_charge``) keeps its previous copy
+            instead of its current state.
+
+        Notes
+        -----
+        The pairs of held phases and their copies are kept in
+        ``_reset_sources``. Earlier releases recorded every phase again on
+        each assignment, so after a flowsheet re-transfer ``reset()`` and a
+        ``reset_states=True`` solve restored the previous run's crystals
+        instead of the user's seed (issue #466).
+        """
+        previous = getattr(self, '_reset_sources', ())
+        records = []
+        for phase in self.Slurry.Phases:
+            kept = (next((record for held, record in previous
+                          if held is phase), None)
+                    if self._kept_from_charge(phase) else None)
+            records.append(copy.deepcopy(phase.__dict__) if kept is None
+                           else kept)
+        self._reset_sources = list(zip(self.Slurry.Phases, records))
+        return records
 
     def _record_solved_states(self) -> None:
         """Record the held phases as the solve left them.
