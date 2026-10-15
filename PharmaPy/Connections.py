@@ -547,6 +547,8 @@ class Connection:
         inventory basis. Converted states are stored in ``Matter.y_inlet``.
         A ``DynamicCollector`` destination receives the input names of the
         model its inlet selects, from :meth:`_collector_input_names`.
+        A refactored stream of a single phase is converted through that
+        phase, from :meth:`_conversion_matter`.
         """
         mode_source = self.source_uo.oper_mode
         mode_dest = self.destination_uo.oper_mode
@@ -589,7 +591,8 @@ class Connection:
                 num_distr)
 
             # Convert units and pass states to self.Matter
-            converted_states = name_analyzer.convertUnits(self.Matter)
+            converted_states = name_analyzer.convertUnits(
+                self._conversion_matter())
             self.Matter.y_inlet = converted_states
 
         elif btf_flag:
@@ -607,7 +610,8 @@ class Connection:
                 )
 
             # Convert units and pass states to self.Matter
-            converted_states = name_analyzer.convertUnits(self.Matter)
+            converted_states = name_analyzer.convertUnits(
+                self._conversion_matter())
             self.Matter.y_inlet = converted_states
 
     @staticmethod
@@ -625,6 +629,36 @@ class Connection:
         """Whether material belongs to the refactored phase stack."""
         return any(cls.__module__.endswith('_Refactored')
                    for cls in type(matter).__mro__)
+
+    def _conversion_matter(self):
+        """Return the object whose properties convert the upstream states.
+
+        Returns
+        -------
+        object
+            ``self.Matter``, or, when it is a refactored mixed stream of one
+            phase, a shallow copy of that phase carrying ``y_upstream``.
+
+        Notes
+        -----
+        A refactored vessel hands over even a single liquid wrapped in a
+        ``MixedStream``, which is not a ``ThermoPhysicalManager``, so
+        ``NameAnalyzer`` cannot evaluate its density for each sample of a
+        dynamic profile (#219). The lone member is the same material. The
+        copy keeps ``y_upstream`` off the source unit's own phase. Several
+        members are left as they are, so a refactored slurry is refused just
+        as a legacy one is.
+        """
+        phases = getattr(self.Matter, 'Phases', None)
+
+        if (not self._is_refactored_matter(self.Matter)
+                or not isinstance(phases, (list, tuple)) or len(phases) != 1):
+            return self.Matter
+
+        phase = copy.copy(phases[0])
+        phase.y_upstream = self.Matter.y_upstream
+
+        return phase
 
     def _match_stacks(self, matter):
         """Convert material between the old and refactored phase stacks.
