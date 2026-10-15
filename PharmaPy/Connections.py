@@ -8,7 +8,7 @@ Created on Mon Mar  2 15:36:35 2020
 from collections import deque
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
-from PharmaPy.Errors import PharmaPySpecificationError
+from PharmaPy.Errors import PharmaPySpecificationError, PharmaPyValueError
 from PharmaPy.NameAnalysis import NameAnalyzer, get_dict_states
 from PharmaPy.Interpolation import local_newton_interpolation
 
@@ -552,16 +552,20 @@ class Connection:
         PharmaPySpecificationError
             If either unit lacks the connection contract; see
             :meth:`_check_contract`.
+        PharmaPyValueError
+            If the destination cannot take the source's amount basis; see
+            :meth:`_check_route`.
 
         Notes
         -----
-        The contract is checked before :meth:`FeedConnection`, so a
-        rejected connection leaves the source outlet and the destination
-        unchanged. Then :meth:`FeedConnection` attaches the source profile,
+        Both checks run before :meth:`FeedConnection`, so a rejected
+        connection leaves the source outlet and the destination unchanged.
+        Then :meth:`FeedConnection` attaches the source profile,
         :meth:`ConvertUnits` converts it to the destination's input names
         and :meth:`PassPhases` installs a copy in the destination.
         """
         self._check_contract()
+        self._check_route()
         self.FeedConnection()
         self.ConvertUnits()
         self.PassPhases()
@@ -665,6 +669,74 @@ class Connection:
                 'contract for this role; use it standalone (assign its '
                 'Inlet or Phases and call solve_unit) or connect a unit '
                 'that implements it.')
+
+    def _check_route(self) -> None:
+        """Reject a source whose amount basis the destination cannot take.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a source that is not continuous (``is_continuous`` False)
+            feeds a continuous destination (``oper_mode`` ``'Continuous'``)
+            or a ``DynamicCollector``, or if a continuous source feeds a
+            batch destination (``oper_mode`` ``'Batch'``, including a
+            ``BatchToFlowConnector``). The message names both units, the
+            basis mismatch and the remedy.
+
+        Notes
+        -----
+        The route is keyed on the source's ``is_continuous``, not its
+        ``oper_mode``: a ``BatchToFlowConnector`` has ``oper_mode`` 'Batch'
+        but publishes a stream. A continuous source hands over a stream
+        with a flow rate [kg/s]; any other source hands over its final
+        holdup, an amount [kg] with no flow (see :meth:`FeedConnection`).
+        A continuous destination and a ``DynamicCollector`` integrate a
+        feed flow, and a batch destination is charged with a holdup, so
+        neither can take the other basis: a holdup as ``Inlet`` failed
+        later on a missing ``vol_flow`` or ``DynamicInlet``, and a stream
+        as ``Phases`` was rejected by the setter, failed on a missing
+        ``vol``, or was charged as an amount (issue #436). The remedies
+        exist: a ``BatchToFlowConnector`` discharges a liquid holdup as a
+        stream over a cycle time (solids are not supported, issue #423),
+        and a ``DynamicCollector`` collects a stream for a duration into a
+        holdup that can charge a batch unit. ``PharmaPyValueError`` is used,
+        as for the fan-in check of ``SimulationExec``, because the
+        flowsheet specification is inconsistent and a remedy exists.
+
+        A ``Mixer`` destination is not checked: it adopts the basis of its
+        inlets and rejects mixing inventories with flow rates itself.
+        Semibatch destinations other than a ``DynamicCollector`` are not
+        checked here.
+        """
+        destination = self.destination_uo
+        class_destination = destination.__class__.__name__
+        if class_destination == 'Mixer':
+            return
+
+        source_label = _unit_label(self.source_uo, self.source_name)
+        destination_label = _unit_label(destination, self.destination_name)
+        continuous_source = bool(self.source_uo.is_continuous)
+        mode = destination.oper_mode
+
+        if not continuous_source and (class_destination == 'DynamicCollector'
+                                      or mode == 'Continuous'):
+            raise PharmaPyValueError(
+                f'Source {source_label} is not continuous: its outlet is a '
+                'holdup, an amount [kg] without a flow rate, but '
+                f'destination {destination_label} takes a feed stream '
+                '[kg/s] as its Inlet. Insert a BatchToFlowConnector '
+                'between them to discharge the holdup as a stream over a '
+                'cycle time; it accepts a single liquid holdup only, '
+                'solids are not supported yet (issue #423).')
+
+        if continuous_source and mode == 'Batch':
+            raise PharmaPyValueError(
+                f'Source {source_label} is continuous: its outlet is a '
+                'stream, a flow rate [kg/s], but destination '
+                f'{destination_label} is a batch unit charged with a '
+                'holdup, an amount [kg], as its Phases. Collect the stream '
+                'for a duration in a DynamicCollector and connect the '
+                'collector, whose holdup can charge the batch unit.')
 
     def FeedConnection(self) -> None:
         """Select the source outlet and attach its upstream profile.
@@ -834,9 +906,15 @@ class Connection:
           set, with ``material_from_upstream = True``; a transfer to an
           already-charged unit is ignored (issue #438).
         * Continuous units: assigned to ``Inlet`` (``{'feed': matter}`` for
-          a ``DynamicExtractor``). A batch or semibatch source is handed over
-          as its holdup, not converted to a flow (issue #436); insert a
-          ``BatchToFlowConnector`` to discharge a liquid holdup as a stream.
+          a ``DynamicExtractor``).
+
+        The matter keeps the source's amount basis, so :meth:`_check_route`
+        has already rejected the routes that would change it (issue #436):
+        the holdup [kg] of a source that is not continuous reaches a
+        continuous unit or a ``DynamicCollector`` only through a
+        ``BatchToFlowConnector`` (liquid holdups only), and the stream
+        [kg/s] of a continuous source reaches a batch unit only after a
+        ``DynamicCollector`` has collected it into a holdup.
 
         A transfer replaces the destination's copy of ``replaced_matter``
         rather than adding to it, keyed by object identity, so repeating a

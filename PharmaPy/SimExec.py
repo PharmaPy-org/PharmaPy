@@ -506,6 +506,12 @@ class SimulationExec:
             if the source or its successor lacks the attributes the
             connection reads (issue #445); see
             ``PharmaPy.Connections.Connection._check_contract``.
+        PharmaPyValueError
+            After a source is solved and before its outlet is transferred,
+            if its successor cannot take the outlet's amount basis: a
+            holdup [kg] for a continuous unit or ``DynamicCollector``, or a
+            stream [kg/s] for a batch unit (issue #436); see
+            ``PharmaPy.Connections.Connection._check_route``.
 
         Notes
         -----
