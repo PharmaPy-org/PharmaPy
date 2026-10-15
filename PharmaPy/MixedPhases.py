@@ -6,45 +6,140 @@ Created on Tue Jun 16 15:43:14 2020
 """
 
 from collections.abc import Sequence
-from typing import Union
+from typing import Optional, Union
+
+from numpy.typing import ArrayLike
 
 from PharmaPy.Phases import classify_phases
-from PharmaPy.Interpolation import NewtonInterpolation
+from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Commons import trapezoidal_rule
+from PharmaPy.Interpolation import local_newton_interpolation
+
+import warnings
 
 import numpy as np
 from scipy.optimize import newton
-from scipy.interpolate import CubicSpline
+
+# [-], node count of the deprecated three-point Newton helper below
+DEPRECATED_INTERPOLATION_NODES = 3
+
+# [K], common enthalpy reference shared by every phase of a mixture. It equals
+# the existing provider defaults (ThermoPhysicalManager.getEnthalpy,
+# LiquidPhase.getEnthalpy, the SolidPhase constructor, and Mixer temp_refer),
+# the conventional 25 degC thermochemical reference. These mixtures always
+# evaluated both phases at this reference, so keeping it preserves their
+# established results. In a mass-conserving adiabatic mixing balance, any
+# common value gives the same temperature root.
+MIXTURE_ENTHALPY_TEMP_REF = 298.15
+
 
 def Interpolation(t_data, y_data, time):
-    idx_time = np.argmin(abs(time - t_data))
+    """Interpolate a profile with a local three-point Newton polynomial.
 
-    idx_lower = max(0, idx_time - 1)
-    idx_upper = idx_lower + 3
+    Parameters
+    ----------
+    t_data : numpy.ndarray
+        Sample times [s], ascending, shape (num_samples,).
+    y_data : numpy.ndarray
+        Samples with time on the first axis, shape (num_samples,) or
+        (num_samples, num_states), in their own units.
+    time : float
+        Query time [s].
 
-    t_interp = t_data[idx_lower:idx_upper]
-    y_interp = y_data[idx_lower:idx_upper]
+    Returns
+    -------
+    float or numpy.ndarray
+        Interpolated value in the units of ``y_data``, shape () or
+        (num_states,).
 
-    interp = NewtonInterpolation(t_interp, y_interp)
+    Warns
+    -----
+    DeprecationWarning
+        Always. Use :func:`PharmaPy.Connections.interpolate_inputs` for
+        connected inlet profiles, or
+        :func:`PharmaPy.Interpolation.local_newton_interpolation`.
 
-    y_target = interp.evalPolynomial(time)
+    Notes
+    -----
+    Deprecated. Delegates to
+    :func:`PharmaPy.Interpolation.local_newton_interpolation` with three
+    nodes, which keeps a full three-node window at the end of the profile;
+    earlier releases used two nodes there.
+    """
+    warnings.warn(
+        "PharmaPy.MixedPhases.Interpolation is deprecated; use "
+        "PharmaPy.Connections.interpolate_inputs for connected inlet profiles "
+        "or PharmaPy.Interpolation.local_newton_interpolation.",
+        DeprecationWarning, stacklevel=2)
 
-    return y_target
+    return local_newton_interpolation(
+        time, t_data, y_data, num_points=DEPRECATED_INTERPOLATION_NODES)
 
 
-def energy_balance(inst, mass_str):
-    masses = [getattr(phase, mass_str) for phase in inst.Phases]
-    h_in = [phase.getEnthalpy() for phase in inst.Phases]
-    mass_tot = sum(masses)
+def energy_balance(inst, mass_str: str,
+                   temp_ref: float = MIXTURE_ENTHALPY_TEMP_REF) -> float:
+    """Solve the adiabatic common temperature of a mixture's phases.
 
-    def fun(temp_out):
-        h_tot = inst.getEnthalpy(temp_out, volumetric=False)
-        balance = np.dot(masses, h_in) - mass_tot * h_tot
+    Parameters
+    ----------
+    inst : Slurry or SlurryStream
+        Mixture with attached ``Phases`` and a mass-basis
+        ``getEnthalpy(temp, volumetric=False, temp_ref=...)`` method.
+    mass_str : {'mass', 'mass_flow'}
+        Phase attribute holding the inventory used as balance weight:
+        mass [kg] for a batch mixture or mass flow [kg/s] for a stream.
+    temp_ref : float, optional
+        Common enthalpy reference temperature [K] for every phase and for
+        the mixture. The default is ``MIXTURE_ENTHALPY_TEMP_REF`` (298.15 K).
+
+    Returns
+    -------
+    float
+        Mixture temperature [K] at which the mixture enthalpy equals the
+        sum of the phase enthalpies at their own temperatures.
+
+    Raises
+    ------
+    RuntimeError
+        If the Newton iteration does not converge.
+
+    Notes
+    -----
+    Each phase is evaluated on the same ``temp_ref``, overriding any
+    reference stored on a phase, so the balance never combines enthalpies
+    with different zero points. The ``Slurry`` and ``SlurryStream`` phase
+    setters call this helper without ``temp_ref`` and therefore always use
+    ``MIXTURE_ENTHALPY_TEMP_REF``. When the mixture mass fractions used by
+    ``inst.getEnthalpy`` match the phase inventories, the root does not
+    depend on the common value.
+    """
+    masses = [getattr(phase, mass_str) for phase in inst.Phases]  # [kg] or [kg/s]
+    h_in = [phase.getEnthalpy(temp_ref=temp_ref)
+            for phase in inst.Phases]  # [J/kg]
+    mass_tot = sum(masses)  # [kg] or [kg/s]
+
+    def fun(temp_out: float) -> float:
+        """Return the mixture enthalpy residual at a trial temperature.
+
+        Parameters
+        ----------
+        temp_out : float
+            Trial common mixture temperature [K].
+
+        Returns
+        -------
+        float
+            Phase-inlet minus mixture enthalpy, [J] for batch weights or
+            [J/s] for stream weights.
+        """
+        h_tot = inst.getEnthalpy(temp_out, volumetric=False,
+                                 temp_ref=temp_ref)  # [J/kg]
+        balance = np.dot(masses, h_in) - mass_tot * h_tot  # [J] or [J/s]
 
         return balance
 
-    temps = [phase.temp for phase in inst.Phases]
-    temp_phase = newton(fun, np.mean(temps))
+    temps = [phase.temp for phase in inst.Phases]  # [K]
+    temp_phase = newton(fun, np.mean(temps))  # [K]
 
     return temp_phase
 
@@ -303,12 +398,56 @@ class Slurry:
         """
         return self.Liquid_1.vol + self.Solid_1.vol
 
-    def getEnthalpy(self, temp, volfracs=None, densMass=None, volumetric=True):
-        # Individual phases
-        hLiq = self.Liquid_1.getEnthalpy(temp=temp, basis='mass')
-        hSol = self.Solid_1.getEnthalpy(temp=temp, basis='mass')
+    def getEnthalpy(self, temp, volfracs=None, densMass=None, volumetric=True,
+                    temp_ref: float = MIXTURE_ENTHALPY_TEMP_REF
+                    ) -> Union[float, np.ndarray]:
+        """Return slurry enthalpy on one common phase reference.
 
-        hMass = np.array([hLiq, hSol])
+        Parameters
+        ----------
+        temp : float or ndarray
+            Common phase temperature [K]. With ``volumetric=True`` and the
+            default ``volfracs`` and ``densMass``, only a scalar temperature
+            is supported. A temperature profile of shape ``(num_temps,)`` is
+            supported only with ``volumetric=False``.
+        volfracs : array-like, optional
+            Liquid and solid fractions of slurry volume [-], ordered
+            ``[liquid, solid]``. Defaults to the attached slurry fractions.
+            Used only when ``volumetric`` is ``True``.
+        densMass : array-like, optional
+            Liquid and solid mass densities [kg/m**3], ordered
+            ``[liquid, solid]``. Defaults to the attached phase densities.
+            Used only when ``volumetric`` is ``True``.
+        volumetric : bool, optional
+            If ``True`` (default), return enthalpy per slurry volume. If
+            ``False``, return enthalpy per slurry mass, weighting the phases
+            by the mass fractions of the attached slurry.
+        temp_ref : float, optional
+            Enthalpy reference temperature [K] passed to both the liquid and
+            the solid provider. The default is ``MIXTURE_ENTHALPY_TEMP_REF``
+            (298.15 K).
+
+        Returns
+        -------
+        float or ndarray
+            Slurry enthalpy, [J/m**3 slurry] when ``volumetric`` is ``True``
+            and [J/kg slurry] otherwise.
+
+        Notes
+        -----
+        Both phases always use ``temp_ref``, including when the attached
+        solid was constructed with a different ``temp_ref``, so the result
+        never mixes references. ``temp_ref`` follows the existing parameters,
+        so positional calls such as ``getEnthalpy(temp, volfracs, densMass)``
+        keep their meaning.
+        """
+        # Individual phases
+        hLiq = self.Liquid_1.getEnthalpy(
+            temp=temp, temp_ref=temp_ref, basis='mass')  # [J/kg liquid]
+        hSol = self.Solid_1.getEnthalpy(
+            temp=temp, temp_ref=temp_ref, basis='mass')  # [J/kg solid]
+
+        hMass = np.array([hLiq, hSol])  # [J/kg], [liquid, solid]
 
         # Mixture
         if volfracs is None:
@@ -459,8 +598,10 @@ class SlurryStream(Slurry):
         ``mass_slurry`` and ``mass_flow`` [kg/s] equal the constituent flow
         sums. With no distribution or moments supplied, constituent flows
         determine the total, replacing the constructor's flow value.
-        Solid volume uses the inherited ``SolidStream.vol`` [m**3/s]; that
-        stream need not expose a ``vol_flow`` alias. Liquid volume and mass
+        Solid volume uses the inherited ``SolidStream.vol`` [m**3/s], which
+        the stream mirrors in its ``vol_flow`` alias whenever ``vol`` is
+        defined, including the no-distribution branch where the solid stream
+        carries the number rate [#/um/s]. Liquid volume and mass
         use flow aliases because liquid updates delete phase amount attributes.
         """
         if isinstance(phases_list, tuple):
@@ -520,7 +661,6 @@ class SlurryStream(Slurry):
 
                 self.dx = np.diff(x_grid)
 
-            # self.Solid_1.x_distrib = self.x_distrib
             self.moments = self.Solid_1.getMoments(self.x_distrib,
                                                    self.distrib)
 
@@ -568,27 +708,33 @@ class SlurryStream(Slurry):
         self.temp = energy_balance(self, 'mass_flow')
         self.solid_conc = self.getSolidsConcentr(basis='mass')
 
-    def InterpolateInputs(self, time):
-        if isinstance(time, (float, int)):
-            time = min(time, self.time_upstream[-1])
+    def InterpolateInputs(
+            self, time: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
+        """Interpolate the stored upstream array profile at given times.
 
-            y_interpol = Interpolation(self.time_upstream, self.y_inlet,
-                                       time)
-        else:
-            interpol = CubicSpline(self.time_upstream, self.y_inlet)
-            flags_interpol = time > self.time_upstream[-1]
+        Parameters
+        ----------
+        time : float or numpy.ndarray
+            Evaluation time [s], scalar or shape (num_times,) in any order.
 
-            if any(flags_interpol):
-                time_interpol = time[~flags_interpol]
-                y_interp = interpol(time_interpol)
+        Returns
+        -------
+        float or numpy.ndarray
+            Upstream slurry values in the units and state order of
+            ``y_inlet``, which holds time on its first axis with shape
+            (num_upstream_times,) or (num_upstream_times, num_states).
+            Scalar time removes the time axis; array time gives
+            (num_times,) or (num_times, num_states) in query order.
 
-                y_extrapol = np.tile(y_interp[-1],
-                                     (sum(flags_interpol), 1))
-                y_interpol = np.vstack((y_interp, y_extrapol))
-            else:
-                y_interpol = interpol(time)
-
-        return y_interpol
+        Notes
+        -----
+        Delegates to :func:`PharmaPy.Connections.interpolate_inputs` with
+        ``time_upstream`` [s], using its default three-node local Newton
+        interpolation for scalar time and a cubic spline for array time.
+        Times after ``time_upstream[-1]`` hold the final upstream sample;
+        earlier times extrapolate.
+        """
+        return interpolate_inputs(time, self.time_upstream, self.y_inlet)
 
     def evaluate_inputs(self, time):
         if self.DynamicInlet is None:
@@ -603,25 +749,41 @@ class SlurryStream(Slurry):
 
 
 class Cake:
-    def __init__(self, z_external=None, num_discr=50, saturation=None):
-        """ Create a cake object.
+    """Represent a packed filter cake of attached liquid and solid phases.
+
+    The cake is resolved on axial nodes ``z_external`` [m] with a
+    volumetric liquid saturation [-] per node; assigning ``Phases`` derives
+    its porosity [-], cake volume [m**3] and specific resistance from the
+    attached solid. Like the other matter objects, ``y_upstream`` is None
+    for a raw cake and holds the upstream outputs for a cake transferred
+    from a unit operation, which is how raw-material reporting tells the
+    two apart.
+    """
+
+    def __init__(self, z_external: Optional[ArrayLike] = None,
+                 num_discr: int = 50,
+                 saturation: Optional[ArrayLike] = None) -> None:
+        """Create a cake object.
 
         Parameters
         ----------
-        z_external : array, optional
-            Array of size N, containing the internal spatial grid
-            of length coordinate of the cakes [m]. The default is None
-        num_discr : integer, optional
-            The number which the cake length coordiante is discretized in. 
-            The default is 50.
-        saturation : array, optional
-            Array of size N (N = num_discr). Volumetric liquid uptake 
-            in each spatial node of the cake. The default is None.
+        z_external : array-like, optional
+            Axial node coordinates of the cake [m], shape (num_nodes,). The
+            default None uses ``num_discr`` nodes evenly spaced over [0, 1] m.
+        num_discr : int, optional
+            Number of axial nodes [-] used when ``z_external`` is None. The
+            default is 50.
+        saturation : array-like, optional
+            Volumetric liquid uptake per node [-], shape (num_nodes,). The
+            default None means fully saturated, ones at every node.
 
-        Returns
-        -------
-        None.
-
+        Notes
+        -----
+        ``y_upstream`` starts as None, like the other matter objects
+        (``LiquidPhase``, ``LiquidStream``, ``Slurry``). A raw Cake keeps
+        None, so raw-material and stream-table reporting classify it as a
+        raw inlet; ``Connection.FeedConnection`` replaces it with the
+        upstream outputs when the Cake is transferred from a unit operation.
         """
     
 
@@ -636,6 +798,7 @@ class Cake:
             self.saturation = saturation
 
         self.mass_concentr = None
+        self.y_upstream = None
 
     @property
     def Phases(self):
@@ -731,8 +894,9 @@ class Cake:
 
         return alpha
 
-    def getEnthalpy(self, temp=None, mass_frac=None,
-                    distrib=None) -> Union[float, np.ndarray]:
+    def getEnthalpy(self, temp=None, mass_frac=None, distrib=None,
+                    temp_ref: float = MIXTURE_ENTHALPY_TEMP_REF
+                    ) -> Union[float, np.ndarray]:
         """Return the mass-specific enthalpy of liquid and solid in a cake.
 
         Parameters
@@ -745,20 +909,26 @@ class Cake:
             Defaults to the attached liquid composition.
         distrib : array-like, optional
             Legacy unused distribution argument [#/um].
+        temp_ref : float, optional
+            Enthalpy reference temperature [K] passed to both the liquid and
+            the solid provider. The default is ``MIXTURE_ENTHALPY_TEMP_REF``
+            (298.15 K).
 
         Returns
         -------
         float or ndarray
             Enthalpy [J/kg of liquid plus solid inventory], relative to the
-            phase providers' default reference temperature of 298.15 K. Array
-            temperatures retain the providers' temperature axis.
+            common reference ``temp_ref``. Array temperatures retain the
+            providers' temperature axis.
 
         Notes
         -----
         The attached liquid and solid masses set the weights, matching the
         total inventory used by Mixer.energy_balance. Porosity and saturation
         metadata do not change these inventories. Gas mass and enthalpy are
-        neglected.
+        neglected. Both phases always use ``temp_ref``, including when the
+        attached solid was constructed with a different ``temp_ref``, so the
+        weighted result never mixes references.
         """
         if temp is None:
             temp = self.Liquid_1.temp  # [K]
@@ -767,8 +937,10 @@ class Cake:
             mass_frac = self.Liquid_1.mass_frac  # [-]
 
         hLiq = self.Liquid_1.getEnthalpy(
-            temp=temp, mass_frac=mass_frac, basis='mass')  # [J/kg liquid]
-        hSol = self.Solid_1.getEnthalpy(temp=temp, basis='mass')  # [J/kg solid]
+            temp=temp, mass_frac=mass_frac, temp_ref=temp_ref,
+            basis='mass')  # [J/kg liquid]
+        hSol = self.Solid_1.getEnthalpy(
+            temp=temp, temp_ref=temp_ref, basis='mass')  # [J/kg solid]
 
         mass_liq = self.Liquid_1.mass  # [kg]
         mass_sol = self.Solid_1.mass  # [kg]

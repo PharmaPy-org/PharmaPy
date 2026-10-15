@@ -1,16 +1,13 @@
 """Discrete solute-conservation regression for ``DeliquoringStep`` (issue #29).
 
-The defect lives entirely in the finite-volume flux assembly of
-``DeliquoringStep.material_balance``, so these tests drive the unit's public RHS
-entry point ``unit_model`` with a compact synthetic cake state instead of a full
-``solve_unit`` transient (which requires Assimulo). The cake fixture is built
-from the same correlations ``solve_unit`` uses, but the expected outlet solute
-efflux is derived from the *returned* saturation derivative rather than from the
-production flux expression, so the assertion cannot go green by restating the
-code under test.
+Real liquid/solid phases and a ``Cake`` enter through the public ``Phases``
+setter, which supplies the grid, species order, and inventory. The shared
+``drying_cake_factory`` uses documented synthetic property data, not substitute
+objects. Prescribed pressure and residual saturation isolate the dimensionless
+finite-volume contract without requiring an Assimulo transient. Expected solute
+efflux follows independently from the returned saturation derivative. The native
+setup path is covered by ``test_deliquoring_particle_size_units.py``.
 """
-
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,7 +19,7 @@ pytestmark = pytest.mark.unit
 
 
 NUM_NODES = 5  # axial finite volumes along the cake [-]
-NUM_SPECIES = 2  # solutes carried by the mobile liquid [-]
+NUM_SPECIES = 3  # [-], water/ethanol/carrier order in the shared cake fixture
 
 # Irreducible saturation. Representative of the value ``get_sat_inf`` returns
 # from its 0.155*(1 + 0.031*Ca**-0.49) correlation for a moderately fine cake.
@@ -35,23 +32,26 @@ P_THRESH = 3.0e4  # [Pa]
 
 P_ATM = 1.01325e5  # ambient pressure at the cake surface [Pa]
 DELTA_P = 5.0e4  # applied pressure drop across the cake [Pa]
+CONSERVATION_RTOL = 1e-10  # [-], roundoff allowance for flux telescoping
+CONSERVATION_ATOL = 1e-14  # [-], roundoff allowance at zero-flux cells
 
 
-def _build_deliquoring_step():
-    """Build a ``DeliquoringStep`` carrying only the RHS-relevant attributes.
+def _build_deliquoring_step(drying_cake_factory):
+    """Attach a real cake and prescribe deterministic drainage conditions.
 
-    ``DeliquoringStep.Phases`` normally installs the grid and the cake
-    properties, but that setter needs full ``Cake``/``Liquid``/``Solid`` phase
-    objects and is unrelated to the flux assembly under test. The attributes set
-    here are exactly those ``material_balance`` reads.
+    Parameters
+    ----------
+    drying_cake_factory : callable
+        Fixture constructing a production cake with real liquid/solid phases.
 
     Returns
     -------
     DeliquoringStep
-        Unit whose ``p_gas`` [Pa], ``p_thresh`` [Pa], ``sat_inf`` [-],
-        ``delta_z`` [-] and ``Liquid_1.num_species`` [-] are populated.
+        Unit with public phase/grid setup and specified ``p_gas`` [Pa],
+        ``p_thresh`` [Pa], and ``sat_inf`` [-].
     """
     unit = DeliquoringStep(num_nodes=NUM_NODES)
+    unit.Phases = drying_cake_factory()
 
     # Gas pressure on the N + 1 face grid, decaying from the pressurized face
     # to ambient exactly as ``solve_unit`` builds it [Pa].
@@ -59,12 +59,6 @@ def _build_deliquoring_step():
 
     unit.p_thresh = P_THRESH  # [Pa]
     unit.sat_inf = SAT_INF  # [-]
-
-    # Uniform non-dimensional cell width on z in [0, 1], as built by the
-    # ``Phases`` setter from ``np.linspace(0, 1, num_nodes + 1)`` [-].
-    unit.delta_z = np.diff(np.linspace(0, 1, NUM_NODES + 1))  # [-]
-
-    unit.Liquid_1 = SimpleNamespace(num_species=NUM_SPECIES)
 
     return unit
 
@@ -75,8 +69,9 @@ def _cake_state():
     The conservation identity under test must hold for *any* admissible state,
     so the profiles only need to be valid and non-degenerate: reduced saturation
     increases toward the drainage face (the gas-entry side dries first, which
-    makes the liquid flux positive in +z), and the two solutes carry opposite
-    monotone trends so that a species/axis transposition cannot cancel out.
+    makes the liquid flux positive in +z). Opposite monotone trends for the
+    first two species and a nonmonotone third profile expose donor-cell and
+    species-order mistakes. Five cells and three species separate the axes.
 
     Returns
     -------
@@ -91,13 +86,14 @@ def _cake_state():
         (
             np.linspace(0.80, 0.20, NUM_NODES),  # species 0 [-]
             np.linspace(0.15, 0.65, NUM_NODES),  # species 1 [-]
+            np.array([0.05, 0.15, 0.35, 0.25, 0.45]),  # species 2 [-]
         )
     )  # [-]
 
     return sat_star, conc_star
 
 
-def test_deliquoring_solute_inventory_matches_boundary_efflux():
+def test_deliquoring_solute_inventory_matches_boundary_efflux(drying_cake_factory):
     """Discrete solute inventory changes only through the outlet face flux.
 
     The continuous species balance eps*d(S*C)/dt = -d(q*C)/dz makes the cake's
@@ -106,16 +102,22 @@ def test_deliquoring_solute_inventory_matches_boundary_efflux():
     (``upwind_fvm(q_liq, boundary_cond=0)``), the only open boundary is the
     outlet face, so the discrete holdup rate must equal minus the outlet liquid
     flux times the upwind (last-cell) concentration, per species.
+
+    Parameters
+    ----------
+    drying_cake_factory : callable
+        Fixture constructing real liquid/solid cake collaborators.
     """
-    unit = _build_deliquoring_step()
-    sat_star, conc_star = _cake_state()
+    unit = _build_deliquoring_step(drying_cake_factory)
+    sat_star, conc_star = _cake_state()  # [-], [-]
 
     # Interleaved [saturation, mass_conc...] ordering per node, as
     # ``unit_model`` receives it from the integrator.
-    states = np.column_stack((sat_star, conc_star)).ravel()
+    states = np.column_stack((sat_star, conc_star)).ravel()  # [-]
 
     theta = 0.35  # non-dimensional deliquoring time [-] (autonomous RHS)
-    derivatives = unit.unit_model(theta, states).reshape(NUM_NODES, NUM_SPECIES + 1)
+    derivatives = unit.unit_model(theta, states).reshape(
+        NUM_NODES, NUM_SPECIES + 1)  # [-], per unit non-dimensional time
 
     dsat_star_dtheta = derivatives[:, 0]  # [-] per unit non-dimensional time
     dconc_dtheta = derivatives[:, 1:]  # [-] per unit non-dimensional time
@@ -145,10 +147,12 @@ def test_deliquoring_solute_inventory_matches_boundary_efflux():
     # Upwind outlet face carries the last cell's concentration.
     expected_rate = -liquid_efflux * conc_star[-1]  # [-] per non-dim. time
 
-    np.testing.assert_allclose(inventory_rate, expected_rate, rtol=1e-10, atol=1e-14)
+    np.testing.assert_allclose(inventory_rate, expected_rate,
+                               rtol=CONSERVATION_RTOL, atol=CONSERVATION_ATOL)
 
 
-def test_deliquoring_concentration_derivative_uses_upwind_face_flux():
+def test_deliquoring_concentration_derivative_uses_upwind_face_flux(
+        drying_cake_factory):
     """Per-cell concentration rates use the upstream liquid concentration.
 
     Eliminating ``dS/dtheta`` between the conservative solute and saturation
@@ -156,13 +160,19 @@ def test_deliquoring_concentration_derivative_uses_upwind_face_flux():
     cell's left face. Those face fluxes are recovered cumulatively from the
     returned saturation derivative, independently of the production flux
     assembly, so the assertion pins the donor cell at every interior face.
+
+    Parameters
+    ----------
+    drying_cake_factory : callable
+        Fixture constructing real liquid/solid cake collaborators.
     """
-    unit = _build_deliquoring_step()
-    sat_star, conc_star = _cake_state()
+    unit = _build_deliquoring_step(drying_cake_factory)
+    sat_star, conc_star = _cake_state()  # [-], [-]
 
     states = np.column_stack((sat_star, conc_star)).ravel()  # [-]
     theta = 0.35  # non-dimensional deliquoring time [-] (autonomous RHS)
-    derivatives = unit.unit_model(theta, states).reshape(NUM_NODES, NUM_SPECIES + 1)
+    derivatives = unit.unit_model(theta, states).reshape(
+        NUM_NODES, NUM_SPECIES + 1)  # [-], per unit non-dimensional time
 
     dsat_star_dtheta = derivatives[:, 0]  # [-] per non-dimensional time
     dconc_dtheta = derivatives[:, 1:]  # [-] per non-dimensional time
@@ -184,4 +194,5 @@ def test_deliquoring_concentration_derivative_uses_upwind_face_flux():
         / (saturation[:, np.newaxis] * cell_width[:, np.newaxis])
     )  # [-] per non-dimensional time
 
-    np.testing.assert_allclose(dconc_dtheta, expected_rate, rtol=1e-10, atol=1e-14)
+    np.testing.assert_allclose(dconc_dtheta, expected_rate,
+                               rtol=CONSERVATION_RTOL, atol=CONSERVATION_ATOL)

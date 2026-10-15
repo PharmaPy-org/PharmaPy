@@ -594,10 +594,14 @@ class _BaseCryst:
         upstream SI moment profile (also reported by FVM crystallizers) and
         interpolate it with the other inlet fields. Explicitly converted or
         dynamic mu_n values take precedence; the original stream is unchanged.
-        Other inlet fields do not suppress the moment fallback. For moment-mode
-        slurry feeds, dynamic concentration overrides belong to Liquid_1;
-        omitted dynamic fields retain static moments, liquid concentration,
-        flow and temperature without modifying the stream. Multiple evaluation
+        Other inlet fields do not suppress the moment fallback. For moment and
+        1D-FVM slurry feeds, dynamic concentration overrides belong to
+        Liquid_1; omitted dynamic fields retain the static population (moments
+        or distribution), liquid concentration, flow and temperature without
+        modifying the stream. A dynamic Liquid_1 composition enters the species
+        balances only: unit_model evaluates inlet density and enthalpy, and the
+        Semibatch liquid-volume balance, from the stream's static Liquid_1
+        composition. Multiple evaluation
         times broadcast the fallback to (num_times, num_moments);
         a single evaluation time retains shape (num_moments,). The downstream
         model uses the lowest num_distr moment orders. Extra feed orders are
@@ -928,9 +932,16 @@ class _BaseCryst:
 
         Notes
         -----
-        Updates phase composition and temperature for property evaluation.
+        Updates owned phase composition and temperature for property evaluation.
+        Concentration buffers are copied before phase updates: a named solvent
+        may be completed by the phase's ideal-volume closure, but that property
+        representation must not overwrite the independently integrated state.
         Jacket derivatives are flattened individually so scalar and length-one
         thermal rates retain the tank-then-jacket state order.
+        Slurry-feed inlet densities [kg/m**3] and enthalpy [J/m**3] come from
+        the Inlet stream's static phase compositions. A dynamic Liquid_1
+        mass_conc from get_inputs therefore changes the species balances but
+        not these properties or the Semibatch liquid-volume balance.
         """
         di_states = unpack_states(states, self.dim_states, self.name_states)
 
@@ -942,7 +953,7 @@ class _BaseCryst:
                                          self.Slurry, self.controls)
 
         # ---------- Physical properties
-        self.Liquid_1.updatePhase(mass_conc=di_states['mass_conc'])
+        self.Liquid_1.updatePhase(mass_conc=di_states['mass_conc'].copy())
         self.Liquid_1.temp = di_states['temp']
         self.Solid_1.temp = di_states['temp']
 
@@ -2230,8 +2241,8 @@ class BatchCryst(_BaseCryst):
             ddistr_dt, transf = self.fvm_method(distrib, mu_n, mass_conc, temp,
                                                 params, rho_s, vol=vol_slurry)
 
-        # Balance for target
-        self.Liquid_1.updatePhase(mass_conc=mass_conc, vol=vol)
+        # Phase completion owns its concentration buffer; the ODE state is read-only.
+        self.Liquid_1.updatePhase(mass_conc=mass_conc.copy(), vol=vol)
 
         dvol_liq = -transf/rho_liq  # TODO: results not consistent with mu_3
         dcomp_dt = -transf/vol * (self.kron_jtg - mass_conc/rho_liq)  # [kg/m**3/s]
@@ -2376,6 +2387,12 @@ class BatchCryst(_BaseCryst):
         Raw solver moments are seeded in micrometer lengths by solve_unit.
         Retrieval converts them to total SI moments [m**n] for reported and
         phase values. Public states_di and result metadata both describe SI.
+        Integrated concentration profiles are retained unchanged. Owned liquid
+        phases and outlets retain LiquidPhase's named-solvent volume completion
+        contract; their solvent concentration can differ from the ODE value.
+        Copying makes this existing distinction explicit and prevents an
+        endpoint-only overwrite. It does not establish inventory equivalence
+        between the integrated volume model and the phase closure (issue #312).
         Each run is converted before storage so continuation preserves SI.
         Final solid mass and volume follow kv*mu_3 of the total moments;
         outlet moments use the final combined liquid and solid volume.
@@ -2426,7 +2443,7 @@ class BatchCryst(_BaseCryst):
 
         vol_slurry = dp['vol'][-1] + vol_sol  # [m**3]
 
-        self.Liquid_1.updatePhase(mass_conc=dp['mass_conc'][-1],
+        self.Liquid_1.updatePhase(mass_conc=dp['mass_conc'][-1].copy(),
                                   vol=dp['vol'][-1])
 
         self.Liquid_1.temp = dp['temp'][-1]
@@ -3268,6 +3285,12 @@ class MSMPR(_BaseCryst):
         converts them to SI [m**n/m**3] for MSMPR profiles or total [m**n]
         for Semibatch profiles. Public states_di and result metadata describe
         these SI reported values; phase moments also retain SI lengths.
+        Integrated concentration profiles are retained unchanged. Owned liquid
+        phases and outlets retain LiquidPhase's named-solvent volume completion
+        contract; their solvent concentration can differ from the ODE value.
+        Copying makes this existing distinction explicit and prevents an
+        endpoint-only overwrite. It does not establish inventory equivalence
+        between the integrated volume model and the phase closure (issue #312).
         Semibatch solid inventory follows kv*mu_3 of the final total moments.
         Moment outlets retain that inventory and the phase-owned shape factor,
         including when the seed phase also has a size grid.
@@ -3334,7 +3357,7 @@ class MSMPR(_BaseCryst):
             vol_liq = (1 - self.Solid_1.kv * dp['mu_n'][-1, 3]) * vol_slurry
 
             self.Liquid_1.updatePhase(vol=vol_liq,
-                                      mass_conc=dp['mass_conc'][-1])
+                                      mass_conc=dp['mass_conc'][-1].copy())
             if self.method == '1D-FVM':
                 distrib_tilde = dp['distrib'][-1] * vol_slurry
                 self.Solid_1.updatePhase(distrib=distrib_tilde)
@@ -3346,7 +3369,7 @@ class MSMPR(_BaseCryst):
 
         else:
             vol_liq = dp['vol'][-1]
-            self.Liquid_1.updatePhase(mass_conc=dp['mass_conc'][-1],
+            self.Liquid_1.updatePhase(mass_conc=dp['mass_conc'][-1].copy(),
                                   vol=dp['vol'][-1])
             
             rho_solid = self.Solid_1.getDensity()  # [kg/m**3]
@@ -3379,7 +3402,7 @@ class MSMPR(_BaseCryst):
 
         if type(self) == MSMPR:
             liquid_out = LiquidStream(path,
-                                      mass_conc=dp['mass_conc'][-1],
+                                      mass_conc=self.Liquid_1.mass_conc.copy(),
                                       temp=dp['temp'][-1], check_input=False)
 
             solid_out = SolidStream(path, mass_frac=solid_comp, kv=self.Solid_1.kv)
@@ -3575,7 +3598,8 @@ class SemibatchCryst(MSMPR):
         vol_solid = mu_n[3] * self.Solid_1.kv  # mu_3 is total, not by volume
         vol_slurry = vol + vol_solid
 
-        self.Liquid_1.updatePhase(mass_conc=mass_conc)
+        # Isolate the solver state from named-solvent completion.
+        self.Liquid_1.updatePhase(mass_conc=mass_conc.copy())
 
         if self.method == 'moments':
             # [um**n/m**3], exact SI-to-micrometer inlet conversion

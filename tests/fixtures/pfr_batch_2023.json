@@ -1,0 +1,10 @@
+{
+  "source_commit": "f20b3a2238b8f8588c641c43d8072361e28faba6",
+  "source_notebook": "doc/online_docs/examples/PFR_Batch_solved.ipynb",
+  "source_cell": 18,
+  "description": "Original stored 2023 initial-design raw-material costs, preserved before refreshing outputs. These algebraic feed costs do not certify the optimizer's final design.",
+  "species": ["A", "B", "C", "D", "solvent"],
+  "cost_columns": ["mass_A", "mass_B", "mass_C", "mass_D", "mass_solvent"],
+  "units": "USD/batch",
+  "cost_per_batch": [19.8, 11.879999999999999, 0.0, 0.0, 119.37392429236701]
+}

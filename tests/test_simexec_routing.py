@@ -141,16 +141,13 @@ def test_stream_handoff_follows_graph_edges_not_execution_order(data_path):
     created = _connection_edges(flowsheet)
 
     _assert_connections_follow_graph(graph, created)
-    assert set(created) == {("A", "C"), ("B", "C"), ("C", "D")}
+    assert created == [("A", "C"), ("B", "C"), ("C", "D")]
     assert len(flowsheet.C.Inlets) == 2
     assert len(flowsheet.D.Inlets) == 1
     source_masses = np.array([3.0, 6.0])  # [kg]
-    # Issue #309 tracks hash-seed-dependent inlet arrival order. Keep this
-    # provisional assertion order-independent until deterministic traversal
-    # lands, then replace the sort with an order-sensitive assertion.
-    destination_inlets = sorted(
-        flowsheet.C.Inlets, key=lambda inlet: inlet.mass
-    )
+    # Sources A and B are both ready first; FIFO traversal runs them in
+    # declaration order, so C receives A's inlet before B's (issue #309).
+    destination_inlets = flowsheet.C.Inlets
     expected_sources = [flowsheet.A.Outlet, flowsheet.B.Outlet]
     np.testing.assert_allclose(
         [inlet.mass for inlet in destination_inlets], source_masses
@@ -183,12 +180,13 @@ def test_stream_handoff_supports_fanout_to_multiple_successors(data_path):
     created = _connection_edges(flowsheet)
 
     _assert_connections_follow_graph(graph, created)
-    assert set(created) == {
+    # FIFO traversal visits B before C, following A's successor order.
+    assert created == [
         ("A", "B"),
         ("A", "C"),
         ("B", "D"),
         ("C", "D"),
-    }
+    ]
     assert len(flowsheet.B.Inlets) == 1
     assert len(flowsheet.C.Inlets) == 1
     assert len(flowsheet.D.Inlets) == 2

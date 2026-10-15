@@ -243,6 +243,30 @@ class ContinuousHoldup:
 
 
 class Mixer:
+    """Mix liquid, slurry or cake inlets by algebraic mass and energy balances.
+
+    The balances are evaluated at the times of the inputs; static inputs
+    give one result sample at 0 s and no processing time.
+
+    Parameters
+    ----------
+    temp_refer : float, optional
+        Reference temperature [K] stored as ``temp_refer``; default
+        298.15 K.
+
+    Attributes
+    ----------
+    is_instantaneous : bool
+        Class-level True: continuous mixing holds no inventory and passes
+        its feed on as it arrives, so ``SimulationExec`` raw-material
+        accounting charges the raw inlets of a static (single-sample)
+        continuous solve for the time its outlet is consumed downstream;
+        see ``SimulationExec.get_raw_inlets``. Batch mixing is accounted
+        from its charged inventories [kg] and is unaffected.
+    """
+
+    is_instantaneous = True
+
     def __init__(self, temp_refer=298.15):
 
         self._Inlets = []
@@ -284,7 +308,11 @@ class Mixer:
         Notes
         -----
         Species metadata comes from the first inlet's liquid phase, whether
-        supplied directly or attached to a slurry or cake.
+        supplied directly or attached to a slurry or cake. The liquid
+        ``states_di`` declares the amount [kg] or flow [kg/s], the
+        dimensionless ``mass_frac`` [-] with one entry per species, and the
+        temperature [K]; ``dim_states`` therefore sums to
+        ``num_species + 2``, the width of one packed liquid state.
         """
         incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
         flow_flags = [hasattr(inlet, 'mass_flow')
@@ -315,20 +343,21 @@ class Mixer:
         self.bipartite.append(None)
 
         liquid_inlet = getattr(self.Inlets[0], 'Liquid_1', self.Inlets[0])
+        # Dimensionless per-species fractions, as in the solids branch.
+        mass_frac_di = {'units': '', 'dim': len(liquid_inlet.name_species),
+                        'index': liquid_inlet.name_species, 'type': 'alg'}
 
         if flow_flag:
             self.states_di = {
                 'mass_flow': {'units': 'kg/s', 'dim': 1, 'type': 'alg'},
-                'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': liquid_inlet.name_species, 'type': 'alg'},
+                'mass_frac': mass_frac_di,
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
         else:
             self.states_di = {
                 'mass': {'units': 'kg', 'dim': 1, 'type': 'alg'},
-                'mass_frac': {'units': 'kg', 'dim': 1,
-                              'index': liquid_inlet.name_species, 'type': 'alg'},
+                'mass_frac': mass_frac_di,
                 'temp': {'units': 'K', 'dim': 1, 'type': 'alg'}
                 }
 
@@ -437,6 +466,13 @@ class Mixer:
             Solids without either a size distribution or a size grid are
             unsupported.
             The message identifies the differing quantity and inlet index.
+            Also raised if any inlet carries a non-empty ``DynamicInlet``,
+            which this static path cannot evaluate; the message names the
+            zero-based inlet index.
+            Also raised, before any balance, if a connected inlet's
+            ``time_upstream`` [s] has more than one sample; the message
+            names the zero-based inlet index, the sample count, and the
+            time window [s].
 
         Notes
         -----
@@ -458,17 +494,36 @@ class Mixer:
         deferred: the mixer keeps attached masses authoritative, but Slurry
         enthalpy weights phases by moment-derived fractions, so inconsistent
         solids cannot be mixed conservatively.
-        Profiled multiphase mixing remains outside this static path
-        (https://github.com/PharmaPy-org/PharmaPy/issues/221).
+        Profiled and dynamic multiphase Mixer inputs are unsupported: this
+        path reads static phase values only.
+        Whether a connected inlet is profiled is decided by the number of
+        samples in its ``time_upstream`` [s], as in the liquid branch of
+        :meth:`solve_unit`, not by ``y_upstream``: an upstream state
+        dictionary's length counts state names, not times. An inlet without
+        ``time_upstream``, or with a scalar or one-element time, is a
+        constant feed. Its attached phases carry the transferred final
+        upstream state, and the balance reads those phase attributes;
+        ``y_upstream`` values are not consumed.
         """
+        for index, inlet in enumerate(self.Inlets):
+            dynamic = getattr(inlet, 'DynamicInlet', None)
+            if dynamic is not None and getattr(dynamic, 'controls', {}):
+                raise ValueError(
+                    f'Mixer inlet {index} has DynamicInlet controls, but dynamic '
+                    'multiphase Mixer inputs are unsupported and would be '
+                    'ignored; remove the DynamicInlet or mix liquid-only streams.')
 
-        timeseries_flag = []
-
-        for inlet in self.Inlets:
-            if getattr(inlet, 'y_upstream', None) is None:
-                timeseries_flag.append(False)
-            else:
-                timeseries_flag.append(len(inlet.y_upstream) > 1)
+        for index, inlet in enumerate(self.Inlets):
+            inlet_time = getattr(inlet, 'time_upstream', None)  # [s]
+            if np.size(inlet_time) > 1:
+                inlet_time = np.atleast_1d(inlet_time)  # [s]
+                raise ValueError(
+                    f'Mixer inlet {index} carries a connected profile of '
+                    f'{inlet_time.size} samples over [{inlet_time[0]}, '
+                    f'{inlet_time[-1]}] s, but solids mixing is static and '
+                    'reads one phase state per inlet, so the profile cannot '
+                    'be mixed; connect a single-sample upstream result or mix '
+                    'liquid-only streams.')
 
         solids_flag = [hasattr(inlet, 'Solid_1') for inlet in self.Inlets]
 
@@ -532,33 +587,30 @@ class Mixer:
                     f'Mixer inlet {index} has x_distrib different from inlet {ind_solid}.')
         num_dist = reference_solid.distrib.shape[0]
 
-        if any(timeseries_flag):
-            pass
-        else:
-            for inlet in self.Inlets:
-                if hasattr(inlet, 'Solid_1'):
-                    mass_solid.append(getattr(inlet.Solid_1, amount_name))
-                    mass_liquid.append(getattr(inlet.Liquid_1, amount_name))
+        for inlet in self.Inlets:
+            if hasattr(inlet, 'Solid_1'):
+                mass_solid.append(getattr(inlet.Solid_1, amount_name))
+                mass_liquid.append(getattr(inlet.Liquid_1, amount_name))
 
-                    massfrac_liq.append(inlet.Liquid_1.mass_frac)
+                massfrac_liq.append(inlet.Liquid_1.mass_frac)
 
-                    distrib_sol.append(inlet.Solid_1.distrib)
+                distrib_sol.append(inlet.Solid_1.distrib)
 
-                    temps.append(inlet.Liquid_1.temp)
-                else:
-                    mass_solid.append(0)
-                    mass_liquid.append(getattr(inlet, amount_name))
+                temps.append(inlet.Liquid_1.temp)
+            else:
+                mass_solid.append(0)
+                mass_liquid.append(getattr(inlet, amount_name))
 
-                    massfrac_liq.append(inlet.mass_frac)
-                    distrib_sol.append(np.zeros(num_dist))
+                massfrac_liq.append(inlet.mass_frac)
+                distrib_sol.append(np.zeros(num_dist))
 
-                    temps.append(inlet.temp)
+                temps.append(inlet.temp)
 
-            massfrac_liq = np.array(massfrac_liq)
-            mass_solid = np.array(mass_solid)
-            mass_liquid = np.array(mass_liquid)
-            temps = np.array(temps)
-            distrib_sol = np.array(distrib_sol)
+        massfrac_liq = np.array(massfrac_liq)  # [-]
+        mass_solid = np.array(mass_solid)  # [kg] or [kg/s]
+        mass_liquid = np.array(mass_liquid)  # [kg] or [kg/s]
+        temps = np.array(temps)  # [K]
+        distrib_sol = np.array(distrib_sol)  # [#/um] or [#/um/s]
 
         dict_out = {'temp': temps, 'mass_frac': massfrac_liq,
                     'mass_liq': mass_liquid, 'mass_solid': mass_solid,
@@ -904,12 +956,19 @@ class Mixer:
         ValueError
             If a multi-sample liquid inlet's time window does not overlap the
             chosen grid or starts after that grid begins. The message names
-            the zero-based inlet index and both windows [s].
+            the zero-based inlet index and both windows [s]. With a solids
+            inlet, also if :meth:`get_inputs_solids` rejects the inlets,
+            including any inlet with non-empty ``DynamicInlet`` controls and
+            any connected inlet whose ``time_upstream`` [s] has more than
+            one sample.
 
         Notes
         -----
         The first connected liquid inlet with more than one sample supplies
-        the evaluation grid [s]. Single-sample inlets are constant feeds: they
+        the evaluation grid [s]. In a ``SimulationExec`` flowsheet, inlets
+        are connected in the execution order of this unit's predecessors
+        (see ``PharmaPy.Connections.topological_bfs``). Single-sample
+        inlets are constant feeds: they
         neither select the grid nor restrict its time window. Other connected
         inlets must overlap the grid and cover its beginning. Endpoint
         comparisons allow ``sqrt(machine epsilon) * grid span`` [s] as a
@@ -923,6 +982,15 @@ class Mixer:
         Entirely static liquid mixing publishes a single time [s]
         and contributes no duration. Duration-based flowsheet accounting of
         instantaneous units is a separate SimExec concern.
+
+        Solids mixing is also instantaneous: ``result`` and ``outputs``
+        hold one sample at time 0 s, so a flowsheet records zero
+        processing time for it; see :meth:`_publish_solids_result` for the
+        published names, shapes, and bases. The returned tuple is
+        unchanged. Connected inputs to solids mixing must have one upstream
+        sample; they are constant feeds whose attached phase state is
+        mixed, so the balance equals that of the same phases supplied
+        directly.
         """
 
         # ---------- Read inputs
@@ -937,21 +1005,20 @@ class Mixer:
 
         if any(solids_flag):
             self.states_in_dict = {'Inlet': states_in_dict}
+            # Instantaneous static mixing: one sample, no invented duration.
+            time_prof = np.zeros(1)  # [s]
             u_input, ind_solids = self.get_inputs_solids()
 
             path = self.Inlets[ind_solids].Liquid_1.path_data
-            if isinstance(u_input['mass_frac'], list):
-                pass
+            states = self.balances_solids(u_input, ind_solids)
+            # Reuse balanced liquid fractions [-] and the appropriate
+            # batch inventory [kg] or continuous mass flow [kg/s].
+            if self.is_continuous:
+                self.Liquid_1 = LiquidStream(
+                    path, mass_frac=states[2], mass_flow=states[0], temp=states[-1])
             else:
-                states = self.balances_solids(u_input, ind_solids)
-                # Reuse balanced liquid fractions [-] and the appropriate
-                # batch inventory [kg] or continuous mass flow [kg/s].
-                if self.is_continuous:
-                    self.Liquid_1 = LiquidStream(
-                        path, mass_frac=states[2], mass_flow=states[0], temp=states[-1])
-                else:
-                    self.Liquid_1 = LiquidPhase(
-                        path, mass_frac=states[2], mass=states[0], temp=states[-1])
+                self.Liquid_1 = LiquidPhase(
+                    path, mass_frac=states[2], mass=states[0], temp=states[-1])
         else:
             self.states_in_dict = {'Inlet': states_in_dict}
             time_prof = [0]  # [s], instantaneous static mixing
@@ -1018,8 +1085,9 @@ class Mixer:
 
         Parameters
         ----------
-        time : sequence of float or None
-            Profile times [s]; None for static solids mixing.
+        time : sequence of float
+            Profile times [s]; for static solids mixing, the one-sample zero
+            time of shape (1,).
         states : tuple
             Returned balance quantities: liquid-only amount [kg] or flow
             [kg/s], composition [-], temperature [K]; for solids, liquid and
@@ -1030,7 +1098,9 @@ class Mixer:
         -----
         Solid populations and phase amounts are already reconciled by
         ``balances_solids``. Retrieval commits temperature without replacing
-        a total solid population with a volume-specific slurry distribution.
+        a total solid population with a volume-specific slurry distribution,
+        then publishes ``result`` and ``outputs`` through
+        :meth:`_publish_solids_result`.
         For continuous liquid mixing, outlet temperature is committed before
         ``updatePhase`` reconciles volumetric flow at that temperature.
         Entirely static, instantaneous liquid mixing publishes one time [s]
@@ -1041,14 +1111,7 @@ class Mixer:
                        for inlet in self.Inlets]
 
         if any(solids_flag):
-            mass_liq, mass_sol, massfrac_liq, distrib, temp = states
-
-            if self.type_out == 'Slurry':
-                self.names_states_out = ['mass_liq', 'temp', 'num_distrib']
-            else:
-                self.names_states_out = ['mass_liq', 'temp', 'total_distrib']
-
-            self.outputs = states
+            temp = states[-1]  # [K], adiabatic outlet temperature
 
             # Amounts and populations were reconciled during construction.
             self.Outlet.Liquid_1.temp = temp
@@ -1056,6 +1119,8 @@ class Mixer:
             self.Outlet.temp = temp  # [K]
 
             self.timeProf = [0]
+
+            self._publish_solids_result(time, states)
 
         else:
             mass, massfrac, temp = states
@@ -1096,6 +1161,90 @@ class Mixer:
 
             self.Outlet = self.Liquid_1
 
+    def _publish_solids_result(self, time: np.ndarray, states: tuple) -> None:
+        """Publish the one-sample result of instantaneous solids mixing.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Result time [s], shape (1,). Static mixing has one sample and
+            no duration.
+        states : tuple
+            Balanced outlet quantities from :meth:`balances_solids`: liquid
+            and solid amounts [kg] (batch) or mass flows [kg/s]
+            (continuous), liquid mass fractions [-] of shape
+            (num_species,), distribution of shape (num_sizes,), and
+            temperature [K]. The distribution is slurry-volume specific
+            [#/m**3/um] for Slurry and SlurryStream outlets and a total
+            population [#/um] for a Cake outlet.
+
+        Notes
+        -----
+        Replaces ``states_di``, ``name_states``, ``dim_states`` and
+        ``names_states_out`` with ``mass_liq``, ``mass_solid``,
+        ``mass_frac``, ``temp``, and the distribution, named ``distrib``
+        for Slurry and SlurryStream outlets and ``total_distrib`` for a
+        Cake, as crystallizers name these two population bases. All are
+        algebraic. ``outputs`` is a dictionary and ``result`` is a
+        ``DynamicResult`` (attribute access, not subscriptable) whose
+        attributes reference the same arrays, for example
+        ``result.temp is outputs['temp']``. Every state has a leading time
+        axis of length one: amounts and temperature (1,), mass fractions
+        (1, num_species) in the outlet liquid's database species order, and
+        the distribution (1, num_sizes). Both also carry ``time`` [s] and
+        the size grid ``x_cryst`` [um] of shape (num_sizes,), the grid name
+        used by crystallizer results.
+
+        A SlurryStream distribution is the solid number-rate distribution
+        [#/um/s] divided by the slurry volumetric flow [m**3/s], hence
+        [#/m**3/um] like a batch Slurry. Continuous amounts keep the names
+        ``mass_liq`` and ``mass_solid``, with [kg/s] recorded in
+        ``states_di``, because ``NameAnalysis.getBipartite`` pairs any
+        upstream name containing ``flow`` with a downstream flow state
+        before it checks exact name matches.
+        """
+        mass_liq, mass_solid, massfrac_liq, distrib, temp = states
+        species = list(self.Outlet.Liquid_1.name_species)
+        num_species = len(species)
+        x_grid = np.array(self.Outlet.Solid_1.x_distrib, dtype=float)  # [um]
+        num_sizes = len(x_grid)
+
+        # Phase amounts stay off the 'flow' names that getBipartite would
+        # pair with a downstream flow state; the basis lives in the units.
+        amount_units = 'kg/s' if self.is_continuous else 'kg'
+        if self.type_out == 'Slurry':
+            distrib_name, distrib_units = 'distrib', '#/m**3/um'
+        else:
+            distrib_name, distrib_units = 'total_distrib', '#/um'
+
+        self.states_di = {
+            'mass_liq': {'units': amount_units, 'dim': 1, 'type': 'alg'},
+            'mass_solid': {'units': amount_units, 'dim': 1, 'type': 'alg'},
+            'mass_frac': {'units': '', 'dim': num_species, 'index': species,
+                          'type': 'alg'},
+            'temp': {'units': 'K', 'dim': 1, 'type': 'alg'},
+            distrib_name: {'units': distrib_units, 'dim': num_sizes,
+                           'index': list(range(num_sizes)), 'type': 'alg'},
+            }
+        self.name_states = list(self.states_di.keys())
+        self.dim_states = [di['dim'] for di in self.states_di.values()]
+        self.names_states_out = self.name_states.copy()
+
+        result = {
+            'mass_liq': np.array(mass_liq, dtype=float).reshape(1),  # [kg] or [kg/s]
+            'mass_solid': np.array(mass_solid, dtype=float).reshape(1),  # [kg] or [kg/s]
+            'mass_frac': np.array(massfrac_liq, dtype=float).reshape(
+                1, num_species),  # [-]
+            'temp': np.array(temp, dtype=float).reshape(1),  # [K]
+            distrib_name: np.array(distrib, dtype=float).reshape(
+                1, num_sizes),  # [#/m**3/um] or [#/um]
+            'x_cryst': x_grid,  # [um]
+            'time': np.array(time, dtype=float).reshape(1),  # [s]
+            }
+
+        self.result = DynamicResult(self.states_di, **result)
+        self.outputs = result
+
 
 class DynamicCollector:
     """Dynamic holdup model for liquid and crystallizing inlet streams.
@@ -1103,6 +1252,31 @@ class DynamicCollector:
     The inlet phase type selects either a liquid-mixer balance or a delegated
     semibatch crystallizer model. State labels and result retrieval therefore
     follow the selected model's declared state layout.
+
+    A slurry inlet always delegates to an adiabatic ``SemibatchCryst``,
+    which needs two crystallization settings on the collector:
+
+    ``KinCryst``
+        Crystallization kinetics object, such as
+        :class:`PharmaPy.Kinetics.CrystKinetics`, assigned to the delegate's
+        ``Kinetics``. There is no non-crystallizing slurry holdup.
+    ``kwargs_cryst``
+        Mapping (e.g. dict) with the required keys ``'target_ind'``, the
+        zero-based index [-] of the crystallizing species in the inlet
+        liquid's species order, and ``'target_comp'``, its name or a list,
+        tuple or one-dimensional array of names in the property database.
+        ``target_ind`` must index the first of the ``target_comp`` names in
+        that order, the species the delegate crystallizes. Other entries,
+        for example ``'scale'`` [-], are passed to the ``SemibatchCryst``
+        constructor. The collector sets ``method`` and ``adiabatic``, so
+        those keys are rejected, and replaces any ``num_interp_points``
+        entry with its own ``num_interp_points``.
+
+    Only crystallizer sources (``PharmaPy.Crystallizers`` units) supply both
+    automatically through ``Connection``; for any other slurry source, such as
+    a raw ``SlurryStream`` or a solids ``Mixer``, the caller sets them.
+    ``solve_unit`` validates both first, before it rebuilds the inlet layout
+    or builds any phase.
     """
 
     def __init__(self, temp_refer: float = 298.15,
@@ -1264,19 +1438,24 @@ class DynamicCollector:
 
         Notes
         -----
-        When mu_n is an active input, SlurryStream fallback fields come from
-        its own moments and attached liquid concentration. Without an attached
-        liquid phase, concentration retains the generic missing-field default.
-        Connected upstream and dynamic inlet values take precedence for each
-        supplied field. Aliases are installed on a shallow copy so the original
-        stream is unchanged.
+        In a slurry-feed layout, one with an active population (``mu_n`` or
+        ``distrib``), a SlurryStream's fallback ``mass_conc`` comes from its
+        attached liquid phase for moment and 1D-FVM populations alike, and
+        fallback ``mu_n`` from its own moments when ``mu_n`` is active.
+        Without an attached liquid phase, or without an active population,
+        concentration retains the generic missing-field default. Connected
+        upstream and dynamic inlet values take precedence for each supplied
+        field. Aliases are installed on a shallow copy so the original stream
+        is unchanged.
         """
         inlet = self.Inlet
-        if (isinstance(inlet, SlurryStream)
-                and 'mu_n' in self.states_in_dict['Inlet']):
+        active = self.states_in_dict['Inlet']
+        if isinstance(inlet, SlurryStream) and (
+                'mu_n' in active or 'distrib' in active):
             inlet = copy(inlet)
-            inlet.mu_n = self.Inlet.moments  # [m**n/m**3], slurry-volume basis
-            if hasattr(self.Inlet, 'Liquid_1'):
+            if 'mu_n' in active:
+                inlet.mu_n = self.Inlet.moments  # [m**n/m**3], slurry-volume basis
+            if 'mass_conc' in active and hasattr(self.Inlet, 'Liquid_1'):
                 inlet.mass_conc = self.Inlet.Liquid_1.mass_conc  # [kg/m**3 liquid]
         return get_inputs_new(time, inlet, self.states_in_dict)
 
@@ -1342,6 +1521,114 @@ class DynamicCollector:
 
         return dtemp_dt
 
+    def _check_crystallization_settings(self) -> None:
+        """Validate the settings a slurry feed's crystallizer delegate needs.
+
+        Raises
+        ------
+        ValueError
+            If ``KinCryst`` or ``kwargs_cryst`` is None or ``kwargs_cryst``
+            lacks ``'target_ind'`` or ``'target_comp'`` (all missing settings
+            are named together); if ``kwargs_cryst`` sets ``'method'`` or
+            ``'adiabatic'``, which the collector sets; if ``target_comp``
+            names no species or a species absent from the inlet liquid; or if
+            ``target_ind`` is not the index [-] of the first ``target_comp``
+            species in the inlet species order.
+        TypeError
+            If ``kwargs_cryst`` is not a mapping, ``target_comp`` is neither
+            a string nor a list, tuple or one-dimensional NumPy array of
+            strings, or ``target_ind`` is not an integer (Python or NumPy;
+            booleans are rejected).
+
+        Notes
+        -----
+        Missing settings raise ``ValueError``, like a solve without an end
+        time: the collector is not configured, rather than given an object
+        of the wrong type. ``target_comp`` accepts the forms the
+        crystallizers document and use (a name, or a sequence or
+        one-dimensional array of names; their plots index its first entry).
+        The delegate ``SemibatchCryst`` derives its own target index as the
+        first inlet species named in ``target_comp``, while the collector
+        uses ``target_ind`` for the seed crystal composition, so a
+        disagreement would seed one species and crystallize another and is
+        rejected. A ``'num_interp_points'`` entry is accepted but replaced by
+        the collector's ``num_interp_points`` in the delegate's options.
+        """
+        source_note = (
+            'Only crystallizer sources (PharmaPy.Crystallizers units) supply '
+            'KinCryst and kwargs_cryst automatically through a Connection; '
+            'set them on the collector for any other slurry source.')
+        missing = []
+        if self.KinCryst is None:
+            missing.append('KinCryst (crystallization kinetics, e.g. '
+                           'PharmaPy.Kinetics.CrystKinetics)')
+        settings = self.kwargs_cryst
+        if settings is None:
+            missing.append("kwargs_cryst (mapping, e.g. dict, with "
+                           "'target_ind' and 'target_comp')")
+        elif not isinstance(settings, Mapping):
+            raise TypeError(
+                "DynamicCollector.kwargs_cryst must be a mapping (e.g. dict) "
+                "with 'target_ind' and 'target_comp'; got "
+                f'{type(settings).__name__}.')
+        else:
+            absent = [key for key in ('target_ind', 'target_comp')
+                      if key not in settings]
+            if absent:
+                missing.append(f'kwargs_cryst keys {absent}')
+        if missing:
+            raise ValueError(
+                'A slurry-fed DynamicCollector delegates to a SemibatchCryst '
+                'and needs crystallization settings; missing: '
+                + '; '.join(missing) + '. ' + source_note)
+
+        reserved = [key for key in ('method', 'adiabatic') if key in settings]
+        if reserved:
+            raise ValueError(
+                f'kwargs_cryst keys {reserved} are set by the DynamicCollector '
+                "(method from the inlet population, adiabatic=True); remove "
+                'them.')
+
+        target_comp = settings['target_comp']
+        if isinstance(target_comp, str):
+            targets = [target_comp]
+        elif ((isinstance(target_comp, Sequence)
+               or (isinstance(target_comp, np.ndarray)
+                   and target_comp.ndim == 1))
+              and all(isinstance(name, str) for name in target_comp)):
+            targets = list(target_comp)
+        else:
+            raise TypeError(
+                "kwargs_cryst['target_comp'] must be a species name or a "
+                'list, tuple or one-dimensional array of names; got '
+                f'{target_comp!r}.')
+        species = list(self.name_species)
+        if not targets:
+            raise ValueError(
+                "kwargs_cryst['target_comp'] must name at least one species "
+                f'from the inlet species {species}.')
+        unknown = [name for name in targets if name not in species]
+        if unknown:
+            raise ValueError(
+                f"kwargs_cryst['target_comp'] = {target_comp!r} must name "
+                f'inlet species from {species}; unknown: {unknown}.')
+
+        expected_ind = min(species.index(name) for name in targets)  # [-]
+        target_ind = settings['target_ind']
+        if (isinstance(target_ind, (bool, np.bool_))
+                or not isinstance(target_ind, (int, np.integer))):
+            raise TypeError(
+                f"kwargs_cryst['target_ind'] must be the integer index of "
+                f"{species[expected_ind]!r}, the first target_comp species "
+                f'in the inlet species order {species}: {expected_ind}; got '
+                f'{target_ind!r}.')
+        if target_ind != expected_ind:
+            raise ValueError(
+                f"kwargs_cryst['target_ind'] = {target_ind!r} must be the "
+                f"index of {species[expected_ind]!r}, the first target_comp "
+                f'species in the inlet species order {species}: '
+                f'{expected_ind}.')
+
     def solve_unit(self, runtime: Optional[float] = None,
                    time_grid: Optional[Sequence[float]] = None,
                    verbose: bool = True,
@@ -1392,9 +1679,16 @@ class DynamicCollector:
         ------
         ValueError
             If a liquid-mixer solve receives neither ``runtime`` nor
-            ``time_grid`` and therefore has no integration end time [s].
+            ``time_grid`` and therefore has no integration end time [s], or
+            if a slurry solve lacks valid crystallization settings; see
+            :meth:`_check_crystallization_settings`.
+        TypeError
+            If a slurry solve's ``kwargs_cryst``, its ``target_comp`` or its
+            ``target_ind`` has an unsupported type; see
+            :meth:`_check_crystallization_settings`.
         """
         if self.model_type == 'crystallizer':
+            self._check_crystallization_settings()
 
             moment_mode = self.Inlet.distrib is None
             population_name = 'mu_n' if moment_mode else 'distrib'

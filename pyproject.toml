@@ -76,6 +76,9 @@ Repository = "https://github.com/PharmaPy-org/PharmaPy"
 [tool.setuptools.packages.find]
 include = ["PharmaPy*"]
 
+[tool.setuptools.package-data]
+PharmaPy = ["data/minimum_modeling_objects.json"]
+
 # ---------------------------------------------------------------------------
 # pixi: reproducible conda-forge-backed development environments.
 #

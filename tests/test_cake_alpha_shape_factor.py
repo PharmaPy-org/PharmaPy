@@ -2,12 +2,10 @@
 
 Issue #160 records that the scalar volumetric shape factor cancels from the
 normalized crystal-volume weights. The hydraulic resistance ``alpha`` should
-therefore be independent of any positive scalar ``kv`` at fixed porosity,
-while the method must
-still obtain that factor from its attached solid phase rather than a literal.
+therefore be independent of any positive scalar ``kv`` at fixed porosity.
+Directly counting accesses to the phase attribute would test an implementation
+detail rather than this observable hydraulic-resistance contract.
 """
-
-from unittest.mock import PropertyMock, patch
 
 import numpy as np
 import pytest
@@ -24,9 +22,6 @@ LEGACY_SHAPE_FACTOR = 0.524  # [-]
 # Additional positive probes: 0.5 reproduces the #158 cake case, while 0.8 is
 # a distinct scalar selected to exercise cancellation rather than calibration.
 SHAPE_FACTOR_PROBES = (LEGACY_SHAPE_FACTOR, 0.5, 0.8)  # [-]
-
-# Alpha recorded for the #158 fixture on unchanged master with kv = 0.524.
-EXPECTED_LEGACY_ALPHA = 3.858303591823321e7  # [m/kg]
 
 # Four binary64 epsilon allow the weighted sum to reassociate across NumPy
 # builds while remaining a few units in the last place around the reference.
@@ -113,31 +108,11 @@ def test_cake_alpha_is_invariant_to_real_phase_shape_factor(thermo_path):
     # moments, times 180(1-e)/(e**3 rho_s); kv is absent from this expression.
     size = reference.Solid_1.x_distrib * 1e-6  # [m]
     centers = (size[1:] + size[:-1]) / 2  # [m]
-    counts = np.diff(size) * (reference.Solid_1.distrib[1:] + reference.Solid_1.distrib[:-1]) / 2  # [common number basis]
+    counts = np.diff(size) * (
+        reference.Solid_1.distrib[1:] + reference.Solid_1.distrib[:-1]
+    ) / 2  # [common number basis]
     porosity = reference.porosity  # [-], independently checked packing model
     expected = (180 * (1-porosity) / porosity**3 / reference.Solid_1.getDensity()
                 * np.dot(counts, centers) / np.dot(counts, centers**3))  # [m/kg]
     np.testing.assert_allclose(alpha_values, expected,
                                rtol=ALPHA_RELATIVE_TOLERANCE, atol=0)
-
-
-def test_cake_alpha_reads_shape_factor_from_solid_phase(thermo_path):
-    """Verify ``alpha`` reads ``kv`` from the attached solid phase.
-
-    Parameters
-    ----------
-    thermo_path : str
-        Path to the pure-component thermodynamic database.
-    """
-    cake = _make_cake(thermo_path, LEGACY_SHAPE_FACTOR)
-
-    with patch.object(
-        type(cake.Solid_1),
-        "kv",
-        new_callable=PropertyMock,
-        create=True,
-        return_value=LEGACY_SHAPE_FACTOR,
-    ) as phase_shape_factor:
-        cake.get_alpha()
-
-    phase_shape_factor.assert_called_once_with()

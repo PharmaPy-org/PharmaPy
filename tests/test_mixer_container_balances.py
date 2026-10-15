@@ -373,7 +373,7 @@ def test_consistent_cake_uses_moment_geometry_and_inlet_grid(path, pore_fill, gr
 
 
 @pytest.mark.parametrize('continuous', [False, True])
-def test_mixer_rejects_bin_weight_mass_moment_mismatch(path, continuous):
+def test_mixer_rejects_explicit_mass_moment_mismatch(path, continuous):
     """Reject the inconsistent inventory before the nonconservative balance.
 
     Parameters
@@ -392,9 +392,12 @@ def test_mixer_rejects_bin_weight_mass_moment_mismatch(path, continuous):
     solid = solid_class(path, mass_frac=SOLID_COMPOSITION, temp=COLD,
                         kv=KV, x_distrib=grid, distrib=weights,
                         **{amount_name: amount})
-    # Constructor bin weights sum to one, but trapezoidal integration halves
-    # endpoint weights, so the moment-derived mass is only 0.75 of the input.
-    moment_amount = 0.75 * amount  # [kg/s] or [kg], independent endpoint weights
+    # #269 now preserves constructor inventory even at occupied endpoints.
+    # Deliberately retain the full explicit mass while removing one quarter
+    # of the population, so the mixer still rejects a truly stale inventory.
+    retained_fraction = 0.75  # [-], synthetic one-quarter population loss
+    solid.updatePhase(distrib=retained_fraction * solid.distrib, mass=amount)
+    moment_amount = retained_fraction * amount  # [kg/s] or [kg]
     particle_volume = moment_amount / solid.getDensity()  # [m**3/s] or [m**3]
     porosity = solid.getPorosity()  # [-], same packing model as Cake
     pore_volume = particle_volume * porosity / (1 - porosity)  # [m**3/s] or [m**3]
@@ -573,3 +576,52 @@ def test_empty_dynamic_mixer_input_retains_static_contract(path):
     mixer.solve_unit()
     assert mixer.Outlet.mass_flow == pytest.approx(FLOW, rel=RTOL)
     assert mixer.Outlet.temp == pytest.approx(COLD, rel=RTOL)
+
+
+def _continuous_slurry_inlets(path):
+    """Build a continuous slurry and a pure-liquid stream for solids mixing.
+
+    Parameters
+    ----------
+    path : str
+        Shipped five-species thermodynamic database path.
+
+    Returns
+    -------
+    list
+        ``[SlurryStream, LiquidStream]`` with liquid flows [kg/s] of
+        FLOW / 2 and FLOW and the four-bin crystal population.
+    """
+    slurry = SlurryStream()
+    slurry.Phases = [
+        LiquidStream(path, mass_frac=COMPOSITION, temp=COLD, mass_flow=FLOW / 2),
+        SolidStream(path, mass_frac=SOLID_COMPOSITION, temp=COLD,
+                    x_distrib=GRID, distrib=POPULATION, kv=KV)]
+    liquid = LiquidStream(path, mass_frac=HOT_COMPOSITION, temp=HOT,
+                          mass_flow=FLOW)
+    return [slurry, liquid]
+
+
+@pytest.mark.parametrize('index, field', [(0, 'vol_flow'), (1, 'mass_flow')],
+                         ids=['slurry', 'liquid'])
+def test_solids_mixer_rejects_dynamic_inlet(path, index, field):
+    """Reject controls the static solids path would silently ignore."""
+    inlets = _continuous_slurry_inlets(path)
+    doubled = 2 * getattr(inlets[index], field)  # [m**3/s] or [kg/s]
+    inlets[index].DynamicInlet = DynamicInput()
+    inlets[index].DynamicInlet.add_variable(field, lambda time: doubled)
+    mixer = Mixer()
+    mixer.Inlets = inlets
+    with pytest.raises(ValueError,
+                       match=f'Mixer inlet {index} has DynamicInlet controls'):
+        mixer.solve_unit()
+
+
+def test_solids_mixer_accepts_empty_dynamic_inlet(path):
+    inlets = _continuous_slurry_inlets(path)
+    inlets[0].DynamicInlet = DynamicInput()
+    mixer = Mixer()
+    mixer.Inlets = inlets
+    mixer.solve_unit()
+    # Static liquid flows FLOW / 2 + FLOW [kg/s] are mixed unchanged.
+    assert mixer.Liquid_1.mass_flow == pytest.approx(1.5 * FLOW, rel=RTOL)

@@ -17,29 +17,32 @@ import copy
 from matplotlib.ticker import MaxNLocator, AutoMinorLocator
 
 
-def get_alg_map(states_di, nstages=1):
+def get_alg_map(states_di: dict, nstages: int = 1) -> np.ndarray:
     """Build Assimulo algebraic/differential state flags.
 
     Parameters
     ----------
     states_di : dict
-        State metadata dictionaries containing ``dim`` [-] and ``type``.
+        Insertion-ordered state metadata containing ``dim`` [-] and ``type``
+        (``'diff'`` or ``'alg'``). Each type applies to its entire field.
     nstages : int, optional
         Number of dynamic extractor stages [-].
 
     Returns
     -------
     ndarray
-        Algebraic-variable map with one flag per state entry [-].
+        One flag per state entry [-]: 1 for differential, 0 for algebraic.
+        Fields follow dictionary order within each stage; the complete stage
+        block repeats ``nstages`` times, matching stage-major state flattening.
     """
-    maps = []
+    maps = []  # [-], one flag block per field in a single stage
     for val in states_di.values():
         if val['type'] == 'diff':
-            maps.append(np.ones(val['dim'] * nstages))
+            maps.append(np.ones(val['dim']))
         elif val['type'] == 'alg':
-            maps.append(np.zeros(val['dim'] * nstages))
+            maps.append(np.zeros(val['dim']))
 
-    return np.hstack(maps)
+    return np.tile(np.hstack(maps), nstages)
 
 
 def complete_molefrac(mole_frac, mapping):
@@ -201,7 +204,7 @@ class DynamicExtractor:
                 f"shape {k_i.shape}."
             ) from err
 
-    def nomenclature(self):
+    def nomenclature(self) -> None:
         """Create dynamic extractor state metadata.
 
         Returns
@@ -220,14 +223,21 @@ class DynamicExtractor:
         normalization; in this constant-flow approximation the final
         heavy-phase entry is no longer constrained by its own component
         equilibrium relation, so results may depend on component ordering.
-        It keeps the existing dictionary-based metadata structure used by the
-        result and plotting helpers; replacing that structure is outside this
-        focused closure change.
+        The light-phase field contains differential variables, except for
+        its final dependent component. ``alg_map`` records this exception and
+        repeats the stage-major flags used by IDA: independent light-phase
+        mole fractions and energy are differential; all other states are
+        algebraic. The dictionary metadata retains its existing field layout.
+
+        ``SimulationResult`` counts whole fields by their metadata type, so
+        its coarse differential-equation summary includes the dependent final
+        light-phase fraction. ``alg_map`` provides the exact per-component
+        classification used by IDA.
         """
         num_comp = self.num_comp  # [-]
         name_species = self.name_species
         self.states_di = {
-            'x_i': {'dim': num_comp, 'type': 'alg', 'index': name_species,
+            'x_i': {'dim': num_comp, 'type': 'diff', 'index': name_species,
                     'units': '[-]'},
             'y_i': {'dim': num_comp, 'type': 'alg', 'index': name_species,
                     'units': '[-]'},
@@ -242,6 +252,12 @@ class DynamicExtractor:
         self.states_in_dict = {'Inlet': states_in_dict}
 
         self.alg_map = get_alg_map(self.states_di, self.num_stages)  # [-]
+        # The last x_i row is sum(x_i) - 1, with no time derivative. All y_i
+        # rows and temperature are already algebraic in the field metadata.
+        light_field_position = self.name_states.index('x_i')
+        light_field_offset = sum(self.dim_states[:light_field_position])
+        dependent_component = light_field_offset + num_comp - 1
+        self.alg_map.reshape(self.num_stages, -1)[:, dependent_component] = 0  # [-]
 
         self.fstates_di = {}
 
@@ -315,23 +331,34 @@ class DynamicExtractor:
 
         return inputs
 
-    def get_augmented_arrays(self, di_states, inputs):  # bottom_flows):
+    def get_augmented_arrays(
+            self, di_states: dict, inputs: dict) -> tuple[np.ndarray, ...]:
         """Build inlet-augmented state arrays for stage balances.
 
         Parameters
         ----------
         di_states : dict
-            Current stage states: mole fractions [-], internal energy [J], and
-            temperature [K].
+            Stage mole fractions ``x_i`` and ``y_i`` [-], each with shape
+            ``(num_stages, num_comp)``, and ``temp`` [K] with shape
+            ``(num_stages,)``.
         inputs : dict
-            Dynamic inlet values. Mole flows are [mol/s], mole fractions are
-            [-], and temperatures are [K].
+            Feed and solvent dictionaries containing ``Inlet`` values:
+            scalar ``mole_flow`` [mol/s], component ``mole_frac`` [-] with
+            shape ``(num_comp,)``, and scalar ``temp`` [K].
 
         Returns
         -------
-        tuple of ndarray
-            ``x_augm`` and ``y_augm`` [-], ``temp_augm`` [K],
-            ``light_flows`` [mol/s], and ``heavy_flows`` [mol/s].
+        x_augm, y_augm : ndarray
+            Light/heavy mole fractions [-], shape
+            ``(num_stages + 1, num_comp)``. The light inlet precedes the
+            light stages; the heavy inlet follows the heavy stages.
+        temp_augm : ndarray
+            Light-inlet, stage, then heavy-inlet temperatures [K], shape
+            ``(num_stages + 2,)``. Inlet temperatures follow the same phase
+            roles as inlet compositions, including when the feed is heavy.
+        light_flows, heavy_flows : ndarray
+            Fixed phase molar flows [mol/s], each with shape
+            ``(num_stages + 1,)``.
         """
         light = self.target_states['light_phase']
         heavy = self.target_states['heavy_phase']
@@ -343,8 +370,8 @@ class DynamicExtractor:
 
         x_augm = np.vstack((x_in, di_states['x_i']))  # [-]
         y_augm = np.vstack((di_states['y_i'], y_in))  # [-]
-        temp_augm = np.hstack((temp_in['feed'], di_states['temp'],
-                               temp_in['solvent']))  # [K]
+        temp_augm = np.hstack((temp_in[light], di_states['temp'],
+                               temp_in[heavy]))  # [K]
 
         light_flows = np.zeros(self.num_stages + 1)  # [mol/s]
         heavy_flows = np.zeros_like(light_flows)  # [mol/s]
@@ -353,11 +380,9 @@ class DynamicExtractor:
         light_in = inputs[light]['Inlet']['mole_flow']  # [mol/s]
 
         light_flows[0] = light_in  # [mol/s]
-        # light_flows[1:] = di_states['top_flows']
         light_flows[1:] = light_in  # [mol/s]
 
         heavy_flows[-1] = heavy_in  # [mol/s]
-        # heavy_flows[:-1] = bottom_flows
         heavy_flows[:-1] = heavy_in  # [mol/s]
 
         augm_arrays = (x_augm, y_augm, temp_augm, light_flows, heavy_flows)

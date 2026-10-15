@@ -8,6 +8,8 @@ Created on Thu Aug 13 11:13:10 2020
 
 import numpy as np
 
+from PharmaPy.ThermoModule import ThermoPhysicalManager
+
 
 def getBipartiteNames(first, second):
     """
@@ -193,9 +195,25 @@ class NameAnalyzer:
         return idx_composition, idx_flow, idx_amount, idx_distrib
 
     def convertUnits(self, matter_transf):
-        # if matter_transf.__module__ == 'PharmaPy.MixedPhases':  # TODO: not general
-        #     matter_transf = matter_transf.Liquid_1
+        """Convert upstream states to the names requested downstream.
 
+        Parameters
+        ----------
+        matter_transf : LiquidStream, VaporStream or similar phase object
+            Transferred matter whose ``y_upstream`` maps upstream state names
+            to scalars (static source) or profiles with time on the first
+            axis: flows of shape (num_times,) in [kg/s], [mol/s] or
+            [m**3/s], compositions of shape (num_times, num_species), and
+            optional temperature ``temp`` [K] of shape (num_times,). Its
+            thermophysical methods supply molar masses and densities.
+
+        Returns
+        -------
+        dict
+            Downstream state names mapped to converted values with the same
+            time axis and species order as the upstream profiles. Names
+            matching upstream are passed through unchanged.
+        """
         dict_in = matter_transf.y_upstream
 
         dict_out = {}
@@ -219,7 +237,8 @@ class NameAnalyzer:
                         
                         converted_state = self.__convertFlow(
                             source, target, y_j, matter_transf,
-                            dict_in[comp[0]], comp[0])
+                            dict_in[comp[0]], comp[0],
+                            temp=dict_in.get('temp'))
 
                     dict_out[target] = converted_state
 
@@ -230,6 +249,27 @@ class NameAnalyzer:
 
     def __convertComposition(self, prefix_up, prefix_down, composition,
                              matter_object):
+        """Convert a composition between fraction and concentration bases.
+
+        Parameters
+        ----------
+        prefix_up, prefix_down : str
+            Upstream and downstream composition names: ``'mole_frac'`` or
+            ``'mass_frac'`` [-], ``'mole_conc'`` [mol/L] or ``'mass_conc'``
+            [kg/m**3].
+        composition : numpy.ndarray
+            Upstream composition, shape (num_species,) or
+            (num_times, num_species), in database species order.
+        matter_object : phase, stream or slurry object
+            Supplies the conversion method, directly or through one of its
+            ``Phases``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Composition in the ``prefix_down`` basis with the shape and
+            species order of ``composition``.
+        """
         up, down = prefix_up, prefix_down
 
         if 'frac' in up and 'frac' in down:
@@ -261,10 +301,9 @@ class NameAnalyzer:
 
         elif 'mass_conc' in up and 'frac' in down:
             method_name = 'mass_conc_to_frac'
-            fun_kwargs = {'conc': composition}
-
-            if 'mole' in down:
-                fun_kwargs['basis'] = 'mole'
+            # An explicit basis returns one array; None would return both.
+            fun_kwargs = {'conc': composition,
+                          'basis': 'mole' if 'mole' in down else 'mass'}
 
         elif 'conc' in up and 'conc' in down:
             method_name = 'conc_to_conc'
@@ -287,46 +326,137 @@ class NameAnalyzer:
         return output_composition
 
     def __convertFlow(self, prefix_up, prefix_down, flow, matter_object,
-                      composition, comp_name):
+                      composition, comp_name, temp=None):
+        """Convert a flow between mass, molar, and volume bases.
+
+        Parameters
+        ----------
+        prefix_up, prefix_down : str
+            Upstream and downstream flow names: ``'mass_flow'`` [kg/s],
+            ``'mole_flow'`` [mol/s] or ``'vol_flow'`` [m**3/s].
+        flow : float or numpy.ndarray
+            Upstream flow in the ``prefix_up`` units, scalar for a static
+            source or shape (num_times,) for a dynamic profile.
+        matter_object : phase or stream object
+            Supplies molar masses ``mw`` [g/mol] and ``getDensity``. Dynamic
+            profiles require a single-phase thermophysical object (liquid,
+            vapor or solid phase or stream).
+        composition : numpy.ndarray
+            Upstream composition named ``comp_name``: ``mole_frac`` or
+            ``mass_frac`` [-], ``mole_conc`` [mol/L], or ``mass_conc``
+            [kg/m**3]; shape (num_times, num_species) for a dynamic profile.
+        comp_name : str
+            Name of the upstream composition state.
+        temp : float or numpy.ndarray, optional
+            Upstream temperature [K], scalar or shape (num_times,). Used
+            only for dynamic profiles; None keeps the stored temperature.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Flow in the ``prefix_down`` units, with the shape of ``flow``.
+
+        Raises
+        ------
+        NotImplementedError
+            If a dynamic profile is carried by an object that is not a
+            single-phase thermophysical object, such as a slurry, whose
+            density is per phase rather than per mixture sample.
+        ValueError
+            If a dynamic profile uses an unsupported composition basis.
+
+        Notes
+        -----
+        Static flows use the stored state of ``matter_object``. Dynamic flows
+        evaluate molar mass [g/mol] and mass density [kg/m**3] for every
+        sample from its composition and, when supplied, its temperature;
+        pressure is the stored state. ``getDensity`` decides the temperature
+        dependence: ideal-gas vapor density varies with each sample, while
+        the current liquid pure-component densities are constants.
+        Concentration profiles (``mole_conc``, ``mass_conc``) contribute only
+        their fractions: the liquid mass density is the ideal-mixing value
+        of the database pure-component densities, not the upstream total
+        concentration. A dynamic sample whose composition is exactly zero
+        (a stopped feed) carries no material and converts to zero flow
+        without evaluating mixture properties; non-finite samples are
+        converted as usual, so invalid values propagate.
+        """
         up, down = prefix_up, prefix_down
+        stopped = None  # dynamic rows with exactly zero composition
 
-        # Molecular weight
         if np.asarray(flow).ndim == 0:
-            mw_av = matter_object.mw_av
-        elif comp_name == 'mole_frac':
-            mw_av = np.dot(matter_object.mw, composition.T)
-        elif comp_name == 'mass_frac':
-            mole_frac = matter_object.frac_to_frac(mass_frac=composition)
-            mw_av = np.dot(matter_object.mw, mole_frac.T)
-        elif comp_name == 'mole_conc':
-            mole_frac = (composition.T / composition.sum(axis=1))
-            mw_av = np.dot(matter_object.mw, mole_frac)
+            mw_av = matter_object.mw_av  # [g/mol]
+            density = matter_object.getDensity()  # [kg/m**3]
+        else:
+            if not isinstance(matter_object, ThermoPhysicalManager):
+                raise NotImplementedError(
+                    f"Dynamic '{up}' to '{down}' conversion with "
+                    f"'{comp_name}' needs a per-sample mixture density, "
+                    f"which {type(matter_object).__name__} does not provide; "
+                    "supply a single-phase liquid or vapor stream.")
 
-        # Density
-        if np.asarray(flow).ndim == 0:
-            density = matter_object.getDensity()
-        elif comp_name == 'mole_frac' or comp_name == 'mass_frac':
-            density = matter_object.getDensity(**{comp_name: composition})
-        elif comp_name == 'mole_conc':
-            density = matter_object.getDensity(mole_frac=mole_frac.T)
+            # Mixture properties are undefined for stopped samples; evaluate
+            # them only for the other rows and give stopped rows zero flow.
+            composition = np.asarray(composition, dtype=float)
+            stopped = np.all(composition == 0, axis=-1)
+            if np.ndim(temp) > 0:
+                temp = np.asarray(temp, dtype=float)[~stopped]  # [K]
+            composition = composition[~stopped]
 
-        # Convert units
+            # Per-sample fractions [-], rows normalized for concentrations
+            if comp_name == 'mole_frac':
+                mole_frac = composition
+                frac_kwargs = {'mole_frac': mole_frac}
+            elif comp_name == 'mole_conc':
+                mole_frac = composition / composition.sum(axis=1,
+                                                          keepdims=True)
+                frac_kwargs = {'mole_frac': mole_frac}
+            elif comp_name in ('mass_frac', 'mass_conc'):
+                mass_frac = composition
+                if comp_name == 'mass_conc':
+                    mass_frac = composition / composition.sum(axis=1,
+                                                              keepdims=True)
+                mole_frac = matter_object.frac_to_frac(mass_frac=mass_frac)
+                frac_kwargs = {'mass_frac': mass_frac}
+            else:
+                raise ValueError(
+                    f"Dynamic flow conversion does not support the "
+                    f"'{comp_name}' composition basis of "
+                    f"{type(matter_object).__name__}; use mole_frac, "
+                    "mass_frac, mole_conc or mass_conc.")
+
+            fed_mw_av = np.dot(mole_frac, matter_object.mw)  # [g/mol]
+            density_kwargs = {} if temp is None else {'temp': temp}  # [K]
+            fed_density = matter_object.getDensity(
+                **frac_kwargs, **density_kwargs)  # [kg/m**3], per fed sample
+
+            # Unit placeholders for stopped rows; their flow is zeroed below.
+            mw_av = np.ones(len(stopped))  # [g/mol]
+            density = np.ones(len(stopped))  # [kg/m**3]
+            mw_av[~stopped] = fed_mw_av
+            density[~stopped] = fed_density
+
+        # Convert units; 1000 g/kg relates [g/mol] to [kg/mol]
         if 'mass' in up and 'mole' in down:
             flow_out = flow / mw_av * 1000  # mol/s
         elif 'mole' in up and 'mass' in down:
             flow_out = flow * mw_av / 1000  # kg/s
         elif 'vol' in down:
             if 'mole' in up:
-                density *= 1000 / mw_av
-
-            flow_out = flow / density  # m3/s
+                molar_density = density * 1000 / mw_av  # [mol/m**3]
+                flow_out = flow / molar_density  # [m**3/s]
+            else:
+                flow_out = flow / density  # [m**3/s]
 
         elif 'vol' in up:
-            dens = matter_object.getDensity()  # kg/m3
             if 'mole' in down:
-                dens *= 1000 / mw_av
+                molar_density = density * 1000 / mw_av  # [mol/m**3]
+                flow_out = flow * molar_density  # [mol/s]
+            else:
+                flow_out = flow * density  # [kg/s]
 
-            flow_out = flow * dens  # kg/s - mol/s
+        if stopped is not None and stopped.any():
+            flow_out = np.where(stopped, 0.0, flow_out)  # stopped feed
 
         return flow_out
 

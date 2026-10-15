@@ -69,12 +69,18 @@ Compatibility and ordering
   their existing meaning. Nested measurement fields must already follow the
   corresponding independent-data field order.
 
-``SimulationExec.SetParamEstimation`` uses the same constructor. Its named
-phase/control modifiers therefore stay associated with the matching observations,
-including when only one named experiment is supplied. Because modifiers and
-``wrapper_kwargs`` are routed to experiments by name, ``SetParamEstimation``
-requires named experiments whenever there is more than one: a list or tuple of
-several unnamed experiments in ``x_data`` raises ``ValueError`` before the
-estimator is built, where older versions misrouted those arguments by position.
-Pass ``x_data`` as a dictionary keyed by experiment name. A single unnamed array
-remains supported.
+``SimulationExec.SetParamEstimation`` uses the same constructor and hands every
+experiment its own ``modify_phase``, ``modify_controls`` and ``run_args``
+wrapper keywords. With named experiments, ``phase_modifiers`` and
+``control_modifiers`` are dictionaries keyed by exactly the experiment names;
+missing or unexpected names raise ``ValueError`` naming the argument. A list or
+tuple of several unnamed experiments is supported: modifiers are then lists in
+``x_data`` order, and a modifier dictionary, which cannot be aligned with them,
+raises ``ValueError``. A single unnamed array remains supported. Earlier
+versions silently dropped modifier entries for names absent from ``x_data`` and
+rejected several unnamed experiments with ``ValueError``; before that rejection
+was added, their wrapper keywords were misrouted by position.
+
+``Experiment`` and ``Measurement`` objects, which carry experiment and field
+identity explicitly, are described in :doc:`experiment_measurement`, including
+their use with ``SetParamEstimation``.

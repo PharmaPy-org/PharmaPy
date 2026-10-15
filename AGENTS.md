@@ -165,6 +165,17 @@ Prioritize, in order:
 - Prefer existing project abstractions and NumPy/SciPy operations over duplicate
   helpers. Add a dependency only when the benefit justifies the maintenance cost.
 
+## AI-assisted contributions
+
+- AI tools may help draft code, tests, documentation, and commit messages, but
+  the human contributor remains responsible for the correctness, security,
+  licensing, and maintainability of every changed line. Contributors must
+  personally review the change and be able to explain its design and evidence.
+- Pull requests must disclose how AI tools were used and identify any
+  uncertainty or area where focused reviewer attention is requested. Generated
+  output is not verification; independently inspect the relevant source,
+  execute the applicable tests, and validate scientific claims before handoff.
+
 ## Testing and verification
 
 - Add or update tests for every behavior change and bug fix. Demonstrate a
@@ -191,9 +202,25 @@ Prioritize, in order:
 - Give each test module a concise docstring covering its scope and noteworthy
   fixtures, backends, or cost. Document individual tests only when their names
   and bodies are not self-explanatory.
-- Prefer representative real collaborators. Use monkeypatches and stubs only at
-  narrow optional, expensive, or external boundaries, and assert the actual
-  handoff. Link the blocker when stable end-to-end coverage must be deferred.
+- Do not introduce general-purpose mock objects or frameworks such as
+  `unittest.mock`, the `mock` backport, `pytest-mock`, `Mock`, `MagicMock`, or
+  `PropertyMock`. Do not introduce pytest's `monkeypatch` fixture or
+  `pytest.MonkeyPatch`, runtime replacement of imports, modules, attributes, or
+  environment state. These techniques make it too easy to verify configured
+  substitutes instead of the PharmaPy behavior users rely on. The #202
+  migrations retired all legacy exemptions. Migrate the test instead of adding
+  an exemption to `tests/test_mock_policy.py`.
+- Exercise deterministic behavior through public APIs with representative real
+  collaborators. For optional, licensed, external, or expensive boundaries,
+  run the real collaborator in its marked environment, test a deterministic
+  solver-independent contract directly, or refactor that contract behind a
+  production helper when doing so is a coherent design improvement. A small,
+  hand-written boundary contract object is acceptable only when those
+  alternatives are impractical: document its necessity, the exact handoff it
+  verifies, and the lane that exercises the real collaborator. It must not be
+  a configurable mock or stand in for a cheap PharmaPy collaborator. Otherwise,
+  link a focused blocker and defer the coverage instead of introducing a
+  substitute.
 - When expected behavior depends on an unfixed defect elsewhere, identify the
   blocking issue in the test docstring or adjacent comment, state the
   provisional expectation and what must change after the fix, and repeat that
@@ -206,10 +233,13 @@ Prioritize, in order:
 - Use the markers defined in `pytest.ini`: `unit`, `integration`, `slow`, and
   `assimulo`. Do not make core tests depend on the optional Assimulo stack.
 - Exercise missing-optional-dependency fallbacks explicitly, either by blocking
-  the import in a focused test or in an environment where the dependency is
-  genuinely absent; a green rich environment proves only the installed path.
-  Tests that import an optional-backend module must apply the matching marker
-  and `pytest.importorskip` before that import. Inventory every optional import
+  the import in a focused boundary test or in an environment where the
+  dependency is genuinely absent; a green rich environment proves only the
+  installed path. Perform import blocking in an isolated subprocess, as shown
+  in `tests/test_optional_assimulo_imports.py`, so the test process does not
+  replace its own imports, modules, attributes, or environment state. Tests
+  that import an optional-backend module must apply the matching marker and
+  `pytest.importorskip` before that import. Inventory every optional import
   performed during module loading so the minimal CI lane remains dependency
   independent.
 - Run the narrowest relevant tests while developing, then run the locked core

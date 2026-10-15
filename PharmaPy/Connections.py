@@ -5,7 +5,8 @@ Created on Mon Mar  2 15:36:35 2020
 @author: dcasasor
 """
 
-from typing import Union
+from collections import deque
+from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
 from PharmaPy.NameAnalysis import NameAnalyzer, get_dict_states
 from PharmaPy.Interpolation import local_newton_interpolation
@@ -25,8 +26,8 @@ def interpolate_inputs(time: Union[float, np.ndarray],
     Parameters
     ----------
     time : float or numpy.ndarray
-        Evaluation time [s], scalar or an ascending array of shape
-        (num_times,).
+        Evaluation time [s], scalar or an array of shape (num_times,) in any
+        order.
     t_inlet : float or numpy.ndarray
         Upstream times [s], shape (num_upstream_times,); a scalar represents
         one sample and requires exactly one row in ``y_inlet``.
@@ -43,7 +44,8 @@ def interpolate_inputs(time: Union[float, np.ndarray],
     -------
     scalar or numpy.ndarray
         Interpolated values in the input units. Scalar time removes the time
-        axis; array time replaces it with the requested time axis.
+        axis; array time replaces it with the requested time axis, whose rows
+        follow the caller's query order.
 
     Raises
     ------
@@ -54,8 +56,10 @@ def interpolate_inputs(time: Union[float, np.ndarray],
     -----
     A single upstream sample is constant for all scalar or array times.
     Multi-point profiles use local Newton interpolation for scalar time and
-    cubic splines for array time; values beyond the final time hold the actual
-    endpoint. Earlier times extrapolate, so callers requiring measured support
+    cubic splines for array time; values at or beyond the final time are the
+    final upstream sample ``y_inlet[-1]`` (in a floating dtype), not a
+    polynomial evaluation that could lose it to round-off or node-window
+    choice. Earlier times extrapolate, so callers requiring measured support
     must validate the beginning of their evaluation interval.
     """
     t_inlet = np.atleast_1d(t_inlet)  # [s], scalar times represent one sample
@@ -70,27 +74,23 @@ def interpolate_inputs(time: Union[float, np.ndarray],
             y_inlet[0], (len(time),) + np.shape(y_inlet)[1:]).copy()
 
     if np.ndim(time) == 0:
-        # Assume steady state for extrapolation
-        time = min(time, t_inlet[-1])
+        if time >= t_inlet[-1]:
+            # Steady-state hold: return the measured terminal sample itself;
+            # astype copies an array row and keeps 1-D profiles scalar.
+            samples = np.asarray(y_inlet)
+            return samples[-1].astype(np.result_type(samples.dtype, np.float64))
 
         y_interp = local_newton_interpolation(time, t_inlet, y_inlet,
                                               **kwargs_interp_fn)
     else:
+        time = np.asarray(time)  # [s], caller query order
         interpol = CubicSpline(t_inlet, y_inlet, **kwargs_interp_fn)
-        flags_extrapol = time > t_inlet[-1]
+        flags_hold = time >= t_inlet[-1]
 
-        if any(flags_extrapol):
-            time_interpol = time[~flags_extrapol]
-            y_interp = interpol(time_interpol)
-
-            if y_inlet.ndim == 1:
-                y_extrap = np.tile(interpol(t_inlet[-1]), sum(flags_extrapol))
-                y_interp = np.concatenate((y_interp, y_extrap))
-            else:
-                y_extrap = np.tile(interpol(t_inlet[-1]), (sum(flags_extrapol), 1))
-                y_interp = np.vstack((y_interp, y_extrap))
-        else:
-            y_interp = interpol(time)
+        # Evaluate rows in place so the output keeps the query order, then
+        # write the final upstream sample at and after the end of support.
+        y_interp = interpol(np.minimum(time, t_inlet[-1]))
+        y_interp[flags_hold] = y_inlet[-1]
 
     return y_interp
 
@@ -178,32 +178,124 @@ def get_remaining_states(dict_states_in, stream, inlets, time):
     return di_out
 
 
-def get_inputs_new(time, stream, dict_states_in, **kwargs_interp):
-    """
-    Get inputs based on stream(s) object and names of inlet states
+def _map_dynamic_inputs(dynamic_inputs: dict, dict_states_in: dict) -> dict:
+    """Assign stream-level dynamic fields to the declared inlet groups.
 
     Parameters
     ----------
-    time : float
-        evaluation time [s].
-    stream : PharmaPy.Stream
-        stream object.
-    names_in : dict
-        dictionary with names of inlet states to the destination unit operation
-        as keys and dimension of the state as values.
+    dynamic_inputs : dict
+        Field names mapped to the values returned by
+        ``DynamicInput.evaluate_inputs``, in the units and shapes produced by
+        each control callable (for example volumetric flow [m**3/s] or
+        liquid mass concentrations [kg/m**3]).
+    dict_states_in : dict
+        Destination inlet layout: group keys (``'Inlet'`` for stream-level
+        fields, or a phase name such as ``'Liquid_1'``) mapped to containers
+        of the field names declared for that group.
+
+    Returns
+    -------
+    dict
+        One entry per layout group, in layout order. Each value holds the
+        dynamic fields assigned to that group in their original order and
+        with the unchanged values, so no unit or basis conversion occurs.
+
+    Raises
+    ------
+    ValueError
+        If a dynamic field is declared in more than one group, or if it is
+        declared in none and the layout has no ``'Inlet'`` group.
+
+    Notes
+    -----
+    A field declared by exactly one group is assigned to that group. A field
+    declared by no group is assigned to ``'Inlet'``, which reproduces the
+    established single-group behaviour where every dynamic field is passed
+    through under ``'Inlet'``. A stream-level ``DynamicInput`` keys its
+    fields by plain name only, so a name shared by several groups (for
+    example ``temp`` declared for both ``'Inlet'`` and ``'Liquid_1'``) cannot
+    be attributed to one of them; it is rejected instead of being copied to
+    every group or overwriting one group's value with another's.
+    """
+    mapped = {group: {} for group in dict_states_in}
+
+    for name, value in dynamic_inputs.items():
+        groups = [group for group, names in dict_states_in.items()
+                  if name in names]
+
+        if len(groups) > 1:
+            raise ValueError(
+                f"DynamicInput field '{name}' is declared by several inlet "
+                f"groups {groups} of the destination unit; a stream-level "
+                "DynamicInput cannot identify which one it controls. Remove "
+                f"the '{name}' control or use a destination whose inlet "
+                "layout declares it once.")
+        elif groups:
+            target = groups[0]
+        elif 'Inlet' in dict_states_in:
+            target = 'Inlet'
+        else:
+            raise ValueError(
+                f"DynamicInput field '{name}' is not declared by any inlet "
+                f"group {list(dict_states_in)} of the destination unit, and "
+                "the layout has no 'Inlet' group to receive stream-level "
+                "fields.")
+
+        mapped[target][name] = value
+
+    return mapped
+
+
+def get_inputs_new(time: Union[float, np.ndarray], stream: object,
+                   dict_states_in: dict, **kwargs_interp) -> dict:
+    """Resolve a destination unit's inlet fields from one stream.
+
+    Parameters
+    ----------
+    time : float or numpy.ndarray
+        Evaluation time [s], scalar or shape (num_times,).
+    stream : PharmaPy stream
+        Inlet stream. Its ``DynamicInlet``, connected upstream profile
+        (``y_upstream``/``y_inlet``/``time_upstream``) or static attributes
+        supply the values, in that order of precedence.
+    dict_states_in : dict
+        Destination inlet layout: group keys mapped to dictionaries of
+        declared field names and their dimensions. ``'Inlet'`` (or any key
+        containing ``'inlet'``) holds stream-level fields read from
+        ``stream``; other keys name a phase attribute of ``stream`` such as
+        ``'Liquid_1'``, whose static fields are read from that phase.
     **kwargs_interp : keyword arguments
-        arguments to be passed to the particular interpolation function.
+        Arguments for the interpolation of connected upstream profiles
+        only. They are not supported with a ``DynamicInlet``, whose
+        ``evaluate_inputs`` accepts the evaluation time alone.
 
     Returns
     -------
     inputs : dict
-        dictionary with states.
+        One entry per layout group, each mapping field names to values in the
+        units and basis of their source (for example [m**3/s], [K],
+        [kg/m**3]). Fields absent from every source are zero-filled.
 
+    Raises
+    ------
+    ValueError
+        If a ``DynamicInlet`` field cannot be assigned to exactly one layout
+        group (see Notes).
+
+    Notes
+    -----
+    ``DynamicInput`` fields are keyed by plain field name. Each one is
+    assigned to the single layout group that declares it; fields declared
+    by no group go to ``'Inlet'``, so single-group ``{'Inlet': ...}``
+    layouts receive every dynamic field exactly as before. A name declared
+    by several groups is rejected rather than duplicated or overwritten.
+    Declared fields that no control supplies keep their static values from
+    the stream (``'Inlet'``) or from the corresponding phase.
     """
 
     if stream.DynamicInlet is not None:
         inputs = stream.DynamicInlet.evaluate_inputs(time, **kwargs_interp)
-        inputs = {'Inlet': inputs}
+        inputs = _map_dynamic_inputs(inputs, dict_states_in)
 
     elif stream.y_upstream is not None and stream.time_upstream is not None:
         t_inlet = stream.time_upstream
@@ -289,25 +381,77 @@ def get_inputs(time, uo, num_species, num_distr=0):
     return input_dict
 
 
-def topological_bfs(graph):
-    in_degree = {}
+def topological_bfs(graph: Mapping[str, Sequence[str]]
+                    ) -> Tuple[Dict[str, int], List[str]]:
+    """Order flowsheet units by deterministic first-in, first-out Kahn BFS.
+
+    Parameters
+    ----------
+    graph : mapping of str to sequence of str
+        Directed flowsheet adjacency. Keys are unit names in declaration
+        order; each value lists the unit's successors in an ordered sequence
+        such as a list. Units that appear only as successors are nodes too.
+
+    Returns
+    -------
+    in_degree : dict of str to int
+        Residual incoming-edge counters [-] keyed by every node, in order of
+        first appearance (each key, then its new successors). Counters are
+        decremented as predecessors are visited, so all are zero for an
+        acyclic graph; nonzero counters mark nodes on or downstream of a
+        cycle. They are not raw graph degrees.
+    path : list of str
+        Visited nodes in execution order. Shorter than the node count when
+        the graph contains a cycle.
+
+    Raises
+    ------
+    TypeError
+        If a successor collection is a set or frozenset, whose iteration
+        order depends on string hashing and would make execution order
+        irreproducible.
+
+    Notes
+    -----
+    Ready nodes leave a first-in, first-out queue. The queue is seeded with
+    the nodes without predecessors in ``graph`` key order. Visiting a node
+    decrements its successors' counters in that node's successor order, and
+    a successor joins the queue when its counter reaches zero, that is, after
+    its last predecessor is visited. The order is therefore independent of
+    ``PYTHONHASHSEED``.
+
+    ``SimulationExec`` executes units in ``path`` order and transfers each
+    unit's outlet to its successors right after it runs, so a ``Mixer``
+    receives its inlets in the execution order of its predecessors. That is
+    declaration order when all of them are seeded sources, but not in
+    general: for ``{'S1': ['P'], 'P': ['M'], 'S2': ['M'], 'M': []}`` the
+    order is ``S1, S2, P, M`` and ``M`` receives the ``S2`` inlet before the
+    ``P`` inlet although ``P`` is declared first.
+    """
+    in_degree = {}  # [-], incoming-edge counters
     for node, neighbors in graph.items():
+        if isinstance(neighbors, (set, frozenset)):
+            raise TypeError(
+                f"Successors of flowsheet unit {node!r} must be an ordered "
+                "sequence such as a list, not a set, so that execution order "
+                "is reproducible.")
+
         in_degree.setdefault(node, 0)
-        for n in neighbors:
-            in_degree[n] = in_degree.get(n, 0) + 1
+        for neighbor in neighbors:
+            in_degree[neighbor] = in_degree.get(neighbor, 0) + 1
 
     path = []
 
-    no_incoming = {node for node, count in in_degree.items() if count == 0}
+    ready = deque(node for node, count in in_degree.items() if count == 0)
 
-    while no_incoming:
-        v = no_incoming.pop()
-        path.append(v)
-        for adj in graph.get(v, []):
-            in_degree[adj] -= 1
+    while ready:
+        node = ready.popleft()
+        path.append(node)
+        for neighbor in graph.get(node, []):
+            in_degree[neighbor] -= 1
 
-            if in_degree[adj] == 0:
-                no_incoming.add(adj)
+            if in_degree[neighbor] == 0:
+                ready.append(neighbor)
 
     return in_degree, path
 
@@ -329,6 +473,9 @@ class Connection:
 
         self.source_uo = source_uo
         self.destination_uo = destination_uo
+        # Deep copy handed to the destination by PassPhases; SimulationExec
+        # records it to verify raw-material consumption.
+        self.transferred_matter = None
 
     def transfer_data(self):
         self.FeedConnection()
@@ -351,6 +498,43 @@ class Connection:
         else:
             self.Matter.time_upstream = time_prof[-1]
 
+    def _collector_input_names(self) -> list:
+        """Return the DynamicCollector input names for the transferred matter.
+
+        Returns
+        -------
+        list of str
+            The collector's crystallizer names (liquid ``mass_conc``
+            [kg/m**3], ``vol_flow`` [m**3/s], ``temp`` [K], ``distrib``
+            [#/m**3/um], ``mu_n`` [m**n/m**3]) for mixed-phase matter,
+            otherwise its liquid-mixer names (``mass_frac`` [-],
+            ``mass_flow`` [kg/s], ``temp`` [K]).
+
+        Notes
+        -----
+        The choice follows the matter type, as ``DynamicCollector.Inlet``
+        selects its model, rather than the source class: mixed-phase
+        (``PharmaPy.MixedPhases``) matter, such as a ``SlurryStream`` from an
+        ``MSMPR`` or a continuous solids ``Mixer``, gets the crystallizer
+        names, and a liquid source the liquid-mixer names.
+
+        ``NameAnalyzer`` then pairs them with the source's published names.
+        An ``MSMPR`` publishes ``mass_conc`` [kg/m**3], passed through
+        unchanged. A source publishing liquid mass fractions ``mass_frac``
+        [-], such as the solids ``Mixer``, has them converted to liquid mass
+        concentration [kg/m**3] by the attached liquid's ``frac_to_conc``:
+        ``w_i / sum_j(w_j / rho_j)``, the fractions times the ideal
+        mass-basis mixing density of the database pure-component liquid
+        densities ``rho_liq`` [kg/m**3], which are temperature independent.
+        Fields the source does not publish, such as the solids Mixer's
+        ``vol_flow`` [m**3/s], are read by the collector from the
+        transferred stream itself.
+        """
+        names = self.destination_uo.names_states_in
+        if self.Matter.__module__ == 'PharmaPy.MixedPhases':
+            return names['crystallizer']
+        return names['liquid_mixer']
+
     def ConvertUnits(self) -> None:
         """Convert upstream states using the destination's selected names.
 
@@ -361,6 +545,8 @@ class Connection:
         so an unconnected mixer still exposes both alternatives here. Stream
         quantities retain their per-second basis; batch amounts retain their
         inventory basis. Converted states are stored in ``Matter.y_inlet``.
+        A ``DynamicCollector`` destination receives the input names of the
+        model its inlet selects, from :meth:`_collector_input_names`.
         """
         mode_source = self.source_uo.oper_mode
         mode_dest = self.destination_uo.oper_mode
@@ -379,19 +565,9 @@ class Connection:
 
             class_destination = self.destination_uo.__class__.__name__
             if class_destination == 'DynamicCollector':
-                if self.source_uo.__class__.__name__ == 'MSMPR':
-                    states_down = self.destination_uo.names_states_in['crystallizer']
-                else:
-                    states_down = self.destination_uo.names_states_in['liquid_mixer']
-
+                states_down = self._collector_input_names()
             else:
                 states_down = names_states_in
-            
-            # if hasattr(self.Matter, 'moments'):
-            #     num_distr = len(self.Matter.moments)
-            
-            # elif hasattr(self.Matter, 'distrib'):
-            #     num_distr = len(self.Matter.distrib)
             
             if 'mu_n' in states_up:
                 # Old units expose the moment set as 'moments'; a
@@ -421,11 +597,7 @@ class Connection:
 
             class_destination = self.destination_uo.__class__.__name__
             if class_destination == 'DynamicCollector':
-                if self.source_uo.__class__.__name__ == 'MSMPR':
-                    states_down = self.destination_uo.names_states_in['crystallizer']
-                else:
-                    states_down = self.destination_uo.names_states_in['liquid_mixer']
-
+                states_down = self._collector_input_names()
             else:
                 states_down = names_states_in
 
@@ -570,8 +742,53 @@ class Connection:
 
         return {}
 
-    def PassPhases(self):
+    def PassPhases(self) -> None:
+        """Hand a deep copy of the source outlet to the destination unit.
 
+        Raises
+        ------
+        Exception
+            Any exception raised by the destination's ``Inlets``, ``Inlet``
+            or ``Phases`` setter propagates, for example
+            ``NotImplementedError``/``TypeError``/``ValueError`` when a
+            ``BatchToFlowConnector`` rejects anything other than one liquid
+            batch holdup (issue #423), ``ValueError`` when a ``Mixer``
+            rejects mixing batch inventories [kg] with flow rates [kg/s],
+            or ``RuntimeError`` when a reactor, crystallizer or filter
+            ``Phases`` setter receives a stream or a non-phase object.
+
+        Notes
+        -----
+        The transferred matter is ``copy.deepcopy(self.Matter)``, so the
+        source outlet is never shared, and it is marked
+        ``transferred_from_uo = True`` (raw-material reporting excludes it).
+        It is kept as ``self.transferred_matter`` so ``SimulationExec`` can
+        verify that the destination actually uses it. When the source and
+        the destination are on different phase stacks, the copy is first
+        converted to the destination's stack (``_match_stacks``).
+        Dispatch by destination:
+
+        * ``Mixer``: appended to ``Inlets``.
+        * Batch units, including ``BatchToFlowConnector``: assigned to
+          ``Phases``.
+        * ``DynamicCollector``: assigned to ``Inlet``, which selects the
+          collector model from the matter type, with
+          ``material_from_upstream = True``. Only a ``PharmaPy.Crystallizers``
+          source also sets ``KinCryst`` to its ``Kinetics`` and
+          ``kwargs_cryst`` to its ``target_ind``, ``target_comp`` and
+          ``scale``; for other sources caller-set values are kept.
+        * Semibatch ``MultiPhaseVessel`` units: a continuous source's
+          matter is assigned to ``Inlet`` (and to ``Phases`` if none are
+          set); a discontinuous source's is assigned to ``Phases``, as a
+          charge. Both set ``material_from_upstream = True``.
+        * Other semibatch units: assigned to ``Phases`` only if none are
+          set, with ``material_from_upstream = True``; a transfer to an
+          already-charged unit is ignored (issue #438).
+        * Continuous units: assigned to ``Inlet`` (``{'feed': matter}`` for
+          a ``DynamicExtractor``). A batch or semibatch source is handed over
+          as its holdup, not converted to a flow (issue #436); insert a
+          ``BatchToFlowConnector`` to discharge a liquid holdup as a stream.
+        """
         class_destination = self.destination_uo.__class__.__name__
         mode_dest = self.destination_uo.oper_mode
         transfered_matter = copy.deepcopy(self.Matter)
@@ -579,14 +796,13 @@ class Connection:
         transfered_matter = self._match_stacks(transfered_matter)
 
         transfered_matter.transferred_from_uo = True
+        self.transferred_matter = transfered_matter
 
         if class_destination == 'Mixer':
             self.destination_uo.Inlets = transfered_matter
 
         elif mode_dest == 'Batch':
             self.destination_uo.Phases = transfered_matter
-            # if class_destination == 'BatchToFlowConnector':
-            #     self.destination_uo.names_states_out = self.source_uo.names_states_out
 
         elif mode_dest == 'Semibatch':
             if class_destination == 'DynamicCollector':
@@ -632,17 +848,7 @@ class Connection:
                 self.destination_uo.Phases = transfered_matter
                 self.destination_uo.material_from_upstream = True
 
-        elif mode_dest == 'Continuous':  # Continuous
-            # Transfering from batch to continuous (how to approach this?)
-            if self.source_uo.oper_mode != 'Continuous':
-                pass
-                # TODO: big TODO. We need to define how Batch/Semibatch
-                # followed by continuous will be handled. The most practical
-                # approach would be to solve thhe the downstream continuous
-                # section for a period of time such as the material from the
-                # last discontinuous UO is depleted, as stated in the paper.
-                # Reference date: (2022/06/28)
-
+        elif mode_dest == 'Continuous':
             if class_destination == 'DynamicExtractor':
                 self.destination_uo.Inlet = {'feed': transfered_matter}
             else:
