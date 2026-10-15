@@ -10,6 +10,14 @@ class _BaseCrystallizer(MultiPhaseVessel):
     # grows the volume (a semibatch crystallizer) must dilute it.
     dilutes_intensive_states = True
 
+    # Step cap asked of the integrator, unless the caller sets maxh. Interim:
+    # right after nucleation onset the population sits below the solver
+    # tolerance and the crystal count can follow the step pattern, so no cap
+    # is safe in general. On the case-study units 10 s was right on every
+    # case and the 1 s backend default was 4.5 % off on the moment form
+    # (team-update rerun, 14 Oct 2026). To revisit once onset is well posed.
+    NUCLEATION_STEP_CAP = 10.0  # [s]
+
     def __init__(self,*args,**kwargs):
         super().__init__(*args,**kwargs)
         
@@ -144,10 +152,12 @@ class _BaseCrystallizer(MultiPhaseVessel):
         the backend rather than its solver keeps this independent of the
         integrator; one with no such choice ignores the request.
 
-        The cap is the integrator's ``maxh`` option: 1 s in AssimuloBackend
-        unless given other options, 10 s in the flowsheet tests.
+        It also asks for a ``NUCLEATION_STEP_CAP`` step cap, which CVode
+        applies unless the caller's options set ``maxh``; the SciPy backend
+        keeps its own.
         """
         self.integrator.set_linear_solver("dense")
+        self.integrator.request_max_step(self.NUCLEATION_STEP_CAP)
     def _post_set_phases(self):
         """Re-bind the population balance after the phases are replaced.
 

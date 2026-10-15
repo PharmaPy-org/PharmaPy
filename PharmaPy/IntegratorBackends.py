@@ -1,3 +1,4 @@
+import importlib.util
 import numpy as np
 from abc import ABC, abstractmethod
 from scipy.integrate import solve_ivp
@@ -49,6 +50,9 @@ class IntegratorBackend(ABC):
 
         # Neutral linear-solver request, set by the unit operation.
         self.linear_solver = None
+
+        # Step cap [s] the unit asks for; the caller's own maxh wins.
+        self.max_step_request = None
 
     # Backends that cannot integrate a differential-algebraic system set
     # this False, and refuse at compile time rather than silently treating a
@@ -107,6 +111,31 @@ class IntegratorBackend(ABC):
         """
 
         self.linear_solver = kind
+
+    def request_max_step(self, max_step):
+        """
+        Ask for a step cap that holds unless the caller's options set one.
+
+        A unit knows when its own dynamics need a cap -- a crystallizer at
+        nucleation onset -- but an explicit ``maxh`` in the backend's options
+        is the caller's decision and always wins.
+
+        Parameters
+        ----------
+        max_step : float
+            Longest integrator step [s].
+
+        Notes
+        -----
+        The CVode and IDA backends apply the request. The SciPy backend
+        records it and keeps its own behaviour: on the case-study
+        crystallizers LSODA gave the same answers with and without a 10 s
+        cap, and BDF stalled or failed at nucleation onset in five of twelve
+        cases with the cap against one without (team-update rerun, 14 Oct
+        2026).
+        """
+
+        self.max_step_request = float(max_step)
 
     @staticmethod
     def declared_absolute_tolerances(unit, default):
@@ -175,7 +204,68 @@ class IntegratorBackend(ABC):
         )
     
 
-class AssimuloBackend(IntegratorBackend):
+class _AssimuloOptions:
+    """Option handling shared by the CVode and IDA backends.
+
+    The caller's options are merged over ``DEFAULT_OPTIONS`` instead of
+    replacing them, so a caller who sets only ``rtol`` keeps the default step
+    cap; a unit's ``request_max_step`` sits between the two.
+    """
+
+    # The 1 s cap these backends have always applied by default. Until
+    # 15 Oct 2026 any options the caller passed replaced it outright, and a
+    # crystallizer left with no cap went hundreds of % wrong without a
+    # warning (team-update rerun, 14 Oct 2026).
+    DEFAULT_OPTIONS = {'maxh': 1.0}  # [s]
+
+    def solver_options(self, call_options=None):
+        """Solver attributes to set, lowest precedence first.
+
+        Parameters
+        ----------
+        call_options : dict, optional
+            Options passed to ``compile_integrator`` for this compilation.
+
+        Returns
+        -------
+        dict
+            ``DEFAULT_OPTIONS``, then the unit's step-cap request as
+            ``maxh`` [s], then ``call_options``, then the constructor's
+            ``options``, each overriding the last.
+        """
+
+        merged = dict(self.DEFAULT_OPTIONS)
+
+        if self.max_step_request is not None:
+            merged['maxh'] = self.max_step_request  # [s]
+
+        merged.update(call_options or {})
+        merged.update(self.options)
+
+        return merged
+
+    def request_max_step(self, max_step):
+        """Record a unit's step cap and apply it to a compiled solver.
+
+        Parameters
+        ----------
+        max_step : float
+            Longest integrator step [s].
+
+        Notes
+        -----
+        Called from the unit's ``configure_solver``, after the solver has
+        been built, so the cap goes straight onto it unless the caller's
+        options set ``maxh``.
+        """
+
+        super().request_max_step(max_step)
+
+        if self._solver is not None and 'maxh' not in self._caller_options:
+            self._solver.maxh = self.max_step_request  # [s]
+
+
+class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
 
     # Neutral name -> Assimulo/Sundials linear solver
     LINEAR_SOLVERS = {
@@ -184,13 +274,23 @@ class AssimuloBackend(IntegratorBackend):
         "sparse": "SPARSE",
     }
 
-    def __init__(self,options={'maxh':1} ):
+    def __init__(self, options=None):
+        """CVode (Assimulo) backend for ODE units.
+
+        Parameters
+        ----------
+        options : dict, optional
+            CVode solver attributes, such as ``maxh`` [s], ``rtol`` [-] or
+            ``atol``. Merged over ``DEFAULT_OPTIONS`` and copied, so later
+            changes to the caller's dict do not leak in.
+        """
 
         super().__init__()
 
         self._problem = None
         self._solver = None
-        self.options = options
+        self.options = dict(options) if options else {}
+        self._caller_options = dict(self.options)
         self.state_event_list = []
 
         self.eval_sens = False
@@ -232,21 +332,15 @@ class AssimuloBackend(IntegratorBackend):
         solver.iter = "Newton"
         solver.discr = "BDF"
 
-        if options: #flagged for deprecation
+        # options is flagged for deprecation; it still outranks the defaults.
+        self._caller_options = {**(options or {}), **self.options}
 
-            for name,val in options.items():
+        for name, val in self.solver_options(options).items():
 
-                setattr(solver,name,val)
+            setattr(solver, name, val)
 
-                if name == "time_limit":
-                    solver.report_continuously = True
-        if self.options:
-            for name,val in self.options.items():
-            
-                setattr(solver,name,val)
-
-                if name == "time_limit":
-                    solver.report_continuously = True
+            if name == "time_limit":
+                solver.report_continuously = True
 
         # States that declare their own absolute tolerance get it, unless the
         # caller set atol, which then applies to every state as passed.
@@ -432,7 +526,7 @@ class AssimuloBackend(IntegratorBackend):
         return rhs_sens
     
 
-class AssimuloDAEBackend(IntegratorBackend):
+class AssimuloDAEBackend(_AssimuloOptions, IntegratorBackend):
     """
     Assimulo IDA backend for differential-algebraic units.
 
@@ -456,13 +550,23 @@ class AssimuloDAEBackend(IntegratorBackend):
         "sparse": "SPARSE",
     }
 
-    def __init__(self, options={'maxh': 1}):
+    def __init__(self, options=None):
+        """IDA (Assimulo) backend for differential-algebraic units.
+
+        Parameters
+        ----------
+        options : dict, optional
+            IDA solver attributes, such as ``maxh`` [s], ``rtol`` [-] or
+            ``atol``. Merged over ``DEFAULT_OPTIONS`` and copied, so later
+            changes to the caller's dict do not leak in.
+        """
 
         super().__init__()
 
         self._problem = None
         self._solver = None
-        self.options = options
+        self.options = dict(options) if options else {}
+        self._caller_options = dict(self.options)
 
         self.eval_sens = False
         self.jac_v_prod = False
@@ -569,13 +673,13 @@ class AssimuloDAEBackend(IntegratorBackend):
         solver = IDA(problem)
         solver.suppress_alg = True
 
-        for source in (options, self.options):
-            if not source:
-                continue
-            for name, value in source.items():
-                setattr(solver, name, value)
-                if name == "time_limit":
-                    solver.report_continuously = True
+        # options is flagged for deprecation; it still outranks the defaults.
+        self._caller_options = {**(options or {}), **self.options}
+
+        for name, value in self.solver_options(options).items():
+            setattr(solver, name, value)
+            if name == "time_limit":
+                solver.report_continuously = True
 
         if not verbose:
             solver.verbosity = 50
@@ -1333,8 +1437,8 @@ class ScipyBackend(IntegratorBackend):
                 f"{sorted(self.METHODS)}."
             )
 
-        # Copied, not stored: AssimuloBackend's options={'maxh': 1} default is
-        # one dict shared by every instance ever constructed.
+        # Copied, not stored, so later changes to the caller's dict do not
+        # leak into this backend.
         self.options = dict(options) if options else {}
 
         self.method = method
@@ -1954,3 +2058,44 @@ class ScipyBackend(IntegratorBackend):
             out["linear_solver_hint"] = self.linear_solver
 
         return out
+
+
+def assimulo_installed():
+    """Whether the optional Assimulo package can be found, without importing it.
+
+    Returns
+    -------
+    bool
+        True when an ``assimulo`` package is on the import path. A broken
+        installation still counts, so that its own error surfaces when the
+        unit is solved instead of a silent switch to another integrator.
+    """
+
+    try:
+        return importlib.util.find_spec('assimulo') is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def default_integrator():
+    """The backend a vessel gets when it is built without one.
+
+    Returns
+    -------
+    IntegratorBackend
+        ``AssimuloBackend()`` (CVode) when Assimulo is installed, otherwise
+        ``ScipyBackend(method='LSODA')``.
+
+    Notes
+    -----
+    On the case-study units (team-update rerun, 14 Oct 2026: twelve units and
+    stress cases against SciPy LSODA at rtol 1e-10) CVode was right on every
+    case at a 10 s cap and LSODA on all but an instant moment-form shock,
+    while BDF, the SciPy backend's own default method, stalled or failed at
+    nucleation onset.
+    """
+
+    if assimulo_installed():
+        return AssimuloBackend()
+
+    return ScipyBackend(method='LSODA')

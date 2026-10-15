@@ -10,6 +10,7 @@ from PharmaPy.MixedPhases_Refactored import MixedPhase, MixedStream
 
 from PharmaPy.ProcessControl_Refactored import Controller
 from PharmaPy.Results import DynamicResult
+from PharmaPy.IntegratorBackends import default_integrator
 from PharmaPy.Connections import interpolate_inputs
 
 
@@ -43,6 +44,44 @@ class MultiPhaseVessel():
       adiabatic=False,Phases=None,
       basis='mass_j',ht_mode="jacket",diam=0,area_base=0,
       emit_events=True, positivity_horizon=1.0):
+        """Set up the vessel; phases, kinetics and connections come later.
+
+        Parameters
+        ----------
+        integrator : IntegratorBackend, optional
+            Backend that solves the vessel. None, the default, gives
+            ``default_integrator()``: CVode when Assimulo is installed,
+            otherwise SciPy LSODA.
+        temp_ref : float, optional
+            Reference temperature of the enthalpies [K]. Defaults to 273.15.
+        isothermal : bool, optional
+            Hold the temperature fixed, with no energy balance.
+        reset_states : bool, optional
+            Passed to the state initialization.
+        controller : Controller, optional
+            Operating controller; a fresh ``Controller()`` by default.
+        h_conv : float, optional
+            Heat-transfer coefficient to the utility [W/m**2/K].
+        state_events : list, optional
+            State events the integrator should locate.
+        adiabatic : bool, optional
+            Exchange no heat with the utility.
+        Phases : sequence of BasePhase, optional
+            Initial phases; usually set later through ``Phases``.
+        basis : str, optional
+            Material state basis; ``'mass_j'`` (species masses [kg]).
+        ht_mode : str, optional
+            ``'jacket'``; a coil is not implemented.
+        diam : float, optional
+            Vessel diameter [m], for the jacket area.
+        area_base : float, optional
+            Base area [m**2], for the jacket area.
+        emit_events : bool, optional
+            Hand the mechanisms' and controller's switching surfaces to the
+            integrator.
+        positivity_horizon : float, optional
+            Window over which depletion is anticipated [s].
+        """
 
         # Built here rather than as a default argument: a default is
         # evaluated once at class-definition time, so every vessel in the
@@ -98,7 +137,8 @@ class MultiPhaseVessel():
         self._outlet_connections = []
 
         #Integrator
-        self.integrator = integrator
+        self.integrator = (integrator if integrator is not None
+                           else default_integrator())
 
         # Window over which depletion is anticipated, in seconds.
         #
