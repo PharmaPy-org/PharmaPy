@@ -1493,10 +1493,56 @@ class DynamicCollector:
 
     @property
     def Phases(self):
+        """Phases the collector built for its last solve, or None.
+
+        Returns
+        -------
+        list or tuple of phase objects, or None
+            The liquid (and, for a slurry inlet, solid) phases that
+            ``solve_unit`` starts from, or None before the first solve.
+        """
         return self._Phases
 
     @Phases.setter
     def Phases(self, phases):
+        """Reject an initial charge assigned by the user.
+
+        Parameters
+        ----------
+        phases : object
+            Any assigned value.
+
+        Raises
+        ------
+        NotImplementedError
+            Always; the collector is unchanged. A collector starts empty
+            and collects its ``Inlet``: ``solve_unit`` builds its own
+            starting phases (see :meth:`_set_phases`), so an assigned
+            charge would be silently ignored (issue #459). Starting from
+            an initial holdup is tracked by issue #342.
+        """
+        raise NotImplementedError(
+            'DynamicCollector does not take an initial charge through '
+            'Phases: a collector starts empty and collects its Inlet, so an '
+            'assigned charge would be ignored. Remove the Phases assignment; '
+            'starting from an initial holdup is not implemented yet (issue '
+            '#342).')
+
+    def _set_phases(self, phases) -> None:
+        """Install the phases the collector starts its solve from.
+
+        Parameters
+        ----------
+        phases : phase object or list or tuple of phase objects
+            Liquid phase, or liquid and solid phases, built by
+            ``solve_unit`` from the inlet: amounts [kg], fractions [-] and
+            temperature [K]. A single phase is appended to the held ones.
+
+        Notes
+        -----
+        This is the collector's internal assignment; the public ``Phases``
+        setter rejects user charges (issue #459).
+        """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
         elif phases.__module__ == 'PharmaPy.Phases':
@@ -1936,7 +1982,7 @@ class DynamicCollector:
 
             self.vol_phase = vol_phase
 
-            self.Phases = phases
+            self._set_phases(phases)
 
         elif self.model_type == 'liquid_mixer':
             if time_grid is not None:
@@ -1962,7 +2008,7 @@ class DynamicCollector:
 
             states_init = np.hstack((frac_init, mass_init, temp_init))
 
-            self.Phases = (liquid,)
+            self._set_phases((liquid,))
 
             self.states_di = {
                 'mass_frac': {'units': '', 'dim': self.num_species,

@@ -92,8 +92,10 @@ def test_collector_temperature_derivative_mass_cp(path):
     collector = DynamicCollector()
     collector.Inlet = LiquidStream(path, mass_flow=FLOW, mass_frac=COMPOSITION,
                                     temp=HOT)
-    collector.Phases = LiquidPhase(path, mass=MASS, mass_frac=COMPOSITION,
-                                    temp=COLD)
+    # Install the property phase that solve_unit builds, to evaluate the
+    # model directly; the public Phases setter rejects user charges (#459).
+    collector._set_phases(LiquidPhase(path, mass=MASS, mass_frac=COMPOSITION,
+                                      temp=COLD))
     with open(path) as database:
         properties = json.load(database)
     # Independently integrate each database Cp polynomial, converting molar
