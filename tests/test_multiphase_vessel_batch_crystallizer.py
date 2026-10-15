@@ -82,8 +82,6 @@ REFERENCE_RTOL = 1e-6  # [-]
 # explicit one distinct from it. Both in each state's own units.
 SOLVER_DEFAULT_ATOL = 1e-6
 EXPLICIT_ATOL = 1e-8
-# Never integrated: the handoff test stops at the first solve_ivp call.
-HANDOFF_RUNTIME = 1.0  # [s]
 # Anti-vacuity floors. Any real crystallization exceeds these by decades.
 ACTIVE_MASS_RATE_FLOOR = 1e-6  # [kg/s]
 ACTIVE_NUCLEATION_FLOOR = 1.0  # [#/(um m**3 s)]
@@ -995,53 +993,38 @@ def test_population_state_declares_its_own_absolute_tolerance():
     )
 
 
-class _SolveIvpReached(Exception):
-    """Raised by the solve_ivp stand-in once it has seen its arguments."""
-
-
-def _atol_handed_to_solve_ivp(monkeypatch, backend):
-    """Start a SciPy solve of the warm crystallizer and capture its atol.
+def _atol_for_solve_ivp(backend):
+    """Return the warm crystallizer and the atol its backend gives solve_ivp.
 
     Parameters
     ----------
-    monkeypatch : pytest.MonkeyPatch
-        Replaces ``solve_ivp`` for the calling test only.
     backend : ScipyBackend
-        Backend to solve with.
+        Backend whose solve_ivp arguments are read.
 
     Returns
     -------
     tuple
-        The vessel, and the ``atol`` the backend passed to ``solve_ivp``,
-        in each state's own units.
+        The vessel, and the ``atol`` from ``solve_ivp_options``, which
+        ``ScipyBackend.solve`` passes on to ``solve_ivp`` unchanged, in each
+        state's own units.
     """
-    received = {}
-
-    def record_and_stop(*args, **kwargs):
-        received.update(kwargs)
-        raise _SolveIvpReached
-
-    monkeypatch.setattr("PharmaPy.IntegratorBackends.solve_ivp", record_and_stop)
     vessel = _build_crystallizer(WARM_TEMP)
     vessel.integrator = backend
 
-    with pytest.raises(_SolveIvpReached):
-        vessel.solve_unit(runtime=HANDOFF_RUNTIME, verbose=False)
-
-    return vessel, received["atol"]
+    return vessel, backend.solve_ivp_options(vessel)["atol"]
 
 
-def test_scipy_backend_hands_the_declared_tolerances_to_solve_ivp(monkeypatch):
+def test_scipy_backend_hands_the_declared_tolerances_to_solve_ivp():
     """The vessel's tolerance vector reaches solve_ivp unless atol is set."""
-    vessel, atol = _atol_handed_to_solve_ivp(monkeypatch, ScipyBackend())
+    vessel, atol = _atol_for_solve_ivp(ScipyBackend())
 
     np.testing.assert_array_equal(
         atol, vessel.solver_absolute_tolerances(SOLVER_DEFAULT_ATOL)
     )
 
     # An explicit atol is the caller's choice for every state.
-    _, atol = _atol_handed_to_solve_ivp(
-        monkeypatch, ScipyBackend(options={"atol": EXPLICIT_ATOL})
+    _, atol = _atol_for_solve_ivp(
+        ScipyBackend(options={"atol": EXPLICIT_ATOL})
     )
     np.testing.assert_array_equal(atol, EXPLICIT_ATOL)
 
