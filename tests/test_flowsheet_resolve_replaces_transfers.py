@@ -14,10 +14,11 @@ need no ODE backend, on the shipped five-species database
 (tests/Flowsheet/data/compound_database.json): source M1 mixes FEED_A and
 FEED_B, and M2 adds its own raw feed of FEED_C, so the expected M2 outlet is
 the sum of the three feeds on the flow [kg/s] or inventory [kg] basis. The
-``Drying`` case uses ``Connection`` directly with a synthetic solved
-``Filter``: ``SimulationExec`` transfers only to destinations it solves,
-and no maintained fixture solves a dryer, while the edge-to-connection
-handoff is covered by the Mixer cases. ``assimulo`` cases integrate the
+``Drying`` cases use ``Connection`` directly with a synthetic solved
+``Filter``. An ``assimulo`` case also solves a real ``Filter -> Drying``
+flowsheet twice on the synthetic drying database of tests/conftest.py,
+which covers the phases of the earlier transfer that ``SimulationExec``
+hands to ``Connection`` (``replaced_phases``). ``assimulo`` cases integrate the
 issue reproduction (Mixer -> Mixer -> ``DynamicCollector``), a
 ``BatchCryst`` charged by a batch Mixer, and a ``DynamicExtractor`` fed by
 a Mixer on the synthetic constant-K database of
@@ -40,7 +41,9 @@ from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase
 from PharmaPy.Results import DynamicResult
 from PharmaPy.SimExec import SimulationExec
 from PharmaPy.SolidLiquidSep import Filter
-from PharmaPy.Streams import LiquidStream
+from PharmaPy.Streams import LiquidStream, VaporStream
+from conftest import (DRYING_GAS_MASS_FRACTION, DRYING_LIQUID_MASS_FRACTION,
+                      DRYING_SIZE_GRID_UM, DRYING_THERMO_DATA)
 
 FEED_A = np.array([0.1, 0.1, 0.1, 0.1, 0.6])  # [-], issue #441 feed
 FEED_B = np.array([0.0, 0.2, 0.0, 0.0, 0.8])  # [-], solvent-rich feed
@@ -674,3 +677,70 @@ def test_extractor_feed_is_the_latest_transfer(tmp_path):
         assert extractor.Inlet['feed'] is transferred
         assert extractor.Inlet['feed'].mole_flow == pytest.approx(
             feed_flow, rel=RTOL)
+
+
+# Filter -> Drying flowsheet on the synthetic drying database (water,
+# ethanol, nitrogen) of tests/conftest.py: a 0.1 L liquid with ethanol
+# crystals, a synthetic specific cake resistance, and a dryer with its own
+# solvent-poor gas, solved for 1e-8 s, as tests/test_drying_gas_balance.py.
+DRYER_LIQUID_VOLUME = 1e-4  # [m**3]
+DRYER_POPULATION = np.array([1e5, 2e5, 1e5])  # [#/um] on DRYING_SIZE_GRID_UM
+DRYER_CAKE_RESISTANCE = 1e11  # [m/kg], synthetic, no correlation applies
+FILTER_PRESSURE_DROP = 1e5  # [Pa]
+DRYER_PRESSURE_DROP = 1e4  # [Pa]
+DRYER_RUNTIME = 1e-8  # [s]
+DRYER_LIQUID_TEMP = 302.0  # [K]
+DRYER_GAS_TEMP = 300.0  # [K]
+DRYER_GAS_MASS = 1e-4  # [kg]
+DRYER_GAS_FLOW = 1e-4  # [kg/s]
+# [-], axial nodes of the dryer: the default num_discr of the Filter's
+# outlet Cake (PharmaPy.MixedPhases.Cake), because Drying reads a
+# multi-node saturation profile node for node.
+CAKE_NODES = 50
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_resolved_filter_replaces_the_dryer_cake(tmp_path):
+    """Keep the dryer's gas and one copy of the latest Filter cake.
+
+    ``SimulationExec`` hands ``Connection`` the phases of the previous
+    transfer on the edge; a ``Drying`` holdup holds the cake's phases,
+    not the cake, so without them the earlier cake would be stacked.
+    """
+    pytest.importorskip('assimulo')
+    thermo = tmp_path / 'drying.json'
+    thermo.write_text(json.dumps(DRYING_THERMO_DATA))
+    thermo = str(thermo)
+    sim = SimulationExec(thermo, {'F01': ['D01'], 'D01': []})
+    sim.F01 = Filter(station_diam=STATION_DIAMETER,
+                     alpha=DRYER_CAKE_RESISTANCE)
+    sim.F01.Phases = [
+        LiquidPhase(thermo, temp=DRYER_LIQUID_TEMP, vol=DRYER_LIQUID_VOLUME,
+                    mass_frac=DRYING_LIQUID_MASS_FRACTION),
+        SolidPhase(thermo, temp=DRYER_LIQUID_TEMP,
+                   x_distrib=DRYING_SIZE_GRID_UM.copy(),
+                   distrib=DRYER_POPULATION.copy(), mass_frac=[0, 1, 0])]
+    sim.D01 = Drying(CAKE_NODES, supercrit_names=['nitrogen'],
+                     diam_unit=STATION_DIAMETER)
+    gas = VaporPhase(thermo, temp=DRYER_GAS_TEMP, mass=DRYER_GAS_MASS,
+                     mass_frac=DRYING_GAS_MASS_FRACTION)
+    sim.D01.Phases = gas
+    sim.D01.Inlet = VaporStream(thermo, temp=DRYER_GAS_TEMP,
+                                mass_flow=DRYER_GAS_FLOW,
+                                mass_frac=DRYING_GAS_MASS_FRACTION)
+    run = {'F01': {'deltaP': FILTER_PRESSURE_DROP, 'verbose': False},
+           'D01': {'deltaP': DRYER_PRESSURE_DROP, 'runtime': DRYER_RUNTIME,
+                   'verbose': False}}
+
+    cakes = []
+    for _ in range(2):
+        sim.SolveFlowsheet(kwargs_run=run, verbose=False)
+        cake = sim.connections['CONN1'].transferred_matter
+        cakes.append(cake)
+        held = sim.D01.Phases
+        assert len(held) == 3
+        assert held[0] is gas
+        assert held[1] is cake.Liquid_1
+        assert held[2] is cake.Solid_1
+    assert cakes[1] is not cakes[0]
