@@ -313,17 +313,120 @@ class Mixer:
         dimensionless ``mass_frac`` [-] with one entry per species, and the
         temperature [K]; ``dim_states`` therefore sums to
         ``num_species + 2``, the width of one packed liquid state.
+
+        Every assignment appends. A ``Connection`` that transfers again on
+        the same flowsheet edge replaces its earlier copy in place instead
+        (:meth:`_replace_inlet`, issue #441), so raw inlets are kept and
+        each connected source is mixed once.
         """
         incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
-        flow_flags = [hasattr(inlet, 'mass_flow')
-                      for inlet in self._Inlets + incoming]
+        self._check_inlet_basis(self._Inlets + incoming)
+        self._Inlets += incoming
+
+        self.names_upstream.append(None)
+        self.bipartite.append(None)
+
+        self._refresh_inlet_metadata()
+
+    @staticmethod
+    def _check_inlet_basis(inlets: list) -> None:
+        """Reject a set of inlets that mixes inventories and flow rates.
+
+        Parameters
+        ----------
+        inlets : list of object
+            Candidate inlets: liquid or mixed-phase inventories [kg], or
+            streams [kg/s].
+
+        Raises
+        ------
+        ValueError
+            If batch inventories and flow rates are combined without a
+            duration contract.
+        """
+        flow_flags = [hasattr(inlet, 'mass_flow') for inlet in inlets]
         if any(flow_flags) and not all(flow_flags):
             raise ValueError(
                 'Mixer cannot combine batch inventories [kg] with flow rates '
                 '[kg/s] without a duration contract; supply batch phases or '
                 'use only streams.')
-        self._Inlets += incoming
 
+    def _replace_inlet(self, previous: object, inlet: object) -> bool:
+        """Replace a held inlet object by another in the same positions.
+
+        Parameters
+        ----------
+        previous : object
+            Inlet to replace, matched by identity, for example the copy a
+            ``Connection`` transferred on an earlier solve.
+        inlet : object
+            Replacement inventory [kg] or stream [kg/s].
+
+        Returns
+        -------
+        bool
+            True if ``previous`` was held and every entry of it has been
+            replaced; False if it is not held, in which case the Mixer is
+            unchanged.
+
+        Raises
+        ------
+        ValueError
+            If ``inlet`` and ``previous`` have different amount bases, a
+            batch inventory [kg] and a flow rate [kg/s]; the Mixer, including
+            ``Inlets``, ``oper_mode``, ``names_states_in`` and ``states_di``,
+            is then unchanged.
+
+        Notes
+        -----
+        The replacement keeps the inlet's position, so the inlet order, and
+        hence the evaluation grid taken from the first multi-sample inlet,
+        is the same as when ``previous`` was installed. Every entry
+        identical to ``previous`` is replaced, so an inlet assigned twice
+        by hand stays assigned twice and remains detectable as a duplicate
+        instead of leaving a stale copy beside the new one.
+
+        The first assignment fixes the Mixer's amount basis: it selects the
+        flow or non-flow ``names_states_in``. A replacement on the other
+        basis is therefore rejected, even when it would be the only inlet;
+        the held inlets share ``previous``'s basis, so an accepted
+        replacement keeps them consistent. ``names_upstream`` and
+        ``bipartite`` are not extended, because no inlet is added; the
+        state metadata is refreshed for the new set of inlets.
+        """
+        positions = [position for position, held in enumerate(self._Inlets)
+                     if held is previous]
+        if not positions:
+            return False
+
+        bases = {False: 'a batch inventory [kg]', True: 'a flow rate [kg/s]'}
+        held_flow = hasattr(previous, 'mass_flow')
+        new_flow = hasattr(inlet, 'mass_flow')
+        if held_flow != new_flow:
+            raise ValueError(
+                f'Mixer cannot replace {bases[held_flow]} with '
+                f'{bases[new_flow]}: its operating mode and state names '
+                'were set for the first basis. Assign a new Mixer to the '
+                'flowsheet before solving it with the changed upstream unit.')
+
+        for position in positions:
+            self._Inlets[position] = inlet
+        self._refresh_inlet_metadata()
+        return True
+
+    def _refresh_inlet_metadata(self) -> None:
+        """Derive the operating mode and state metadata from the inlets.
+
+        Notes
+        -----
+        The mode follows the last inlet: flow rates [kg/s] give a
+        continuous Mixer, inventories [kg] a batch one. Species metadata
+        comes from the first inlet's liquid phase, whether supplied
+        directly or attached to a slurry or cake. The liquid ``states_di``
+        declares the amount [kg] or flow [kg/s], the dimensionless
+        ``mass_frac`` [-] with one entry per species, and the temperature
+        [K].
+        """
         flow_flag = hasattr(self.Inlets[-1], 'mass_flow')
 
         if flow_flag:
@@ -338,9 +441,6 @@ class Mixer:
                 self.names_states_in = self.names_states_in['flow']
             else:
                 self.names_states_in = self.names_states_in['non_flow']
-
-        self.names_upstream.append(None)
-        self.bipartite.append(None)
 
         liquid_inlet = getattr(self.Inlets[0], 'Liquid_1', self.Inlets[0])
         # Dimensionless per-species fractions, as in the solids branch.

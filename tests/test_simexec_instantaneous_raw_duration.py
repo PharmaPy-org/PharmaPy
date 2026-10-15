@@ -20,17 +20,20 @@ the solve, which the instantaneous Mixer never consumed, raises
 ``ValueError``.
 
 Provenance is recorded per flowsheet edge across ``SolveFlowsheet`` calls
-and checked at accounting time. Covered cases: repeated solves that leave
-several outlet copies in a ``Mixer`` (issue #441); a source re-solved after
-its transfer; a consumer whose solve after a new transfer failed; a
+and checked at accounting time. Covered cases: repeated solves, after which
+a connected ``Mixer`` holds its raw feed and one copy of the upstream outlet
+and is charged for the latest run (issue #441); an outlet copy assigned to
+the Mixer again by hand, which gives NaN, also after a repeated solve
+replaced both entries; a source re-solved after its
+transfer; a consumer whose solve after a new transfer failed; a
 consumer solved before any transfer; partial solves (``pick_units``) of
 unrelated units or of the consumer alone; consumers that keep several solve
 segments (a continued ``CSTR``, and a continued ``ContinuousEvaporator``
 that restarts its clock per segment, issue #278) or none (a ``CSTR`` after
 ``reset()``), which give NaN; and reset consumers (``reset()`` or
-``reset_states=True``), charged for their own fresh run. Discarded transfer
-copies are pruned from the record and freed, and a destination with an
-untimed result (``BatchExtractor``) does not break re-solving.
+``reset_states=True``), charged for their own fresh run. Replaced transfer
+copies are freed, and a destination with an untimed result
+(``BatchExtractor``) does not break re-solving.
 
 Fixtures use the shipped five-species database and the issue reproduction:
 1.0 kg/s (A, B, C, D, solvent = 0.1, 0.1, 0.1, 0.1, 0.6) at 300 K and
@@ -541,28 +544,89 @@ RUN_C01 = {'C01': {'runtime': RUNTIME, 'verbose': False}}
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_repeated_solve_with_copied_outlet_reports_nan(path):
-    """Report NaN when a re-solve leaves two outlet copies in a Mixer.
+def test_repeated_solve_charges_the_latest_run(path):
+    """Charge the latest run after re-solving a Mixer chain (issue #441).
 
-    Provisional: a connected Mixer appends another transferred copy on
-    every solve (issue #441); once fixed, a repeated solve should charge
-    the latest run.
+    The second solve replaces M02's copy of the M01 outlet instead of
+    adding one, so M02 holds its raw feed plus one copy and every raw feed
+    is charged for the collector's latest run.
     """
     pytest.importorskip('assimulo')
     sim = _chain(path)
     sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
     sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
-    assert len(sim.M02.Inlets) == 3  # raw feed plus two copies of M01's outlet
+    assert len(sim.M02.Inlets) == 2  # raw feed plus one copy of M01's outlet
 
-    reason = (r"downstream unit 'M02' holds 2 copies of its outlet "
-              r"\(issue #441\)")
-    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
-            unit='M01', reason=reason)):
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
         keys, totals = _raw_amounts(sim.GetRawMaterials(), 'mass')
 
     assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1'), ('M02', 'Inlet_0')]
+    np.testing.assert_allclose(
+        totals, [FLOW_A * RUNTIME, FLOW_B * RUNTIME, FLOW_C * RUNTIME],
+        rtol=RTOL)
+
+
+@pytest.mark.unit
+def test_outlet_assigned_again_by_hand_reports_nan(path):
+    """Report NaN when a Mixer holds the transferred outlet twice.
+
+    A flowsheet transfer never leaves two copies (issue #441), but a user
+    can append the transferred object again and solve the Mixer by hand;
+    it then mixes the upstream outlet twice.
+    """
+    sim = SimulationExec(path, {'M01': ['M02'], 'M02': []})
+    sim.M01 = _mixer(path)
+    sim.M02 = Mixer()
+    sim.M02.Inlets = [_stream(path, COMPOSITION_C, FLOW_C)]
+    sim.SolveFlowsheet(verbose=False)
+    sim.M02.Inlets = sim.M02.Inlets[-1]  # the transferred copy, again
+    sim.M02.solve_unit()
+
+    reason = (r"downstream unit 'M02' holds the transferred outlet 2 times "
+              r"\(it was assigned again by hand\)")
+    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
+            unit='M01', reason=reason)):
+        raw = sim.GetRawMaterials()
+
+    keys, totals = _raw_amounts(raw, 'mass')
+    assert keys[:2] == [('M01', 'Inlet_0'), ('M01', 'Inlet_1')]
     assert np.isnan(totals[:2]).all()
-    np.testing.assert_allclose(totals[2], FLOW_C * RUNTIME, rtol=RTOL)
+
+
+@pytest.mark.unit
+def test_hand_duplicate_survives_a_re_solve_and_reports_nan(path):
+    """Replace both entries of a hand-duplicated copy, and report NaN.
+
+    A repeated solve replaces every entry of the earlier transfer, so the
+    duplicate made by hand stays a duplicate of the new copy (M02 mixes
+    it twice) and is not left behind as a stale copy that accounting
+    would miss.
+    """
+    sim = SimulationExec(path, {'M01': ['M02'], 'M02': []})
+    sim.M01 = _mixer(path)
+    sim.M02 = Mixer()
+    sim.M02.Inlets = [_stream(path, COMPOSITION_C, FLOW_C)]
+    sim.SolveFlowsheet(verbose=False)
+    sim.M02.Inlets = sim.M02.Inlets[-1]  # the transferred copy, again
+
+    sim.SolveFlowsheet(verbose=False)
+
+    latest = sim.connections['CONN1'].transferred_matter
+    assert len(sim.M02.Inlets) == 3
+    assert sim.M02.Inlets[1] is latest and sim.M02.Inlets[2] is latest
+    # [kg/s], M02's raw feed plus the M01 outlet mixed twice
+    doubled_flow = FLOW_C + 2 * (FLOW_A + FLOW_B)
+    assert sim.M02.Outlet.mass_flow == pytest.approx(doubled_flow, rel=RTOL)
+    reason = (r"downstream unit 'M02' holds the transferred outlet 2 times "
+              r"\(it was assigned again by hand\)")
+    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
+            unit='M01', reason=reason)):
+        raw = sim.GetRawMaterials()
+
+    keys, totals = _raw_amounts(raw, 'mass')
+    assert keys[:2] == [('M01', 'Inlet_0'), ('M01', 'Inlet_1')]
+    assert np.isnan(totals[:2]).all()
 
 
 @pytest.mark.assimulo
@@ -681,8 +745,8 @@ def test_consumer_solved_before_any_transfer_reports_nan(path):
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_repeated_solves_keep_only_held_transfers(path):
-    """Prune discarded transfer copies so they can be freed."""
+def test_repeated_solves_free_replaced_transfers(path):
+    """Keep only the latest transfer, so replaced copies can be freed."""
     pytest.importorskip('assimulo')
     sim = SimulationExec(path, {'M01': ['C01'], 'C01': []})
     sim.M01 = _mixer(path)
@@ -692,25 +756,28 @@ def test_repeated_solves_keep_only_held_transfers(path):
     for _ in range(REPEATED_SOLVES):
         sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
 
-    history = sim._transfer_history[('M01', 'C01')]
-    assert len(history) == 1 and history[0] is sim.C01.Inlet
+    assert sim._transfers[('M01', 'C01')][0] is sim.C01.Inlet
     gc.collect()
     assert first() is None
 
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_mixer_history_keeps_every_held_copy(path):
-    """Keep the copies a re-solved Mixer still holds (issue #441)."""
+def test_repeated_solves_keep_one_copy_in_the_mixer(path):
+    """Replace a re-solved Mixer's connected copy in place (issue #441)."""
     pytest.importorskip('assimulo')
     sim = _chain(path)
+    raw_feed = sim.M02.Inlets[0]
+    sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
+    first = weakref.ref(sim.M02.Inlets[1])
     for _ in range(REPEATED_SOLVES):
         sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
 
-    history = sim._transfer_history[('M01', 'M02')]
-    held = sim.M02.Inlets[1:]  # every copy of M01's outlet
-    assert len(history) == len(held) == REPEATED_SOLVES
-    assert all(any(copy is item for item in held) for copy in history)
+    latest = sim._transfers[('M01', 'M02')][0]
+    assert len(sim.M02.Inlets) == 2
+    assert sim.M02.Inlets[0] is raw_feed and sim.M02.Inlets[1] is latest
+    gc.collect()
+    assert first() is None
 
 
 def _cstr_flowsheet(data_path, **reactor_kwargs):

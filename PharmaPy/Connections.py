@@ -468,14 +468,46 @@ def convert_str_flowsheet(flowsheet):
     return out
 
 
-class Connection:
-    def __init__(self, source_uo, destination_uo):
+# Marks a held object without a ``name`` before a failed batch assignment.
+_UNNAMED = object()
 
+
+class Connection:
+    def __init__(self, source_uo, destination_uo, replaced_matter=None,
+                 replaced_phases=()):
+        """Connect a solved source unit's outlet to a destination unit.
+
+        Parameters
+        ----------
+        source_uo : object
+            Solved unit operation whose ``Outlet`` is transferred.
+        destination_uo : object
+            Unit operation that receives a deep copy of the outlet.
+        replaced_matter : object, optional
+            Matter that an earlier transfer on the same source-destination
+            edge handed to ``destination_uo``, that is, the earlier
+            connection's ``transferred_matter``. If the destination still
+            holds it, :meth:`PassPhases` replaces it with the new copy
+            instead of adding the new copy to it (issue #441). The default,
+            None, keeps every input the destination holds.
+        replaced_phases : sequence, optional
+            Phase objects that ``replaced_matter`` carried when it was
+            transferred, that is, the earlier connection's
+            ``transferred_phases``. A batch destination drops them together
+            with ``replaced_matter``. They are given explicitly because a
+            destination may later add its own phases to the transferred
+            cake's live ``Phases`` list (``Drying`` keeps that list as its
+            own). Empty by default.
+        """
         self.source_uo = source_uo
         self.destination_uo = destination_uo
-        # Deep copy handed to the destination by PassPhases; SimulationExec
-        # records it to verify raw-material consumption.
+        self.replaced_matter = replaced_matter
+        self.replaced_phases = tuple(replaced_phases)
+        # Deep copy handed to the destination by PassPhases, and the phases
+        # it carried at that time; SimulationExec records both to replace
+        # the copy on a later transfer and to verify raw-material use.
         self.transferred_matter = None
+        self.transferred_phases = ()
 
     def transfer_data(self):
         self.FeedConnection()
@@ -628,6 +660,7 @@ class Connection:
             ``BatchToFlowConnector`` rejects anything other than one liquid
             batch holdup (issue #423), ``ValueError`` when a ``Mixer``
             rejects mixing batch inventories [kg] with flow rates [kg/s],
+            or replacing its connected copy with one on the other basis,
             or ``RuntimeError`` when a reactor, crystallizer or filter
             ``Phases`` setter receives a stream or a non-phase object.
 
@@ -657,15 +690,36 @@ class Connection:
           as its holdup, not converted to a flow (issue #436); insert a
           ``BatchToFlowConnector`` to discharge a liquid holdup as a stream.
 
+        A transfer replaces the destination's copy of ``replaced_matter``
+        rather than adding to it, keyed by object identity, so repeating a
+        transfer on the same edge gives the same inputs (issue #441):
+
+        * ``Mixer``: the copy is replaced in its position in ``Inlets``,
+          and the Mixer's other inlets, such as raw feeds, are kept.
+        * Batch units: the copy, and the phases a transferred ``Cake`` or
+          ``Slurry`` carried (``replaced_phases``), are removed from a
+          list-valued ``Phases`` before the assignment, so a ``BatchCryst``
+          or ``Drying`` unit, whose setter adds single phases or cake
+          phases to its holdup, does not stack the new transfer on the old
+          one. Phases set independently, such as a crystallizer's seed or a
+          dryer's gas, are kept. If the assignment raises, the destination's
+          attributes, phase list and phase names are restored.
+        * ``DynamicExtractor``: the copy is removed from its ``inlets``
+          before ``{'feed': matter}`` is merged; that merge keeps existing
+          keys, so the earlier ``'feed'`` would otherwise win.
+
+        Without ``replaced_matter``, or when the destination no longer
+        holds it, the transfer is installed as described above.
+
         Only a ``Mixer`` combines several transfers into one mass- and
-        energy-balanced mixture. A later transfer to any other destination
-        replaces its ``Inlet`` or ``Phases``, is ignored (a charged
-        semibatch unit), or, for a ``BatchCryst`` or ``Drying`` unit, is
-        stacked with the earlier phases into a holdup list that is not a
-        mixture of the feeds (a ``Slurry`` replaces a ``BatchCryst``'s
-        phases instead). ``SimulationExec.SolveFlowsheet`` therefore
-        rejects several predecessors of a non-``Mixer`` unit before
-        solving (issue #444).
+        energy-balanced mixture. A transfer from a further source to any
+        other destination replaces its ``Inlet`` or ``Phases``, is ignored
+        (a charged semibatch unit), or, for a ``BatchCryst`` or ``Drying``
+        unit, is stacked with the earlier phases into a holdup list that is
+        not a mixture of the feeds (a ``Slurry`` replaces a
+        ``BatchCryst``'s phases instead).
+        ``SimulationExec.SolveFlowsheet`` therefore rejects several
+        predecessors of a non-``Mixer`` unit before solving (issue #444).
         """
         class_destination = self.destination_uo.__class__.__name__
         mode_dest = self.destination_uo.oper_mode
@@ -673,12 +727,18 @@ class Connection:
 
         transfered_matter.transferred_from_uo = True
         self.transferred_matter = transfered_matter
+        # Snapshot before installation: a destination may extend the list.
+        self.transferred_phases = tuple(
+            getattr(transfered_matter, 'Phases', None) or ())
 
+        replaced = self.replaced_matter
         if class_destination == 'Mixer':
-            self.destination_uo.Inlets = transfered_matter
+            if replaced is None or not self.destination_uo._replace_inlet(
+                    replaced, transfered_matter):
+                self.destination_uo.Inlets = transfered_matter
 
         elif mode_dest == 'Batch':
-            self.destination_uo.Phases = transfered_matter
+            self._assign_batch_phases(transfered_matter)
 
         elif mode_dest == 'Semibatch':
             if class_destination == 'DynamicCollector':
@@ -698,6 +758,69 @@ class Connection:
 
         elif mode_dest == 'Continuous':
             if class_destination == 'DynamicExtractor':
+                if replaced is not None:
+                    self.destination_uo.inlets = {
+                        key: inlet
+                        for key, inlet in self.destination_uo.inlets.items()
+                        if inlet is not replaced}
                 self.destination_uo.Inlet = {'feed': transfered_matter}
             else:
                 self.destination_uo.Inlet = transfered_matter
+
+    def _assign_batch_phases(self, matter) -> None:
+        """Assign transferred matter to a batch destination's ``Phases``.
+
+        Parameters
+        ----------
+        matter : object
+            Deep copy of the source outlet: a phase, or a ``Cake`` or
+            ``Slurry`` holding phases, with inventories [kg].
+
+        Raises
+        ------
+        Exception
+            Any exception raised by the destination's ``Phases`` setter
+            propagates after the destination is restored (see Notes).
+
+        Notes
+        -----
+        ``replaced_matter`` and ``replaced_phases`` are removed by identity
+        from the destination's ``Phases`` list in place, so setters that add
+        to the held list (``BatchCryst``, ``Drying``) do not keep the
+        earlier transfer. Setters that replace their phases are unaffected.
+        A destination whose ``Phases`` is not a list, or a transfer without
+        ``replaced_matter``, is assigned directly.
+
+        A setter can fail after it has changed the destination, as a
+        ``Drying`` unit does when the new cake lacks one of its
+        ``supercrit_names`` species after re-classifying its phases and
+        resizing its cake grid. The destination's attribute bindings (a
+        shallow copy of its ``__dict__``), the contents of its phase list
+        and the ``name`` of each held phase are therefore restored before
+        the exception propagates. Objects the setter changed in place
+        other than these are not restored.
+        """
+        destination = self.destination_uo
+        held = destination.Phases
+        replaced = self.replaced_matter
+        if replaced is None or not isinstance(held, list):
+            destination.Phases = matter
+            return
+
+        stale = (replaced,) + self.replaced_phases
+        attributes = dict(vars(destination))
+        original = list(held)
+        names = [(phase, getattr(phase, 'name', _UNNAMED))
+                 for phase in original]
+        held[:] = [phase for phase in held
+                   if not any(phase is old for old in stale)]
+        try:
+            destination.Phases = matter
+        except Exception:
+            vars(destination).clear()
+            vars(destination).update(attributes)
+            held[:] = original
+            for phase, name in names:
+                if name is not _UNNAMED:
+                    phase.name = name
+            raise

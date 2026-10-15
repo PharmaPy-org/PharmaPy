@@ -310,14 +310,12 @@ class SimulationExec:
         self.graph = graph
         self.in_degree, self.execution_names = topological_bfs(graph)
 
-        # Raw-material provenance, kept across SolveFlowsheet calls (see
+        # Transfer provenance, kept across SolveFlowsheet calls (see
         # _transfer_to_neighbors): per (source, destination) edge, the latest
         # transfer as (transferred matter, source result, destination result,
-        # destination first profile segment), all taken at transfer time;
-        # and the transferred copies the destination still holds plus the
-        # latest one.
+        # destination first profile segment, phases the transferred matter
+        # carried), all taken at transfer time.
         self._transfers = {}
-        self._transfer_history = {}
 
         # Residual counters cover every node, including successor-only units.
         if len(self.execution_names) < len(self.in_degree):
@@ -354,45 +352,47 @@ class SimulationExec:
 
         Notes
         -----
-        Each transfer also updates the persistent raw-material provenance,
-        which survives later ``SolveFlowsheet`` calls. ``_transfers[edge]``
-        for ``edge = (name, successor)`` is overwritten with a tuple of the
+        Each transfer updates the persistent provenance, which survives
+        later ``SolveFlowsheet`` calls. ``_transfers[edge]`` for
+        ``edge = (name, successor)`` is overwritten with a tuple of the
         transferred matter object, the source's ``result``, the
         destination's ``result`` (or None) and the destination's first
-        retained profile segment (``profiles_runs[0]``, or None), all taken
-        at transfer time. ``_transfer_history[edge]`` keeps only the
-        transferred copies the destination still holds, plus the latest
-        one, so discarded copies are freed while copies a ``Mixer`` keeps
-        appending remain countable (issue #441). Only
-        :meth:`_consumed_duration` reads these records.
+        retained profile segment (``profiles_runs[0]``, or None) and the
+        connection's ``transferred_phases`` (the phases a transferred cake
+        or slurry carried), all taken at transfer time. The previously
+        recorded matter and phases of the edge are handed to the
+        ``Connection`` as ``replaced_matter`` and ``replaced_phases``, so a
+        repeated or partial solve replaces the destination's earlier copy
+        instead of adding another (issue #441), while the destination's
+        independent inputs are kept. Earlier copies are then no longer
+        referenced and can be freed. :meth:`_consumed_duration` reads these
+        records.
         """
         # Successor-only units are graph nodes without an adjacency entry.
         for uo_next in self.graph.get(name, ()):
             if pick_units is not None and uo_next not in pick_units:
                 continue
 
+            edge = (name, uo_next)
+            previous = self._transfers.get(edge)
             connection = Connection(
                 source_uo=getattr(self, name),
-                destination_uo=getattr(self, uo_next))
+                destination_uo=getattr(self, uo_next),
+                replaced_matter=None if previous is None else previous[0],
+                replaced_phases=() if previous is None else previous[4])
 
             conn_name = 'CONN%i' % count
             connections[conn_name] = connection
 
             connection.transfer_data()
-            edge = (name, uo_next)
             source, destination = getattr(self, name), getattr(self, uo_next)
             # Results are compared by identity only, so untimed (algebraic)
             # results such as a BatchExtractor's are recorded safely.
             self._transfers[edge] = (connection.transferred_matter,
                                      source.result,
                                      getattr(destination, 'result', None),
-                                     self._first_profile(destination))
-            held = self._used_inputs(destination)
-            self._transfer_history[edge] = [
-                matter for matter in self._transfer_history.get(edge, [])
-                if any(matter is item for item in held)
-                and matter is not connection.transferred_matter] + [
-                    connection.transferred_matter]
+                                     self._first_profile(destination),
+                                     connection.transferred_phases)
 
             count += 1
 
@@ -453,7 +453,11 @@ class SimulationExec:
         The flowsheet is executed in topological order. Unit operations listed
         in ``pick_units`` are solved before their output data are transferred
         to selected graph successors. Units not selected in ``pick_units`` can
-        still transfer existing output data when already solved.
+        still transfer existing output data when already solved. A transfer
+        replaces the copy the previous transfer on the same edge handed to
+        the destination and keeps the destination's own inputs, so repeated
+        and partial solves do not accumulate connected inputs (issue #441;
+        see :meth:`_transfer_to_neighbors`).
 
         Parameters
         ----------
@@ -1725,11 +1729,13 @@ class SimulationExec:
         ``SolveFlowsheet`` calls. The transfer is verified when the source
         has not been re-solved since it, the successor has been solved
         since it, the transferred object is among the successor's inputs
-        (identity), and the successor holds no other object transferred on
-        that edge. ``SolveFlowsheet`` rejects a graph in which any unit has
-        several successors before solving it (issue #437), so a unit of the
-        solved flowsheet has at most one. Otherwise the duration is NaN,
-        with one of these reasons:
+        (identity) exactly once. A repeated transfer on the edge replaces
+        every entry of the successor's earlier copy (issue #441), so no
+        older copy survives; the latest one is held more than once only
+        when the earlier copy was duplicated by hand. ``SolveFlowsheet``
+        rejects a graph in which any unit has several successors before
+        solving it (issue #437), so a unit of the solved flowsheet has at
+        most one. Otherwise the duration is NaN, with one of these reasons:
 
         * the unit is not part of the solved flowsheet;
         * terminal unit, with no successor;
@@ -1743,8 +1749,10 @@ class SimulationExec:
           replaced after the transfer, for example by assigning a new
           ``Inlet`` and solving it again (``SolveFlowsheet`` rejects
           several predecessors of a non-``Mixer`` unit, issue #444);
-        * the successor holds several copies of the outlet, for example a
-          ``Mixer`` re-solved in the same flowsheet (issue #441);
+        * the successor holds the transferred outlet more than once, which
+          only happens when a transferred copy is assigned again by hand,
+          for example ``mixer.Inlets = mixer.Inlets[-1]``, before or after
+          a repeated solve;
         * the successor keeps several solve segments in ``profiles_runs``,
           as when a ``CSTR`` or ``ContinuousEvaporator`` continues an
           earlier solve (issues #278, #443);
@@ -1783,7 +1791,7 @@ class SimulationExec:
         if record is None:
             return np.nan, ('no transfer to downstream unit '
                             f"'{successor}' is recorded")
-        matter, source_result, consumer_result, first = record
+        matter, source_result, consumer_result, first, _ = record
         if uo.result is not source_result:
             return np.nan, ('it was re-solved after its outlet was '
                             f"transferred to downstream unit '{successor}'")
@@ -1801,11 +1809,11 @@ class SimulationExec:
                 f"downstream unit '{successor}' no longer holds the "
                 'transferred outlet (it ignored the transfer, see issue '
                 '#438, or its input was replaced after the transfer)')
-        history = self._transfer_history.get((name, successor), [])
-        copies = sum(any(item is old for old in history) for item in used)
+        copies = sum(item is matter for item in used)  # [-]
         if copies > 1:
-            return np.nan, (f"downstream unit '{successor}' holds {copies} "
-                            'copies of its outlet (issue #441)')
+            return np.nan, (f"downstream unit '{successor}' holds the "
+                            f'transferred outlet {copies} times (it was '
+                            'assigned again by hand)')
         runs = getattr(consumer, 'profiles_runs', None)
         if not self._is_instantaneous(consumer) and runs is not None:
             # Only a result from exactly one solve after the transfer is
@@ -1868,7 +1876,7 @@ class SimulationExec:
             after the transfer; outlet held as a holdup rather than a feed
             (issues #436, #438); transferred outlet no longer held by the
             successor (issue #438, or an input replaced after the transfer);
-            several outlet copies held by the successor (issue #441);
+            transferred outlet held several times by the successor;
             several solve segments kept by the successor (issues #278,
             #443); no solve segment kept by the successor (for example
             after ``reset()``); or, defensively, only the segment it held
@@ -2095,7 +2103,7 @@ class SimulationExec:
         [s], such as an ``Evaporator`` inlet shut by its volume event.
         The raw totals of an instantaneous unit, such as a static
         continuous ``Mixer``, are NaN unless it has a single, verified
-        consumer (see :meth:`_consumed_duration`; issues #438, #441).
+        consumer (see :meth:`_consumed_duration`; issue #438).
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -2275,8 +2283,7 @@ class SimulationExec:
         -----
         ``raw_cost`` prices the ``GetRawMaterials`` totals, so the entries
         of an instantaneous unit without a single, verified consumer are NaN
-        like its totals (see :meth:`_consumed_duration`; issues #438,
-        #441).
+        like its totals (see :meth:`_consumed_duration`; issue #438).
         """
 
         opex_items = ('duties', 'raw_materials', 'labor')
