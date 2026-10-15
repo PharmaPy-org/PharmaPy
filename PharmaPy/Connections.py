@@ -996,7 +996,8 @@ class Connection:
         -----
         The transferred matter is ``copy.deepcopy(self.Matter)``, so the
         source outlet is never shared, and it is marked
-        ``transferred_from_uo = True`` (raw-material reporting excludes it).
+        ``transferred_from_uo = True``, as is each phase of a mixture such
+        as a ``Slurry`` (raw-material reporting excludes them, issue #455).
         It is kept as ``self.transferred_matter`` so ``SimulationExec`` can
         verify that the destination actually uses it.
         Dispatch by destination:
@@ -1064,6 +1065,11 @@ class Connection:
         transfered_matter = copy.deepcopy(self.Matter)
 
         transfered_matter.transferred_from_uo = True
+        # Mark each phase of a mixture as well: a unit may hold the phases
+        # without the mixture, and raw-material accounting checks every
+        # phase of an initial holdup (issue #455).
+        for phase in getattr(transfered_matter, 'Phases', None) or ():
+            phase.transferred_from_uo = True
         self.transferred_matter = transfered_matter
         # Snapshot before installation: a destination may extend the list.
         self.transferred_phases = tuple(

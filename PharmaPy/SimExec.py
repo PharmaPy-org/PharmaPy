@@ -2070,8 +2070,28 @@ class SimulationExec:
         Returns
         -------
         dict
-            Initial holdup records including composition fractions [-],
-            temperature [K], pressure [Pa], and volume [m**3].
+            ``{'Initial_holdup': records}`` with one record per raw phase of
+            the initial holdup, keyed by phase name, including the amount
+            [kg] or [mol], composition fractions [-], temperature [K],
+            pressure [Pa], and volume [m**3]. Empty if the unit keeps no
+            initial holdup or none of its phases is a raw material.
+
+        Raises
+        ------
+        AttributeError
+            If the snapshot is neither a phase nor a mixed phase, such as
+            the attribute dictionary kept by ``DeliquoringStep`` and
+            ``DisplacementWashing`` (issue #311).
+
+        Notes
+        -----
+        The initial holdup is accounted per phase (issue #455). A phase
+        transferred from an upstream unit (``transferred_from_uo``) is
+        charged to its source and skipped; the others were charged by the
+        user and are reported. A crystallizer seeded by the user and
+        completed by a transferred liquid therefore reports its seed
+        crystals. A ``Connection`` marks every phase of a transferred
+        mixture, so a wholly transferred holdup reports nothing.
         """
         out = {}
 
@@ -2085,9 +2105,19 @@ class SimulationExec:
 
             fields += ['temp', 'pres', 'vol']
 
-            if not phases.transferred_from_uo:
-                out = self.get_from_phases(phases, fields)
-                out = {'Initial_holdup': out}
+            if getattr(phases, '__module__', None) == 'PharmaPy.MixedPhases':
+                held = list(phases.Phases)
+                raw = [phase for phase in held
+                       if not phase.transferred_from_uo]
+            else:
+                raw = [] if phases.transferred_from_uo else [phases]
+
+            records = {}
+            for phase in raw:
+                records.update(self.get_from_phases(phase, fields))
+
+            if records:
+                out = {'Initial_holdup': records}
 
         return out
 
@@ -2108,8 +2138,10 @@ class SimulationExec:
             accepted for API compatibility but currently does not change the
             returned table.
         include_holdups : bool, optional
-            If true, include initial holdups that were not transferred from an
-            upstream unit operation.
+            If true, include the phases of initial holdups that were not
+            transferred from an upstream unit operation, such as a
+            crystallizer's seed completed by a transferred liquid (see
+            :meth:`get_holdup`).
 
         Returns
         -------
