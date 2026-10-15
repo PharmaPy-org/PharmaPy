@@ -14,9 +14,38 @@ from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
 
+import math
+import numbers
 import warnings
 
 import numpy as np
+
+
+def _require_finite_positive(value, name: str, unit: str) -> None:
+    """Reject a parameter that is not a finite real number above zero.
+
+    Parameters
+    ----------
+    value : float
+        Parameter value, in ``unit``.
+    name : str
+        Parameter name, used in the message.
+    unit : str
+        Bracketed unit of the parameter, such as ``'[s]'`` or ``'[-]'``.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a real number (booleans included), or is
+        zero, negative, NaN or infinite. The message names the parameter,
+        the value and the unit.
+    """
+    # bool is a numbers.Real; numpy.bool_ is not registered as one.
+    is_real = isinstance(value, numbers.Real) and not isinstance(value, bool)
+    if not (is_real and math.isfinite(value) and value > 0):
+        raise ValueError(
+            f'BatchToFlowConnector {name} must be a finite number greater '
+            f'than zero {unit}; got {value!r}.')
 
 
 def Interpolation(t_data, y_data, time, newton=True, num_points=3):
@@ -90,11 +119,25 @@ class BatchToFlowConnector:
         Parameters
         ----------
         cycle_time : float
-            Time over which the batch holdup is discharged [s].
+            Time over which the batch holdup is discharged [s]; finite and
+            greater than zero.
         flow_mult : float, optional
-            Multiplier applied to the discharge mass flow [-]; the default
-            of one discharges the holdup exactly once per cycle.
+            Multiplier applied to the discharge mass flow [-], finite and
+            greater than zero; the default of one discharges the holdup
+            exactly once per cycle.
+
+        Raises
+        ------
+        ValueError
+            If ``cycle_time`` or ``flow_mult`` is not a finite real number
+            greater than zero. The outlet mass flow [kg/s] is the holdup
+            mass [kg] / ``cycle_time`` * ``flow_mult``, so such values gave
+            a negative or NaN flow, or a ``ZeroDivisionError`` when solved
+            (issue #434).
         """
+        _require_finite_positive(cycle_time, 'cycle_time', '[s]')
+        _require_finite_positive(flow_mult, 'flow_mult', '[-]')
+
         self.flow_mult = flow_mult  # [-]
         self.cycle_time = cycle_time  # [s]
 
