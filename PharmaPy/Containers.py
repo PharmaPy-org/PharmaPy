@@ -321,6 +321,10 @@ class Mixer:
 
         Raises
         ------
+        NotImplementedError
+            If an inlet is a bare ``SolidPhase`` or ``SolidStream``
+            (crystals without their liquid); see
+            :meth:`_check_no_bare_solids`. The Mixer is then unchanged.
         ValueError
             If batch inventories and flow rates are combined without a
             duration contract. Supply batch phases or use only streams.
@@ -340,6 +344,7 @@ class Mixer:
         each connected source is mixed once.
         """
         incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
+        self._check_no_bare_solids(incoming)
         self._check_inlet_basis(self._Inlets + incoming)
         self._Inlets += incoming
 
@@ -347,6 +352,43 @@ class Mixer:
         self.bipartite.append(None)
 
         self._refresh_inlet_metadata()
+
+    @staticmethod
+    def _check_no_bare_solids(inlets: list) -> None:
+        """Reject crystals assigned without their liquid.
+
+        Parameters
+        ----------
+        inlets : list of object
+            Candidate inlets: liquid or mixed-phase inventories [kg], or
+            streams [kg/s].
+
+        Raises
+        ------
+        NotImplementedError
+            If an inlet is a ``SolidPhase`` or ``SolidStream`` (or a
+            subclass). The message names each such inlet by position and
+            class and points to ``Slurry``, ``SlurryStream`` and ``Cake``.
+
+        Notes
+        -----
+        The Mixer mixes solids only inside a mixed-phase inlet; a bare
+        solid would be mixed as a liquid, turning the crystals into
+        dissolved solute without an error (issue #458). Mixing bare
+        solids is not implemented, as for the other unsupported physical
+        inputs of PharmaPy units.
+        """
+        solids = [f'{type(inlet).__name__} at position {position}'
+                  for position, inlet in enumerate(inlets)
+                  if isinstance(inlet, (SolidPhase, SolidStream))]
+        if solids:
+            raise NotImplementedError(
+                f'Mixer cannot mix bare solid inlets ({", ".join(solids)} of '
+                'the assigned inlets): it mixes crystals only with their '
+                'liquid, inside a Slurry or a Cake (a SlurryStream for '
+                'flows). Wrap the crystals and their liquid in one of them; '
+                'a bare solid would otherwise be mixed as a dissolved '
+                'liquid.')
 
     @staticmethod
     def _check_inlet_basis(inlets: list) -> None:
@@ -391,6 +433,9 @@ class Mixer:
 
         Raises
         ------
+        NotImplementedError
+            If ``inlet`` is a bare ``SolidPhase`` or ``SolidStream`` (see
+            :meth:`_check_no_bare_solids`); the Mixer is then unchanged.
         ValueError
             If ``inlet`` and ``previous`` have different amount bases, a
             batch inventory [kg] and a flow rate [kg/s]; the Mixer, including
@@ -418,6 +463,7 @@ class Mixer:
                      if held is previous]
         if not positions:
             return False
+        self._check_no_bare_solids([inlet])
 
         bases = {False: 'a batch inventory [kg]', True: 'a flow rate [kg/s]'}
         held_flow = hasattr(previous, 'mass_flow')
