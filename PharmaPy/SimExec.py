@@ -1720,7 +1720,7 @@ class SimulationExec:
         Parameters
         ----------
         uo : object
-            Solved unit operation with ``result.time`` [s].
+            Solved unit operation, normally with ``result.time`` [s].
 
         Returns
         -------
@@ -1731,6 +1731,11 @@ class SimulationExec:
 
         Notes
         -----
+        A unit without a timed result, such as a steady-state
+        ``IsothermalFlash``, ``AdiabaticFlash`` or ``ContinuousExtractor``
+        fed directly by a raw stream, processes a flow without a time
+        span, so its duration is NaN (issue #451).
+
         A unit that is not instantaneous (see :meth:`_is_instantaneous`)
         consumes its feed from its first result time to its last, or to its
         recorded ``inlet_stop_time`` [s] if earlier; a dynamic unit solved
@@ -1784,7 +1789,13 @@ class SimulationExec:
         time (a first, fresh, ``reset()`` or ``reset_states=True`` run).
         That solve's own span is used, capped by its ``inlet_stop_time``.
         """
-        time = np.atleast_1d(np.asarray(uo.result.time, dtype=float))  # [s]
+        time = getattr(getattr(uo, 'result', None), 'time', None)  # [s]
+        if time is None:
+            # A steady-state unit processes a flow [mol/s] or [kg/s]
+            # without a time span (issue #451).
+            return np.nan, ('it has no timed result: it is a steady-state '
+                            'unit such as a flash, or its solve failed')
+        time = np.atleast_1d(np.asarray(time, dtype=float))  # [s]
         if not self._is_instantaneous(uo):
             start_time, end_time = time[0], time[-1]  # [s]
             stop_time = getattr(uo, 'inlet_stop_time', None)  # [s]
@@ -1887,9 +1898,12 @@ class SimulationExec:
         Warns
         -----
         RuntimeWarning
-            If the unit is instantaneous and its consumed duration is
-            undefined, so its static continuous totals are NaN. The message
-            names the unit and the reason: not part of the solved flowsheet;
+            If the unit's consumed duration is undefined, so its static
+            continuous totals are NaN: a unit without a timed result, such
+            as a steady-state flash fed directly by a raw stream (issue
+            #451), or an instantaneous unit. The message names the unit and
+            the reason, for an instantaneous unit: not part of the solved
+            flowsheet;
             terminal unit; successor not solved or no transfer recorded;
             successor without a timed result (failed solve, or a
             steady-state unit such as a flash, issue #445);
@@ -2006,8 +2020,10 @@ class SimulationExec:
                         if reason is not None:
                             unit_name = (self._unit_name(uo)
                                          or type(uo).__name__)
+                            kind = ('instantaneous unit'
+                                    if self._is_instantaneous(uo) else 'unit')
                             warnings.warn(
-                                f"Raw inlets of instantaneous unit "
+                                f"Raw inlets of {kind} "
                                 f"'{unit_name}' have no defined fed duration: "
                                 f'{reason}; their totals are reported as NaN.',
                                 RuntimeWarning, stacklevel=2)
@@ -2111,8 +2127,9 @@ class SimulationExec:
         Warns
         -----
         RuntimeWarning
-            From :meth:`get_raw_inlets`, once per instantaneous unit whose
-            raw totals are NaN.
+            From :meth:`get_raw_inlets`, once per unit whose raw totals
+            are NaN: an instantaneous unit without a verified consumer, or a
+            steady-state unit without a timed result, such as a flash.
 
         Notes
         -----
@@ -2296,8 +2313,9 @@ class SimulationExec:
         Warns
         -----
         RuntimeWarning
-            From :meth:`get_raw_inlets`, once per instantaneous unit whose
-            raw totals are NaN.
+            From :meth:`get_raw_inlets`, once per unit whose raw totals
+            are NaN: an instantaneous unit without a verified consumer, or a
+            steady-state unit without a timed result, such as a flash.
 
         Notes
         -----

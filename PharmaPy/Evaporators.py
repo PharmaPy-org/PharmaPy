@@ -204,6 +204,33 @@ class IsothermalFlash:
         solved unit outside ``PharmaPy.Containers``.
         """
 
+    def get_reported_outlets(self) -> dict:
+        """Return the flash products that the stream table reports.
+
+        Returns
+        -------
+        dict of str to LiquidStream/VaporStream or LiquidPhase/VaporPhase
+            ``{'liquid': LiquidOut, 'vapor': VaporOut}``: the liquid and
+            vapor products, as flows [mol/s] for a stream ``Inlet`` or as
+            amounts [mol] for a phase ``Inlet``, at the drum temperature
+            [K] and pressure [Pa].
+
+        Raises
+        ------
+        AttributeError
+            If the flash has not been solved, so it has no ``LiquidOut``.
+
+        Notes
+        -----
+        ``SimulationResult.GetStreamTable`` reads this hook before
+        ``Outlet`` and reports the products as the rows
+        ``'Outlet_liquid'`` and ``'Outlet_vapor'`` (issue #451). The
+        IsothermalFlash deliberately has no ``Outlet``: a ``Connection`` hands a
+        source's ``Outlet`` to its successor, and a flash cannot be a
+        flowsheet source (issue #445).
+        """
+        return {'liquid': self.LiquidOut, 'vapor': self.VaporOut}
+
     @property
     def Inlet(self):
         return self._Inlet
@@ -445,6 +472,33 @@ class AdiabaticFlash:
         ``SimulationExec.SolveFlowsheet`` calls ``flatten_states`` on every
         solved unit outside ``PharmaPy.Containers``.
         """
+
+    def get_reported_outlets(self) -> dict:
+        """Return the flash products that the stream table reports.
+
+        Returns
+        -------
+        dict of str to LiquidStream/VaporStream or LiquidPhase/VaporPhase
+            ``{'liquid': LiquidOut, 'vapor': VaporOut}``: the liquid and
+            vapor products, as flows [mol/s] for a stream ``Inlet`` or as
+            amounts [mol] for a phase ``Inlet``, at the drum temperature
+            [K] and pressure [Pa].
+
+        Raises
+        ------
+        AttributeError
+            If the flash has not been solved, so it has no ``LiquidOut``.
+
+        Notes
+        -----
+        ``SimulationResult.GetStreamTable`` reads this hook before
+        ``Outlet`` and reports the products as the rows
+        ``'Outlet_liquid'`` and ``'Outlet_vapor'`` (issue #451). The
+        AdiabaticFlash deliberately has no ``Outlet``: a ``Connection`` hands a
+        source's ``Outlet`` to its successor, and a flash cannot be a
+        flowsheet source (issue #445).
+        """
+        return {'liquid': self.LiquidOut, 'vapor': self.VaporOut}
 
     @property
     def Inlet(self):

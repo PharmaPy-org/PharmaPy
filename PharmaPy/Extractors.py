@@ -131,6 +131,43 @@ class ContinuousExtractor:
     def get_inputs(self):
         pass
 
+    def get_reported_outlets(self) -> dict:
+        """Return the two liquid products that the stream table reports.
+
+        Returns
+        -------
+        dict of str to LiquidStream or LiquidPhase
+            ``{'heavy': Liquid_2, 'light': Liquid_3}``: the liquid products,
+            as flows [mol/s] for ``ContinuousExtractor`` or amounts [mol]
+            for ``BatchExtractor``, at the feed temperature [K] and
+            pressure [Pa].
+
+        Raises
+        ------
+        AttributeError
+            If the extractor has not been solved, so it has no
+            ``Liquid_2``.
+
+        Notes
+        -----
+        ``heavy`` and ``light`` follow the extractor's current
+        classification of ``Liquid_2`` and ``Liquid_3`` in
+        ``retrieve_results``, also used by its result fields ``x_heavy``
+        and ``x_light``: when two liquid phases form, ``Liquid_2`` is the
+        one with the larger molar density [mol/m**3], not necessarily the
+        larger mass density [kg/m**3]. Otherwise the products are not
+        compared by density: ``Liquid_2`` takes the phase-fraction share of
+        the feed and ``Liquid_3`` the rest, so one of them is empty.
+        Classifying by mass density is tracked by issue #257
+        (https://github.com/PharmaPy-org/PharmaPy/issues/257); fixing it
+        there corrects these rows without renaming them.
+        ``SimulationResult.GetStreamTable`` reads this hook before
+        ``Outlet`` and reports the products as the rows ``'Outlet_heavy'``
+        and ``'Outlet_light'`` (issue #451). The extractor deliberately has
+        no ``Outlet``, so it cannot be a flowsheet source (issue #445).
+        """
+        return {'heavy': self.Liquid_2, 'light': self.Liquid_3}
+
     def material_eqn_based(self, extr, raff, x_extr, x_raff, z_i):
 
         gamma_extr = self.matter.getActivityCoeff(method=self.gamma_method,

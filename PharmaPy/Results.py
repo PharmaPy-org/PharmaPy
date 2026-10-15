@@ -73,7 +73,7 @@ def get_di_multiindex(di):
 
 def pprint(di, name_items, fields, str_out=True):
     """
-    Create a table showing items with their respective fiels as columns
+    Create a table showing items with their respective fields as columns.
 
     Parameters
     ----------
@@ -84,15 +84,21 @@ def pprint(di, name_items, fields, str_out=True):
              'item_2': {'field_1':..., 'field_2':...},
              ...}
 
-    described_name : str
-        name of described variable.
-    fields : list of str
-        name of fields to be taken from nested dictionaries.
+        It may be empty, in which case only the header is rendered.
+    name_items : str
+        Header of the first column, which lists the item names.
+    fields : dict of str to str
+        Field names to be taken from the nested dictionaries, mapped to
+        their ``str.format`` type codes (e.g. ``'d'`` or ``'s'``).
+    str_out : bool, optional
+        If True (default), join the table lines into one string.
 
     Returns
     -------
-    out : TYPE
-        DESCRIPTION.
+    out : str or list of str
+        The table, as one string or as its lines. Column widths fit the
+        header and the widest value; an empty ``di`` gives the header
+        between two separator lines, followed by the closing separator.
 
     """
 
@@ -107,8 +113,10 @@ def pprint(di, name_items, fields, str_out=True):
     items = list(di.keys())
 
     # ---------- Lenghts
-    # Lenght of first column
-    max_lens = {name_items: max([len(name) for name in items])}
+    # Lenght of first column. An empty table (no items, e.g. a flowsheet of
+    # steady-state flashes without ``states_di``) still prints its header,
+    # so the column widths fall back to the header widths.
+    max_lens = {name_items: max([len(name) for name in items], default=0)}
 
     # Lenght of remaining columns
     for field in fields:
@@ -122,7 +130,7 @@ def pprint(di, name_items, fields, str_out=True):
                     field_vals[ind] = '%i, ..., %i' % (val[0], val[-1])
 
         len_vals = [len(repr(val)) for val in field_vals]
-        max_lens[field] = max(len_vals)
+        max_lens[field] = max(len_vals, default=0)
 
     # All fields
     all_fields = {name_items: 's', **fields}
@@ -262,6 +270,50 @@ def _flowsheet_diagram_lines(graph: Mapping[str, Sequence[str]],
     return lines
 
 
+def _named_outlets(uo) -> dict:
+    """Return the outlets of a unit operation keyed by stream-table row.
+
+    Parameters
+    ----------
+    uo : object
+        Solved unit operation. A unit that reports outlets other than its
+        flowsheet ``Outlet`` defines ``get_reported_outlets()``, returning a
+        dict of named outlet streams or phases; every other unit publishes
+        ``Outlet``, a stream or phase or a dict of them.
+
+    Returns
+    -------
+    dict of str to object
+        ``{'Outlet': outlet}`` for a single outlet, or
+        ``{'Outlet_<key>': outlet}`` for each entry of a dict of outlets,
+        in the unit's order. The outlets keep their own basis: flows
+        [kg/s], [mol/s] for streams, amounts [kg], [mol] for phases.
+
+    Raises
+    ------
+    AttributeError
+        If the unit has neither hook nor ``Outlet``, or its hook reads an
+        outlet that does not exist yet because the unit was not solved.
+
+    Notes
+    -----
+    ``get_reported_outlets`` is read before ``Outlet`` so that units which
+    must not publish an ``Outlet``, such as the steady-state flashes and
+    ``ContinuousExtractor`` that cannot be flowsheet sources (issue #445),
+    are still reported (issue #451).
+    """
+    reporter = getattr(uo, 'get_reported_outlets', None)
+    if reporter is not None:
+        matter_obj = reporter()
+    else:
+        matter_obj = uo.Outlet
+
+    if not isinstance(matter_obj, dict):
+        return {'Outlet': matter_obj}
+
+    return {'Outlet_%s' % key: val for key, val in matter_obj.items()}
+
+
 class SimulationResult:
     def __init__(self, sim):
         self.sim = sim
@@ -338,10 +390,23 @@ class SimulationResult:
             temperature [K], pressure [Pa], volume [m**3], volumetric flow
             [m**3/s], and species fractions [-], where applicable. Mass
             amounts and flows are [kg] and [kg/s]; molar amounts and flows
-            are [mol] and [mol/s]. Inapplicable fields are NaN.
+            are [mol] and [mol/s]. Inapplicable fields are NaN. A unit's
+            outlet rows are ``'Outlet'``, or ``'Outlet_<key>'`` for each
+            of several named outlets: for example ``'Outlet_liquid'`` and
+            ``'Outlet_vapor'`` for ``IsothermalFlash`` and
+            ``AdiabaticFlash``, and ``'Outlet_heavy'`` and
+            ``'Outlet_light'`` for ``ContinuousExtractor`` (see
+            ``_named_outlets``). The extractor rows follow its current
+            molar-density classification of ``Liquid_2`` (heavy) and
+            ``Liquid_3`` (light); classifying by mass density is tracked
+            by issue #257, which will correct the rows without renaming
+            them.
 
         Raises
         ------
+        AttributeError
+            If a unit has no outlet to report, for example because it was
+            not solved.
         ValueError
             If ``basis`` is not ``'mass'`` or ``'mole'``, or (forwarded from
             ``SimulationExec.GetRawMaterials``) if a raw inlet's dynamic
@@ -351,7 +416,9 @@ class SimulationResult:
         -----
         RuntimeWarning
             Forwarded from ``SimulationExec.get_raw_inlets``, once per
-            instantaneous unit whose raw amounts are NaN.
+            unit whose raw amounts are NaN: an instantaneous unit without a
+            verified consumer, or a steady-state unit without a timed
+            result, such as a flash.
 
         Notes
         -----
@@ -383,13 +450,7 @@ class SimulationResult:
 
         info = {}
         for ind, name in enumerate(uo_dict):
-            matter_obj = uo_dict[name].Outlet
-
-            if not isinstance(matter_obj, dict):
-                matter_obj = {'Outlet': matter_obj}
-            else:
-                matter_obj = {'Outlet_%s' % key: val
-                              for key, val in matter_obj.items()}
+            matter_obj = _named_outlets(uo_dict[name])
 
             info[name] = {}
 
