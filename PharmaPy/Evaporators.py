@@ -622,10 +622,17 @@ class AdiabaticFlash:
         ``states_di`` describes the flash unknowns for this feed: the
         species that are not supercritical at the feed temperature, which
         the solve keeps in its composition blocks, and the drum
-        temperature (see ``_active_states_di``).
+        temperature (see ``_active_states_di``). ``num_comp`` is the number
+        of feed species; a solve never changes it (issue #319).
+
+        The zero-flow vapor object is both the ``VaporOut`` placeholder
+        and ``_vapor_props``, the property object whose composition the
+        energy balance updates while solving. A solve publishes a new
+        ``VaporOut``, so a later solve leaves the published products of
+        earlier solves unchanged.
         """
         self._Inlet = instance
-        self.num_comp = self._Inlet.num_species
+        self.num_comp = self._Inlet.num_species  # [-], feed species
         self.states_di = self._active_states_di(self._supercritical_mask())
 
         path = self.Inlet.path_data
@@ -633,6 +640,7 @@ class AdiabaticFlash:
         self.VaporOut = VaporStream(path, pres=self.pres,
                                     mole_frac=instance.mole_frac,
                                     check_input=False)
+        self._vapor_props = self.VaporOut
 
         self.k_func = self.Inlet.getKeqVLE
 
@@ -700,12 +708,36 @@ class AdiabaticFlash:
         return material
 
     def energy_balance(self, liq, vap, x_i, y_i, z_i, temp):
+        """Evaluate the scaled adiabatic energy residual.
 
-        self.VaporOut.mole_frac = y_i
+        Parameters
+        ----------
+        liq, vap : float
+            Liquid and vapor fractions of the feed [-].
+        x_i, y_i : numpy.ndarray
+            Liquid and vapor mole fractions of all feed species [-].
+        z_i : numpy.ndarray
+            Feed mole fractions [-].
+        temp : float
+            Drum temperature [K], also the enthalpy reference.
+
+        Returns
+        -------
+        numpy.ndarray, shape (1,)
+            Molar energy residual [J/mol] divided by ``div_energybce`` [-].
+
+        Notes
+        -----
+        The vapor enthalpy is evaluated with ``_vapor_props``, whose
+        composition is set to ``y_i``; the published ``VaporOut`` of an
+        earlier solve is not modified (issue #319).
+        """
+        self._vapor_props.mole_frac = y_i
 
         # Energy balance
         h_liq = 0  # reference state
-        h_vap = self.VaporOut.getEnthalpy(temp, temp_ref=temp, basis='mole')
+        h_vap = self._vapor_props.getEnthalpy(temp, temp_ref=temp,
+                                              basis='mole')
         h_feed = self.Inlet.getEnthalpy(temp_ref=temp, basis='mole')
 
         energy_bce = liq * h_liq + vap * h_vap - h_feed
@@ -714,12 +746,32 @@ class AdiabaticFlash:
         return energy_bce
 
     def unit_model(self, states):
+        """Evaluate the flash residuals for the active species.
+
+        Parameters
+        ----------
+        states : numpy.ndarray
+            Unknowns in the order of ``states_di``: liquid fraction [-],
+            liquid and vapor mole fractions of the N species that are not
+            supercritical [-], vapor fraction [-] and temperature [K].
+
+        Returns
+        -------
+        numpy.ndarray
+            Material residuals [-] followed by the scaled energy residual.
+
+        Notes
+        -----
+        N is counted from ``is_supercritic``, the mask of the current
+        solve, so no count accumulates across solves (issue #319).
+        """
         liq = states[0]
         vap = states[-2]
 
+        num_active = int(np.sum(~self.is_supercritic))  # [-]
         fracs = states[1:-2]
-        x_i = fracs[:self.num_comp]
-        y_i = fracs[self.num_comp:]
+        x_i = fracs[:num_active]
+        y_i = fracs[num_active:]
         z_i = self.Inlet.mole_frac
 
         if any(self.is_supercritic):
@@ -761,6 +813,14 @@ class AdiabaticFlash:
         ValueError
             If residual_tolerance is not finite and positive.
 
+        Notes
+        -----
+        The supercritical species and the active species count are derived
+        from the current ``Inlet`` on every solve, without changing
+        ``num_comp``, so repeated solves of the same feed give the same
+        products. Earlier releases reduced ``num_comp`` on every solve of a
+        feed with a supercritical species, and the second solve failed
+        with ``IndexError`` (issue #319).
         """
 
         if self.seed_basedon_input:
@@ -772,13 +832,13 @@ class AdiabaticFlash:
             y_seed = x_seed
 
         is_supercritic = self._supercritical_mask()
+        num_active = int(np.sum(~is_supercritic))  # [-], solved species
 
         if any(is_supercritic):
             x_seed = x_seed[~is_supercritic]
             y_seed = y_seed[~is_supercritic]
 
-            self.num_comp -= sum(is_supercritic)
-            self.z_super = self.Inlet.mole_frac[is_supercritic]
+            self.z_super = self.Inlet.mole_frac[is_supercritic]  # [-]
 
         self.is_supercritic = is_supercritic
         # The feed may have changed in place since it was assigned.
@@ -790,18 +850,16 @@ class AdiabaticFlash:
 
         seed = np.concatenate(([l_seed], x_seed, y_seed, [v_seed, temp_seed]))
 
-        # jac_eqns = jacauto(self.unit_model)
         solution = _solve_flash(self.unit_model, seed, -2, residual_tolerance)
-        # fprime=jac_eqns)
 
         # Retrieve solution
         liq_flash = solution[0] * self.in_flow
         vap_flash = solution[-2] * self.in_flow
         temp = solution[-1]
 
-        fracs = solution[1:2*self.num_comp + 1]
-        x_flash = fracs[:self.num_comp]
-        y_flash = fracs[self.num_comp:]
+        fracs = solution[1:2*num_active + 1]
+        x_flash = fracs[:num_active]
+        y_flash = fracs[num_active:]
 
         if any(is_supercritic):
             x_flash, y_flash = merge_supercritical(self.is_supercritic,
