@@ -6,7 +6,11 @@ two products (``LiquidOut``/``VaporOut``, ``Liquid_2``/``Liquid_3``) and no
 ``SimulationResult.GetStreamTable`` reports them through their
 ``get_reported_outlets`` hook, as the rows ``Outlet_liquid`` and
 ``Outlet_vapor`` (flashes) or ``Outlet_heavy`` and ``Outlet_light``
-(extractor). The flashes declare ``states_di`` for their algebraic
+(extractor). Which extractor liquid is heavy is provisional: the test pins
+the extractor's current molar-density rule, while issue #257 will classify
+by mass density; on this fixture the mass-density order is the reverse
+(983.5 vs 1012.7 kg/m**3), so the two rows swap once #257 is fixed. The
+flashes declare ``states_di`` for their algebraic
 unknowns, so the unit summary lists them (issue #457): 2N + 2 for
 ``IsothermalFlash`` and 2N + 3 for ``AdiabaticFlash``, with N the number
 of database species. The metadata keys, species index and dimensions
@@ -258,8 +262,11 @@ def test_stream_table_reports_both_products(path, case, with_mixer):
     molar_density = (products['mole_flow']
                      / products['vol_flow'])  # [mol/m**3]
     if case == 'continuous-extractor':
-        # The extractor's heavy liquid is the one with the larger molar
-        # density (its own convention, also used by x_heavy/x_light).
+        # Provisional, pending issue #257: the extractor's heavy liquid is
+        # the one with the larger molar density (its current convention,
+        # also used by x_heavy/x_light). By mass density this fixture's
+        # order is the reverse, so the rows swap once #257 classifies by
+        # mass density; update this assertion then.
         assert (molar_density['Outlet_heavy'].iloc[0]
                 > molar_density['Outlet_light'].iloc[0])
     else:
