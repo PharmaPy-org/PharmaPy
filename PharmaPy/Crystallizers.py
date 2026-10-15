@@ -3508,6 +3508,30 @@ class SemibatchCryst(MSMPR):
                  rad_zero=0, reset_states=False, h_conv=1000, vol_ht=None,
                  basis='mass_conc', jac_type=None, num_interp_points=3,
                  state_events=None, param_wrapper=None):
+        """Create a semibatch crystallizer.
+
+        Parameters
+        ----------
+        target_comp, vol_tank, mask_params, method, scale, controls,
+        adiabatic, rad_zero, reset_states, h_conv, vol_ht, basis, jac_type,
+        num_interp_points, state_events, param_wrapper
+            As for :class:`MSMPR`; ``vol_tank`` is the vessel volume
+            [m**3] and ``h_conv`` the liquid-side heat transfer
+            coefficient [W/m**2/K].
+
+        Notes
+        -----
+        The model is inherited from :class:`MSMPR`, but the unit
+        accumulates its feed and its ``Outlet`` is its ``Slurry`` holdup
+        (total amounts [kg], population [#/um]), not a stream. It
+        therefore declares ``oper_mode = 'Semibatch'`` and
+        ``is_continuous = False`` instead of the inherited continuous
+        flags (issue #447). A flowsheet connection then hands its final
+        holdup to a batch unit or ``Mixer`` and rejects a continuous
+        successor; a connected continuous source becomes its ``Inlet``;
+        and ``SimulationExec.GetLabor`` counts it as a batch unit. No
+        crystallizer method reads these flags.
+        """
 
         super().__init__(target_comp, mask_params,
                          method, scale, vol_tank,
@@ -3516,6 +3540,9 @@ class SemibatchCryst(MSMPR):
                          h_conv, vol_ht, basis,
                          jac_type, num_interp_points, state_events,
                          param_wrapper)
+
+        self.oper_mode = 'Semibatch'
+        self.is_continuous = False
 
     def material_balances(self, time: float, params: "np.ndarray | None",
                           u_inputs: dict, rhos: "Sequence[Sequence[float | None]]",
