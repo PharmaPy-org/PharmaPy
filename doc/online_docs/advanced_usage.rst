@@ -118,6 +118,13 @@ This also corrects previously inaccurate multistage trajectories under the
 default algebraic-state suppression, including when the feed is light.
 No solver-option override is needed to obtain the corrected state flags.
 
+Assigning ``Inlet`` merges the given streams into the held ones: a key that
+is assigned again, such as ``extractor.Inlet = {'feed': new_feed}``,
+replaces the stream held under it, and keys that are not named, such as an
+earlier ``solvent``, are kept. Earlier releases kept the old stream when a
+key was assigned again, so the extractor was solved with the replaced feed
+(issue #449).
+
 Continuous holdup accuracy
 ==========================
 

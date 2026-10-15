@@ -704,9 +704,9 @@ class Connection:
           one. Phases set independently, such as a crystallizer's seed or a
           dryer's gas, are kept. If the assignment raises, the destination's
           attributes, phase list and phase names are restored.
-        * ``DynamicExtractor``: the copy is removed from its ``inlets``
-          before ``{'feed': matter}`` is merged; that merge keeps existing
-          keys, so the earlier ``'feed'`` would otherwise win.
+        * ``DynamicExtractor``: ``{'feed': matter}`` replaces the held
+          ``'feed'``, because its ``Inlet`` setter lets newly assigned keys
+          win (issue #449); its ``'solvent'`` is kept.
 
         Without ``replaced_matter``, or when the destination no longer
         holds it, the transfer is installed as described above.
@@ -758,11 +758,6 @@ class Connection:
 
         elif mode_dest == 'Continuous':
             if class_destination == 'DynamicExtractor':
-                if replaced is not None:
-                    self.destination_uo.inlets = {
-                        key: inlet
-                        for key, inlet in self.destination_uo.inlets.items()
-                        if inlet is not replaced}
                 self.destination_uo.Inlet = {'feed': transfered_matter}
             else:
                 self.destination_uo.Inlet = transfered_matter
