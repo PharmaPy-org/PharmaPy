@@ -72,14 +72,36 @@ def test_pathway_mechanism_is_dimension_independent():
     assert mechanism.model.pathway_ids == ("growth",)
 
 
+def test_flagship_inputs_construct_native_reactor_specializations():
+    root = Path(__file__).parents[2] / "examples/bioreactors"
+    expected = {
+        "batch_ecoli_dfba": BatchReactor,
+        "fed_batch_cho": SemiBatchReactor,
+    }
+    for folder_name, reactor_type in expected.items():
+        folder = (Path(__file__).parent / 'fixtures' if folder_name == 'fed_batch_cho' else root) / folder_name
+        case = json.loads((folder / "inputs/case.json").read_text())
+        definition = json.loads((folder / "inputs/mechanism.json").read_text())
+        assembly = build_bioreactor(case, definition, folder / "inputs/thermo.json")
+        assert type(assembly.unit) is reactor_type
+        assert assembly.unit.Phases.Liquids[0] is assembly.phase
+        assert assembly.unit.intraphase_processes[0].mechanism is assembly.mechanism
 
 
+def test_inactive_biology_metadata_is_rejected():
+    folder = Path(__file__).parents[2] / "examples/bioreactors/batch_ecoli_dfba"
+    case = json.loads((folder / "inputs/case.json").read_text())
+    definition = json.loads((folder / "inputs/mechanism.json").read_text())
+    renamed = copy.deepcopy(case)
+    renamed["biology"]["system"] = {"organism": "descriptive metadata only"}
+    with np.testing.assert_raises_regex(ValueError, "unsupported.*system"):
+        build_bioreactor(renamed, definition, folder / "inputs/thermo.json")
 
 
 def test_pathway_mechanism_runs_inside_native_multiphase_vessel():
     thermo = (
         Path(__file__).parents[2]
-        / "tests/fixtures/native_four_species.json"
+        / "examples/bioreactors/batch_ecoli_dfba/inputs/thermo.json"
     )
     molecular_weights = np.array([180.156, 60.052, 31.998])
     species_moles = np.array([0.0108, 0.0004, 0.00021])
@@ -106,7 +128,7 @@ def test_pathway_mechanism_runs_inside_native_multiphase_vessel():
 
 
 def test_adaptive_backend_enforces_depletion_as_a_hard_boundary():
-    thermo = Path(__file__).parents[2] / "tests/fixtures/native_four_species.json"
+    thermo = Path(__file__).parents[2] / "examples/bioreactors/batch_ecoli_dfba/inputs/thermo.json"
     payload = _definition()
     payload["pathway_ids"] = ["growth"]
     payload["exchange_matrix"] = [[-1.0], [0.0], [0.0]]
@@ -160,7 +182,7 @@ class _AlgebraicTestMechanism(Mechanism):
 
 
 def test_native_vessel_assembles_differential_algebraic_residual():
-    thermo = Path(__file__).parents[2] / "tests/fixtures/native_four_species.json"
+    thermo = Path(__file__).parents[2] / "examples/bioreactors/batch_ecoli_dfba/inputs/thermo.json"
     phase = LiquidPhase(thermo, mass=1.0, mass_frac=np.full(4, 0.25), verbose=False)
     mechanism = _AlgebraicTestMechanism(); phase.mechanisms = mechanism
     unit = MultiPhaseVessel(isothermal=True)

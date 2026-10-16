@@ -27,7 +27,7 @@ def build(name='generic_batch', policy='working-volume', mode=None, backend=None
     return build_bioreactor(case, definition, p / 'thermo.json')
 
 
-@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'fed_batch_cho'])
+@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'batch_ecoli_dfba', 'fed_batch_cho'])
 @pytest.mark.parametrize('mode', ['batch', 'fed-batch'])
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])
 def test_volume_replay_reset_and_copy(name, mode, backend):

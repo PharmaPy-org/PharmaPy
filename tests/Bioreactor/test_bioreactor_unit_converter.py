@@ -77,7 +77,7 @@ def test_arrays_native_phase_properties_and_invalid_values():
         Units.convert(-274., 'degC', 'K')
 
 
-@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'fed_batch_cho'])
+@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'batch_ecoli_dfba', 'fed_batch_cho'])
 def test_json_paths_and_mappings_share_native_converter(name):
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
     case, mechanism = [json.loads((p/file).read_text()) for file in ('case.json', 'mechanism.json')]
@@ -171,6 +171,25 @@ def test_ambiguous_or_incompatible_pathway_bases_fail(exchange, growth):
         Units(flux_time_unit='1/h', flux_basis=dict(exchange=exchange, growth=growth))
 
 
+def test_pathway_transfer_cap_uses_declared_exchange_basis():
+    p = EXAMPLES / 'batch_ecoli_dfba/inputs'
+    case, definition = [json.loads((p/file).read_text()) for file in ('case.json', 'mechanism.json')]
+    original = build_bioreactor(case, definition, p/'thermo.json').mechanism.model
+    model = definition['model']['pathways']
+    model['flux_basis'] = {
+        'exchange': dict(amount_unit='mmol', normalization='kgDW', time_unit='h'),
+        'growth': dict(amount_unit='1', normalization='none', time_unit='h')}
+    model['exchange_matrix'] = (np.asarray(model['exchange_matrix']) * 1000.).tolist()
+    uptake = definition['parameters']['rates']['uptake']
+    for name in uptake:
+        uptake[name] *= 1000.
+    converted = build_bioreactor(case, definition, p/'thermo.json').mechanism.model
+    for biomass in (.001, 1.):
+        first = original.solve_fluxes([10.8, .4, .21], biomass)
+        second = converted.solve_fluxes([10.8, .4, .21], biomass)
+        np.testing.assert_allclose(second.fluxes, first.fluxes, atol=1e-10)
+        np.testing.assert_allclose(second.extracellular_rates * converted.exchange_scale,
+                                   first.extracellular_rates, atol=1e-9)
 
 
 @pytest.mark.parametrize('source, target, value, expected', [

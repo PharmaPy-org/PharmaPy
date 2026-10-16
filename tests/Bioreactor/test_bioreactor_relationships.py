@@ -97,6 +97,18 @@ def test_equivalent_concentration_units(factor):
                              half_saturation=3.*factor)) == pytest.approx(1.6)
 
 
+@pytest.mark.parametrize('mode', ['direct', 'reconciled'])
+@pytest.mark.parametrize('run', ['', 'F11'])
+def test_examples_compile_without_mutation(mode, run):
+    root = Path(__file__).parents[2] / 'examples/bioreactors/ecoli_ye_fed_batch'
+    folder = root / ('inputs' if mode == 'direct' else 'reconciliation/inputs') / run
+    case = json.loads((folder/'case.json').read_text())
+    mechanism = json.loads((folder/'mechanism.json').read_text())
+    before = deepcopy(mechanism)
+    _, normalized = normalize_forward_inputs(case, mechanism)
+    assert mechanism == before
+    assert '"relationship"' not in json.dumps(normalized)
+    assert '"relationship"' in json.dumps(mechanism)
 
 
 @pytest.mark.parametrize('count', [1, 2, 8, 32])
