@@ -14,7 +14,7 @@ from PharmaPy.Bioreactors.construction import _apply_material_event
 
 ROOT = Path(__file__).parents[2]
 EXAMPLES = ROOT / "examples/bioreactors"
-NAMES = ("fed_batch_cho", "generic_batch", "generic_fed_batch")
+NAMES = ("batch_ecoli_dfba", "fed_batch_cho", "generic_batch", "generic_fed_batch")
 
 
 def test_reported_temperature_and_stock_feed_material_balance():

@@ -1,0 +1,45 @@
+{
+  "schema_version": 2,
+  "biology": {
+    "conditions": {
+      "temperature_k": 303.15
+    }
+  },
+  "numerics": {
+    "backend": "scipy",
+    "step": {
+      "unit": "h",
+      "value": 0.1
+    },
+    "relative_tolerance": 1e-10,
+    "absolute_tolerance": 1e-15,
+    "maximum_step": {
+      "unit": "s",
+      "value": 180
+    },
+    "jacobian_relative_step": 1e-05,
+    "jacobian_state_scale": 1e-06
+  },
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "fed-batch",
+    "runtime": {
+      "unit": "h",
+      "value": 26.5
+    },
+    "temperature_k": 303.15,
+    "volume_policy": "working-volume"
+  },
+  "recipe": {
+    "name": "F11",
+    "require_complete_inputs": false,
+    "time_unit": "h"
+  },
+  "$comment": "Same frozen forward case, using rate reconciliation and dry biomass population."
+}

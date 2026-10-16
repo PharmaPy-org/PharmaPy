@@ -12,7 +12,7 @@ import pytest
 ROOT = Path(__file__).parents[2]
 EXAMPLES = ROOT / "examples/bioreactors"
 NOTEBOOKS = tuple(EXAMPLES / name / "workflow.ipynb" for name in (
-    "generic_batch", "generic_fed_batch"))
+    "batch_ecoli_dfba", "generic_batch", "generic_fed_batch"))
 
 
 @pytest.mark.parametrize("notebook", NOTEBOOKS, ids=lambda p: p.parent.name)

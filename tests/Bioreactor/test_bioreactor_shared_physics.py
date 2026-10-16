@@ -57,7 +57,7 @@ def _model(matrix=((-1.,), (-1.,), (0.,))):
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])
 @pytest.mark.parametrize('acetate', [0., 1e-5])
 def test_missing_uptake_rule_cannot_create_growth_from_empty_resource(backend, acetate):
-    thermo = Path(__file__).parents[2] / 'tests/fixtures/native_four_species.json'
+    thermo = EXAMPLES / 'batch_ecoli_dfba/inputs/thermo.json'
     solute = np.array([.001, acetate, 0.]) * np.array([180.156, 60.052, 31.998]) / 1000.
     phase = LiquidPhase(thermo, mass=1., mass_frac=np.r_[solute, 1.-solute.sum()], verbose=False)
     mechanism = PathwayMetabolism(_model(), 1e-4, flux_time_unit='1/s')
@@ -126,6 +126,12 @@ def test_impossible_external_drain_is_reported_as_infeasible():
         ConfiguredPathwayModel(_model()).solve_fluxes([1., 1., 1.], 1., availability=availability)
 
 
+def test_transport_capacity_cannot_disagree_with_actual_supply():
+    p = EXAMPLES / 'batch_ecoli_dfba/inputs'
+    case, definition = [json.loads((p / name).read_text()) for name in ('case.json', 'mechanism.json')]
+    definition['transport']['kla_per_s'] = 0.
+    with pytest.raises(ValueError, match='actual transport'):
+        build_bioreactor(case, definition, p / 'thermo.json')
 
 
 def test_culture_adaptive_boundary_constrains_growth_and_product_together():
