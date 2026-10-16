@@ -1,0 +1,167 @@
+{
+  "schema_version": 2,
+  "mechanism": "configured-kinetics",
+  "parameters": {
+    "rates": {
+      "growth": 0.4,
+      "uptake": 4.0
+    },
+    "affinities": {},
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {},
+    "reconciliation": {},
+    "kinetics": {
+      "rule_graph": [
+        {
+          "identifier": "biomass_g_l",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "biomass"
+              },
+              {
+                "constant": "biomass_g_per_mmol"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "biomass_rate",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.growth"
+                  },
+                  {
+                    "ref": "biomass_g_l"
+                  }
+                ]
+              },
+              {
+                "op": "divide",
+                "args": [
+                  {
+                    "concentration": "nutrient"
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "constant": "half_saturation"
+                      },
+                      {
+                        "concentration": "nutrient"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "nutrient_rate",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "negate",
+                "args": [
+                  {
+                    "op": "multiply",
+                    "args": [
+                      {
+                        "parameter": "rates.uptake"
+                      },
+                      {
+                        "ref": "biomass_g_l"
+                      },
+                      {
+                        "constant": "kg_per_g"
+                      },
+                      {
+                        "constant": "nutrient_mw_g_mol"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "op": "divide",
+                "args": [
+                  {
+                    "concentration": "nutrient"
+                  },
+                  {
+                    "op": "add",
+                    "args": [
+                      {
+                        "constant": "half_saturation"
+                      },
+                      {
+                        "concentration": "nutrient"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "species_mass_rates": {
+        "biomass": "biomass_rate",
+        "nutrient": "nutrient_rate"
+      },
+      "rate_unit": "g/(L h)",
+      "constants": {
+        "biomass_g_per_mmol": 1.0,
+        "kg_per_g": 0.001,
+        "nutrient_mw_g_mol": 100.0,
+        "half_saturation": 1.0
+      }
+    }
+  },
+  "network": null,
+  "rate_provider": null,
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "batch": [
+      {
+        "event_type": "flow",
+        "time": 0.0,
+        "volume_l_h": 0.1,
+        "concentrations_mmol_l": {
+          "nutrient": 10.0
+        },
+        "density_kg_l": 1.0
+      }
+    ]
+  },
+  "state": {
+    "species": {
+      "unit": "mol",
+      "amounts": {
+        "nutrient": 0.01,
+        "biomass": 0.0001
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  }
+}

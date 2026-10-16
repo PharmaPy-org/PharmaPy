@@ -73,8 +73,14 @@ Homepage = "https://github.com/PharmaPy-org/PharmaPy"
 Repository = "https://github.com/PharmaPy-org/PharmaPy"
 "Bug Tracker" = "https://github.com/PharmaPy-org/PharmaPy/issues"
 
+[tool.setuptools]
+# Ship only the files named in package-data below. The implicit scan would
+# also flag PharmaPy/data and its folders as unlisted subpackages.
+include-package-data = false
+
 [tool.setuptools.packages.find]
-include = ["PharmaPy*"]
+include = ["PharmaPy", "PharmaPy.*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 PharmaPy = ["data/minimum_modeling_objects.json"]
