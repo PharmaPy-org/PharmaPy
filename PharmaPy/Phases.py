@@ -57,6 +57,80 @@ def _as_float_array(values: ArrayLike) -> np.ndarray:
     return np.asarray(values, dtype=float)
 
 
+def _amount_supplied(amount: ArrayLike) -> bool:
+    """Tell whether an amount argument was supplied.
+
+    Parameters
+    ----------
+    amount : float or array-like
+        Mass [kg], volume [m**3] or moles [mol] (per second for streams),
+        scalar or per-point with shape ``(num_points,)``.
+
+    Returns
+    -------
+    bool
+        True if any entry is positive. Zero means "not supplied", so a
+        per-point amount counts as supplied when at least one point holds
+        material; its zero points then hold none.
+    """
+    return bool(np.any(np.asarray(amount, dtype=float) > 0))
+
+
+def _amount_ratio(amount: ArrayLike, divisor: ArrayLike):
+    """Divide an amount by a property, giving zero where the amount is zero.
+
+    Parameters
+    ----------
+    amount : float or array-like
+        Mass [kg], volume [m**3] or moles [mol] (per second for streams),
+        scalar or per point.
+    divisor : float or array-like
+        Density or molar mass converting it, in matching units, scalar or
+        per point.
+
+    Returns
+    -------
+    numpy.float64 or numpy.ndarray
+        ``amount / divisor`` with the broadcast shape; points without
+        material (zero amount) give exactly zero, even where the divisor is
+        zero or not finite because their composition is undefined.
+    """
+    amount = np.asarray(amount, dtype=float)
+    divisor = np.asarray(divisor, dtype=float)
+    shape = np.broadcast(amount, divisor).shape
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.divide(amount, divisor, out=np.zeros(shape),
+                          where=amount != 0)
+    return ratio[()] if ratio.ndim == 0 else ratio
+
+
+def _amount_product(amount: ArrayLike, factor: ArrayLike):
+    """Multiply an amount by a property, giving zero where the amount is zero.
+
+    Parameters
+    ----------
+    amount : float or array-like
+        Mass [kg], volume [m**3] or moles [mol] (per second for streams),
+        scalar or per point.
+    factor : float or array-like
+        Density or molar mass converting it, in matching units, scalar or
+        per point.
+
+    Returns
+    -------
+    numpy.float64 or numpy.ndarray
+        ``amount * factor`` with the broadcast shape; points without
+        material give exactly zero, even where the factor is not finite.
+    """
+    amount = np.asarray(amount, dtype=float)
+    factor = np.asarray(factor, dtype=float)
+    shape = np.broadcast(amount, factor).shape
+    with np.errstate(invalid='ignore'):
+        product = np.multiply(amount, factor, out=np.zeros(shape),
+                              where=amount != 0)
+    return product[()] if product.ndim == 0 else product
+
+
 def classify_phases(instance: object, names: Optional[Sequence[str]] = None) -> None:
     """Name phases and install them as attributes of their container.
 
@@ -414,7 +488,8 @@ class LiquidPhase(ThermoPhysicalManager):
         Parameters
         ----------
         mass : float or numpy.ndarray
-            Liquid mass [kg] (streams: [kg/s]); used when positive.
+            Liquid mass [kg] (streams: [kg/s]), scalar or per point with
+            shape ``(num_points,)``; used when any entry is positive.
         vol : float or numpy.ndarray
             Liquid volume [m**3] (streams: [m**3/s]); used when ``mass`` is
             not positive and ``vol`` is.
@@ -445,7 +520,10 @@ class LiquidPhase(ThermoPhysicalManager):
         Notes
         -----
         The first positive amount among ``mass``, ``vol`` and ``moles``
-        controls; without one the stored amounts are left unchanged. The
+        controls; without one the stored amounts are left unchanged. A point
+        of a profile without material (zero controlling amount) gets zero
+        mass, volume and moles, never NaN, even though its fractions are
+        undefined when its composition is zero. The
         factor 1000 converts [mol/L] times [m**3] to [mol] and [g/mol] to
         [kg/mol]. On the concentration basis, with ``mw_av = sum(mass_conc)
         / sum(conc)`` [g/mol], both rules coincide when the concentrations
@@ -455,40 +533,40 @@ class LiquidPhase(ThermoPhysicalManager):
         if concentration_basis:
             mass_density = np.sum(mass_conc, axis=-1)  # [kg/m**3]
             molar_density = np.sum(conc, axis=-1)  # [mol/L] == [kmol/m**3]
-            if mass > 0:
-                self.__reject_zero_total(mass_density, 'mass')
+            if _amount_supplied(mass):
+                self.__reject_zero_total(mass_density, mass, 'mass')
                 self.mass = mass  # [kg]
-                self.vol = mass / mass_density  # [m**3]
+                self.vol = _amount_ratio(mass, mass_density)  # [m**3]
                 self.moles = self.vol * molar_density * 1000  # [mol]
 
-            elif vol > 0:
-                self.__reject_zero_total(molar_density, 'vol')
+            elif _amount_supplied(vol):
+                self.__reject_zero_total(molar_density, vol, 'vol')
                 self.vol = vol  # [m**3]
                 self.mass = vol * mass_density  # [kg]
                 self.moles = vol * molar_density * 1000  # [mol]
 
-            elif moles > 0:
-                self.__reject_zero_total(molar_density, 'moles')
+            elif _amount_supplied(moles):
+                self.__reject_zero_total(molar_density, moles, 'moles')
                 self.moles = moles  # [mol]
-                self.vol = moles / (molar_density * 1000)  # [m**3]
+                self.vol = _amount_ratio(moles, molar_density * 1000)  # [m**3]
                 self.mass = self.vol * mass_density  # [kg]
 
         else:
             densMass = self.getDensityMix(massfrac)  # [kg/m**3], ideal mixing
-            if mass > 0:
-                self.mass = mass
-                self.vol = mass / densMass
-                self.moles = mass / mw_av * 1000
+            if _amount_supplied(mass):
+                self.mass = mass  # [kg]
+                self.vol = _amount_ratio(mass, densMass)  # [m**3]
+                self.moles = _amount_ratio(mass, mw_av) * 1000  # [mol]
 
-            elif vol > 0:
-                self.vol = vol
-                self.mass = vol * densMass
-                self.moles = self.mass / mw_av * 1000
+            elif _amount_supplied(vol):
+                self.vol = vol  # [m**3]
+                self.mass = _amount_product(vol, densMass)  # [kg]
+                self.moles = _amount_ratio(self.mass, mw_av) * 1000  # [mol]
 
-            elif moles > 0:
-                self.moles = moles
-                self.mass = moles * mw_av / 1000  # kg
-                self.vol = self.mass / densMass
+            elif _amount_supplied(moles):
+                self.moles = moles  # [mol]
+                self.mass = _amount_product(moles, mw_av) / 1000  # [kg]
+                self.vol = _amount_ratio(self.mass, densMass)  # [m**3]
 
         self.mass_frac = massfrac
         self.mole_frac = molefrac
@@ -499,7 +577,7 @@ class LiquidPhase(ThermoPhysicalManager):
         self._concentration_basis = concentration_basis
 
     @staticmethod
-    def __reject_zero_total(total_conc, amount_name: str) -> None:
+    def __reject_zero_total(total_conc, amount, amount_name: str) -> None:
         """Reject an amount that authoritative zero concentrations cannot hold.
 
         Parameters
@@ -507,15 +585,18 @@ class LiquidPhase(ThermoPhysicalManager):
         total_conc : float or numpy.ndarray
             Total concentration, ``sum(mass_conc)`` [kg/m**3] or
             ``sum(mole_conc)`` [mol/L], scalar or shape ``(num_points,)``.
+        amount : float or numpy.ndarray
+            Controlling amount, [kg], [m**3] or [mol], scalar or per point.
         amount_name : {'mass', 'vol', 'moles'}
             Name of the controlling positive amount, used in the message.
 
         Raises
         ------
         PharmaPyValueError
-            If any total concentration is exactly zero.
+            If a point with a positive amount has an exactly zero total
+            concentration.
         """
-        if np.any(np.asarray(total_conc) == 0):
+        if np.any((np.asarray(total_conc) == 0) & (np.asarray(amount) > 0)):
             raise PharmaPyValueError(
                 f"Liquid concentrations sum to zero, so the positive "
                 f"'{amount_name}' leaves the composition (and, for mass or "
@@ -608,12 +689,14 @@ class LiquidPhase(ThermoPhysicalManager):
             Species mass fractions with shape ``(num_species,)`` [-].
         mole_frac : array-like, optional
             Species mole fractions with shape ``(num_species,)`` [-].
-        vol : float, optional
-            Liquid volume [m**3].
-        mass : float, optional
-            Liquid mass [kg].
-        moles : float, optional
-            Amount of liquid [mol].
+            Every composition argument also accepts a profile shaped
+            ``(num_points, num_species)``.
+        vol : float or array-like, optional
+            Liquid volume [m**3], scalar or per point ``(num_points,)``.
+        mass : float or array-like, optional
+            Liquid mass [kg], scalar or per point ``(num_points,)``.
+        moles : float or array-like, optional
+            Amount of liquid [mol], scalar or per point ``(num_points,)``.
         temp : float or array-like, optional
             Liquid temperature [K], stored as a Python float for scalar input.
             A spatial profile of shape ``(num_points,)`` is stored as a float
@@ -653,14 +736,22 @@ class LiquidPhase(ThermoPhysicalManager):
         the stored mass [kg], the liquid inventory integrated by the mass
         balances, and recompute volume [m**3] and moles [mol] from the
         updated composition on that basis.
-        This retained-mass reconciliation applies only when the resolved
-        composition is one-dimensional and stored mass is scalar. For
-        two-dimensional compositions shaped ``(num_points, num_species)``
-        or array-valued stored mass, profile inventories are not reconciled:
-        mass, volume, and moles retain their values and scalar-versus-array
-        behavior when no positive explicit amount is supplied.
+        Profiles are reconciled point by point in the same way (issue
+        #439): a two-dimensional composition shaped
+        ``(num_points, num_species)`` uses the species axis, and amounts
+        may be scalars, which apply to every point, or arrays of shape
+        ``(num_points,)``. A composition update without a positive explicit
+        amount retains the stored mass of each point, scalar or per point,
+        and recomputes volume and moles per point, so the invariants above
+        hold for every point. Earlier releases left profile amounts
+        unchanged, contradicting the updated composition. An update of only
+        the temperature or pressure of a profile leaves its amounts, already
+        consistent with the unchanged composition, untouched.
         A no-argument update leaves all state unchanged. Zero amounts mean
-        "not supplied" and cannot empty the phase through this method.
+        "not supplied" and cannot empty the phase through this method; a
+        per-point amount is supplied when any point is positive, and its
+        zero points, which hold no material, keep zero mass, volume and
+        moles (their fractions are undefined if their composition is zero).
 
         Solvent handling matches the constructor: ``self.ind_solv`` is
         compared with ``None`` rather than tested for truth, so a solvent
@@ -671,13 +762,17 @@ class LiquidPhase(ThermoPhysicalManager):
         ------
         PharmaPyValueError
             If concentrations without a solvent total zero while a positive
-            amount, explicit or retained, is reconciled.
+            amount, explicit or retained, is reconciled; or if a per-point
+            amount, explicit or retained, does not have one entry per point
+            of a two-dimensional composition.
         """
 
-        explicit_amount = any(amount > 0 for amount in (mass, vol, moles))
+        explicit_amount = any(_amount_supplied(amount)
+                              for amount in (mass, vol, moles))
+        composition_supplied = any(value is not None for value in
+                                   (mole_conc, mass_conc, mass_frac, mole_frac))
         if not explicit_amount:
-            if all(value is None for value in
-                   (mole_conc, mass_conc, mass_frac, mole_frac, temp, pres)):
+            if not composition_supplied and temp is None and pres is None:
                 return
 
         # Concentrations without a solvent are authoritative; fractions
@@ -727,9 +822,20 @@ class LiquidPhase(ThermoPhysicalManager):
             mole_conc = self.mole_conc
             mass_conc = self.mass_conc
 
-        if (not explicit_amount and np.ndim(mass_frac) == 1
-                and np.ndim(self.mass) == 0):
-            mass = self.mass  # [kg], authoritative retained liquid inventory
+        profile = np.ndim(mass_frac) == 2 or np.ndim(self.mass) > 0
+        if not explicit_amount and (composition_supplied or not profile):
+            # [kg], authoritative retained liquid inventory, per point for
+            # a profile (issue #439)
+            mass = self.mass
+
+        num_points = len(mass_frac) if np.ndim(mass_frac) == 2 else None
+        for name, amount in (('mass', mass), ('vol', vol), ('moles', moles)):
+            if (num_points is not None and np.ndim(amount) > 0
+                    and np.shape(amount) != (num_points,)):
+                raise PharmaPyValueError(
+                    f"The liquid profile has {num_points} points but its "
+                    f"'{name}' has shape {np.shape(amount)}; supply one "
+                    f"amount per point or a scalar.")
 
         if temp is not None:
             self.temp = (float(temp) if np.ndim(temp) == 0

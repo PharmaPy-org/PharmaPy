@@ -185,6 +185,168 @@ def test_profile_amounts_keep_row_shape():
                                rtol=RTOL, atol=0)
 
 
+PROFILE_CONC = np.array([[0.15, 0.10, 0.02, 5.0],
+                         [0.10, 0.15, 0.03, 6.0]])  # [mol/L], two asymmetric points
+
+
+def assert_profile_invariants(liquid):
+    """Check the inventory invariants at every point of a profile.
+
+    Parameters
+    ----------
+    liquid : LiquidPhase
+        Phase with a ``(num_points, num_species)`` composition.
+    """
+    np.testing.assert_allclose(liquid.mole_frac * np.reshape(liquid.moles, (-1, 1)),
+                               liquid.mole_conc * np.reshape(liquid.vol, (-1, 1)) * 1000,
+                               rtol=RTOL, atol=0)
+    np.testing.assert_allclose(liquid.mass_conc.sum(axis=1) * liquid.vol,
+                               liquid.mass, rtol=RTOL, atol=0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('amount', ['retained', 'vol', 'vol_points',
+                                    'mass_points', 'moles_points'])
+def test_profile_update_reconciles_every_point(amount):
+    """Reconcile a concentration profile update point by point (#439).
+
+    The profile is built with 2 L per point, so each point holds
+    ``0.002 * sum(C MW)`` [kg]. Updating to twice the concentrations
+    without an amount retains those masses and halves the volumes; an
+    explicit scalar or per-point amount controls instead. Expected values
+    come from the JSON molar masses: ``mass = vol * sum(C MW)`` [kg] and
+    ``moles = 1000 * vol * sum(C)`` [mol].
+
+    Parameters
+    ----------
+    amount : str
+        ``'retained'`` for a composition-only update, else the explicit
+        amount: scalar volume or per-point volume, mass or moles.
+    """
+    liquid = LiquidPhase(THERMO_PATH, temp=TEMP, vol=VOLUME,
+                         mole_conc=PROFILE_CONC.copy())
+    updated = 2 * PROFILE_CONC  # [mol/L]
+    point_mass = VOLUME * (PROFILE_CONC @ MW)  # [kg], as charged
+    point_volumes = np.array([1e-3, 3e-3])  # [m**3], unequal on purpose
+    if amount == 'retained':
+        liquid.updatePhase(mole_conc=updated)
+        expected_vol = point_mass / (updated @ MW)  # [m**3]
+    elif amount == 'vol':
+        liquid.updatePhase(mole_conc=updated, vol=VOLUME)
+        expected_vol = np.full(2, VOLUME)  # [m**3]
+    elif amount == 'vol_points':
+        liquid.updatePhase(mole_conc=updated, vol=point_volumes)
+        expected_vol = point_volumes  # [m**3]
+    elif amount == 'mass_points':
+        liquid.updatePhase(mole_conc=updated, mass=point_volumes * (updated @ MW))
+        expected_vol = point_volumes  # [m**3]
+    else:
+        liquid.updatePhase(mole_conc=updated,
+                           moles=1000 * point_volumes * updated.sum(axis=1))
+        expected_vol = point_volumes  # [m**3]
+    np.testing.assert_allclose(liquid.vol, expected_vol, rtol=RTOL, atol=0)
+    np.testing.assert_allclose(liquid.mass, expected_vol * (updated @ MW),
+                               rtol=RTOL, atol=0)
+    np.testing.assert_allclose(liquid.moles, 1000 * expected_vol * updated.sum(axis=1),
+                               rtol=RTOL, atol=0)
+    assert_profile_invariants(liquid)
+    if amount == 'retained':
+        np.testing.assert_allclose(liquid.mass, point_mass, rtol=RTOL, atol=0)
+
+
+@pytest.mark.unit
+def test_profile_amount_of_another_length_is_rejected():
+    liquid = LiquidPhase(THERMO_PATH, temp=TEMP, vol=VOLUME,
+                         mole_conc=PROFILE_CONC.copy())
+    with pytest.raises(PharmaPyValueError,
+                       match=r"2 points but its 'vol' has shape \(3,\)"):
+        liquid.updatePhase(mole_conc=PROFILE_CONC, vol=np.full(3, VOLUME))
+
+
+@pytest.mark.unit
+def test_profile_point_without_material_may_have_zero_concentrations():
+    rows = np.vstack([CONC, np.zeros(len(MW))])  # [mol/L], second point empty
+    liquid = LiquidPhase(THERMO_PATH, temp=TEMP, vol=VOLUME,
+                         mole_conc=PROFILE_CONC.copy())
+    with np.errstate(invalid='ignore'):  # 0/0 fractions of the empty point
+        liquid.updatePhase(mole_conc=rows, vol=np.array([VOLUME, 0.0]))
+    np.testing.assert_allclose(liquid.mass, [TOTAL_MASS, 0.0], rtol=RTOL, atol=0)
+    with pytest.raises(PharmaPyValueError, match="sum to zero"):
+        with np.errstate(invalid='ignore'):
+            liquid.updatePhase(mole_conc=rows, vol=np.array([VOLUME, VOLUME]))
+
+
+EMPTY_POINT_ROWS = np.vstack([CONC, np.zeros(len(MW))])  # [mol/L], 2nd point empty
+EMPTY_POINT_FRACTIONS = np.vstack([[0.4, 0.1, 0.2, 0.3],
+                                   np.zeros(len(MW))])  # [-], 2nd point empty
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('stream', [False, True])
+@pytest.mark.parametrize('amount', ['retained', 'mass', 'moles', 'fractions_mass',
+                                    'fractions_vol', 'fractions_moles'])
+def test_empty_profile_point_keeps_zero_inventory(amount, stream):
+    """A point without material keeps zero mass, volume and moles.
+
+    The empty point's composition is all zero, so its fractions are
+    undefined (0/0), but its inventory must be exactly zero, not NaN, on
+    every reconciliation path: a retained mass, an explicit per-point mass
+    or moles on the concentration basis, and an explicit per-point mass,
+    volume or moles with a zero fraction row. The filled point holds the
+    fixture charge, ``0.002 * sum(C MW)`` [kg] and ``1000 * 0.002 * sum(C)``
+    [mol]; with fractions w its mass m, volume ``m sum(w / rho)`` [m**3] and
+    moles ``1000 m sum(w / MW)`` [mol] follow from the JSON by hand.
+
+    Parameters
+    ----------
+    amount : str
+        Reconciliation path of the second update.
+    stream : bool
+        Use a ``LiquidStream`` and check its flow aliases instead.
+    """
+    point_vol = np.array([VOLUME, 0.0])  # [m**3] or [m**3/s]
+    if stream:
+        liquid = LiquidStream(THERMO_PATH, temp=TEMP, vol_flow=VOLUME,
+                              mole_conc=PROFILE_CONC.copy())
+        names = {'mass': 'mass_flow', 'vol': 'vol_flow', 'moles': 'mole_flow'}
+        conc_name = 'concentr'
+    else:
+        liquid = LiquidPhase(THERMO_PATH, temp=TEMP, vol=VOLUME,
+                             mole_conc=PROFILE_CONC.copy())
+        names = {'mass': 'mass', 'vol': 'vol', 'moles': 'moles'}
+        conc_name = 'mole_conc'
+    fraction_row = EMPTY_POINT_FRACTIONS[0]  # [-]
+    fraction_mass = TOTAL_MASS  # [kg], filled point of the fraction cases
+    fraction_vol = fraction_mass * (fraction_row @ (1 / RHO_LIQ))  # [m**3]
+    fraction_moles = 1000 * fraction_mass * (fraction_row @ (1 / MW))  # [mol]
+    explicit = {'mass': ('mass', TOTAL_MASS),
+                'moles': ('moles', SPECIES_MOLES.sum()),
+                'fractions_mass': ('mass', fraction_mass),
+                'fractions_vol': ('vol', fraction_vol),
+                'fractions_moles': ('moles', fraction_moles)}
+    # 0/0 fractions and 1/0 densities of the empty point are undefined
+    with np.errstate(invalid='ignore', divide='ignore'):
+        liquid.updatePhase(**{conc_name: EMPTY_POINT_ROWS,
+                              names['vol']: point_vol})
+        kwargs = {}
+        if amount in explicit:
+            name, value = explicit[amount]
+            kwargs = {names[name]: np.array([value, 0.0])}  # [kg], [m**3] or [mol]
+        if amount.startswith('fractions'):
+            liquid.updatePhase(mass_frac=EMPTY_POINT_FRACTIONS, **kwargs)
+            expected = [fraction_mass, fraction_vol, fraction_moles]
+        else:
+            liquid.updatePhase(**{conc_name: EMPTY_POINT_ROWS}, **kwargs)
+            expected = [TOTAL_MASS, VOLUME, SPECIES_MOLES.sum()]  # [kg], [m**3], [mol]
+    inventory = [np.asarray(getattr(liquid, names[name]))
+                 for name in ('mass', 'vol', 'moles')]
+    for values in inventory:
+        assert np.all(np.isfinite(values))
+        assert values[1] == 0
+    np.testing.assert_allclose([values[0] for values in inventory], expected,
+                               rtol=RTOL, atol=0)
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize('frac_name', ['mass_frac', 'mole_frac'])
 def test_update_transitions_keep_or_switch_the_basis(frac_name):

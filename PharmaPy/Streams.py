@@ -468,10 +468,10 @@ class LiquidStream(LiquidPhase):
         Notes
         -----
         Only explicit positive flows participate in mass, volume, then mole
-        precedence. For scalar inventory and one-dimensional composition,
-        composition-only updates conserve mass flow [kg/s] and recompute the
-        dependent flows. Composition precedence, solvent completion, and
-        unchanged profile inventories follow :meth:`LiquidPhase.updatePhase`.
+        precedence. Composition-only updates conserve mass flow [kg/s] and
+        recompute the dependent flows, point by point for a composition
+        profile (issue #439). Composition precedence, solvent completion,
+        and profile reconciliation follow :meth:`LiquidPhase.updatePhase`.
         A no-argument update retains the state and flow values. As in previous
         versions, updates delete the inherited ``mass``, ``vol``, and ``moles``
         attributes; use the flow aliases to read the reconciled amounts.
