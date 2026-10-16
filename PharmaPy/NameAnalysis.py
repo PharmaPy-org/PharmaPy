@@ -6,6 +6,7 @@ Created on Thu Aug 13 11:13:10 2020
 @author: dcasasor
 """
 
+import sys
 from typing import Optional, Tuple, Union
 
 import numpy as np
@@ -17,8 +18,10 @@ from PharmaPy.ThermoModule import ThermoPhysicalManager
 # are the same composition, recomputed at most by a normalization and a
 # mass/mole conversion (one sum over the species and a few products per
 # entry), whose float64 round-off is a few tens of machine epsilons. Any
-# physically different composition differs by many orders more.
-HELD_STATE_FRACTION_ATOL = 64 * np.finfo(float).eps  # [-]
+# physically different composition differs by many orders more. The
+# epsilon is Python's float64 one, equal to ``np.finfo(float).eps``, so the
+# constant stays defined when the documentation build mocks NumPy.
+HELD_STATE_FRACTION_ATOL = 64 * sys.float_info.epsilon  # [-]
 
 
 def getBipartiteNames(first, second):
