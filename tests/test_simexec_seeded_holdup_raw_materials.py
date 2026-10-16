@@ -551,3 +551,32 @@ def test_reset_states_resolve_repeats_the_first_solve(path, cls):
                        sim.CR01.Solid_1.distrib.copy()))  # [kg], [#/um]
     assert finals[1][0] == pytest.approx(finals[0][0], rel=RTOL)
     np.testing.assert_allclose(finals[1][1], finals[0][1], rtol=RTOL)
+
+
+@pytest.mark.parametrize('cls', [BatchCryst, SemibatchCryst],
+                         ids=['batch', 'semibatch'])
+def test_reset_after_a_user_reassignment_restores_the_edited_seed(path, cls):
+    """Record a seed edited and re-assigned by the user as the new charge.
+
+    A direct user assignment is recorded afresh, also for ``reset()``:
+    later re-transfers keep that record, so ``reset()`` restores the
+    edited seed and a ``reset_states=True`` solve starts from it.
+    """
+    edited = EDIT_FACTOR * SEED  # [#/um]
+    edited_mass = _scaled_seed(path, EDIT_FACTOR)['mass'].sum()  # [kg]
+    for reset_states in (False, True):
+        sim, seed = _growth_flowsheet(path, cls, reset_states=reset_states)
+        for _ in range(RESOLVES):
+            sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+        seed.updatePhase(distrib=edited)
+        sim.CR01.Phases = [sim.CR01.Liquid_1, seed]
+        for _ in range(RESOLVES):
+            sim.SolveFlowsheet(kwargs_run=GROWTH_RUN, verbose=False)
+            if reset_states:
+                np.testing.assert_array_equal(sim.CR01.result.distrib[0],
+                                              edited)  # [#/um]
+        if not reset_states:
+            assert seed.mass != pytest.approx(edited_mass, rel=RTOL)
+            sim.CR01.reset()
+            np.testing.assert_array_equal(seed.distrib, edited)  # [#/um]
+            assert seed.mass == pytest.approx(edited_mass, rel=RTOL)
