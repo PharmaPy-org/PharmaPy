@@ -643,14 +643,19 @@ class SimulationExec:
             If a unit other than a ``Mixer`` has two or more distinct
             predecessors. The message names every such unit, in order of
             first appearance as a successor, with its class and its
-            predecessors in graph declaration order, and says to combine
-            the predecessors in a ``Mixer`` first. ``ValueError`` is used
-            because the flowsheet specification is inconsistent with a
-            destination that does not mix its inlets, and the remedy, a
-            ``Mixer``, already exists in PharmaPy.
+            predecessors in graph declaration order, and gives the remedy
+            for each (see :meth:`_fan_in_remedy`): combine predecessors of
+            the same amount basis in a ``Mixer`` first, or, for a semibatch
+            unit fed by a holdup and a stream or a ``DynamicExtractor``,
+            connect one input and assign the other directly on the unit.
+            ``ValueError`` is used because the flowsheet specification is
+            inconsistent with a destination that does not mix its inlets,
+            and the remedies already exist in PharmaPy.
         AttributeError
             If such a destination has not been assigned to the executor,
-            as when ``SolveFlowsheet`` reaches an unassigned unit.
+            as when ``SolveFlowsheet`` reaches an unassigned unit. An
+            unassigned predecessor does not prevent the
+            ``PharmaPyValueError``; its amount basis is unknown.
 
         Notes
         -----
@@ -690,13 +695,91 @@ class SimulationExec:
             details = '; '.join(
                 f'{name!r} ({unit_class}) receives {sources}'
                 for name, (unit_class, sources) in merged.items())
+            remedies = {name: self._fan_in_remedy(name, sources)
+                        for name, (_, sources) in merged.items()}
+            mixable = [name for name, remedy in remedies.items()
+                       if remedy is None]
+            if mixable and len(mixable) == len(merged):
+                advice = ('Connect the predecessors to a Mixer and the '
+                          'Mixer to the unit.')
+            else:
+                advice = ' '.join(
+                    ([f'Connect the predecessors of {mixable} to a Mixer '
+                      'and the Mixer to the unit.'] if mixable else [])
+                    + [remedy for remedy in remedies.values()
+                       if remedy is not None])
             raise PharmaPyValueError(
                 'Flowsheet units that are not a Mixer are fed by several '
                 f'units: {details}. Only a Mixer combines several inlets '
                 'into one balanced mixture; any other unit would keep '
-                'only one transferred stream, or stack them '
-                'unmixed. Connect the predecessors to a Mixer and the '
-                'Mixer to the unit.')
+                'only one transferred stream, or stack them unmixed. '
+                f'{advice}')
+
+    def _fan_in_remedy(self, name: str, sources: Sequence[str]
+                       ) -> Optional[str]:
+        """Return the remedy for a non-Mixer unit fed by several units.
+
+        Parameters
+        ----------
+        name : str
+            Destination unit name.
+        sources : sequence of str
+            Its predecessors, in graph declaration order.
+
+        Returns
+        -------
+        str or None
+            None when a ``Mixer`` of the predecessors is the remedy; else
+            the sentence for the destination:
+
+            * a ``DynamicExtractor``, whose connected input is its
+              ``'feed'``: mixing the feed with the solvent would remove the
+              countercurrent contact the unit models;
+            * a ``DynamicCollector`` with a predecessor known to hand over
+              a holdup [kg]: it collects streams only, so the holdup is
+              discharged through a ``BatchToFlowConnector`` first;
+            * any other unit whose predecessors are known to hand over a
+              holdup [kg] and a stream [kg/s]: a ``Mixer`` cannot mix an
+              inventory with a flow rate, so one input is connected and
+              the other assigned directly (the charge through ``Phases``,
+              the feed through ``Inlet``), whatever the unit's current
+              ``oper_mode`` (an ``Evaporator`` becomes semibatch once it
+              has an ``Inlet``).
+
+        Notes
+        -----
+        A predecessor's basis is its ``is_continuous`` flag. It is unknown
+        for an unassigned predecessor or one that does not declare it yet,
+        such as a ``Mixer`` fed only through the flowsheet; with any basis
+        unknown, the bases are not known to differ, and the ``Mixer``
+        remedy is given unless a known holdup feeds a ``DynamicCollector``.
+        """
+        destination = getattr(self, name)
+        unit_class = type(destination).__name__
+        if unit_class == 'DynamicExtractor':
+            return (f"{name!r} (DynamicExtractor) takes one connected "
+                    "input, its 'feed' Inlet; mixing the feed with the "
+                    'solvent would remove the countercurrent contact. '
+                    'Connect the feed source and assign the solvent '
+                    f"directly: {name}.Inlet = {{'solvent': stream}}.")
+        flags = [getattr(getattr(self, source, None), 'is_continuous', None)
+                 for source in sources]
+        known = [bool(flag) for flag in flags if flag is not None]
+        if unit_class == 'DynamicCollector':
+            if False in known:
+                return (f'{name!r} (DynamicCollector) collects streams '
+                        '[kg/s] only: discharge each holdup [kg] through a '
+                        'BatchToFlowConnector, then combine the streams in '
+                        'a Mixer and connect the Mixer to the collector.')
+            return None
+        if len(known) == len(flags) and len(set(known)) > 1:
+            return (f'{name!r} ({unit_class}) takes one connected input: a '
+                    'stream [kg/s] as its feed (Inlet) or a holdup [kg] as '
+                    'its initial charge (Phases), and a Mixer cannot mix a '
+                    'holdup with a stream. Connect one predecessor and '
+                    'assign the other input directly on the unit: the '
+                    'charge through Phases or the feed through Inlet.')
+        return None
 
     def SetParamEstimation(self, x_data, y_data=None, y_spectra=None,
                            fit_spectra=False,
