@@ -1,8 +1,8 @@
 """mass, population, and energy contracts with real phase collaborators.
 
 The five-species shipped database supplies thermodynamics. No ODE solver is
-needed: collector derivatives and instantaneous mixer balances are evaluated
-directly. Continuous liquid solve/profile routing remains owned by #220.
+needed: collector rates, the collector's temperature inversion and
+instantaneous mixer balances are evaluated directly. Continuous liquid solve/profile routing remains owned by #220.
 
 
 Related issue scope:
@@ -88,7 +88,13 @@ def test_profile_reference_temperature(path):
     np.testing.assert_allclose(fractions, np.tile(COMPOSITION, (3, 1)), rtol=RTOL)
 
 
-def test_collector_temperature_derivative_mass_cp(path):
+def test_collector_enthalpy_rate_and_temperature_inversion(path):
+    """Integrate the feed enthalpy and invert the holdup's for temperature.
+
+    The liquid collector integrates species masses and enthalpy (issue
+    #467): its enthalpy rate is F h_in, and its temperature solves
+    h(T, w) = H/m on the mass basis.
+    """
     collector = DynamicCollector()
     collector.Inlet = LiquidStream(path, mass_flow=FLOW, mass_frac=COMPOSITION,
                                     temp=HOT)
@@ -105,11 +111,18 @@ def test_collector_temperature_derivative_mass_cp(path):
                      for index, species in enumerate(properties.values()))
     # [J/kg/K], polynomial in temperature [K]
     enthalpy = mixture_cp.integ()  # [J/kg], arbitrary common integration constant
-    expected = FLOW / MASS * (enthalpy(HOT) - enthalpy(COLD)) / mixture_cp(COLD)
-    # [K/s], adiabatic tank balance with identical feed/tank compositions
-    states = np.r_[COMPOSITION, MASS, COLD]  # [-], [kg], [K]
-    derivative = collector.unit_model(0.0, states)  # [1/s], [kg/s], [K/s]
-    assert derivative[-1] == pytest.approx(expected, rel=RTOL)
+    reference = 298.15  # [K], getEnthalpy's default reference temperature
+    inputs = {'mass_flow': FLOW, 'mass_frac': COMPOSITION, 'temp': HOT}
+    expected_rate = FLOW * (enthalpy(HOT) - enthalpy(reference))  # [J/s]
+    assert collector.energy_balance(inputs) == pytest.approx(expected_rate,
+                                                             rel=RTOL)
+    np.testing.assert_allclose(collector.material_balances(inputs),
+                               FLOW * COMPOSITION, rtol=RTOL)  # [kg/s]
+
+    target = np.array([enthalpy(COLD) - enthalpy(reference)])  # [J/kg]
+    temperature = collector._temperatures(COMPOSITION[np.newaxis], target,
+                                          guess=HOT)  # [K]
+    assert temperature[0] == pytest.approx(COLD, rel=RTOL)
 
 
 def test_liquid_cp_default_mass_basis(path):
