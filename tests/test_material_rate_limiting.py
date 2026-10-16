@@ -212,3 +212,65 @@ def test_transfer_heat_is_scaled_with_material():
     assert result[StateKey("global_temp")] == pytest.approx(5.)
     buffer.reset()
     assert buffer.aux[buffer.CROSSPHASE] == []
+
+
+def test_native_batch_reactor_through_solve_unit():
+    from PharmaPy.DataClasses import IntraPhaseProcess, TransferResult
+    from PharmaPy.IntegratorBackends import FixedStepBackend
+    from PharmaPy.Mechanisms import Mechanism
+    from PharmaPy.Reactors_Refactored import BatchReactor
+
+    class Conversion(Mechanism):
+        def get_overrides(self, name=None):
+            return {} if name is None else None
+
+        def get_solver_state_rates(self, process, phase, **kwargs):
+            rate = .5 * phase.mass_j[0]
+            return TransferResult({StateKey("mass_j", process.phaseref):
+                                   np.array([-rate, rate, 0., 0.])}, {}, 0.)
+
+    thermo = Path(__file__).parents[1] / "tests/fixtures/native_four_species.json"
+    unit = BatchReactor(isothermal=True, integrator=FixedStepBackend())
+    unit.Phases = LiquidPhase(thermo, mass=1., mass_frac=np.full(4, .25), verbose=False)
+    unit.intraphase_processes = [IntraPhaseProcess(PhaseRef("liquid", 0), Conversion())]
+    times, states = unit.solve_unit(time_grid=np.linspace(0., 1., 11), verbose=False)
+    expected = .25 * .95 ** np.arange(11)
+    np.testing.assert_allclose(states[:, 0], expected)
+    np.testing.assert_allclose(states[:, 1], .5 - expected)
+    np.testing.assert_allclose(states.sum(axis=1), 1.)
+    np.testing.assert_allclose(unit.result.mass_j_liquid0, states)
+
+
+def test_native_paired_transfer_through_solve_unit():
+    from PharmaPy.DataClasses import PhaseConnection, TransferResult
+    from PharmaPy.IntegratorBackends import FixedStepBackend
+    from PharmaPy.Mechanisms import CrossPhaseTransferMechanism
+
+    class Exchange(CrossPhaseTransferMechanism):
+        def __init__(self):
+            super().__init__()
+            self.aux = {}
+
+        def get_overrides(self, name=None):
+            return {} if name is None else None
+
+        def get_solver_state_rates(self, source_phase, connection, **kwargs):
+            rate = np.array([2. * source_phase.mass_j[0], 0., 0., 0.])
+            self.aux["connection"] = connection
+            return TransferResult({StateKey("mass_j", connection.source_phaseref): -rate,
+                                   StateKey("mass_j", connection.sink_phaseref): rate},
+                                  self.aux, rate.sum())
+
+    thermo = Path(__file__).parents[1] / "tests/fixtures/native_four_species.json"
+    unit = MultiPhaseVessel(isothermal=True, integrator=FixedStepBackend())
+    unit.Phases = [LiquidPhase(thermo, mass=1., mass_frac=np.full(4, .25), verbose=False)
+                   for _ in range(2)]
+    unit.phase_connections = [PhaseConnection(PhaseRef("liquid", 0), PhaseRef("liquid", 1),
+                                              None, mechanism=Exchange())]
+    times, states = unit.solve_unit(time_grid=np.arange(3.), verbose=False)
+    np.testing.assert_allclose(states.sum(axis=1), 2.)
+    np.testing.assert_allclose(states[1:, 0], 0.)
+    np.testing.assert_allclose(states[1:, 4], .5)
+    assert np.all(states >= 0.)
+    buffer = unit._material_contributions
+    assert buffer.aux[buffer.CROSSPHASE][0]["transfer_scale"] == 1.
