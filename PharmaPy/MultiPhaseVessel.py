@@ -2166,7 +2166,7 @@ class MultiPhaseVessel():
             buffer,
             completed_state,
             limiter_dt=1.0,
-        ):
+        ) -> bool:
         """Throttle consuming contributions to keep phase inventories positive.
 
         ``limiter_dt`` is the horizon over which depletion is anticipated.
@@ -2179,7 +2179,8 @@ class MultiPhaseVessel():
         buffer : MaterialContributionBuffer
             Material contributions, modified in place when throttled.
         completed_state : dict
-            Native completed state.
+            Native completed state. Material arrays use their declared
+            inventory units (for example [kg]); these arrays are not modified.
         limiter_dt : float, optional
             Depletion horizon [s]. Default 1.0.
 
@@ -2191,9 +2192,18 @@ class MultiPhaseVessel():
         Raises
         ------
         RuntimeError
-            Throttling transfers and outlets cannot keep an inventory above
-            -1e-12 over ``limiter_dt``, because the deficit comes from fixed inlet
-            or intraphase terms.
+            After accounting for transfer/outlet scaling, proposed rates
+            consume more than the nonnegative available inventory over
+            ``limiter_dt``, beyond the existing 1e-12 inventory-unit allowance.
+
+        Notes
+        -----
+        This is a rate-feasibility check, not an acceptance test for solver
+        states. Adaptive solvers can evaluate slightly negative trial states.
+        Such a state provides zero available inventory but must not be
+        rejected solely for remaining negative with zero or positive rate.
+        State accuracy remains the integrator's responsibility. Neither the
+        state nor the reaction rates are clipped or replaced by this check.
         """
 
         scales = self.calculate_scale(
@@ -2218,7 +2228,11 @@ class MultiPhaseVessel():
                         predicted_rates[state_slice] += (1.0 - factor) * rate
         if limiter_dt > 0.0:
             for key, state_slice in self._positivity_groups:
-                if np.any(completed_state[key] + limiter_dt * predicted_rates[state_slice] < -1e-12):
+                # [declared inventory units] Bound for feasibility only;
+                # do not change the solver state or count negative mass as supply.
+                available_inventory = np.maximum(completed_state[key], 0.0)
+                if np.any(available_inventory
+                          + limiter_dt * predicted_rates[state_slice] < -1e-12):
                     raise RuntimeError("Inventory depletion cannot be corrected by transfer/outlet "
                                        "scaling; reduce the integration step or constrain the mechanism.")
         if scales is None:
