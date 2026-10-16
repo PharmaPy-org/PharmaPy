@@ -648,8 +648,8 @@ class AssimuloDAEBackend(_AssimuloOptions, IntegratorBackend):
         eval_sens, jac_v_prod : bool, optional
             Not supported; must be False.
         options : dict, optional
-            Per-call IDA attributes. They are applied after the instance options,
-            so a per-call value overrides the instance default.
+            Per-call IDA attributes. They override backend defaults; explicit
+            constructor options take precedence over per-call attributes.
         verbose : bool, optional
             Print solver output.
         any_event : bool, optional
