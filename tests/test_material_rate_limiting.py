@@ -60,6 +60,51 @@ def test_reaction_depletion_is_rejected_without_altering_stoichiometry():
     np.testing.assert_array_equal(buffer.contributions, before)
 
 
+@pytest.mark.parametrize("inventory", [-2.e-12, -1.e-8, 0.])
+@pytest.mark.parametrize("production", [0., 1.e-13])
+def test_nonconsuming_trial_state_is_not_rejected_or_clipped(inventory, production):
+    """Allow stationary/recovering trial states without certifying their accuracy.
+
+    Parameters
+    ----------
+    inventory : float
+        Trial species inventory [kg]. Negative cases straddle the existing
+        depletion threshold and remain far below ordinary solver tolerances.
+    production : float
+        Nonnegative species rate [kg/s]. The positive case does not restore
+        the negative inventory within the one-second limiting horizon.
+    """
+    unit, state, buffer = system([[inventory, 1.]])  # [kg]
+    buffer.contributions[buffer.INTRAPHASE] = [production, -production]  # [kg/s]
+    original_state = {key: value.copy() for key, value in state.items()}  # [kg]
+    original_rates = buffer.contributions.copy()  # [kg/s]
+    assert not limit(unit, state, buffer)
+    for key in state:
+        np.testing.assert_array_equal(state[key], original_state[key])
+    np.testing.assert_array_equal(buffer.contributions, original_rates)
+
+
+@pytest.mark.parametrize("inventory", [-2.e-12, 0.])
+def test_empty_trial_inventory_still_rejects_consumption(inventory):
+    """Reject actual depletion even when the solver trial inventory is negative.
+
+    Parameters
+    ----------
+    inventory : float
+        Empty or slightly negative trial inventory [kg]. The imposed
+        consumption is much larger than the existing depletion tolerance.
+    """
+    unit, state, buffer = system([[inventory, 1.]])  # [kg]
+    buffer.contributions[buffer.INTRAPHASE] = [-1.e-4, 1.e-4]  # [kg/s]
+    original_state = {key: value.copy() for key, value in state.items()}  # [kg]
+    original_rates = buffer.contributions.copy()  # [kg/s]
+    with pytest.raises(RuntimeError, match="Inventory depletion"):
+        limit(unit, state, buffer)
+    for key in state:
+        np.testing.assert_array_equal(state[key], original_state[key])
+    np.testing.assert_array_equal(buffer.contributions, original_rates)
+
+
 def test_transfer_pairing_and_reaction_rates_are_preserved():
     unit, state, buffer = system([[1., 0.], [0., 0.]])
     buffer.contributions[buffer.INTRAPHASE] = [-.2, .2, 0., 0.]
@@ -70,6 +115,19 @@ def test_transfer_pairing_and_reaction_rates_are_preserved():
     np.testing.assert_allclose(buffer.contributions[buffer.CROSSPHASE], [-.8, 0., .8, 0.])
     assert buffer.aux[buffer.CROSSPHASE][0]["transfer_scale"] == pytest.approx(.4)
     assert buffer.contributions.sum() == pytest.approx(0.)
+
+
+def test_negative_spectator_does_not_block_conservative_transfer_limiting():
+    """Preserve a paired transfer beside a negative, nonconsuming trial species."""
+    unit, state, buffer = system([[.5, -2.e-12], [0., 0.]])  # [kg]
+    buffer.contributions[buffer.CROSSPHASE] = [-2., 0., 2., 0.]  # [kg/s]
+    original_state = {key: value.copy() for key, value in state.items()}  # [kg]
+    assert limit(unit, state, buffer)
+    # [kg/s] The half-kilogram donor supports 0.5 kg/s for one second.
+    np.testing.assert_allclose(buffer.contributions[buffer.CROSSPHASE],
+                               [-.5, 0., .5, 0.])
+    for key in state:
+        np.testing.assert_array_equal(state[key], original_state[key])
 
 
 def test_receiver_depletion_cannot_be_hidden_by_scaling_donor():
