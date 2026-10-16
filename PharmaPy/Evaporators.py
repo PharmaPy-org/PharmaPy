@@ -123,6 +123,87 @@ def _validate_flash_solution(model, solution: np.ndarray, status: int,
     return solution
 
 
+def _flash_states_di(name_species: Sequence[str],
+                     adiabatic: bool = False) -> dict:
+    """Describe the algebraic unknowns of a steady-state flash.
+
+    Parameters
+    ----------
+    name_species : sequence of str
+        Names of the N species in the solved composition blocks, in
+        database order: every feed species for ``IsothermalFlash``, the
+        species that are not supercritical for ``AdiabaticFlash``.
+    adiabatic : bool, optional
+        If True, append the drum temperature, the extra unknown of
+        ``AdiabaticFlash``.
+
+    Returns
+    -------
+    dict
+        State metadata in the order of the solved unknown vector: the
+        liquid fraction of the feed ``frac_liq`` [-], the liquid mole
+        fractions ``x_liq`` [-] and vapor mole fractions ``y_vap`` [-]
+        (N each, indexed by species), the vapor fraction of the feed
+        ``frac_vap`` [-] and, if ``adiabatic``, the temperature ``temp``
+        [K]. Every state is algebraic (``'type': 'alg'``), so a flash has
+        2N + 2 unknowns, or 2N + 3 when adiabatic.
+
+    Notes
+    -----
+    ``SimulationResult`` reads this metadata for its unit-operation
+    summary (issue #457).
+    """
+    names = list(name_species)
+    states_di = {
+        'frac_liq': {'dim': 1, 'type': 'alg', 'units': ''},
+        'x_liq': {'dim': len(names), 'type': 'alg', 'units': '',
+                  'index': names},
+        'y_vap': {'dim': len(names), 'type': 'alg', 'units': '',
+                  'index': names},
+        'frac_vap': {'dim': 1, 'type': 'alg', 'units': ''}}
+    if adiabatic:
+        states_di['temp'] = {'dim': 1, 'type': 'alg', 'units': 'K'}
+    return states_di
+
+
+def _model_liquid_volume(liquid) -> float:
+    """Return the liquid volume the evaporator models assign to a charge.
+
+    Parameters
+    ----------
+    liquid : LiquidPhase
+        Evaporator liquid holdup with ``moles`` [mol], ``mole_frac`` [-]
+        and ``temp`` [K].
+
+    Returns
+    -------
+    float
+        Liquid volume [m**3] on the models' own basis: the moles over the
+        ideal-mixing molar density of their composition,
+        ``moles / getDensity(mole_frac, temp, basis='mole') / 1000``
+        (1000 L/m**3), as ``material_balances`` evaluates it.
+
+    Notes
+    -----
+    The evaporator states are moles and mole fractions, closed by ideal
+    mixing. A liquid on the ideal-mixing basis (fractions, or concentrations
+    with ``name_solv``) already stores that volume, which is returned
+    unchanged so its results stay bit-identical. A liquid whose
+    concentrations are authoritative and do not close ideal mixing
+    (``LiquidPhase.concentration_basis``, issue #439) keeps its moles but
+    occupies its ideal-mixing volume in the evaporator model; seeding the
+    stored volume instead would leave an inconsistent initial volume and
+    energy balance.
+    """
+    if not getattr(liquid, 'concentration_basis', False):
+        return liquid.vol  # [m**3]
+
+    molar_density = liquid.getDensity(mole_frac=liquid.mole_frac,
+                                      temp=liquid.temp,
+                                      basis='mole')  # [mol/L]
+    return liquid.moles / molar_density / 1000  # [m**3]
+
+
 class IsothermalFlash:
         
     """
@@ -135,12 +216,14 @@ class IsothermalFlash:
     ----------
     temp_drum : float, optional
         equipment temperature [K]. If None, temperature will be taken from
-        the Inlet object aggregated to the flash (from PharmaPy.Phases or
-        PharmaPy.Streams modules). The default is None.
+        the current Inlet object aggregated to the flash (from
+        PharmaPy.Phases or PharmaPy.Streams modules), every time an inlet
+        is assigned and every time the flash is solved. The default is
+        None.
     pres_drum : float, optional
         equipment pressure [Pa]. If None, pressure will be taken from
-        the Inlet object aggregated to the flash (from PharmaPy.Phases or
-        PharmaPy.Streams modules). The default is None.
+        the current Inlet object, as for ``temp_drum``. The default is
+        None.
     gamma_method : str, optional
         one of 'ideal', 'UNIFAC' or 'UNIQUAC'. If 'UNIFAC' or 'UNIQUAC' is
         passed, the pure-component .json file must have the interaction
@@ -159,9 +242,12 @@ class IsothermalFlash:
         Parameters
         ----------
         temp_drum : float, optional
-            Drum temperature [K]; None uses the inlet temperature.
+            Drum temperature [K]; None uses the current inlet temperature.
+            Kept as ``temp_drum``; the effective drum temperature is
+            ``temp``.
         pres_drum : float, optional
-            Drum pressure [Pa]; None uses the inlet pressure.
+            Drum pressure [Pa]; None uses the current inlet pressure. Kept
+            as ``pres_drum``; the effective drum pressure is ``pres``.
         gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
             Liquid activity model, with parameters supplied by the inlet.
 
@@ -169,32 +255,135 @@ class IsothermalFlash:
         ------
         ValueError
             If ``gamma_method`` is not a supported selector.
+
+        Notes
+        -----
+        The flash is a steady-state stream unit, so it declares the
+        flowsheet destination contract of a continuous unit (issue #445):
+        ``oper_mode = 'Continuous'``, ``is_continuous = True`` and
+        ``names_states_in``, the stream fields it reads from its ``Inlet``:
+        mole fractions [-], molar flow [mol/s], and the temperature [K] and
+        pressure [Pa] used when ``temp_drum`` or ``pres_drum`` is None. It
+        reads them from the stored state of the ``Inlet`` object, so a
+        connected upstream time profile is not resolved: the flash
+        separates the upstream outlet's final state. It publishes
+        ``LiquidOut`` and ``VaporOut`` but no ``Outlet`` or time profile,
+        so it cannot be a flowsheet source.
+
+        The user's drum settings stay in ``temp_drum`` [K] and
+        ``pres_drum`` [Pa]; the effective drum conditions ``temp`` [K] and
+        ``pres`` [Pa] are derived from them and the current ``Inlet`` on
+        every ``Inlet`` assignment and at the start of every
+        ``solve_unit`` (issue #452).
         """
         validate_activity_model(gamma_method, param_name='gamma_method')
 
-        self.temp = temp_drum
-        self.pres = pres_drum
+        self.temp_drum = temp_drum  # [K], or None to follow the inlet
+        self.pres_drum = pres_drum  # [Pa], or None to follow the inlet
         self._Inlet = None
+        self._update_drum_conditions()
         self.gamma_method = gamma_method
+
+        self.oper_mode = 'Continuous'
+        self.is_continuous = True
+        self.names_states_in = ['mole_frac', 'mole_flow', 'temp', 'pres']
+
+    def flatten_states(self) -> None:
+        """Do nothing: the steady-state flash keeps no state profiles.
+
+        Notes
+        -----
+        ``SimulationExec.SolveFlowsheet`` calls ``flatten_states`` on every
+        solved unit outside ``PharmaPy.Containers``.
+        """
+
+    def get_reported_outlets(self) -> dict:
+        """Return the flash products that the stream table reports.
+
+        Returns
+        -------
+        dict of str to LiquidStream/VaporStream or LiquidPhase/VaporPhase
+            ``{'liquid': LiquidOut, 'vapor': VaporOut}``: the liquid and
+            vapor products, as flows [mol/s] for a stream ``Inlet`` or as
+            amounts [mol] for a phase ``Inlet``, at the drum temperature
+            [K] and pressure [Pa].
+
+        Raises
+        ------
+        AttributeError
+            If the flash has not been solved, so it has no ``LiquidOut``.
+
+        Notes
+        -----
+        ``SimulationResult.GetStreamTable`` reads this hook before
+        ``Outlet`` and reports the products as the rows
+        ``'Outlet_liquid'`` and ``'Outlet_vapor'`` (issue #451). The
+        IsothermalFlash deliberately has no ``Outlet``: a ``Connection`` hands a
+        source's ``Outlet`` to its successor, and a flash cannot be a
+        flowsheet source (issue #445).
+        """
+        return {'liquid': self.LiquidOut, 'vapor': self.VaporOut}
+
+    def _update_drum_conditions(self) -> None:
+        """Derive the effective drum temperature and pressure.
+
+        Sets ``temp`` [K] to ``temp_drum`` when the user set it, otherwise
+        to the current ``Inlet`` temperature, and ``pres`` [Pa] likewise
+        from ``pres_drum`` or the ``Inlet`` pressure. Without an ``Inlet``,
+        an unset value stays None.
+
+        Notes
+        -----
+        The user's settings are never overwritten, so a re-assigned inlet,
+        or an inlet changed in place before a new solve, is flashed at its
+        own conditions. Earlier releases stored the first inlet's values
+        as the drum settings and flashed every later inlet at them
+        (issue #452).
+        """
+        inlet = self._Inlet
+        temp_inlet = None if inlet is None else inlet.temp  # [K]
+        pres_inlet = None if inlet is None else inlet.pres  # [Pa]
+
+        self.temp = (self.temp_drum if self.temp_drum is not None
+                     else temp_inlet)  # [K]
+        self.pres = (self.pres_drum if self.pres_drum is not None
+                     else pres_inlet)  # [Pa]
 
     @property
     def Inlet(self):
+        """Feed of the flash (``LiquidPhase`` or ``LiquidStream``).
+
+        Returns
+        -------
+        LiquidPhase or LiquidStream or None
+            The assigned feed, or None before one is assigned.
+        """
         return self._Inlet
 
     @Inlet.setter
     def Inlet(self, instance):
+        """Attach the feed and derive the effective drum conditions.
+
+        Parameters
+        ----------
+        instance : LiquidPhase or LiquidStream
+            Feed with mole fractions [-], temperature [K], pressure [Pa],
+            and inventory [mol] or flow [mol/s].
+
+        Notes
+        -----
+        ``temp`` [K] and ``pres`` [Pa] are derived again from ``temp_drum``
+        and ``pres_drum`` and this feed (see ``_update_drum_conditions``).
+        ``states_di`` describes the flash unknowns for this feed's species
+        (see ``_flash_states_di``).
+        """
         self._Inlet = instance
 
-        if self.temp is None:
-            self.temp = self._Inlet.temp
+        self._update_drum_conditions()
 
-        if self.pres is None:
-            self.pres = self._Inlet.pres
-
-        # self.pres = self._Inlet.pres
         self.num_comp = self._Inlet.num_species
+        self.states_di = _flash_states_di(self._Inlet.name_species)
 
-        # if self.k_func is None:
         self.k_func = self.Inlet.getKeqVLE
 
         if self.Inlet.__module__ == 'PharmaPy.Streams':
@@ -276,7 +465,15 @@ class IsothermalFlash:
             If the solve does not converge or fails residual/phase-bound checks.
         ValueError
             If residual_tolerance is not finite and positive.
+
+        Notes
+        -----
+        The effective drum temperature ``temp`` [K] and pressure ``pres``
+        [Pa] are derived from ``temp_drum``, ``pres_drum`` and the current
+        ``Inlet`` before solving, so an inlet changed in place since its
+        assignment is flashed at its current conditions.
         """
+        self._update_drum_conditions()
 
         # Set seeds
         l_seed = 0.5
@@ -287,12 +484,8 @@ class IsothermalFlash:
 
         seed = np.concatenate(([l_seed], x_seed, y_seed, [v_seed]))
 
-        # # Set jacobian
-        # jac_eqns = jacauto(self.unit_model)
-
         # Solve nonlinear system
         solution = _solve_flash(self.unit_model, seed, -1, residual_tolerance)
-        # fprime=jac_eqns,
 
         # Retrieve solution
         liq_flash = solution[0] * self.in_flow
@@ -380,21 +573,75 @@ class AdiabaticFlash:
         ------
         ValueError
             If ``gamma_method`` is not a supported selector.
+
+        Notes
+        -----
+        The flash is a steady-state stream unit, so it declares the
+        flowsheet destination contract of a continuous unit (issue #445):
+        ``oper_mode = 'Continuous'``, ``is_continuous = True`` and
+        ``names_states_in``, the stream fields it reads from its ``Inlet``:
+        mole fractions [-], molar flow [mol/s] and temperature [K]; the
+        drum pressure is ``pres_drum``. It reads them from the stored state
+        of the ``Inlet`` object, so a connected upstream time profile is
+        not resolved: the flash separates the upstream outlet's final
+        state. It publishes ``LiquidOut`` and ``VaporOut`` but no
+        ``Outlet`` or time profile, so it cannot be a flowsheet source.
         """
         validate_activity_model(gamma_method, param_name='gamma_method')
- 
-        self.pres = pres_drum
 
-        self.div_energybce = div_energybce
-        self.mult_midfun = mult_midfun
+        self.pres = pres_drum  # [Pa]
+
+        self.div_energybce = div_energybce  # [-]
+        self.mult_midfun = mult_midfun  # [-]
         self.seed_basedon_input = seed_basedon_input
 
         self._Inlet = None
 
         self.gamma_method = gamma_method
 
+        self.oper_mode = 'Continuous'
+        self.is_continuous = True
+        self.names_states_in = ['mole_frac', 'mole_flow', 'temp']
+
+    def flatten_states(self) -> None:
+        """Do nothing: the steady-state flash keeps no state profiles.
+
+        Notes
+        -----
+        ``SimulationExec.SolveFlowsheet`` calls ``flatten_states`` on every
+        solved unit outside ``PharmaPy.Containers``.
+        """
+
+    def get_reported_outlets(self) -> dict:
+        """Return the flash products that the stream table reports.
+
+        Returns
+        -------
+        dict of str to LiquidStream/VaporStream or LiquidPhase/VaporPhase
+            ``{'liquid': LiquidOut, 'vapor': VaporOut}``: the liquid and
+            vapor products, as flows [mol/s] for a stream ``Inlet`` or as
+            amounts [mol] for a phase ``Inlet``, at the drum temperature
+            [K] and pressure [Pa].
+
+        Raises
+        ------
+        AttributeError
+            If the flash has not been solved, so it has no ``LiquidOut``.
+
+        Notes
+        -----
+        ``SimulationResult.GetStreamTable`` reads this hook before
+        ``Outlet`` and reports the products as the rows
+        ``'Outlet_liquid'`` and ``'Outlet_vapor'`` (issue #451). The
+        AdiabaticFlash deliberately has no ``Outlet``: a ``Connection`` hands a
+        source's ``Outlet`` to its successor, and a flash cannot be a
+        flowsheet source (issue #445).
+        """
+        return {'liquid': self.LiquidOut, 'vapor': self.VaporOut}
+
     @property
     def Inlet(self):
+        """Feed of the flash (``LiquidPhase`` or ``LiquidStream``), or None."""
         return self._Inlet
 
     @Inlet.setter
@@ -407,15 +654,31 @@ class AdiabaticFlash:
             Feed with mole fractions [-], temperature [K], pressure [Pa],
             and inventory [mol] or flow [mol/s]. The vapor placeholder uses
             its species order and composition until the flash is solved.
+
+        Notes
+        -----
+        ``states_di`` describes the flash unknowns for this feed: the
+        species that are not supercritical at the feed temperature, which
+        the solve keeps in its composition blocks, and the drum
+        temperature (see ``_active_states_di``). ``num_comp`` is the number
+        of feed species; a solve never changes it (issue #319).
+
+        The zero-flow vapor object is both the ``VaporOut`` placeholder
+        and ``_vapor_props``, the property object whose composition the
+        energy balance updates while solving. A solve publishes a new
+        ``VaporOut``, so a later solve leaves the published products of
+        earlier solves unchanged.
         """
         self._Inlet = instance
-        self.num_comp = self._Inlet.num_species
+        self.num_comp = self._Inlet.num_species  # [-], feed species
+        self.states_di = self._active_states_di(self._supercritical_mask())
 
         path = self.Inlet.path_data
 
         self.VaporOut = VaporStream(path, pres=self.pres,
                                     mole_frac=instance.mole_frac,
                                     check_input=False)
+        self._vapor_props = self.VaporOut
 
         self.k_func = self.Inlet.getKeqVLE
 
@@ -423,6 +686,38 @@ class AdiabaticFlash:
             self.in_flow = self.Inlet.mole_flow
         else:
             self.in_flow = self.Inlet.moles
+
+    def _supercritical_mask(self) -> np.ndarray:
+        """Flag the feed species the solve removes as supercritical.
+
+        Returns
+        -------
+        numpy.ndarray of bool, shape (num_species,)
+            True for each species whose critical temperature [K] is below
+            the current ``Inlet`` temperature [K]; ``solve_unit`` removes
+            these species from the liquid and vapor composition unknowns.
+        """
+        return self.Inlet.temp > self.Inlet.t_crit
+
+    def _active_states_di(self, is_supercritic: np.ndarray) -> dict:
+        """Describe the unknowns of the flash for its active species.
+
+        Parameters
+        ----------
+        is_supercritic : numpy.ndarray of bool, shape (num_species,)
+            Supercritical flags of the feed species, as returned by
+            ``_supercritical_mask``.
+
+        Returns
+        -------
+        dict
+            ``_flash_states_di`` for the species that are not
+            supercritical, with the drum temperature [K]: 2N + 3
+            algebraic unknowns for N such species.
+        """
+        active = [name for name, flag in zip(self.Inlet.name_species,
+                                             is_supercritic) if not flag]
+        return _flash_states_di(active, adiabatic=True)
 
     def material_balances(self, liq, vap, x_i, y_i, z_i, temp):
 
@@ -451,12 +746,36 @@ class AdiabaticFlash:
         return material
 
     def energy_balance(self, liq, vap, x_i, y_i, z_i, temp):
+        """Evaluate the scaled adiabatic energy residual.
 
-        self.VaporOut.mole_frac = y_i
+        Parameters
+        ----------
+        liq, vap : float
+            Liquid and vapor fractions of the feed [-].
+        x_i, y_i : numpy.ndarray
+            Liquid and vapor mole fractions of all feed species [-].
+        z_i : numpy.ndarray
+            Feed mole fractions [-].
+        temp : float
+            Drum temperature [K], also the enthalpy reference.
+
+        Returns
+        -------
+        numpy.ndarray, shape (1,)
+            Molar energy residual [J/mol] divided by ``div_energybce`` [-].
+
+        Notes
+        -----
+        The vapor enthalpy is evaluated with ``_vapor_props``, whose
+        composition is set to ``y_i``; the published ``VaporOut`` of an
+        earlier solve is not modified (issue #319).
+        """
+        self._vapor_props.mole_frac = y_i
 
         # Energy balance
         h_liq = 0  # reference state
-        h_vap = self.VaporOut.getEnthalpy(temp, temp_ref=temp, basis='mole')
+        h_vap = self._vapor_props.getEnthalpy(temp, temp_ref=temp,
+                                              basis='mole')
         h_feed = self.Inlet.getEnthalpy(temp_ref=temp, basis='mole')
 
         energy_bce = liq * h_liq + vap * h_vap - h_feed
@@ -465,12 +784,32 @@ class AdiabaticFlash:
         return energy_bce
 
     def unit_model(self, states):
+        """Evaluate the flash residuals for the active species.
+
+        Parameters
+        ----------
+        states : numpy.ndarray
+            Unknowns in the order of ``states_di``: liquid fraction [-],
+            liquid and vapor mole fractions of the N species that are not
+            supercritical [-], vapor fraction [-] and temperature [K].
+
+        Returns
+        -------
+        numpy.ndarray
+            Material residuals [-] followed by the scaled energy residual.
+
+        Notes
+        -----
+        N is counted from ``is_supercritic``, the mask of the current
+        solve, so no count accumulates across solves (issue #319).
+        """
         liq = states[0]
         vap = states[-2]
 
+        num_active = int(np.sum(~self.is_supercritic))  # [-]
         fracs = states[1:-2]
-        x_i = fracs[:self.num_comp]
-        y_i = fracs[self.num_comp:]
+        x_i = fracs[:num_active]
+        y_i = fracs[num_active:]
         z_i = self.Inlet.mole_frac
 
         if any(self.is_supercritic):
@@ -512,6 +851,14 @@ class AdiabaticFlash:
         ValueError
             If residual_tolerance is not finite and positive.
 
+        Notes
+        -----
+        The supercritical species and the active species count are derived
+        from the current ``Inlet`` on every solve, without changing
+        ``num_comp``, so repeated solves of the same feed give the same
+        products. Earlier releases reduced ``num_comp`` on every solve of a
+        feed with a supercritical species, and the second solve failed
+        with ``IndexError`` (issue #319).
         """
 
         if self.seed_basedon_input:
@@ -522,16 +869,18 @@ class AdiabaticFlash:
             x_seed = np.ones(self.num_comp) * 1 / self.num_comp
             y_seed = x_seed
 
-        is_supercritic = self.Inlet.temp > self.Inlet.t_crit
+        is_supercritic = self._supercritical_mask()
+        num_active = int(np.sum(~is_supercritic))  # [-], solved species
 
         if any(is_supercritic):
             x_seed = x_seed[~is_supercritic]
             y_seed = y_seed[~is_supercritic]
 
-            self.num_comp -= sum(is_supercritic)
-            self.z_super = self.Inlet.mole_frac[is_supercritic]
+            self.z_super = self.Inlet.mole_frac[is_supercritic]  # [-]
 
         self.is_supercritic = is_supercritic
+        # The feed may have changed in place since it was assigned.
+        self.states_di = self._active_states_di(is_supercritic)
 
         l_seed = 1 - v_seed
 
@@ -539,18 +888,16 @@ class AdiabaticFlash:
 
         seed = np.concatenate(([l_seed], x_seed, y_seed, [v_seed, temp_seed]))
 
-        # jac_eqns = jacauto(self.unit_model)
         solution = _solve_flash(self.unit_model, seed, -2, residual_tolerance)
-        # fprime=jac_eqns)
 
         # Retrieve solution
         liq_flash = solution[0] * self.in_flow
         vap_flash = solution[-2] * self.in_flow
         temp = solution[-1]
 
-        fracs = solution[1:2*self.num_comp + 1]
-        x_flash = fracs[:self.num_comp]
-        y_flash = fracs[self.num_comp:]
+        fracs = solution[1:2*num_active + 1]
+        x_flash = fracs[:num_active]
+        y_flash = fracs[num_active:]
 
         if any(is_supercritic):
             x_flash, y_flash = merge_supercritical(self.is_supercritic,
@@ -1231,8 +1578,18 @@ class Evaporator:
             times drum volume [m**3]. This root-surface allowance covers
             roundoff on both sides of the event. Reset or drain before
             continuing; no state is advanced on rejection.
+
+        Notes
+        -----
+        The initial liquid volume [m**3], which sets the headspace and the
+        fill checks, is taken on the model's ideal-mixing basis by
+        :func:`_model_liquid_volume`: the stored volume for fraction and
+        ``name_solv`` charges, the ideal-mixing volume of the moles for a
+        charge whose concentrations are authoritative (issue #439).
         """
-        liquid_volume = self.Liquid_1.vol  # [m**3], checked on every initialization path
+        # [m**3], model basis (see _model_liquid_volume), checked on every
+        # initialization path
+        liquid_volume = _model_liquid_volume(self.Liquid_1)
         volume_tolerance = np.sqrt(eps) * self.vol_tot  # [m**3], root-surface roundoff allowance
         if not np.isfinite(liquid_volume) or liquid_volume >= self.vol_tot:
             raise ValueError("Drum volume must exceed the finite liquid volume [m**3]")
@@ -1278,7 +1635,7 @@ class Evaporator:
 
         # Moles of phases
         mol_liq = self.Liquid_1.moles  # [mol]
-        vol_liq = self.Liquid_1.vol  # [m**3]
+        vol_liq = liquid_volume  # [m**3], model basis
 
         vol_vap = self.vol_tot - vol_liq  # [m**3]
         if vol_vap < 0:
@@ -1320,7 +1677,9 @@ class Evaporator:
             temp_init = FlashInit.LiquidOut.temp  # [K]
 
             mol_liq = FlashInit.LiquidOut.moles  # [mol]
-            dens_liq = self.Liquid_1.getDensity(basis='mole')  # [mol/L]
+            # The flash liquid's own moles to volume (issue #439); it is
+            # built from fractions, so this is its ideal-mixing density.
+            dens_liq = self.Liquid_1.getInventoryDensity(basis='mole')  # [mol/L]
             vol_liq = mol_liq / dens_liq / 1000  # [m**3]
             vol_vap = self.vol_tot - vol_liq  # [m**3]
 
@@ -2444,6 +2803,12 @@ class ContinuousEvaporator:
         ------
         ValueError
             If the liquid volume exceeds the drum volume [m**3].
+
+        Notes
+        -----
+        The initial liquid volume [m**3] is taken on the model's
+        ideal-mixing basis by :func:`_model_liquid_volume`, as in
+        :meth:`Evaporator.init_unit` (issue #439).
         """
         temp_bubble_init, y_init = self.Liquid_1.getBubblePoint(
             pres=self.pres, y_vap=True,
@@ -2455,7 +2820,8 @@ class ContinuousEvaporator:
 
         # Moles of phases
         mol_liq = self.Liquid_1.moles  # [mol]
-        vol_liq = self.Liquid_1.vol  # [m**3]
+        # [m**3], model basis (see _model_liquid_volume)
+        vol_liq = _model_liquid_volume(self.Liquid_1)
 
         vol_vap = self.vol_tot - vol_liq  # [m**3]
         if vol_vap < 0:

@@ -1,13 +1,15 @@
 """Regression tests for graph-defined flowsheet stream routing.
 
 The cases solve real batch mixers and transfer real liquid phases through real
-``Connection`` and ``SimulationResult`` collaborators.
+``Connection`` and ``SimulationResult`` collaborators. A graph in which one
+unit feeds several successors is rejected before any transfer (issue #437).
 """
 
 import numpy as np
 import pytest
 
 from PharmaPy.Containers import Mixer
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.Phases import LiquidPhase
 from PharmaPy.SimExec import SimulationExec
 
@@ -164,8 +166,12 @@ def test_stream_handoff_follows_graph_edges_not_execution_order(data_path):
     )
 
 
-def test_stream_handoff_supports_fanout_to_multiple_successors(data_path):
-    """Copy a real source phase to every graph successor.
+def test_stream_handoff_rejects_fanout_before_any_transfer(data_path):
+    """Reject a real source phase routed to two graph successors.
+
+    Copying the outlet to every successor would duplicate its mass, so the
+    diamond is rejected before any unit is solved, although its downstream
+    fan-in into Mixer D alone would be legal (issue #437).
 
     Parameters
     ----------
@@ -176,42 +182,45 @@ def test_stream_handoff_supports_fanout_to_multiple_successors(data_path):
     database_path = str(data_path["flowsheet"] / "compound_database.json")
     flowsheet = _configured_flowsheet(graph, database_path)
 
-    flowsheet.SolveFlowsheet(verbose=False)
-    created = _connection_edges(flowsheet)
+    with pytest.raises(PharmaPyNonImplementedError,
+                       match=r"'A' feeds \['B', 'C'\]\. Every successor "
+                             r"would receive a full copy of the outlet"):
+        flowsheet.SolveFlowsheet(verbose=False)
 
-    _assert_connections_follow_graph(graph, created)
-    # FIFO traversal visits B before C, following A's successor order.
-    assert created == [
-        ("A", "B"),
-        ("A", "C"),
-        ("B", "D"),
-        ("C", "D"),
-    ]
-    assert len(flowsheet.B.Inlets) == 1
-    assert len(flowsheet.C.Inlets) == 1
-    assert len(flowsheet.D.Inlets) == 2
+    assert not hasattr(flowsheet, "connections")
+    assert not hasattr(flowsheet.A, "Outlet")
+    assert flowsheet.B.Inlets == []
+    assert flowsheet.C.Inlets == []
+    assert flowsheet.D.Inlets == []
 
 
 def test_already_solved_branch_honors_pick_units(data_path):
     """Filter a real pre-solved unit's handoffs to selected destinations.
+
+    B and E are solved before the flowsheet and not picked: B still hands
+    its phase to the picked destination C, while E's destination D is not
+    picked, so D receives nothing.
 
     Parameters
     ----------
     data_path : dict of pathlib.Path
         Repository test-data directories.
     """
-    graph = {"A": ["B", "C"], "B": ["C", "D"], "C": [], "D": []}
+    graph = {"A": ["C"], "B": ["C"], "E": ["D"], "C": [], "D": []}
     database_path = str(data_path["flowsheet"] / "compound_database.json")
     flowsheet = _configured_flowsheet(graph, database_path)
-    _add_real_feed(
-        flowsheet.B, database_path, temperature=307.0, mass_scale=2.0
-    )
     flowsheet.B.solve_unit()
+    flowsheet.E.solve_unit()
 
     flowsheet.SolveFlowsheet(pick_units=["A", "C"], verbose=False)
     created = _connection_edges(flowsheet)
 
     _assert_connections_follow_graph(graph, created)
     assert created == [("A", "C"), ("B", "C")]
-    assert len(flowsheet.C.Inlets) == 2
+    # Sources A and B are scaled by 1 and 2: (1 + 2 kg) and 2 * (1 + 2 kg).
+    source_masses = np.array([3.0, 6.0])  # [kg]
+    np.testing.assert_allclose(
+        [inlet.mass for inlet in flowsheet.C.Inlets], source_masses
+    )
+    assert flowsheet.C.Outlet.mass == pytest.approx(source_masses.sum())
     assert flowsheet.D.Inlets == []
