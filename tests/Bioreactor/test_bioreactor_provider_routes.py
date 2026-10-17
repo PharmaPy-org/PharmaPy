@@ -1,6 +1,7 @@
 """Provider substitution preserves native balances in all three mechanisms."""
 
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -14,8 +15,8 @@ ROOT = Path(__file__).parents[2] / 'examples/bioreactors'
 def inputs(kind):
     folder = (Path(__file__).parent/'fixtures/reconciliation/analytic_balances/inputs/consistent'
               if kind == 'reconciled' else ROOT/'generic_batch/inputs')
-    case = json.loads((folder/'case.json').read_text())
-    model = json.loads((folder/'mechanism.json').read_text())
+    case = read_input_json((folder/'case.json'))
+    model = read_input_json((folder/'mechanism.json'))
     if kind == 'direct':
         model['mechanism'] = 'configured-kinetics'
         model['state']['biomass_kg'] = None

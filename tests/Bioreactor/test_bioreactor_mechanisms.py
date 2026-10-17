@@ -1,5 +1,6 @@
 import copy
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -201,8 +202,8 @@ def test_network_conservation_audit_distinguishes_internal_and_boundary_reaction
 
 def test_culture_audit_exposes_untracked_exchanges_without_changing_bounds():
     folder = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/fed_batch_cho'
-    case = json.loads((folder / 'inputs/case.json').read_text())
-    definition = json.loads((folder / 'inputs/mechanism.json').read_text())
+    case = read_input_json((folder / 'inputs/case.json'))
+    definition = read_input_json((folder / 'inputs/mechanism.json'))
     mechanism = build_bioreactor(case, definition, folder / 'inputs/thermo.json').mechanism
     lower, upper = mechanism.network.bounds()
     report = mechanism.audit_conservation()
@@ -262,8 +263,8 @@ def test_closed_uptake_audit_detects_resource_free_production():
 
 def test_exchange_role_must_agree_with_inventory_mapping():
     folder = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/fed_batch_cho/inputs'
-    case = json.loads((folder / 'case.json').read_text())
-    definition = json.loads((folder / 'mechanism.json').read_text())
+    case = read_input_json((folder / 'case.json'))
+    definition = read_input_json((folder / 'mechanism.json'))
     definition['network']['exchange_roles']['R043'] = 'tracked'
     with np.testing.assert_raises_regex(ValueError, 'inventory mapping'):
         build_bioreactor(case, definition, folder / 'thermo.json')

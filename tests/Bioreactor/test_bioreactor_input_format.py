@@ -1,6 +1,7 @@
 """The shared forward template preserves native model inputs and behavior."""
 
 import json
+from .input_helpers import read_input_json
 from copy import deepcopy
 from pathlib import Path
 
@@ -55,13 +56,13 @@ def test_invalid_stock_is_rejected_without_changing_inventory(stock):
 
 def _load(name):
     folder = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / "inputs"
-    return [json.loads((folder / file).read_text())
+    return [read_input_json((folder / file))
             for file in ("case.json", "mechanism.json", "thermo.json")]
 
 
 def test_all_examples_use_the_same_ordered_forward_template():
     template = ROOT / "doc/online_docs/bioreactors/templates"
-    case, model, thermo = [json.loads((template / file).read_text())
+    case, model, thermo = [read_input_json((template / file))
                            for file in ("case.json", "mechanism.json", "thermo.json")]
     for name in NAMES:
         configured_case, configured_model, properties = _load(name)

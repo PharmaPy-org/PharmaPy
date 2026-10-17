@@ -1,6 +1,7 @@
 """Independent population, network, constraint, operation and coupled-model checks."""
 
 import json
+from .input_helpers import read_input_json
 import os
 import signal
 import time
@@ -32,7 +33,7 @@ POPULATION_SCALES = np.array([10., 1., .2, .1, 1., .001])
 
 def population_load(variant):
     p = POPULATION_BASE/'inputs'/variant
-    return json.loads((p/'case.json').read_text()), json.loads((p/'mechanism.json').read_text()), p/'thermo.json'
+    return read_input_json((p/'case.json')), read_input_json((p/'mechanism.json')), p/'thermo.json'
 
 
 def population_observed(a, h):
@@ -208,8 +209,8 @@ def test_reconciliation_copy_preserves_policy(policy):
 
 def network_load(variant):
     folder = NETWORK_BASE/'inputs'/variant
-    return (json.loads((folder/'case.json').read_text()),
-            json.loads((folder/'mechanism.json').read_text()), folder/'thermo.json')
+    return (read_input_json((folder/'case.json')),
+            read_input_json((folder/'mechanism.json')), folder/'thermo.json')
 
 
 def network_projection(variant, limits=(np.inf, np.inf)):
@@ -355,7 +356,7 @@ def test_network_rename_and_permute(variant, tmp_path):
         if isinstance(value, list):
             return [transform(v) for v in value]
         return rename.get(value, value) if isinstance(value, str) else value
-    config, thermo = transform(config), transform(json.loads(thermo.read_text()))
+    config, thermo = transform(config), transform(read_input_json(thermo))
     for key in ('reactions', 'internal_metabolites', 'exchange_reactions'):
         config['network'][key].reverse()
     config['model']['kinetics']['extracellular_species'].reverse()
@@ -429,8 +430,8 @@ CONSTRAINT_MAPPING = np.array([[1., 1.], [0., 1.], [1., 0.], [0., 2.], [0., 0.]]
 
 def constraint_load(name):
     folder = CONSTRAINT_BASE/'inputs'/name
-    return (json.loads((folder/'case.json').read_text()),
-            json.loads((folder/'mechanism.json').read_text()), folder/'thermo.json')
+    return (read_input_json((folder/'case.json')),
+            read_input_json((folder/'mechanism.json')), folder/'thermo.json')
 
 
 def constraint_reference(config, solve=np.linalg.solve):
@@ -929,8 +930,8 @@ OPERATION_SCALES = np.array([1.,1.,1.,.1,1.,1.,1.,.0001])
 
 def operation_load(name, backend='fixed-step', step=.001):
     folder = OPERATION_BASE/'inputs'/name
-    case = json.loads((folder/'case.json').read_text())
-    config = json.loads((folder/'mechanism.json').read_text())
+    case = read_input_json((folder/'case.json'))
+    config = read_input_json((folder/'mechanism.json'))
     case['numerics']['step']['value'] = step
     if backend == 'scipy':
         case['numerics'].update(backend='scipy', relative_tolerance=1e-10,
@@ -1096,7 +1097,7 @@ def operation_record_refinement(name, values):
     if os.environ.get('BIOREACTOR_VERIFICATION_OUTPUT'):
         path = Path(os.environ['BIOREACTOR_VERIFICATION_OUTPUT'])/'refinement.json'
         path.parent.mkdir(parents=True, exist_ok=True)
-        report = json.loads(path.read_text()) if path.exists() else {}
+        report = read_input_json(path) if path.exists() else {}
         report[name] = values
         path.write_text(json.dumps(report,indent=2)+'\n')
 
@@ -1257,7 +1258,7 @@ def test_operation_equivalent_units_and_names(name,backend,tmp_path):
     for key in ('reactions','internal_metabolites','exchange_reactions'):
         config['network'][key].reverse()
     renamed_thermo=tmp_path/'thermo.json'
-    renamed_thermo.write_text(json.dumps(transform(json.loads(thermo.read_text()))))
+    renamed_thermo.write_text(json.dumps(transform(read_input_json(thermo))))
     changed,results,_=operation_run(case,config,renamed_thermo)
     assert len(histories)==len(results)
     for a,b in zip(histories,results):
@@ -1281,8 +1282,8 @@ def test_operation_continuation_does_not_replay_old_events():
 @pytest.mark.parametrize('backend',['fixed-step','scipy'])
 def test_operation_pathway_receives_native_continuous_supply(backend):
     folder=Path(__file__).parents[2]/'examples/bioreactors/generic_fed_batch/inputs'
-    case=json.loads((folder/'case.json').read_text())
-    config=json.loads((folder/'mechanism.json').read_text())
+    case=read_input_json((folder/'case.json'))
+    config=read_input_json((folder/'mechanism.json'))
     case['operation']['runtime']={'value':.06,'unit':'h'}
     case['operation']['volume_policy']='working-volume'
     case['numerics']=operation_load('combined',backend)[0]['numerics']

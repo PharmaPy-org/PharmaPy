@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from math import isfinite
+from typing import Optional
 from .BioreactorUnitConverter import BioreactorUnitConverter
 from .relationships import expand_relationships
 
@@ -271,15 +272,57 @@ def _active(value, fields, name):
     return {key: item for key, item in value.items() if key in fields and item is not None}
 
 
-def normalize_forward_inputs(case, definition):
+def split_forward_inputs(document: dict) -> tuple[dict, dict]:
+    """Unpack a combined schema-3 declaration without changing model values.
+
+    Parameters
+    ----------
+    document : dict
+        Mechanism with ``operation`` (physical setup, conditions and recipe)
+        and ``numerical`` (solver settings). Quantities retain declared units.
+
+    Returns
+    -------
+    tuple of dict
+        Independent schema-2 case and mechanism declarations. No units,
+        parameter values, equations or solver settings are changed.
+
+    Raises
+    ------
+    ValueError
+        The version or combined sections are missing, malformed or unsupported.
+    """
+    if not isinstance(document, dict) or document.get('schema_version') != 3:
+        raise ValueError('combined input requires schema_version 3')
+    definition = deepcopy(document)
+    comment = definition.pop('$comment', None)
+    _keys(definition, (*MECHANISM_FIELDS, 'operation', 'numerical'), 'combined input')
+    operation = definition.pop('operation')
+    if not isinstance(operation, dict) or not {'conditions', 'recipe'} <= operation.keys():
+        raise ValueError('operation requires conditions and recipe mappings')
+    conditions, recipe = operation.pop('conditions'), operation.pop('recipe')
+    if not isinstance(conditions, dict) or not isinstance(recipe, dict):
+        raise ValueError('operation conditions and recipe must be mappings')
+    numerical = definition.pop('numerical')
+    _keys(numerical, NUMERICAL_FIELDS, 'numerical')
+    case = dict(schema_version=2, biology={'conditions': conditions},
+                numerics=numerical, operation=operation, recipe=recipe)
+    definition['schema_version'] = 2
+    if comment is not None:
+        case['$comment'] = comment
+        definition['$comment'] = comment
+    return case, definition
+
+
+def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> tuple[dict, dict]:
     """Accept the standard layout or legacy inputs and return private model inputs.
 
     Parameters
     ----------
     case : Mapping
-        Case declaration (operation, numerics, biology, recipe).
-    definition : Mapping
-        Mechanism declaration (mechanism, parameters, model, state, recipes).
+        Separate case declaration, or a combined schema-3 declaration.
+    definition : Mapping, optional
+        Separate mechanism declaration; omit for combined schema-3 inputs.
 
     Returns
     -------
@@ -294,6 +337,10 @@ def normalize_forward_inputs(case, definition):
         A schema version, section, field or mechanism is unsupported, or an
         inactive field is filled.
     """
+    if definition is None:
+        case, definition = split_forward_inputs(case)
+    elif case.get('schema_version') == 3 or definition.get('schema_version') == 3:
+        raise ValueError('pass combined schema-3 input alone, not with a separate case')
     case, definition = deepcopy(case), deepcopy(definition)
     for document in (case, definition):
         if document.get("schema_version") == 2:

@@ -1,6 +1,7 @@
 """Independent physical conversions and native integration of declared units."""
 
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -59,8 +60,8 @@ def test_missing_properties_and_incompatible_units_fail(source, target, properti
 
 def test_arrays_native_phase_properties_and_invalid_values():
     p = EXAMPLES / 'generic_batch/inputs'
-    assembly = build_bioreactor(json.loads((p/'case.json').read_text()),
-                                json.loads((p/'mechanism.json').read_text()), p/'thermo.json')
+    assembly = build_bioreactor(read_input_json((p/'case.json')),
+                                read_input_json((p/'mechanism.json')), p/'thermo.json')
     phase = assembly.phase
     concentration = np.ones(len(phase.mw)) * .01
     original = concentration.copy()
@@ -80,9 +81,10 @@ def test_arrays_native_phase_properties_and_invalid_values():
 @pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'fed_batch_cho'])
 def test_json_paths_and_mappings_share_native_converter(name):
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
-    case, mechanism = [json.loads((p/file).read_text()) for file in ('case.json', 'mechanism.json')]
+    case, mechanism = [read_input_json((p/file)) for file in ('case.json', 'mechanism.json')]
     before = json.dumps([case, mechanism], sort_keys=True)
-    paths = Units.from_inputs(p/'case.json', p/'mechanism.json')
+    paths = (Units.from_inputs(p/'case.json', p/'mechanism.json')
+             if name == 'fed_batch_cho' else Units.from_inputs(p/'mechanism.json'))
     mappings = Units.from_inputs(case, mechanism)
     native = build_bioreactor(case, mechanism, p/'thermo.json').mechanism.unit_converter
     fields = ('exchange_scale', 'growth_scale', 'product_mass', 'product_scale') if name == 'fed_batch_cho' else ('per_second',)
@@ -93,7 +95,7 @@ def test_json_paths_and_mappings_share_native_converter(name):
 
 def test_additional_json_volume_and_amount_units_preserve_initial_state():
     p = EXAMPLES / 'generic_batch/inputs'
-    case, definition = [json.loads((p/file).read_text()) for file in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json((p/file)) for file in ('case.json', 'mechanism.json')]
     original = build_bioreactor(case, definition, p/'thermo.json')
     case['operation']['initial_volume'] = {'unit': 'mL', 'value': 1000.}
     definition['state']['species']['unit'] = 'umol'
@@ -125,7 +127,7 @@ def test_rate_normalization_minutes_and_overflow():
 ])
 def test_equivalent_pathway_bases_preserve_native_simulation(amount, normalization, time, content, scale):
     p = EXAMPLES / 'generic_batch/inputs'
-    case, definition = [json.loads((p/file).read_text()) for file in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json((p/file)) for file in ('case.json', 'mechanism.json')]
     case['operation']['runtime']['value'] = .2
     reference = build_bioreactor(case, definition, p/'thermo.json').solve(verbose=False)[0]
     exchange = dict(amount_unit=amount, normalization=normalization, time_unit=time)

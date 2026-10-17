@@ -49,7 +49,7 @@ def _check_notebook(tmp_path, notebook):
     # The notebooks need only the forward inputs, even when auxiliary files are absent.
     inputs = tmp_path / "inputs"
     inputs.mkdir()
-    for name in ("case.json", "mechanism.json", "thermo.json"):
+    for name in ("mechanism.json", "thermo.json"):
         (inputs / name).write_bytes((notebook.parent / "inputs" / name).read_bytes())
     try:
         for step, cell in enumerate((c for c in document["cells"] if c["cell_type"] == "code"), 1):

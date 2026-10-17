@@ -1,6 +1,7 @@
 """Example inputs and notebook exports are reproducible without saved outputs."""
 
 import json
+from .input_helpers import read_input_json
 import matplotlib.pyplot as plt
 import pytest
 from pathlib import Path
@@ -40,10 +41,10 @@ def test_core_examples_have_forward_inputs_and_outputs(name, tmp_path):
         Isolated pytest export destination.
     """
     folder = EXAMPLES / name
-    for filename in ('README.md', 'workflow.ipynb', 'inputs/case.json',
+    for filename in ('README.md', 'workflow.ipynb',
                      'inputs/mechanism.json', 'inputs/thermo.json'):
         assert (folder / filename).is_file()
-    notebook = json.loads((folder / 'workflow.ipynb').read_text())
+    notebook = read_input_json((folder / 'workflow.ipynb'))
     namespace = {'__name__': '__notebook__'}
     try:
         for step, cell in enumerate((c for c in notebook['cells'] if c['cell_type'] == 'code'), 1):

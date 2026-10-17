@@ -11,6 +11,7 @@ from copy import deepcopy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional, Union
 
 import numpy as np
 
@@ -1007,16 +1008,16 @@ class NativeBioreactorAssembly:
         return tuple(histories)
 
 
-def build_bioreactor(case, definition, thermo_path):
+def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
+                    thermo_path: Optional[Union[str, Path]] = None) -> NativeBioreactorAssembly:
     """Build one input-declared process as an ordinary native reactor object.
 
     Parameters
     ----------
     case : Mapping
-        Case declaration: ``biology``, ``numerics``, ``operation`` and
-        ``recipe``.
-    definition : Mapping
-        Mechanism declaration.
+        Combined schema-3 declaration, or a legacy separate case declaration.
+    definition : Mapping, optional
+        Legacy separate mechanism declaration. Omit for combined inputs.
     thermo_path : path-like
         Native thermodynamic JSON file.
 
@@ -1036,7 +1037,11 @@ def build_bioreactor(case, definition, thermo_path):
     -----
     The default temperature 298.15 K is used only when ``temperature_k`` is
     absent; reactors are built isothermal.
+    Combined inputs use ``build_bioreactor(document, thermo_path=path)``.
+    The original three-argument interface remains supported.
     """
+    if thermo_path is None:
+        raise ValueError('thermo_path is required')
     case, definition = normalize_forward_inputs(case, definition)
     _require_keys(case, {"biology", "numerics", "operation", "recipe"}, "case")
     _require_keys(case["biology"], {"conditions", "mechanism"}, "biology")
