@@ -22,6 +22,13 @@ one, so a ``SimulationExec`` flowsheet records zero processing time for it
 and hands the downstream unit a constant feed; earlier releases published
 ``time = None`` and every flowsheet containing the connector failed.
 
+Issue #434: ``cycle_time`` [s] and ``flow_mult`` [-] must be finite real
+numbers greater than zero. Zero, negative, NaN and infinite values,
+booleans (Python and NumPy) and non-real values (None, a numeric string,
+a complex number) raise ``ValueError`` naming the parameter, value and
+unit when the connector is created; they gave a negative or NaN outlet
+flow, or a ``ZeroDivisionError`` when solved.
+
 Fixtures follow the issue reproduction with the shipped five-species
 database: liquid of mass fractions 0.1/0.1/0.1/0.1/0.6 and pure-A crystals
 of 1e7/2e7/1e7 #/um on a 10/20/40 um grid at 310 K. Unit tests need no ODE
@@ -29,6 +36,8 @@ backend; the ``assimulo`` tests integrate a ``BatchCryst`` feeding the
 connector, and a liquid ``DynamicCollector`` -> connector ->
 ``DynamicCollector`` flowsheet.
 """
+
+import re
 
 import numpy as np
 import pytest
@@ -446,3 +455,44 @@ def test_liquid_flowsheet_discharges_through_connector(path):
     assert [key[:2] for key in raw.index] == [('C1', 'Inlet_0')]
     assert raw['mass'].iloc[0] == pytest.approx(FEED_FLOW * UPSTREAM_RUNTIME,
                                                 rel=FLOWSHEET_RTOL)
+
+
+# [s] or [-], each rejected: out-of-range reals, then booleans and
+# non-real values, which are not numbers.Real.
+INVALID_SETTINGS = [-CYCLE_TIME, 0.0, float('nan'), float('inf'),
+                    -float('inf'), True, np.bool_(True), None, '3600',
+                    1 + 0j]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('value', INVALID_SETTINGS,
+                         ids=['negative', 'zero', 'nan', 'inf', '-inf',
+                              'bool', 'numpy-bool', 'none', 'string',
+                              'complex'])
+@pytest.mark.parametrize('name, unit', [('cycle_time', '[s]'),
+                                        ('flow_mult', '[-]')])
+def test_invalid_cycle_settings_are_rejected(name, unit, value):
+    """Reject a non-positive or non-finite cycle time or flow multiplier."""
+    settings = {'cycle_time': CYCLE_TIME, 'flow_mult': FLOW_MULT}  # [s], [-]
+    settings[name] = value
+    message = (rf"^BatchToFlowConnector {name} must be a finite number "
+               rf"greater than zero {re.escape(unit)}; got "
+               rf"{re.escape(repr(value))}\.$")
+    with pytest.raises(ValueError, match=message):
+        BatchToFlowConnector(**settings)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('cycle_time, flow_mult', [
+    (int(CYCLE_TIME), 1), (np.float64(CYCLE_TIME), np.float64(FLOW_MULT))],
+    ids=['int', 'numpy'])
+def test_numeric_cycle_settings_are_accepted(path, cycle_time, flow_mult):
+    """Accept integer and NumPy settings and discharge with them."""
+    connector = BatchToFlowConnector(cycle_time=cycle_time,
+                                     flow_mult=flow_mult)
+    connector.Phases = _liquid(path)
+    connector.solve_unit()
+
+    expected_flow = LIQUID_MASS / CYCLE_TIME * flow_mult  # [kg/s]
+    assert connector.Outlet.mass_flow == pytest.approx(expected_flow,
+                                                       rel=RTOL)

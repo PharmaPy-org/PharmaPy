@@ -1,4 +1,6 @@
-{"special": {"Mixer": ["Inlets"], "DynamicCollector": ["Inlet"]},
+{"special": {"Mixer": ["Inlets"], "DynamicCollector": ["Inlet"],
+             "IsothermalFlash": ["Inlet"], "AdiabaticFlash": ["Inlet"],
+             "ContinuousExtractor": ["Inlet"]},
  "Continuous": ["Phases", "Inlet"],
  "Semibatch": ["Phases", "Inlet"],
  "Batch": ["Phases"],

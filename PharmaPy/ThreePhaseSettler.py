@@ -23,14 +23,36 @@ from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 class ThreePhaseSettler:
     def __init__(self, d_impeller, d_vessel,
                  target_compound, agit_rate=1000/60):
+        """Create a continuous three-phase settler.
 
-        self.d_impeller = d_impeller
-        self.d_vessel = d_vessel
+        Parameters
+        ----------
+        d_impeller : float
+            Impeller diameter [m].
+        d_vessel : float
+            Vessel diameter [m].
+        target_compound : str
+            Name of the solid compound tracked in the feed's liquid species.
+        agit_rate : float, optional
+            Agitation rate [1/s], revolutions per second as used in the
+            impeller Reynolds and Froude numbers; the default, 1000/60,
+            is 1000 rpm.
+
+        Notes
+        -----
+        The settler takes a continuous slurry feed and publishes an outlet
+        stream, so it declares ``oper_mode = 'Continuous'`` and
+        ``is_continuous = True`` for flowsheet connections (issue #445).
+        """
+
+        self.d_impeller = d_impeller  # [m]
+        self.d_vessel = d_vessel  # [m]
         self.target_compound = target_compound
-        self.agit_rate = agit_rate
+        self.agit_rate = agit_rate  # [1/s]
 
         self.outputs = None
         self.oper_mode = 'Continuous'
+        self.is_continuous = True
 
     def nomenclature(self):
         self.name_states = ['solid_conc']
@@ -212,6 +234,26 @@ class ThreePhaseSettler:
         return time, states, d_states
 
     def retrieve_results(self, time, states):
+        """Store the solid-concentration result and build the outlet slurry.
+
+        Parameters
+        ----------
+        time : numpy.ndarray
+            Result times [s], shape (num_times,).
+        states : numpy.ndarray
+            Solid concentration [kg solid/kg liquid], shape (num_times, 1).
+
+        Notes
+        -----
+        The outlet liquid is the bottom-phase inlet at its volume flow
+        [m**3/s]. Its mass flow [kg/s] is that flow times the inlet's
+        ``getInventoryDensity`` [kg/m**3], and the outlet solid mass flow is
+        the final solid concentration times it. A bottom inlet whose
+        concentrations are authoritative (``concentration_basis``, issue
+        #439) is passed on from its ``mole_conc`` [mol/L], so the outlet
+        keeps its concentrations and mass flow; any other inlet is rebuilt
+        from its mass fractions [-] as before.
+        """
         time = np.asarray(time)
         self.timeProf = time
 
@@ -225,10 +267,17 @@ class ThreePhaseSettler:
         # Outlet stream
         path = self.Inlet_bot_phase.path_data
         solid_conc = self.result.solid_conc[-1][-1]
-        solid_mass_flow = solid_conc*self.Inlet_bot_phase.vol_flow*self.Inlet_bot_phase.getDensity()
+        bottom = self.Inlet_bot_phase
+        # [kg/s], solid per liquid mass times the bottom liquid's own mass
+        # flow, its volume flow times its inventory density (issue #439)
+        solid_mass_flow = solid_conc * bottom.vol_flow * bottom.getInventoryDensity()
 
-        OutletLiq = LiquidStream(
-             path, mass_frac=self.Inlet_bot_phase.mass_frac,  vol_flow=self.Inlet_bot_phase.vol_flow)
+        if bottom.concentration_basis:
+            OutletLiq = LiquidStream(
+                path, mole_conc=bottom.mole_conc, vol_flow=bottom.vol_flow)
+        else:
+            OutletLiq = LiquidStream(
+                 path, mass_frac=bottom.mass_frac,  vol_flow=bottom.vol_flow)
         OutletSolid = SolidStream(
              path, mass_flow=solid_mass_flow,  mass_frac=self.Inlet.Solid_1.mass_frac,
              temp=self.Inlet.Solid_1.temp, distrib=self.Inlet.Solid_1.distrib, x_distrib=self.Inlet.Solid_1.x_distrib)
