@@ -63,11 +63,16 @@ conda create -n pharmapy-ipopt -c conda-forge python=3.11 numpy=1.26.4 \
 conda activate pharmapy-ipopt
 python -m pip install -e . --no-deps
 python -c "import cyipopt, assimulo; print(cyipopt.__version__, cyipopt.IPOPT_VERSION, assimulo.__version__)"
-python -m pytest tests/test_paramestim_cyipopt.py tests/test_simexec_cyipopt.py -v
+python -m pytest tests/test_paramestim_cyipopt.py tests/test_simexec_cyipopt.py \
+    tests/test_records_ipopt.py -v
 ```
 
 NumPy 1.26.4 satisfies the Assimulo 3.4.3 binary's NumPy constraint. The first
-module needs only cyipopt; the second requires both cyipopt and Assimulo. Each
+module needs only cyipopt; the second requires both cyipopt and Assimulo. The
+third, `tests/test_records_ipopt.py`, needs only cyipopt: it captures an IPOPT
+fit of the analytic two-experiment decay case in a `CalibrationRecord`
+(explicit bounds, the effective options cyipopt leaves in the caller's
+dictionary, a seed outside its bounds) and reruns it from the record. Each
 module skips at collection when its backend is absent, preserving the core
 missing-dependency lane. Existing CI does not install cyipopt, so run this
 explicit command when changing the IPOPT estimation path. Headless machines can
@@ -124,6 +129,33 @@ example fits concentrations without specifying a physical batch inventory or
 utility. Their model-assumption review and broader workshop
 certification work remain under
 [#172](https://github.com/PharmaPy-org/PharmaPy/issues/172).
+
+## Calibration-record Ziegler case
+
+Capture, save, reload and rerun the workshop's multi-temperature Ziegler
+batch-reactor fit (data of unrecorded origin;
+[#478](https://github.com/PharmaPy-org/PharmaPy/issues/478)) as a
+`CalibrationRecord`:
+
+```bash
+pixi run --locked -e assimulo python -m pytest tests/test_records_ziegler_case.py -v
+```
+
+The module skips at collection without Assimulo and runs in the existing
+informational Assimulo lane (about 10 seconds). It reproduces the solved
+parameter-estimation notebook with the five experiments as `Experiment`
+objects, checks that the saved record reloads with unchanged experiment and
+measurement order, observation values, fitted values and covariance (these
+data have no missing observations; the analytic decay case of
+`tests/test_records_calibration.py` covers their round trip), reruns it
+through `SimulationExec.SetParamEstimation` and through
+`CalibrationRecord.rerun` within four units in the last place (deterministic
+replay on the same stack), and compares the fit with
+`tests/fixtures/param_estimation_2023.json` using the tolerances of the
+workshop regression above. The data's original source, and whether any
+license covers them, are not recorded upstream (#478), so the record declares
+origin `'unknown'` and states only verifiable facts. See
+`doc/online_docs/examples/calibration_records.rst` for the record format.
 
 ## PFR/batch process-optimization workshop regression
 

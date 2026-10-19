@@ -269,7 +269,9 @@ def make_experiments(order=('hot', 'cold'), hot_order=('c_A', 'T'),
 
 
 SOURCES = (
-    DataSource('guide', 'synthetic', 'public domain (PharmaPy docs)',
+    DataSource('guide', 'synthetic',
+               'synthetic values written for the user guide; no external '
+               'data',
                description='Synthetic decay data of the user guide',
                uri='doc/online_docs/examples/experiment_measurement.rst',
                sha256=DIGEST, role='calibration'),
@@ -1127,7 +1129,8 @@ def test_lm_bounds_are_recorded_as_declared_ranges():
      r"'quality_attribute', 'measurement_prediction'\); got 'stat'"),
     (lambda: DataSource('lab', 'measured', 'internal'),
      r"DataSource 'lab' origin must be one of \('experimental', "
-     r"'literature', 'synthetic', 'simulation'\); got 'measured'"),
+     r"'literature', 'synthetic', 'simulation', 'unknown'\); got "
+     r"'measured'"),
     (lambda: DataSource('lab', 'experimental', 'internal',
                         sha256='ab' * 31 + 'a'),
      'sha256 must be 64 lowercase hexadecimal digits'),
@@ -1139,6 +1142,11 @@ def test_lm_bounds_are_recorded_as_declared_ranges():
      'sha256 must be 64 lowercase hexadecimal digits'),
     (lambda: DataSource('lab', 'experimental', ''),
      "DataSource 'lab' sharing must be a non-empty str"),
+    (lambda: DataSource('lab', 'unknown', 'internal'),
+     r"^DataSource 'lab' has origin 'unknown' and must state what is known "
+     r"about the data in its description$"),
+    (lambda: DataSource('lab', 'unknown', 'internal', description=''),
+     "DataSource 'lab' description must be a non-empty str"),
     (lambda: ParameterRecord('k', '1/s', 1.0, lower=2.0, upper=1.0),
      "lower bound 2.0 exceeds its upper bound 1.0"),
     (lambda: ParameterRecord('k', '1/s', np.nan),
@@ -1155,6 +1163,28 @@ def test_lm_bounds_are_recorded_as_declared_ranges():
 def test_component_validation_messages(build, message):
     with pytest.raises(ValueError, match=message):
         build()
+
+
+def test_unknown_origin_states_what_is_known(tmp_path):
+    # Data whose provider did not record their origin (e.g. issue #478)
+    # are recorded as such, with the known facts in sharing/description.
+    unknown = DataSource('workshop', 'unknown',
+                         'shipped with the repository; original license '
+                         'not recorded',
+                         description='origin not recorded by the provider')
+    record, _, _ = fitted_record(sources=(unknown,))
+    path = tmp_path / 'unknown.json'
+    record.save(path)
+    assert '"origin": "unknown"' in path.read_text(encoding='utf-8')
+    loaded = CalibrationRecord.load(path)
+    assert loaded.sources == (unknown,)
+    assert loaded.sources[0].origin == 'unknown'
+    # Loading enforces the description too.
+    data = json.loads(path.read_text(encoding='utf-8'))
+    data['sources'][0]['description'] = None
+    with pytest.raises(ValueError, match="has origin 'unknown' and must "
+                                         "state what is known"):
+        CalibrationRecord.from_dict(data)
 
 
 def test_seed_outside_its_bounds_is_an_infeasible_start():

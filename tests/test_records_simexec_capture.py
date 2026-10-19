@@ -17,9 +17,9 @@ evaluates the closed-form first-order decay of the user guide, taking the
 initial temperature [K] from its ``modify_phase`` keyword. It verifies the
 handoffs SetParamEstimation -> estimator -> from_estimation and back
 (record -> ``rerun`` or ``SetParamEstimation``), not reactor physics.
-Capture of a real reactor (Assimulo lane) is deferred to the Ziegler
-case-adoption increment of #351; until then only this boundary contract is
-verified. Core lane; milliseconds.
+The real collaborator, a CVode ``BatchReactor`` fitted to the Ziegler
+workshop data, is captured and rerun through both paths in the Assimulo
+lane by ``tests/test_records_ziegler_case.py``. Core lane; milliseconds.
 """
 
 from pathlib import Path
@@ -45,7 +45,9 @@ ROUNDOFF_ATOL = 1e-12  # [mol/L or K]
 # experiment -> (initial c_A [mol/L], rise [K*L/mol], initial T [K]).
 CALLBACK = {'hot': (2.0, 20.0, 300.0), 'cold': (1.0, 10.0, 290.0)}
 GRID = {'hot': [0.0, 1.0, 2.0, 4.0], 'cold': [0.5, 1.5, 3.0]}  # [s]
-SOURCES = (DataSource('guide', 'synthetic', 'public domain (PharmaPy docs)'),)
+SOURCES = (DataSource('guide', 'synthetic',
+                      'synthetic values written for the user guide; no '
+                      'external data'),)
 # Both reruns replay bit-identical inputs through the same deterministic LM
 # iterations; four ulps of relative slack absorb operation ordering.
 REPLAY_RTOL = 4 * np.finfo(float).eps  # [-]
