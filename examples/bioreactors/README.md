@@ -1,18 +1,39 @@
 # Native bioreactor forward examples
 
-Each core example supplies `inputs/case.json`, `inputs/mechanism.json`,
+Each core example supplies `inputs/mechanism.json`,
 `inputs/thermo.json`, a forward `workflow.ipynb`. Running a notebook generates local CSV/PNG/SVG outputs; generated files are not distributed.
 The shared path is `build_bioreactor -> native BatchReactor/SemiBatchReactor/ContinuousReactor -> solve_unit`.
 
 See the concise [configuration and provider guide](../../doc/online_docs/bioreactors/USER_GUIDE.md).
 
+## Three runnable input templates
+
+Use the example itself rather than maintaining another copy of its inputs:
+
+| Formulation | Starting example and field guide | Evidence basis |
+| --- | --- | --- |
+| Direct kinetics | [Doyle Exercise 4.15](Doyle_Exercise_4_15/README.md#input-field-guide-direct-kinetics-template) | Textbook numerical reference, not experimental data. |
+| Reduced-pathway optimization | [E. coli batch](batch_ecoli_dfba/README.md#input-field-guide-reduced-pathway-template) | Published-model reconstruction with explicit limitations. |
+| Rate reconciliation | [E. coli F10/F11 reconciliation](ecoli_ye_fed_batch/reconciliation/README.md#input-field-guide-rate-reconciliation-template) | Experimental reproduction using source-calibrated kinetics and reduced yield balances. |
+
+Each guide labels inputs **required for this model**, **optional**, **numerical**,
+or **descriptive**. Optional means inactive or conditional, not necessarily that
+the schema permits deleting the key. Preserve required blank slots and intentional
+zeros. Prefer measured inputs and applicable literature parameters, and document
+assumptions; example values are not universal defaults. Objective coefficients,
+reconciliation scales and constraints belong to the model, not the solver controls.
+
+The three templates above are the selected demonstrators. The generic cases below
+remain small supporting examples and regression coverage from the mechanisms PR.
+
 | Example | Purpose |
 | --- | --- |
+| [Doyle Exercise 4.15](Doyle_Exercise_4_15/README.md) | Textbook direct-kinetics reference; `workbook.ipynb` exposes the same six forward-simulation steps. |
 | [Generic chemostat](generic_chemostat/README.md) | Synthetic Monod equilibrium, dilution and washout, with interchangeable kinetic routes. |
 | [Generic batch](generic_batch/README.md) | Small configurable batch with analytical checks. |
 | [Generic fed-batch](generic_fed_batch/README.md) | Feed events, dilution and material accounting. Synthetic reconciliation benchmarks are maintained separately in the test fixtures. |
 | [Batch E. coli](batch_ecoli_dfba/README.md) | Reduced-pathway optimization and qualitative diauxic growth reproduction. |
-| [Fed-batch E. coli](ecoli_ye_fed_batch/README.md) | Experimental reproduction with continuous feed and sampling. Its [reconciliation assessment](ecoli_ye_fed_batch/reconciliation/README.md) checks the frozen model through metabolic reconciliation. |
+| [Fed-batch E. coli reconciliation](ecoli_ye_fed_batch/reconciliation/README.md) | Source-calibrated F10/F11 reproduction with continuous feed and sampling; shared source records and limitations remain in the parent folder. |
 
 Run the notebook cells in order: select folders, load/edit inputs, construct and
 solve, extract trajectories, plot, export. Change the input values using the
@@ -20,7 +41,7 @@ solve, extract trajectories, plot, export. Change the input values using the
 Core forward notebooks need no runner or verification scripts. They do not fit biological parameters or
 select experiments. Their exports overwrite the configured output paths.
 
-`case.operation.volume_policy` selects native mass/density volume or the declared
+`operation.volume_policy` selects native mass/density volume or the declared
 working-volume basis. Both execute through native reactors. Working-volume
 supports declared continuous inlets, additions and well-mixed samples; continuous
 well-mixed outlets are supported in continuous mode. Perfusion and unmanaged connections remain unsupported. Configure rate

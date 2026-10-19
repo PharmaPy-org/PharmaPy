@@ -7,6 +7,7 @@ missing-data Jacobian behavior is claimed. Generated records live in tmp_path.
 
 from copy import deepcopy
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -35,13 +36,14 @@ def _record(run='F10'):
         Forward record, with unchanged source units and explicit time [s] adapter.
     """
     folder = ECOLI / 'inputs'
-    manifest = json.loads((folder / 'provenance.json').read_text())
-    inputs = folder if run == 'F10' else folder / run
-    return make_record(run, json.loads((inputs / 'case.json').read_text()),
-                       json.loads((inputs / 'mechanism.json').read_text()),
-                       json.loads((folder / 'thermo.json').read_text()),
-                       json.loads((folder / 'observations.json').read_text()),
-                       json.loads((ECOLI / 'reference' / f'{run}.json').read_text())['measurements'],
+    manifest = read_input_json(folder / 'provenance.json')
+    direct = Path(__file__).parent / 'fixtures/ecoli_ye_direct/inputs'
+    inputs = direct if run == 'F10' else direct / run
+    return make_record(run, read_input_json(inputs / 'case.json'),
+                       read_input_json(inputs / 'mechanism.json'),
+                       read_input_json(folder / 'thermo.json'),
+                       read_input_json(folder / 'observations.json'),
+                       read_input_json(ECOLI / 'reference' / f'{run}.json')['measurements'],
                        provenance=manifest['provenance'], parameter_metadata=manifest['parameter_metadata'],
                        model_revision='test-working-tree')
 
@@ -62,7 +64,7 @@ def test_original_observations_round_trip_without_reordering(run, tmp_path):
     path = tmp_path / 'record.json'
     write_record(record, path)
     # A content-preserving external tool may sort every mapping's keys.
-    path.write_text(json.dumps(json.loads(path.read_text()), sort_keys=True))
+    path.write_text(json.dumps(read_input_json(path), sort_keys=True))
     loaded = read_record(path)
     restored = record_observations(loaded)
     expected = read_observations(record['inputs']['observations'], record['source_observations'])
@@ -131,7 +133,7 @@ def test_reload_inputs_reruns_the_public_model_and_preserves_predictions(tmp_pat
         Isolated destinations for the record and replay thermo inputs.
     """
     folder = ROOT / 'examples/bioreactors/generic_batch/inputs'
-    case, mechanism, thermo = (json.loads((folder / f'{part}.json').read_text())
+    case, mechanism, thermo = (read_input_json(folder / f'{part}.json')
                                for part in ('case', 'mechanism', 'thermo'))
     declaration = {'schema_version': 1, 'time_unit': 'h', 'fields': {
         'nutrient': {'species': 'nutrient', 'quantity': 'concentration', 'unit': 'mmol/L',

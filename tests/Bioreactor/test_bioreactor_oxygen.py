@@ -7,6 +7,7 @@ unchanged carbon trajectories. No dissolved-oxygen/control validation is claimed
 
 from copy import deepcopy
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,8 @@ import pytest
 from PharmaPy.Bioreactors import build_bioreactor
 
 
-INPUTS = Path(__file__).parents[2] / 'examples/bioreactors/ecoli_ye_fed_batch/inputs'
+INPUTS = Path(__file__).parent / 'fixtures/ecoli_ye_direct/inputs'
+THERMO = Path(__file__).parents[2] / 'examples/bioreactors/ecoli_ye_fed_batch/inputs/thermo.json'
 
 
 def _inputs(run='F10'):
@@ -32,11 +34,11 @@ def _inputs(run='F10'):
         Case, mechanism and thermo path, retaining all original physical units.
     """
     folder = INPUTS if run == 'F10' else INPUTS / run
-    case = json.loads((folder / 'case.json').read_text())
-    mechanism = json.loads((folder / 'mechanism.json').read_text())
+    case = read_input_json(folder / 'case.json')
+    mechanism = read_input_json(folder / 'mechanism.json')
     case['operation']['runtime']['value'] = 0.2  # [h]; short pre-feed qualification
     mechanism['recipes'][case['recipe']['name']] = []
-    return case, mechanism, INPUTS / 'thermo.json'
+    return case, mechanism, THERMO
 
 
 def _specific_demand(concentrations, parameters):

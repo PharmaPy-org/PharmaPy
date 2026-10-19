@@ -2,7 +2,7 @@
 
 ## Architecture and model selection
 
-`case.json + mechanism.json + thermo.json → build_bioreactor → native phase +
+`mechanism.json + thermo.json → build_bioreactor → native phase +
 mechanism + BatchReactor/SemiBatchReactor/ContinuousReactor → solve_unit → DynamicResult`.
 
 Biological identities, coefficients, networks and operating schedules belong in

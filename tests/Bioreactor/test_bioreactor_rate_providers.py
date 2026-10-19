@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -108,8 +109,8 @@ def test_untargeted_exchanges_reject_invalid_or_empty_target_sets(reactions):
 
 def test_untargeted_rates_do_not_change_penalties_bounds_or_normalization():
     folder = Path(__file__).parents[2] / "tests/Bioreactor/fixtures/fed_batch_cho"
-    case = json.loads((folder / "inputs/case.json").read_text())
-    declaration = json.loads((folder / "inputs/mechanism.json").read_text())
+    case = read_input_json((folder / "inputs/case.json"))
+    declaration = read_input_json((folder / "inputs/mechanism.json"))
     declaration["model"]["reconciliation"]["untargeted_exchanges"] = ["R046", "R050"]
     mechanism = build_bioreactor(case, declaration, folder / "inputs/thermo.json").mechanism
     calls = []
@@ -129,8 +130,8 @@ def test_untargeted_rates_do_not_change_penalties_bounds_or_normalization():
 
 def test_native_untargeted_exchange_run_is_independent_of_omitted_target_values():
     folder = Path(__file__).parents[2] / "tests/Bioreactor/fixtures/fed_batch_cho"
-    case = json.loads((folder / "inputs/case.json").read_text())
-    declaration = json.loads((folder / "inputs/mechanism.json").read_text())
+    case = read_input_json((folder / "inputs/case.json"))
+    declaration = read_input_json((folder / "inputs/mechanism.json"))
     case["operation"]["runtime"] = {"unit": "day", "value": 0.1}
     declaration["model"]["reconciliation"]["untargeted_exchanges"] = ["R046", "R050"]
     first = build_bioreactor(case, declaration, folder / "inputs/thermo.json")

@@ -10,6 +10,7 @@ Cost: about ten short solves plus the two F10/F11 solves (about 10 s).
 
 import copy
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -42,8 +43,8 @@ def _generic(name):
         ``(case, mechanism, thermo_path)``.
     """
     folder = EXAMPLES / name / 'inputs'
-    return (json.loads((folder / 'case.json').read_text()),
-            json.loads((folder / 'mechanism.json').read_text()), folder / 'thermo.json')
+    return (read_input_json(folder / 'case.json'),
+            read_input_json(folder / 'mechanism.json'), folder / 'thermo.json')
 
 
 def _declaration(unit='mmol/L', side='pre', fields=('nutrient',)):
@@ -259,15 +260,15 @@ def test_invalid_observations_are_rejected(data, message):
 
 @pytest.mark.parametrize('run, folder', [('F10', 'inputs'), ('F11', 'inputs/F11')])
 def test_baseline_predictions_cover_every_source_observation(run, folder):
-    declaration = json.loads((ECOLI / 'inputs/observations.json').read_text())
-    source = json.loads((ECOLI / f'reference/{run}.json').read_text())['measurements']
+    declaration = read_input_json(ECOLI / 'inputs/observations.json')
+    source = read_input_json(ECOLI / f'reference/{run}.json')['measurements']
     observations = read_observations(declaration, source)
     for name, entry in source.items():
         np.testing.assert_array_equal(observations['values'][name], entry['g_l'])
         np.testing.assert_allclose(observations['time_s'][name],
                                    np.asarray(entry['time_h']) * 3600., rtol=1e-15)
-    case = json.loads((ECOLI / folder / 'case.json').read_text())
-    mechanism = json.loads((ECOLI / folder / 'mechanism.json').read_text())
+    case = read_input_json(Path(__file__).parent / 'fixtures/ecoli_ye_direct' / folder / 'case.json')
+    mechanism = read_input_json(Path(__file__).parent / 'fixtures/ecoli_ye_direct' / folder / 'mechanism.json')
     assembly = build_bioreactor(case, mechanism, str(ECOLI / 'inputs/thermo.json'))
     histories = assembly.solve(report_times=sampling_times(observations))
     prediction = predict_measurements(assembly, histories, declaration, observations)
@@ -295,6 +296,6 @@ def test_baseline_predictions_cover_every_source_observation(run, folder):
     molar = copy.deepcopy(declaration)
     molar['fields']['glucose']['unit'] = 'mmol/L'
     molar_prediction = predict_measurements(assembly, histories, molar, observations)
-    glucose_mw = json.loads((ECOLI / 'inputs/thermo.json').read_text())['glucose']['mw']  # [g/mol]
+    glucose_mw = read_input_json(ECOLI / 'inputs/thermo.json')['glucose']['mw']  # [g/mol]
     np.testing.assert_allclose(molar_prediction['values']['glucose'],
                                prediction['values']['glucose'] * 1000. / glucose_mw, rtol=1e-14)

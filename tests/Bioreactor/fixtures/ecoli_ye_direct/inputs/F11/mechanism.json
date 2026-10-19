@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "mechanism": "configured-kinetics",
   "parameters": {
     "rates": {},
@@ -1341,5 +1341,42 @@
     "product_g": null,
     "integral": null
   },
-  "$comment": "Direct source kinetics: S3, 3L, GSF_YE_Paper_FedBatch. Acetate source sign corrected. Profile interpreted as g glucose/h, divided by 600 g/L; source volume slopes confirm this. Logged feed volumes are NOT a second feed. Biomass and yeast fractions use formal 1 g/mol bookkeeping bases. Isothermal. Oxygen uptake follows paper Eq. 19 and S3 coefficients, as an algebraic native output; dissolved oxygen, transfer/control and oxygen-limited feedback are not predicted. No nonlimiting-oxygen claim is made. Source-workbook glucose Feed [V] and Profile describe the same feed, not separate liquids; see README source audit. Feed density 1.336 kg/L is a declared stock-density assumption; it affects carrier mass, not the configured additive volume or nutrient feed."
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical.",
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "fed-batch",
+    "runtime": {
+      "unit": "h",
+      "value": 26.5
+    },
+    "temperature_k": 303.15,
+    "volume_policy": "working-volume",
+    "conditions": {},
+    "recipe": {
+      "name": "F11",
+      "require_complete_inputs": false,
+      "time_unit": "h"
+    }
+  },
+  "numerical": {
+    "backend": "scipy",
+    "step": {
+      "unit": "h",
+      "value": 0.1
+    },
+    "relative_tolerance": 1e-10,
+    "absolute_tolerance": 1e-15,
+    "maximum_step": {
+      "unit": "s",
+      "value": 180
+    },
+    "jacobian_relative_step": 1e-05,
+    "jacobian_state_scale": 1e-06
+  }
 }

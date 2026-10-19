@@ -18,7 +18,6 @@ case and full-horizon dynamic optimization are distinct comparisons.
 
 ## Model inputs and numerical benchmarks
 
-- [case.json](../inputs/case.json): operating configuration and solver settings.
 - [mechanism.json](../inputs/mechanism.json): pathway coefficients, bounds,
   initial state, and transport definitions used by this example.
 - [thermo.json](../inputs/thermo.json): native phase-property inputs.

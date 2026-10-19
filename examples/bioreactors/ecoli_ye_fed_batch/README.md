@@ -1,18 +1,16 @@
-# E. coli yeast-extract fed-batch forward reproduction
+# E. coli yeast-extract fed-batch: source and assumptions
 
-Both direct and reconciled F10/F11 mechanisms now select reusable
-[biological relationships](../../../PharmaPy/Bioreactors/TECHNICAL_SUMMARY.md#biological-relationships) inside
-the existing rule graph. Expansion preserves the original source equations,
-parameters and target mappings exactly; explicit rule expressions remain supported.
+The user-facing demonstrator is [F10/F11 rate reconciliation](reconciliation/README.md).
+Run its `reconciliation/workflow.ipynb` to load inputs, build native reactors,
+solve, extract trajectories, plot and export. F10 and F11 configurations are in
+`reconciliation/inputs/` and `reconciliation/inputs/F11/`, sharing
+`inputs/thermo.json`. Source observations, provenance and operating records remain
+here for both runs.
 
-This example runs F10 and F11 through native PharmaPy `SemiBatchReactor.solve_unit`, using configured direct kinetics. It reproduces the major biomass, glucose, and acetate trends without parameter fitting. It is not a rate-reconciliation or oxygen-control validation.
-
-The separate [frozen-model reconciliation assessment](reconciliation/README.md)
-runs the same source equations and operating inputs through the shared
-rate-reconciliation mechanism, with its own forward notebook and outputs.
-It tests preservation of this experimental agreement without refitting.
-
-Open `workflow.ipynb` from the repository or example folder and use Run All. The six commented steps load inputs, build native reactors, simulate, tabulate, plot, and export. `inputs/` contains the F10 configuration; `inputs/F11/` contains the second case and mechanism, sharing `inputs/thermo.json`. Change `INPUT_DIRS` to select configurations. The notebook reads no reference measurements and performs no comparison analysis. `inputs/observations.json` declares the measured biomass, glucose and acetate fields of `reference/F10.json` and `F11.json`; `predict_measurements` returns the matching predictions at each field's own sampling times (see the [user guide](../../../doc/online_docs/bioreactors/USER_GUIDE.md#4-predict-measured-fields)).
+The source's direct-kinetics model is retained only as a regression reference in
+`tests/Bioreactor/fixtures/ecoli_ye_direct`, not as another demonstration.
+Tests compare reconciliation with that reference and independently implemented
+concentration balances. Neither route is refitted to improve agreement.
 
 ## Configuration and native execution
 
@@ -50,7 +48,7 @@ Source: Schröder-Kleeberg et al. (2025), [Modelling of Escherichia coli Batch a
 
 ## Results and limits
 
-The notebook generates forward CSV and PNG/SVG exports under `outputs/F10` and
+The reconciliation notebook generates forward CSV and PNG/SVG exports under `outputs/F10` and
 `outputs/F11`. Outputs are excluded from Git. Tests generate validation evidence
 in temporary directories and compare against the source observations and an
 independent concentration-based Radau calculation. The figures below summarize
@@ -167,8 +165,8 @@ The direct F10/F11 mechanisms now report the paper's Eq. 19 oxygen demand using
 native algebraic outputs: `specific_oxygen_uptake_liquid0` [g O2/(gDW h)] and
 `oxygen_uptake_liquid0` [g O2/(L h)]. The latter is specific demand multiplied
 by biomass concentration. This implements Eq. 19 as printed; it does not
-establish an independently closed elemental/respiratory balance. The notebook exports both alongside the existing
-carbon trajectories. Reconciliation inputs are unchanged.
+establish an independently closed elemental/respiratory balance. The direct-model regression fixture checks these outputs alongside carbon
+trajectories. The reconciliation demonstrator does not report oxygen demand.
 
 The oxygen yields come from S3, sheet `3L`, column `GSF_YE_Paper_FedBatch`:
 1.067, 1.067 and 1.163 g O2/g substrate for glucose, acetate and yeast extract.

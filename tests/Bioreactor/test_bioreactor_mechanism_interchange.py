@@ -22,6 +22,7 @@ seconds).
 """
 
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -55,7 +56,7 @@ def _load(name):
         ``(case, mechanism, thermo)`` JSON mappings.
     """
     folder = EXAMPLES / name / 'inputs'
-    return tuple(json.loads((folder / f'{part}.json').read_text())
+    return tuple(read_input_json((folder / f'{part}.json'))
                  for part in ('case', 'mechanism', 'thermo'))
 
 

@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "mechanism": null,
   "parameters": {
     "rates": {},
@@ -97,5 +97,41 @@
     "product_g": null,
     "integral": null
   },
-  "$comment": "One template for all supported modes. Choose pathway-lp or rate-reconciled-culture. Fill the corresponding model sections; leave unused sections blank or {}. Parameter groups hold numeric maps with user-chosen species, rate and condition identifiers. Dotted references connect coefficients to declared kinetics or bounds; labels do not select equations. See doc/online_docs/bioreactors/templates/guide.json for compact records and units. This blank file intentionally cannot run until required science is supplied."
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical. See guide.json.",
+  "operation": {
+    "carrier_density_kg_l": null,
+    "carrier_species": null,
+    "initial_mass_kg": null,
+    "initial_volume": {
+      "unit": null,
+      "value": null
+    },
+    "mode": null,
+    "runtime": {
+      "unit": null,
+      "value": null
+    },
+    "temperature_k": null,
+    "volume_policy": "native",
+    "conditions": {},
+    "recipe": {
+      "name": null,
+      "require_complete_inputs": false
+    }
+  },
+  "numerical": {
+    "backend": null,
+    "step": {
+      "unit": null,
+      "value": null
+    },
+    "relative_tolerance": null,
+    "absolute_tolerance": null,
+    "maximum_step": {
+      "unit": null,
+      "value": null
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  }
 }

@@ -12,7 +12,8 @@ import pytest
 ROOT = Path(__file__).parents[2]
 EXAMPLES = ROOT / "examples/bioreactors"
 NOTEBOOKS = tuple(EXAMPLES / name / "workflow.ipynb" for name in (
-    "batch_ecoli_dfba", "generic_batch", "generic_fed_batch"))
+    "batch_ecoli_dfba", "generic_batch", "generic_fed_batch")) + (
+        EXAMPLES / 'Doyle_Exercise_4_15/workbook.ipynb',)
 
 
 @pytest.mark.parametrize("notebook", NOTEBOOKS, ids=lambda p: p.parent.name)
@@ -49,7 +50,7 @@ def _check_notebook(tmp_path, notebook):
     # The notebooks need only the forward inputs, even when auxiliary files are absent.
     inputs = tmp_path / "inputs"
     inputs.mkdir()
-    for name in ("case.json", "mechanism.json", "thermo.json"):
+    for name in ("mechanism.json", "thermo.json"):
         (inputs / name).write_bytes((notebook.parent / "inputs" / name).read_bytes())
     try:
         for step, cell in enumerate((c for c in document["cells"] if c["cell_type"] == "code"), 1):

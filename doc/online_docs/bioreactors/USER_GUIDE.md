@@ -4,7 +4,7 @@
 
 | Input mechanism | Choose when | Starting example |
 | --- | --- | --- |
-| `configured-kinetics` | You have explicit volumetric biological source equations or fitted source-rate models. | `ecoli_ye_fed_batch` |
+| `configured-kinetics` | You have explicit volumetric biological source equations or fitted source-rate models. | `Doyle_Exercise_4_15` |
 | `pathway-lp` | A reduced pathway map and objective determine feasible activity under uptake capacities. | `generic_batch` |
 | `rate-reconciled-culture` | Predicted/observed rate targets need reconciliation with a metabolic network. | `tests/Bioreactor/fixtures/reconciliation/analytic_balances` |
 
@@ -13,8 +13,9 @@ units and parameters for your process; the simulator does not infer missing biol
 
 ## 2. Configure and run
 
-Copy an example's three inputs. `case.json` declares operation, initial volume,
-temperature, conditions and numerical settings. `mechanism.json` declares initial
+Copy an example's two inputs. `mechanism.json` includes `operation` for physical
+setup, conditions and recipe selection, and `numerical` for solver settings.
+It also declares initial
 species/populations, equations or network, parameters and feed/sample recipe.
 `thermo.json` supplies the native phase properties needed by that run. Blank
 properties are not zero; populate them before using additional thermal/phase physics.
@@ -25,9 +26,8 @@ from pathlib import Path
 from PharmaPy.Bioreactors import build_bioreactor
 
 folder = Path('examples/bioreactors/generic_batch/inputs')
-case = json.loads((folder / 'case.json').read_text())
 model = json.loads((folder / 'mechanism.json').read_text())
-assembly = build_bioreactor(case, model, folder / 'thermo.json')
+assembly = build_bioreactor(model, thermo_path=folder / 'thermo.json')
 histories = assembly.solve(verbose=False)
 ```
 
@@ -199,7 +199,7 @@ its declared unit. This registers a native postprocessed field (for example
 `oxygen_uptake_liquid0`); it does not add a material source or solver state.
 Values use the declared reporting unit without implicit conversion. Equations
 must therefore match their units and basis, just as for other rule expressions.
-Omitting `reported_rates` preserves existing behavior. The direct F10/F11
+Omitting `reported_rates` preserves existing behavior. The direct F10/F11 regression fixtures
 examples use this to calculate published oxygen demand; they do not model a
 dissolved-oxygen inventory or oxygen-control dynamics.
 

@@ -1,18 +1,19 @@
 # Standard forward-simulation inputs
 
-Copy `case.json`, `mechanism.json`, and `thermo.json` into your input directory.
+Copy `mechanism.json` and `thermo.json` into your input directory.
 These are **blank templates**, not runnable examples. Follow `guide.json` to fill
 them, or use a populated example as a starting point. The guide is documentation,
-not a fourth runtime input.
+not a runtime input.
 
-The case and mechanism use schema version 2; thermo retains the native PharmaPy
+The combined mechanism uses schema version 3; thermo retains the native PharmaPy
 species-property format. The shared structure applies to all three mechanism families.
 Species identifiers, coefficients, equations, matrices, and record-list lengths
 are user inputs. The format does not infer missing biology or material data.
 
-- `case.json`: operation, initial volume/mass, conditions, numerics, selected recipe.
 - `mechanism.json`: mechanism selection, parameters, mathematical model, initial
-  quantities, network/provider, transport, and scheduled material events.
+  quantities, network/provider, transport, scheduled material events, physical
+  `operation` and solver `numerical` settings. `operation.conditions` declares
+  biological conditions; `operation.recipe` selects the recipe and its time unit.
 - `thermo.json`: native species properties needed by the chosen calculation.
 
 Parameters use seven shared groups: rates, affinities, yields, maintenance,
@@ -90,7 +91,7 @@ from pathlib import Path
 from PharmaPy.Bioreactors import BioreactorUnitConverter as Units
 
 inputs = Path("path/to/inputs")
-units = Units.from_inputs(inputs / "case.json", inputs / "mechanism.json")
+units = Units.from_inputs(inputs / "mechanism.json")
 temperature_k = Units.convert(37., "degC", "K")
 concentration = Units.convert(1., "g/L", "mmol/L", molecular_weight_g_mol=180.)
 # Arrays are supported; molecular weights can also come from a native phase.mw.
@@ -138,15 +139,16 @@ from pathlib import Path
 from PharmaPy.Bioreactors import build_bioreactor
 
 inputs = Path("path/to/inputs")
-case = json.loads((inputs / "case.json").read_text())
 mechanism = json.loads((inputs / "mechanism.json").read_text())
-assembly = build_bioreactor(case, mechanism, inputs / "thermo.json")
+assembly = build_bioreactor(mechanism, thermo_path=inputs / "thermo.json")
 print(assembly.input_audit())
 histories = assembly.solve(verbose=False)
 print(assembly.diagnostics(histories))
 ```
 
-Schema 1 and unversioned inputs remain accepted. Existing equations, solver
+Separate schema-1/2 and unversioned inputs remain accepted through
+`build_bioreactor(case, mechanism, thermo_path)`. Combined schema-3 inputs must
+be passed alone with keyword `thermo_path`; mixing the two formats is rejected. Existing equations, solver
 settings, and material increments are preserved unless the user changes them.
 
 Set `operation.mode: "continuous"` for the native chemostat with a well-mixed

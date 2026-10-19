@@ -1,6 +1,7 @@
 """Volume hooks preserve inventory balances, feed dilution, and native replay."""
 
 import json
+from .input_helpers import read_input_json
 from copy import deepcopy
 from pathlib import Path
 
@@ -14,7 +15,7 @@ EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
 
 def build(name='generic_batch', policy='working-volume', mode=None, backend=None):
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
-    case, definition = [json.loads((p / f).read_text()) for f in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p / f) for f in ('case.json', 'mechanism.json')]
     case['operation']['volume_policy'] = policy
     if mode:
         case['operation']['mode'] = mode
@@ -150,7 +151,7 @@ def test_sampling_preserves_concentrations_and_removes_extensive_biology(name, p
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])
 def test_metabolic_models_share_configured_flow_and_sampling(name, backend):
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
-    case, definition = [json.loads((p / f).read_text()) for f in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p / f) for f in ('case.json', 'mechanism.json')]
     case['operation'].update(mode='fed-batch', volume_policy='working-volume',
                              runtime=dict(value=2., unit='s'))
     case['numerics']['step'] = dict(value=.25, unit='s')
@@ -189,7 +190,9 @@ def test_generic_notebook_with_working_volume(name):
     import subprocess
     import sys
     result = subprocess.run([sys.executable, '-c',
-        "import runpy, sys; runpy.run_path(sys.argv[1])['_check_working_volume'](sys.argv[2])",
+        "import runpy, sys, pathlib; "
+        "sys.path.insert(0, str(pathlib.Path(sys.argv[1]).parents[1])); "
+        "runpy.run_module('Bioreactor.test_bioreactor_volume')['_check_working_volume'](sys.argv[2])",
         str(Path(__file__).resolve()), name], cwd=EXAMPLES.parents[1],
         capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -204,7 +207,7 @@ def _check_working_volume(name):
         Generic example folder; expected working volumes are in L.
     """
     import matplotlib.pyplot as plt
-    notebook = json.loads((EXAMPLES / name / 'workflow.ipynb').read_text())
+    notebook = read_input_json(EXAMPLES / name / 'workflow.ipynb')
     namespace = {'__name__': '__notebook__'}
     try:
         for cell in notebook['cells']:
@@ -215,7 +218,7 @@ def _check_working_volume(name):
             if source.startswith('# STEP 1:'):
                 namespace['WRITE_ARTIFACTS'] = False
             if source.startswith('# STEP 2:'):
-                namespace['case']['operation']['volume_policy'] = 'working-volume'
+                namespace['config']['operation']['volume_policy'] = 'working-volume'
                 if name == 'generic_fed_batch':
                     namespace['config']['recipes']['fed_batch'][0]['volume_basis'] = 'solution'
         assert all(np.isfinite(list(row.values())).all() for row in namespace['rows'])

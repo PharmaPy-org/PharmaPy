@@ -4,7 +4,8 @@ This configuration transfers the existing F10/F11 experimental reproduction into
 `rate-reconciled-culture`. The source coefficients, initial phase amounts, feeds,
 samples, base additions and solver settings are unchanged. The parent README
 records the original source processing corrections and biological limitations.
-No coefficients are fitted here. The original direct-kinetic example remains intact.
+No coefficients are fitted here. The direct-kinetic reference remains in `tests/Bioreactor/fixtures/ecoli_ye_direct`
+for regression verification, not as an additional user-facing example.
 
 Run `workflow.ipynb` with Run All. It uses the same six forward-only steps and
 native `build_bioreactor -> assembly.solve -> SemiBatchReactor.solve_unit` path.
@@ -12,7 +13,37 @@ Inputs are under `inputs/` and `inputs/F11/`; the unchanged parent
 `../inputs/thermo.json` is shared. Outputs are CSV trajectories and PNG/SVG figures.
 There are no notebook-local mechanisms or solvers.
 
-## Mathematical transfer
+## Input field guide: rate-reconciliation template
+
+Use `inputs/mechanism.json` for F10 or `inputs/F11/mechanism.json` for F11.
+Both share `../inputs/thermo.json`; do not duplicate or silently substitute its
+properties. These are literature-calibrated reproduction cases with experimental
+observations, not independently validated predictions for arbitrary organisms.
+See the [parent source and assumptions](../README.md#source-and-corrections).
+
+| Section | Category | What to configure |
+| --- | --- | --- |
+| `schema_version`, `mechanism` | Required for this model | Keep version 3 and `rate-reconciled-culture` for this formulation. |
+| `$comment` | Descriptive | Explain the case without changing scientific inputs. |
+| `operation` | Required for this model | Working-volume basis, carrier, initial mass/volume, runtime, conditions, and F10/F11 recipe selection. |
+| `state` | Required for this model | Initial species amounts and dry biomass. Here phase biomass and `biomass_kg` describe the same population and must agree. |
+| `parameters` | Required for this model | Referenced source kinetic coefficients and yields; empty groups remain empty. |
+| `model.kinetics` | Required for this model | Rate relationships, target outputs, exchange mappings and dry-mass basis. Preserve explicit unit conversions. |
+| `model.reconciliation`, `network` | Required for this model | Yield balances, reaction bounds, targeted internal rates, reconciliation policy and reference scales. |
+| `rate_provider` | Required for this model | Select the rule graph and declare its output units; its identifier/version also document provenance. |
+| `recipes` | Required for this model | Feed flows, base additions and sampling times/volumes. These are operating inputs, not adjustable fitting corrections. |
+| `model.pathways`, `transport`, `flux_time_unit`, blank cell-count fields | Optional | Retain the inactive empty/null slots. Do not replace intentional zero rates or the zero product mapping with blanks. |
+| `numerical` | Numerical | Solver, requested time grid, tolerances, maximum step and Jacobian settings. |
+| Shared `thermo.json` | Required for this model / optional properties | Preserve molecular-weight bookkeeping and liquid densities; unused thermal properties stay blank. |
+
+Reconciliation weights/scales, constraints and secondary selection policies can
+affect accepted fluxes. They remain model choices, not harmless solver controls.
+The `network.objective` field does not make this formulation growth-maximizing.
+The configured network represents reduced yield balances, not full elemental
+conservation. Reusing the template requires appropriate biology and operating
+records; do not borrow these values for an unrelated experiment.
+
+### Mathematical transfer
 
 Let `q_s`, `q_ox`, `q_a`, `q_b`, and `q_ac` be the source specific glucose uptake,
 oxidative glucose use, two yeast-fraction uptakes, and acetate uptake in g/(gDW h).

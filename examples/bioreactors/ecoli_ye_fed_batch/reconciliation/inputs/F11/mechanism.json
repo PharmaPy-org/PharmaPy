@@ -1,6 +1,48 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical.",
   "mechanism": "rate-reconciled-culture",
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "fed-batch",
+    "runtime": {
+      "unit": "h",
+      "value": 26.5
+    },
+    "temperature_k": 303.15,
+    "volume_policy": "working-volume",
+    "conditions": {
+      "temperature_k": 303.15
+    },
+    "recipe": {
+      "name": "F11",
+      "require_complete_inputs": false,
+      "time_unit": "h"
+    }
+  },
+  "state": {
+    "species": {
+      "unit": "mol",
+      "amounts": {
+        "biomass": 7.4e-05,
+        "glucose": 0.08381624814050045,
+        "acetate": 0.0024978352094851127,
+        "fraction_a": 2.67,
+        "fraction_b": 7.33
+      }
+    },
+    "biomass_kg": 7.4e-08,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": 0,
+    "integral": null
+  },
   "parameters": {
     "rates": {},
     "affinities": {},
@@ -1421,22 +1463,19 @@
       }
     ]
   },
-  "state": {
-    "species": {
-      "unit": "mol",
-      "amounts": {
-        "biomass": 7.4e-05,
-        "glucose": 0.08381624814050045,
-        "acetate": 0.0024978352094851127,
-        "fraction_a": 2.67,
-        "fraction_b": 7.33
-      }
+  "numerical": {
+    "backend": "scipy",
+    "step": {
+      "unit": "h",
+      "value": 0.1
     },
-    "biomass_kg": 7.4e-08,
-    "viable_cells_million": null,
-    "dead_cells_million": null,
-    "product_g": 0,
-    "integral": null
-  },
-  "$comment": "Frozen source kinetics and feed. Reduced yield bookkeeping, not an elemental or intracellular reconstruction. B is formal biomass mass; maintenance is the source negative growth offset, not an inferred ATP demand. kgDW population requires no cell-mass assumption. Finite bounds follow analytically from the source maximum uptake rates and yields; no bounds were fitted."
+    "relative_tolerance": 1e-10,
+    "absolute_tolerance": 1e-15,
+    "maximum_step": {
+      "unit": "s",
+      "value": 180
+    },
+    "jacobian_relative_step": 1e-05,
+    "jacobian_state_scale": 1e-06
+  }
 }

@@ -100,15 +100,15 @@ class BioreactorUnitConverter:
                     raise ValueError('pathway growth must be specific growth in the declared time unit')
 
     @classmethod
-    def from_inputs(cls, case, mechanism):
+    def from_inputs(cls, case, mechanism=None) -> 'BioreactorUnitConverter':
         """Read mappings or JSON paths using the same adapter as build_bioreactor.
 
         Parameters
         ----------
         case : Mapping or path-like
-            Case declaration or JSON file path.
-        mechanism : Mapping or path-like
-            Mechanism declaration or JSON file path.
+            Combined declaration or legacy case mapping/JSON path.
+        mechanism : Mapping or path-like, optional
+            Legacy mechanism mapping/JSON path; omit for combined inputs.
 
         Returns
         -------
@@ -123,7 +123,8 @@ class BioreactorUnitConverter:
         from .input_format import normalize_forward_inputs
         from .culture import CultureModelDefinition
         case = dict(case) if isinstance(case, Mapping) else json.loads(Path(case).read_text())
-        mechanism = dict(mechanism) if isinstance(mechanism, Mapping) else json.loads(Path(mechanism).read_text())
+        if mechanism is not None:
+            mechanism = dict(mechanism) if isinstance(mechanism, Mapping) else json.loads(Path(mechanism).read_text())
         case, mechanism = normalize_forward_inputs(case, mechanism)
         if case['biology']['mechanism'] != mechanism['mechanism']:
             raise ValueError("case and mechanism declarations do not agree")

@@ -5,6 +5,7 @@ sterile feed=10 mmol/L. No maintenance, death, gas transfer or retention.
 Core uses SciPy; generated thermo inputs and records stay in tmp_path.
 """
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -39,7 +40,7 @@ def continuous_inputs(tmp_path, dilution=0.1, closure='pathway-lp', growth=True)
     tuple
         Case, mechanism and thermo path, in their declared input units.
     """
-    case, model, thermo = [json.loads((INPUTS / f'{name}.json').read_text())
+    case, model, thermo = [read_input_json(INPUTS / f'{name}.json')
                            for name in ('case', 'mechanism', 'thermo')]
     case['operation'].update(mode='continuous', volume_policy='working-volume')
     case['operation']['runtime']['value'] = 80.  # [h]; eight residence times at D=0.1/h
@@ -106,7 +107,7 @@ def test_monod_continuous_equilibrium_and_mass_yield(tmp_path, closure):
     folder = ROOT/'examples/bioreactors/generic_chemostat/inputs'
     if closure == 'configured-kinetics':
         folder = folder/'kinetics'
-    case, model = [json.loads((folder/f'{name}.json').read_text()) for name in ('case', 'mechanism')]
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case', 'mechanism')]
     assembly = build_bioreactor(case, model, folder/'thermo.json')
     time, nutrient, biomass = _trajectory(assembly.solve(), assembly.phase, closure=='configured-kinetics')
     # S*=Ks D/(mu_max-D)=1/3 mmol/L; X*=Y(Sin-S*)=0.9667 g/L.
@@ -244,7 +245,7 @@ def test_reconciliation_outlet_advects_material_states_but_not_exposure(basis):
     else:
         folder = Path(__file__).parent/'fixtures/fed_batch_cho/inputs'
         thermo = folder/'thermo.json'
-    case, model = [json.loads((folder/f'{name}.json').read_text()) for name in ('case','mechanism')]
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case','mechanism')]
     case['operation'].update(mode='continuous',volume_policy='working-volume')
     case['operation']['runtime'] = {'unit': 'h', 'value': 1.}
     model['recipes'][case['recipe']['name']] = []
@@ -424,7 +425,7 @@ def test_reconciliation_reserves_outlet_before_inventory_projection():
     remains available to metabolism. Cell growth is zero in this fixture.
     """
     folder = Path(__file__).parent/'fixtures/reconciliation/operating_transitions/inputs/single'
-    case, model = [json.loads((folder/f'{name}.json').read_text()) for name in ('case', 'mechanism')]
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case', 'mechanism')]
     case['operation'].update(mode='continuous', runtime={'unit':'day','value':.001})
     model['state']['species']['amounts']['nutrient_a'] = .0001  # [mmol]
     model['recipes']['benchmark'] = [{'event_type':'flow','time':{'unit':'day','value':0.},
@@ -453,7 +454,7 @@ def test_reconciliation_continuous_inventory_and_product_solution():
     exp(-Dt), product is 0.1 t exp(-Dt) g and A is (10-1.5 t) exp(-Dt) mmol.
     """
     folder = Path(__file__).parent/'fixtures/reconciliation/operating_transitions/inputs/single'
-    case, model = [json.loads((folder/f'{name}.json').read_text()) for name in ('case', 'mechanism')]
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case', 'mechanism')]
     case['operation'].update(mode='continuous', runtime={'unit':'h','value':2.})
     case['numerics'].update(backend='scipy', relative_tolerance=1e-9, absolute_tolerance=1e-12,
                            maximum_step={'unit':'s','value':300.})

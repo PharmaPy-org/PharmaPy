@@ -1,6 +1,8 @@
 """Frozen experimental model through native biomass-based reconciliation."""
 
 import json
+from .input_helpers import read_input_json
+from PharmaPy.Bioreactors.input_format import split_forward_inputs
 import os
 from hashlib import sha256
 from copy import deepcopy
@@ -13,7 +15,7 @@ import pytest
 
 from PharmaPy.Bioreactors import build_bioreactor, BioreactorUnitConverter as Units
 from PharmaPy.Bioreactors.culture import CultureSnapshot
-from .test_bioreactor_ecoli_ye import EXAMPLE, independent_solution, native_runs
+from .test_bioreactor_ecoli_ye import EXAMPLE, DIRECT, independent_solution, native_runs
 
 
 FOLDER = EXAMPLE / 'reconciliation'
@@ -25,7 +27,7 @@ def reconciled_runs(tmp_path_factory):
     namespace = {}
     output = Path(os.environ.get('BIOREACTOR_RECONCILIATION_OUTPUT',
                                 tmp_path_factory.mktemp('ecoli_reconciliation')))
-    notebook = json.loads((FOLDER / 'workflow.ipynb').read_text())
+    notebook = read_input_json(FOLDER / 'workflow.ipynb')
     start = monotonic()
     for step, cell in enumerate((c for c in notebook['cells'] if c['cell_type'] == 'code'), 1):
         exec(compile(''.join(cell['source']), f'reconciliation:step-{step}', 'exec'), namespace)
@@ -55,9 +57,9 @@ def test_frozen_forward_campaign(reconciled_runs, native_runs):
     for row_index, run in enumerate(['F10', 'F11']):
         rows = reconciled_runs['tables'][run]
         direct = native_runs['tables'][run]
-        case, config = next((c, m) for c, m in reconciled_runs['configurations']
+        case, config = next((c, m) for c, m in map(split_forward_inputs, reconciled_runs['configurations'])
                             if c['recipe']['name'] == run)
-        source_case, source = next((c, m) for c, m in native_runs['configurations']
+        source_case, source = next((c, m) for c, m in map(split_forward_inputs, native_runs['configurations'])
                                   if c['recipe']['name'] == run)
         carbon_parameters = deepcopy(source['parameters'])
         oxygen_yields = {name: carbon_parameters['coefficients'].pop(name)
@@ -103,7 +105,7 @@ def test_frozen_forward_campaign(reconciled_runs, native_runs):
             maximum_balance_error = max(maximum_balance_error, solved.mass_balance_residual_inf)
         assert maximum_target_error < 2e-6
         assert maximum_balance_error < 2e-7
-        measurements = json.loads((EXAMPLE / 'reference' / (run+'.json')).read_text())['measurements']
+        measurements = read_input_json(EXAMPLE / 'reference' / (run+'.json'))['measurements']
         metrics = {}
         for col, name in enumerate(SPECIES[:3]):
             data = measurements[name]
@@ -135,8 +137,8 @@ def test_frozen_forward_campaign(reconciled_runs, native_runs):
 
 
 def test_biomass_basis_units_and_sampling(tmp_path):
-    case = json.loads((FOLDER/'inputs/case.json').read_text())
-    config = json.loads((FOLDER/'inputs/mechanism.json').read_text())
+    case = read_input_json(FOLDER/'inputs/case.json')
+    config = read_input_json(FOLDER/'inputs/mechanism.json')
     case['operation']['runtime']['value'] = .3
     config['recipes']['F10'] = [dict(time=.1, event_type='sample', volume_l=.1),
                               dict(time=.2, event_type='feed', volume_l=.1,
@@ -168,7 +170,7 @@ def test_biomass_basis_units_and_sampling(tmp_path):
     bad['model']['kinetics']['rule_graph'][0]['expression'] = {'state': 'viable_cells_million'}
     with pytest.raises(ValueError, match='cell-count rules'):
         build_bioreactor(case, bad, str(EXAMPLE/'inputs/thermo.json'))
-    thermo = json.loads((EXAMPLE/'inputs/thermo.json').read_text())
+    thermo = read_input_json(EXAMPLE/'inputs/thermo.json')
     names = {name: f'species_{i}' for i, name in enumerate(thermo)}
     def rename(value):
         if isinstance(value, dict):
@@ -185,7 +187,7 @@ def test_biomass_basis_units_and_sampling(tmp_path):
 
 @pytest.mark.parametrize('refinement', ['tolerance', 'step'])
 def test_full_forward_refinement(reconciled_runs, refinement):
-    case, config = deepcopy(reconciled_runs['configurations'][0])
+    case, config = split_forward_inputs(reconciled_runs['configurations'][0])
     if refinement == 'tolerance':
         case['numerics']['relative_tolerance'] /= 10
         case['numerics']['absolute_tolerance'] /= 10
@@ -208,7 +210,7 @@ def test_full_forward_refinement(reconciled_runs, refinement):
     mask = np.ones(len(times), dtype=bool)
     for event in config['recipes']['F10']:
         mask &= ~np.isclose(times, event['time'], atol=1e-8, rtol=0)
-    source = json.loads((EXAMPLE/'inputs/mechanism.json').read_text())
+    source = read_input_json(DIRECT/'inputs/mechanism.json')
     oracle = independent_solution(case, source, times[mask])[:, :5]
     error = float(np.max(abs(concentrations[mask][:, columns]-oracle)))
     # The tighter run must establish accuracy below one fifth of the original
@@ -216,7 +218,7 @@ def test_full_forward_refinement(reconciled_runs, refinement):
     assert error < (2e-6 if refinement == 'tolerance' else 2e-5)
     output = reconciled_runs['EXPORT_DIR']/'assessment.json'
     if output.exists():
-        report = json.loads(output.read_text())
+        report = read_input_json(output)
         report.setdefault('refinements', {})[refinement] = dict(
             maximum_concentration_change_g_l=largest, maximum_oracle_error_g_l=error)
         output.write_text(json.dumps(report, indent=2)+'\n')

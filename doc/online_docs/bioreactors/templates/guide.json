@@ -1,5 +1,5 @@
 {
-  "purpose": "Filling instructions and record examples, not a fourth simulation input. Use the same three blank files for every supported model; reference a populated example only to see completed mathematics.",
+  "purpose": "Filling instructions and record examples, not a simulation input. Use the same two blank files for every supported model; reference a populated example only to see completed mathematics.",
   "scope": {
     "modes": [
       "batch",
@@ -15,12 +15,12 @@
     "limitations": "This schema configures existing model capabilities. Unsupported physics, new kinetic operators, continuous perfusion or arbitrary DAE equations still need implementation; a template cannot infer a metabolic network, kinetic laws, or unavailable material data."
   },
   "steps": [
-    "Copy the three template files. Replace placeholder identifiers; null means not yet supplied or inactive, never a guessed physical value.",
+    "Copy the two template files. Replace placeholder identifiers; null means not yet supplied or inactive, never a guessed physical value.",
     "Declare each solute and the carrier in thermo.json. Keep the same solute identifiers in initial amounts, model species, transport and recipes.",
-    "Fill case.json with reactor mode, initial volume/mass/density, duration, conditions and solver settings. Set recipe.name to process or another key you declare in mechanism.recipes.",
+    "Fill mechanism.json operation with reactor mode, initial volume/mass/density, duration and conditions; fill numerical with solver settings. Set operation.recipe.name to process or another key you declare in mechanism.recipes.",
     "Select mechanism.json mechanism. Fill pathways for pathway-lp, or kinetics plus reconciliation plus network and rate_provider for rate-reconciled-culture. Unused sections may stay blank or be {}. For configured-kinetics, fill kinetics.rule_graph, species_mass_rates and rate_unit; other model sections, network, transport and flux_time_unit remain blank/null. A null rate_provider preserves direct rules; explicit providers replace assigned outputs. pathway-lp also accepts rate_provider with provider-type uptake constraints; see USER_GUIDE.md.",
     "Populate only relevant parameter groups. Define how each coefficient is used through parameter references in your selected equations or uptake constraints.",
-    "Enter initial species amounts and the active biological states. Volume comes from case.json; do not enter it twice.",
+    "Enter initial species amounts and the active biological states. Volume comes from operation.initial_volume; do not enter it twice.",
     "For batch, leave the chosen recipe list empty. For scheduled additions, copy the generic event record and fill its applicable fields.",
     "Pass the dictionaries and thermo.json path to the existing build_bioreactor function, then call assembly.solve()."
   ],
@@ -110,16 +110,16 @@
   },
   "case_fields": {
     "biology.conditions": "Named conditions consumed by configured kinetics, e.g. pH. Empty for a model with no condition-dependent kinetics.",
-    "numerics.backend": [
+    "numerical.backend": [
       "scipy",
       "fixed-step"
     ],
-    "numerics.step": "Output interval for SciPy; propagation interval for fixed-step. Time unit: s, min, h, day.",
-    "numerics.optional": "Leave tolerances, maximum_step and Jacobian settings null if not used by the selected backend. See populated examples for supported numerical choices.",
+    "numerical.step": "Output interval for SciPy; propagation interval for fixed-step. Time unit: s, min, h, day.",
+    "numerical.optional": "Leave tolerances, maximum_step and Jacobian settings null if not used by the selected backend. See populated examples for supported numerical choices.",
     "operation": "Mass kg; density kg/L; volume unit m3, L, mL or uL; temperature K (null retains native 298.15 K). Initial mass must equal declared volume times density. Temperature is isothermal, not a new temperature-dependent kinetic law.",
     "recipe.name": "Must match a key under mechanism.recipes.",
     "operation.volume_policy": "native (default): phase mass/thermodynamic density. working-volume: initial_volume integrates declared inlet and enabled well-mixed outlet volume flows, plus scheduled additions/samples. Uses native mechanism states and property hooks. Continuous mode enables native volume-controlled withdrawal; perfusion, unmanaged phase connections, thermal expansion and inferred biomass volume are unsupported. Does not establish elemental/mass closure. Initial mass/volume/density consistency remains required.",
-    "recipe.time_unit": "Optional unit for numeric recipe times (s, min, h, day); defaults to numerics.step.unit. Explicit time quantities with value/unit override this default."
+    "operation.recipe.time_unit": "Optional unit for numeric recipe times (s, min, h, day); defaults to numerical.step.unit. Explicit time quantities with value/unit override this default."
   },
   "state_fields": {
     "species": "unit mol, mmol, umol, nmol, pmol or fmol; amounts is a species-to-amount map containing every non-carrier species, including zero amounts.",
@@ -254,7 +254,7 @@
     "constants_note": "These conversion factors retain the existing native culture interface and must match the source rate basis. They are not tunable substitutes for missing material information."
   },
   "recipes": {
-    "time": "Event time uses numerics.step.unit. Events at the final endpoint are not applied before harvest. Same-time events execute in their declared order.",
+    "time": "Event time uses numerical.step.unit. Events at the final endpoint are not applied before harvest. Same-time events execute in their declared order.",
     "record": {
       "time": null,
       "event_type": null,
@@ -274,7 +274,7 @@
     "density_kg_l": "Optional positive feed/stock density in kg/L; defaults to operation.carrier_density_kg_l. For solution-volume feeds, concentrations exclude the carrier; its remaining mass is calculated from total solution density."
   },
   "thermo": "Duplicate the generic species property record for each solute and carrier, renaming <species_id>. These are native PharmaPy thermodynamic properties, not an organism-specific schema. Supply the property values and coefficient arrays required by the native property correlations; do not treat blank values as physical defaults.",
-  "compatibility": "Legacy unversioned and version-1 inputs remain accepted. Version 2 reorganizes input representation only; it does not change reactor, kinetics, metabolic optimization or integration mathematics.",
+  "compatibility": "Legacy unversioned and separate version-1/2 inputs remain accepted. Version 3 combines case and mechanism declarations: operation contains physical setup, conditions and recipe selection; numerical contains solver settings. Pass the combined document with keyword thermo_path. Reactor, kinetics, metabolic optimization and integration mathematics are unchanged.",
   "providers": {
     "rule-graph": "Fill output_units for every assigned output. Declare validity bounds when needed.",
     "registered": "The registered factory defines its extra input fields. Its configuration is forwarded without stripping custom blank values."

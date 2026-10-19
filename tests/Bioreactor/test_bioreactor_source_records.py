@@ -7,6 +7,7 @@ the nominal profile scenario and distinguish it from logged glucose-feed totals.
 
 import hashlib
 import json
+from .input_helpers import read_input_json
 from pathlib import Path
 
 import numpy as np
@@ -28,15 +29,17 @@ def test_nominal_glucose_profile_is_one_feed_not_a_second_liquid(run):
     run : str
         F10 or F11 operating record and nominal feed configuration.
     """
-    source = json.loads((EXAMPLE / 'reference/operating_records.json').read_text())
+    source = read_input_json(EXAMPLE / 'reference/operating_records.json')
     channels = source['experiments'][run]
     assert channels['Feed']['ilabname'] == 'Cumulated_feed_volume_glucose'
     assert source['raw_workbook']['columns']['Y:Z'] == 'Glu (Feed [V])'
     assert source['raw_workbook']['columns']['AA:AB'] == 'Glu (Profile)'
     assert channels['Acid']['vals'] == channels['Medium']['vals'] == []
-    folder = EXAMPLE / 'inputs' if run == 'F10' else EXAMPLE / 'inputs' / run
-    case = json.loads((folder / 'case.json').read_text())
-    model = json.loads((folder / 'mechanism.json').read_text())
+    folder = EXAMPLE / 'reconciliation/inputs'
+    if run != 'F10':
+        folder = folder / run
+    case = read_input_json(folder / 'case.json')
+    model = read_input_json(folder / 'mechanism.json')
     events = model['recipes'][run]
     flows = [event for event in events if event['event_type'] == 'flow']
     np.testing.assert_allclose([e['time'] for e in flows], channels['Profile']['times'], rtol=0., atol=1e-12)
@@ -66,10 +69,10 @@ def test_original_measurements_have_traceable_sources_and_oxygen_is_not_assumed_
     run : str
         F10 or F11 experiment identity.
     """
-    manifest = json.loads((EXAMPLE / 'inputs/provenance.json').read_text())
+    manifest = read_input_json(EXAMPLE / 'inputs/provenance.json')
     reference = EXAMPLE / 'reference' / f'{run}.json'
     assert hashlib.sha256(reference.read_bytes()).hexdigest() == manifest['experiments'][run]['reference_sha256']
-    oxygen = json.loads((EXAMPLE / 'reference/oxygen_observations.json').read_text())
+    oxygen = read_input_json(EXAMPLE / 'reference/oxygen_observations.json')
     observed = oxygen['experiments'][run]
     assert len(observed['time_h']) == len(observed['percent_air_saturation'])
     assert min(observed['percent_air_saturation']) < 30.  # [% air saturation]; stated control target

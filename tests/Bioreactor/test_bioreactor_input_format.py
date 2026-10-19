@@ -1,6 +1,7 @@
 """The shared forward template preserves native model inputs and behavior."""
 
 import json
+from .input_helpers import read_input_json
 from copy import deepcopy
 from pathlib import Path
 
@@ -55,24 +56,43 @@ def test_invalid_stock_is_rejected_without_changing_inventory(stock):
 
 def _load(name):
     folder = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / "inputs"
-    return [json.loads((folder / file).read_text())
+    return [read_input_json(folder / file)
             for file in ("case.json", "mechanism.json", "thermo.json")]
 
 
 def test_all_examples_use_the_same_ordered_forward_template():
     template = ROOT / "doc/online_docs/bioreactors/templates"
-    case, model, thermo = [json.loads((template / file).read_text())
+    case, model, thermo = [read_input_json(template / file)
                            for file in ("case.json", "mechanism.json", "thermo.json")]
     for name in NAMES:
         configured_case, configured_model, properties = _load(name)
         assert list(configured_case) == list(case)
         for field in ("biology", "numerics", "operation", "recipe"):
             assert list(configured_case[field]) == list(case[field])
-        assert list(configured_model) == list(model)
+        expected_order = list(model)
+        if name == 'batch_ecoli_dfba':
+            # The selected runnable template puts initial state before parameters.
+            expected_order.remove('state')
+            expected_order.insert(expected_order.index('parameters'), 'state')
+        assert list(configured_model) == expected_order
         for field in ("model", "state"):
             assert list(configured_model[field]) == list(model[field])
         for species in properties.values():
             assert list(species) == list(next(iter(thermo.values())))
+
+
+@pytest.mark.parametrize('folder', [
+    'Doyle_Exercise_4_15/inputs', 'batch_ecoli_dfba/inputs',
+    'ecoli_ye_fed_batch/reconciliation/inputs',
+    'ecoli_ye_fed_batch/reconciliation/inputs/F11',
+])
+def test_runnable_templates_follow_user_setup_order(folder):
+    document = json.loads((EXAMPLES / folder / 'mechanism.json').read_text())
+    assert list(document) == [
+        'schema_version', '$comment', 'mechanism', 'operation', 'state',
+        'parameters', 'model', 'network', 'rate_provider', 'transport',
+        'flux_time_unit', 'recipes', 'numerical',
+    ]
 
 
 @pytest.mark.parametrize("name", NAMES)
