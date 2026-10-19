@@ -31,7 +31,7 @@ from PharmaPy.ParamEstim import ParameterEstimation
 from PharmaPy.Records import (FIELD_KINDS, JACOBIAN_SOURCES,
                               OPTIMIZATION_METHODS, SOURCE_ORIGINS,
                               STEP_DESCRIPTORS, CalibrationRecord,
-                              load_template)
+                              ModelRevision, load_template)
 import test_experiment_measurement_guide as measurement_guide
 import test_records_calibration as decay_case
 
@@ -249,11 +249,19 @@ def test_template_fitting_block_runs_with_the_template():
     filled = load_template()
     namespace = {'filled': filled, 'func': decay_case.decay,
                  'ParameterEstimation': ParameterEstimation,
-                 'CalibrationRecord': CalibrationRecord}
+                 'CalibrationRecord': CalibrationRecord,
+                 'ModelRevision': ModelRevision}
     exec(compile(fitting, f"{PAGE.name}:code-block", 'exec'), namespace)
     fitted = namespace['fitted']
     assert fitted.fitted_values is not None
-    assert fitted.model == filled.model
+    # Name, revision and description carry over; the PharmaPy version is
+    # detected for the running code, not copied from the template (null).
+    assert (fitted.model.name, fitted.model.revision,
+            fitted.model.description) == (
+        filled.model.name, filled.model.revision, filled.model.description)
+    assert filled.model.pharmapy_version is None
+    assert (fitted.model.pharmapy_version
+            == ModelRevision(filled.model.name).pharmapy_version)
     assert fitted.sources == filled.sources
     assert fitted.transformations == filled.transformations
     assert fitted.description == filled.description

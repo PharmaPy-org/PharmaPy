@@ -198,10 +198,13 @@ capture the fit with the record's provenance:
    inputs = filled.estimation_inputs()
    estimator = ParameterEstimation(func, **inputs)  # func: the model callback
    estimator.optimize_fn(verbose=False)
+   # A new ModelRevision detects the running PharmaPy version.
+   model = ModelRevision(filled.model.name, revision=filled.model.revision,
+                         description=filled.model.description)
    fitted = CalibrationRecord.from_estimation(
        estimator, inputs['x_data'], case=filled.case,
        parameter_units=[item.units for item in filled.parameters],
-       model=filled.model, sources=filled.sources,
+       model=model, sources=filled.sources,
        transformations=filled.transformations, fields=filled.fields,
        description=filled.description,
        bounds=[(item.lower, item.upper) for item in filled.parameters
@@ -209,7 +212,11 @@ capture the fit with the record's provenance:
 
 ``from_estimation`` takes the parameter names, seeds and optimize flags from
 the estimator and the bounds from ``bounds``; it does not carry the
-parameters' ``description`` entries.
+parameters' ``description`` entries. It records ``model`` as given, and a
+loaded ``ModelRevision`` keeps its stored ``pharmapy_version`` (``null`` in
+the template) rather than detecting it again, so ``filled.model`` is not
+reused: a new ``ModelRevision`` with the same name, revision and description
+records the PharmaPy version that ran the fit.
 
 The template is:
 

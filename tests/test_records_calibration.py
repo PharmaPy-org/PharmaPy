@@ -18,9 +18,11 @@ closed-form model, never from the record code. Core lane; PharmaPy's
 Levenberg-Marquardt solver fits the one-parameter model in milliseconds.
 """
 
+import copy
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import pickle
 import stat
 import subprocess
 import sys
@@ -599,8 +601,11 @@ def test_save_overwrites_atomically_and_keeps_permissions(tmp_path):
     record = manual_record()
     record.save(path)
     assert CalibrationRecord.load(path) == record
-    assert stat.S_IMODE(os.stat(path).st_mode) == (stat.S_IRUSR
-                                                   | stat.S_IWUSR)
+    # POSIX keeps all permission bits; Windows os.chmod sets only the
+    # read-only flag, so the 0o600 mode is not representable there.
+    if os.name == 'posix':
+        assert stat.S_IMODE(os.stat(path).st_mode) == (stat.S_IRUSR
+                                                       | stat.S_IWUSR)
     assert list(tmp_path.iterdir()) == [path]
 
 
@@ -1658,6 +1663,97 @@ def test_installed_version_requires_the_distribution_of_this_tree(
     assert Path(package).resolve() == (ROOT / 'PharmaPy').resolve()
     assert version == FOREIGN_VERSION
     assert recorded == expected
+
+
+@pytest.mark.parametrize('url, windows, expected', [
+    ('file:///home/user/project', False, '/home/user/project'),
+    ('file:///home/user/my%20project%23', False, '/home/user/my project#'),
+    ('file://localhost/home/user/project', False, '/home/user/project'),
+    ('file://server/share/project', False, None),  # no UNC paths on POSIX
+    ('file:///C:/Users/user/my%20project', True, 'C:/Users/user/my project'),
+    ('file:///c%7C/Users/user', True, 'c:/Users/user'),  # legacy C|
+    ('file:///C|/Users/user', True, 'C:/Users/user'),
+    ('file://localhost/D:/project', True, 'D:/project'),
+    ('file://server/share/my%20project', True, '//server/share/my project'),
+    ('https://example.org/project', True, None),
+    ('https://example.org/project', False, None),
+])
+def test_file_urls_become_local_paths(url, windows, expected):
+    from PharmaPy.Records import _file_url_path
+    path = _file_url_path(url, windows=windows)
+    if expected is None:
+        assert path is None
+    elif windows:
+        # Windows path semantics on every platform: drive, UNC root and
+        # case-insensitive comparison.
+        assert PureWindowsPath(path) == PureWindowsPath(expected)
+        assert PureWindowsPath(path).drive == PureWindowsPath(
+            expected).drive
+    else:
+        assert path == expected
+
+
+def test_file_url_paths_follow_the_running_platform():
+    from PharmaPy.Records import _file_url_path
+    url = ROOT.resolve().as_uri()
+    assert Path(_file_url_path(url)).resolve() == ROOT.resolve()
+    assert _file_url_path(url) == _file_url_path(
+        url, windows=os.name == 'nt')
+
+
+def components_of(record):
+    """List a record and every component record it holds.
+
+    Parameters
+    ----------
+    record : CalibrationRecord
+        Record.
+
+    Returns
+    -------
+    list
+        The record, its model, sources, transformations, parameters,
+        solver settings (if any), fields and their identities.
+    """
+    items = [record, record.model, *record.sources, *record.transformations,
+             *record.parameters, *record.fields,
+             *(field.identity for field in record.fields)]
+    return items + ([] if record.solver is None else [record.solver])
+
+
+@pytest.mark.parametrize('duplicate', [
+    copy.copy, copy.deepcopy,
+    lambda item: pickle.loads(pickle.dumps(item)),
+], ids=['copy', 'deepcopy', 'pickle'])
+def test_records_copy_and_pickle_exactly(duplicate):
+    manual = manual_record()
+    captured = fitted_record()[0]
+    items = components_of(manual) + components_of(captured)
+    # Every record class is covered.
+    assert {type(item) for item in items} == {
+        CalibrationRecord, ModelRevision, DataSource, Transformation,
+        ParameterRecord, SolverSettings, FieldRecord, FieldIdentity}
+    for item in items:
+        duplicated = duplicate(item)
+        assert type(duplicated) is type(item)
+        assert duplicated is not item
+        assert duplicated == item
+        assert json.dumps(duplicated.to_dict()) == json.dumps(item.to_dict())
+    # Stored PharmaPy versions are kept, never detected again.
+    for version in (None, '0.9'):
+        model = ModelRevision('decay', pharmapy_version=version)
+        assert duplicate(model).pharmapy_version == version
+    assert duplicate(captured).fitted_values.tolist() == \
+        captured.fitted_values.tolist()
+
+
+def test_from_estimation_rejects_values_that_are_not_experiments():
+    _, estimator, experiments = fitted_record()
+    mixed = {'hot': {'c_A': experiments['hot'].measurements['c_A']},
+             'cold': experiments['cold']}
+    with pytest.raises(TypeError, match=r"^experiments\['hot'\] must be an "
+                                        r"Experiment; got dict$"):
+        capture(estimator, mixed)
 
 
 def test_unfitted_records_have_no_optimizer_inputs():

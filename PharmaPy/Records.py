@@ -54,7 +54,7 @@ import json
 import math
 import numbers
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import stat
 from urllib.parse import unquote, urlparse
@@ -114,6 +114,9 @@ JSON_INDENT = 2
 TEMPLATE_NAMES = ('calibration_record',)
 
 _SHA256_PATTERN = re.compile(rf'[0-9a-f]{{{SHA256_HEX_LENGTH}}}')
+#: Path of a ``file:`` URL that starts with a Windows drive, ``/C:/...`` (or
+#: the legacy ``/C|/...``): the drive letter and the rest of the path.
+_URL_DRIVE_PATTERN = re.compile(r'/([A-Za-z])[:|](/.*)?')
 #: Reserved key of tagged JSON objects (tuples and NumPy values).
 _TYPE_TAG = '__type__'
 #: Array dtype kinds that serialize exactly: boolean, signed and unsigned
@@ -807,8 +810,9 @@ class _ImmutableRecord:
     """Base of immutable record objects compared by their JSON form.
 
     Subclasses set their attributes once through ``_set`` in ``__init__``
-    and implement ``to_dict``. Records are unhashable because some hold
-    arrays and mappings.
+    and implement ``to_dict`` and its inverse ``from_dict``, through which
+    records are copied and pickled. Records are unhashable because some
+    hold arrays and mappings.
     """
 
     __slots__ = ()
@@ -880,6 +884,26 @@ class _ImmutableRecord:
             return NotImplemented
         return (json.dumps(self.to_dict(), allow_nan=False)
                 == json.dumps(other.to_dict(), allow_nan=False))
+
+    def __reduce__(self) -> tuple:
+        """Support ``copy``, ``deepcopy`` and ``pickle`` via the JSON form.
+
+        Returns
+        -------
+        tuple
+            ``(type(self).from_dict, (self.to_dict(),))``: the record is
+            rebuilt, and validated again, from the JSON-compatible data that
+            ``save`` writes, so a copy compares equal to the original.
+
+        Notes
+        -----
+        The default protocol would restore the attributes one by one,
+        which ``__setattr__`` rejects. Every subclass implements
+        ``from_dict`` as the inverse of ``to_dict``; stored values such as
+        ``ModelRevision.pharmapy_version`` are restored as stored, never
+        detected again.
+        """
+        return (type(self).from_dict, (self.to_dict(),))
 
     def __repr__(self) -> str:
         """Return a representation built from the JSON form.
@@ -1888,6 +1912,62 @@ class ParameterRecord(_ImmutableRecord):
                    description=data.get('description'))
 
 
+def _file_url_path(url: str, *,
+                   windows: Optional[bool] = None) -> Optional[str]:
+    """Convert a ``file:`` URL into a local filesystem path.
+
+    Parameters
+    ----------
+    url : str
+        URL, e.g. the ``url`` of a PEP 610 ``direct_url.json``:
+        ``'file:///home/user/project'``, ``'file:///C:/Users/project'`` or
+        ``'file://server/share/project'``. Percent-encoded characters are
+        decoded.
+    windows : bool, optional
+        Whether to apply Windows path rules; None (the default) selects
+        those of the running platform (``os.name == 'nt'``).
+
+    Returns
+    -------
+    str or None
+        The path: on Windows with its drive (``'C:\\Users\\project'``) or
+        as a UNC path (``'\\\\server\\share\\project'``) for a host other
+        than ``localhost``; on other platforms a POSIX path. None if the URL
+        is not a ``file:`` URL, or names a remote host on a platform without
+        UNC paths.
+
+    Notes
+    -----
+    The path component of ``file:///C:/x`` is ``/C:/x``; decoding it as a
+    POSIX path would lose the drive on Windows. The conversion follows
+    ``urllib.request.url2pathname`` for these URL forms: POSIX rules decode
+    the percent-encoding only, as it does on POSIX; Windows rules also drop
+    the slash before a drive letter (``/C:`` or the legacy ``/C|``) and
+    join a remote host as the UNC server, as it does on Windows. It is
+    implemented here, with ``pathlib.PureWindowsPath``, so that both rule
+    sets are the same and testable on every platform; the platform-specific
+    ``urllib.request.url2pathname`` implements only the running platform's
+    rules, and its Windows module ``nturl2path`` is deprecated since Python
+    3.14.
+    """
+    if windows is None:
+        windows = os.name == 'nt'
+    location = urlparse(url)
+    if location.scheme != 'file':
+        return None
+    remote = location.netloc not in ('', 'localhost')
+    path = unquote(location.path)
+    if not windows:
+        return None if remote else path
+    if remote:
+        # The host is the server of a UNC path, //server/share/...
+        return str(PureWindowsPath(f'//{location.netloc}{path}'))
+    drive = _URL_DRIVE_PATTERN.fullmatch(path)
+    if drive is not None:
+        path = f'{drive.group(1)}:{drive.group(2) or "/"}'
+    return str(PureWindowsPath(path))
+
+
 def _installed_version() -> Optional[str]:
     """Return the version of the distribution providing this PharmaPy.
 
@@ -1927,11 +2007,10 @@ def _installed_version() -> Optional[str]:
             and isinstance(direct_url.get('dir_info'), dict)
             and direct_url['dir_info'].get('editable') is True
             and isinstance(direct_url.get('url'), str)):
-        location = urlparse(direct_url['url'])
-        if location.scheme == 'file':
-            source = Path(unquote(location.path)).resolve()
-            if (source / package.name).resolve() == package:
-                return distribution.version
+        source = _file_url_path(direct_url['url'])
+        if (source is not None
+                and (Path(source) / package.name).resolve() == package):
+            return distribution.version
     return None
 
 
@@ -4106,7 +4185,10 @@ covariance_include_mse
         parameter_units : Mapping[str, str] or sequence of str
             Units of every parameter, by name or in parameter order.
         model : ModelRevision
-            Calibrated model.
+            Calibrated model, recorded as given: its ``pharmapy_version`` is
+            the one it holds (detected when it was built, or stored in a
+            loaded record), never detected again here. Build a new
+            ``ModelRevision`` to record the running PharmaPy version.
         sources : sequence of DataSource
             Data sources.
         transformations : sequence of Transformation, optional
@@ -4163,7 +4245,8 @@ covariance_include_mse
         ------
         TypeError
             If ``estimator`` is not a ``ParameterEstimation``,
-            ``experiments`` is not a mapping, ``parameter_units`` or
+            ``experiments`` is not a mapping or holds a value that is not an
+            ``Experiment``, ``parameter_units`` or
             ``bounds`` is not a list or tuple, a SimulationExec wrapper
             keyword value or a numeric ``dx_finitediff`` cannot be
             recorded, or a provenance entry has the wrong type (see the
@@ -4222,6 +4305,10 @@ covariance_include_mse
             raise TypeError("experiments must be the mapping of Experiment "
                             "objects passed as x_data; got "
                             f"{type(experiments).__name__}")
+        for name, value in experiments.items():
+            if not isinstance(value, Experiment):
+                raise TypeError(f"experiments[{name!r}] must be an "
+                                f"Experiment; got {type(value).__name__}")
         if not estimator.optimize_flag:
             raise ValueError(
                 "The estimator's last optimize_fn ran with simulate=True, "
