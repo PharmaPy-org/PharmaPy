@@ -1,0 +1,264 @@
+{
+  "schema_version": 2,
+  "mechanism": "rate-reconciled-culture",
+  "parameters": {
+    "rates": {
+      "uptake_target": 2.0,
+      "product_target": 2.0
+    },
+    "affinities": {},
+    "yields": {},
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {},
+    "kinetics": {
+      "extracellular_species": [
+        "nutrient"
+      ],
+      "rule_graph": [
+        {
+          "identifier": "growth",
+          "expression": {
+            "condition": "growth_per_day"
+          }
+        },
+        {
+          "identifier": "death",
+          "expression": 0.0
+        },
+        {
+          "identifier": "uptake",
+          "expression": {
+            "parameter": "rates.uptake_target"
+          }
+        },
+        {
+          "identifier": "product",
+          "expression": {
+            "parameter": "rates.product_target"
+          }
+        }
+      ],
+      "kinetic_outputs": {
+        "growth": "growth",
+        "death": "death",
+        "exchange_fluxes": {
+          "uptake": "uptake",
+          "secretion": "product"
+        }
+      },
+      "exchange_mappings": [
+        {
+          "reaction": "uptake",
+          "species": "nutrient",
+          "internal_coefficient": 1.0
+        }
+      ],
+      "degradation_mappings": [],
+      "product_mapping": {
+        "reaction": "secretion",
+        "molecular_weight_g_mol": 100.0
+      },
+      "constants": {
+        "seconds_per_day": 86400.0
+      },
+      "condition_bounds": {
+        "growth_per_day": [
+          0.0,
+          0.0
+        ]
+      },
+      "flux_basis": {
+        "exchange": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        },
+        "growth": {
+          "amount_unit": "1",
+          "normalization": "none",
+          "time_unit": "day"
+        },
+        "product": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        }
+      }
+    },
+    "reconciliation": {
+      "internal_reactions": [
+        "conversion"
+      ],
+      "normalization_exclusions": [],
+      "untargeted_exchanges": [],
+      "parameter_corrections": {},
+      "reconciliation_relative_bound": null,
+      "reconciliation_bound_increment": null,
+      "reconciliation_policy": "unweighted",
+      "problem_name": "Known-answer equal-weight projection"
+    }
+  },
+  "network": {
+    "identifier": "known-answer-chain",
+    "representation": "reduced",
+    "internal_metabolites": [
+      "S",
+      "P"
+    ],
+    "exchange_reactions": [
+      "uptake",
+      "secretion"
+    ],
+    "exchange_roles": {
+      "uptake": "tracked",
+      "secretion": "tracked"
+    },
+    "objective": {
+      "secretion": 1.0
+    },
+    "reactions": [
+      {
+        "identifier": "uptake",
+        "stoichiometry": {
+          "S": 1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "conversion",
+        "stoichiometry": {
+          "S": -1.0,
+          "P": 1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      },
+      {
+        "identifier": "secretion",
+        "stoichiometry": {
+          "P": -1.0
+        },
+        "lower": 0.0,
+        "upper": 10.0
+      }
+    ]
+  },
+  "rate_provider": {
+    "type": "rule-graph",
+    "identifier": "declared-targets",
+    "version": "1",
+    "output_units": {
+      "growth": "1/day",
+      "death": "1/day",
+      "uptake": "mmol/(10^6 cell day)",
+      "product": "mmol/(10^6 cell day)"
+    }
+  },
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "benchmark": [
+      {
+        "time": {
+          "value": 0.0,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "volume_flow": {
+          "value": 0.1,
+          "unit": "L/day"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {
+            "nutrient": 2.0
+          }
+        },
+        "composition": "supplied"
+      },
+      {
+        "time": {
+          "value": 0.5,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "volume_flow": {
+          "value": 0.2,
+          "unit": "L/day"
+        },
+        "composition": "supplied",
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {
+            "nutrient": 2.0
+          }
+        }
+      },
+      {
+        "time": {
+          "value": 0.75,
+          "unit": "day"
+        },
+        "event_type": "sample",
+        "volume": {
+          "value": 0.1,
+          "unit": "L"
+        }
+      },
+      {
+        "time": {
+          "value": 1.0,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "volume_flow": {
+          "value": 0.0,
+          "unit": "L/day"
+        }
+      },
+      {
+        "time": {
+          "value": 1.0,
+          "unit": "day"
+        },
+        "event_type": "feed",
+        "volume": {
+          "value": 0.1,
+          "unit": "L"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {
+            "nutrient": 3.0
+          }
+        },
+        "density": {
+          "value": 1.0,
+          "unit": "kg/L"
+        },
+        "volume_basis": "solution",
+        "composition": "supplied"
+      }
+    ]
+  },
+  "state": {
+    "species": {
+      "unit": "mmol",
+      "amounts": {
+        "nutrient": 10.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": 1.0,
+    "dead_cells_million": 0.0,
+    "product_g": 0.0,
+    "integral": 0.0
+  },
+  "$comment": "Synthetic formal nutrient/product pools, both 100 g/mol; targets and stoichiometry are deliberately constructed to give a unique analytic projection, not inferred physiology. Product inventory is stored separately from liquid species. Equal residual weights; no internal-flux penalty. Network objective is metadata, not biomass maximization in this reconciliation policy."
+}
