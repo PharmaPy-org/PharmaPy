@@ -462,8 +462,13 @@ class ConfiguredPathwayModel:
         # each secondary solve that fixes an optimal pathway allocation.
         solver_options = {"primal_feasibility_tolerance": 1e-9,
                           "dual_feasibility_tolerance": 1e-9}
+        nonzero_objective = abs(self.definition.objective_coefficients[
+            self.definition.objective_coefficients != 0.])  # [objective/flux]
+        # Scaling by the largest coefficient can erase smaller physical terms.
+        objective_scale = np.min(nonzero_objective) if nonzero_objective.size else 0.  # [objective/flux]
+        objective_row = self.definition.objective_coefficients / (objective_scale or 1.)  # [-]
         result = linprog(
-            c=-self.definition.objective_coefficients,
+            c=-objective_row,
             A_ub=a_ub, b_ub=b_ub, bounds=bounds, method="highs", options=solver_options,
         )
         if not result.success:
@@ -478,6 +483,9 @@ class ConfiguredPathwayModel:
             )
 
         optimum = float(self.definition.objective_coefficients @ result.x)
+        normalized_optimum = float(objective_row @ result.x)  # [flux unit]
+        equality = objective_row[None, :] if objective_scale else None  # [-]
+        equality_rhs = np.array([normalized_optimum]) if objective_scale else None  # [flux unit]
         deterministic_bounds = list(bounds)
         deterministic_result = result
         secondary_value = None
@@ -494,18 +502,19 @@ class ConfiguredPathwayModel:
             objective[index] = 1.0
             deterministic_result = linprog(
                 c=objective, A_ub=a_ub, b_ub=b_ub,
-                A_eq=self.definition.objective_coefficients[np.newaxis, :],
-                b_eq=np.array([optimum]), bounds=deterministic_bounds, method="highs",
+                A_eq=equality, b_eq=equality_rhs, bounds=deterministic_bounds, method="highs",
                 options=solver_options,
             )
             if not deterministic_result.success:
                 raise MetabolicNumericalError(f"Pathway LP tie-break failed for {pathway!r}.")
+            self._check_primary_face(deterministic_result.x, objective_row, normalized_optimum)
             fixed = float(deterministic_result.x[index])
             deterministic_bounds[index] = (fixed, fixed)
 
         fluxes = _readonly_vector(
             deterministic_result.x, "optimized fluxes", len(self.pathway_ids)
         )
+        self._check_primary_face(fluxes, objective_row, normalized_optimum)
         if a_ub is not None and np.any(a_ub @ fluxes - b_ub > 1.0e-8):
             raise MetabolicNumericalError(
                 "HiGHS returned a flux vector outside configured constraints."
@@ -533,6 +542,31 @@ class ConfiguredPathwayModel:
             inventory_violation_inf=(None if availability is None else
                                      float(max(0., -np.min(availability.residual(fluxes))))),
         )
+
+    @staticmethod
+    def _check_primary_face(fluxes, objective, optimum):
+        """Reject a secondary point that loses the normalized primary optimum.
+
+        Parameters
+        ----------
+        fluxes : ndarray
+            Candidate [flux unit].
+        objective : ndarray
+            Objective divided by its smallest nonzero coefficient [-].
+        optimum : float
+            Primary value in the normalized basis [flux unit].
+
+        Raises
+        ------
+        MetabolicNumericalError
+            Relative optimal-face error exceeds the existing 1e-8 audit budget.
+            No unit-sized floor is used: tiny primary values remain meaningful.
+        """
+        value = float(objective @ fluxes)  # [flux unit]
+        scale = max(abs(optimum), float(abs(objective) @ abs(fluxes)),
+                    np.finfo(float).tiny)  # [flux unit]
+        if not np.isfinite(value) or abs(value - optimum) > 1e-8 * scale:
+            raise MetabolicNumericalError('Pathway secondary solve changed the primary optimum.')
 
     def _minimum_norm(self, initial, optimum, matrix, capacity, lower, upper):
         """Minimize declared squared normalized flux on the primary optimal face.
