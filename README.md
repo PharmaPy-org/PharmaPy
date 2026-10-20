@@ -34,3 +34,12 @@ See the [contributing guide](https://github.com/PharmaPy-org/PharmaPy/blob/maste
 for the development workflow and integration contract.
 
 Read our [documentation](https://pharmapy-org.readthedocs.io/en/latest/) or chat with the [PharmaPy Simulation Assistant](https://chatgpt.com/g/g-679bb3b5c5188191b26680b147a4f4a2-pharmapy-simulation-assistant) for more information on how to install and how to use PharmaPy.
+
+## WP3.1 native bioreactors
+
+See [the bioreactor examples](examples/bioreactors/README.md) for batch, fed-batch and synthetic chemostat
+models, reduced-pathway dFBA, and rate reconciliation using native PharmaPy vessels.
+The selected baseline is E. coli yeast-extract fed-batch F10/F11.
+[Scope and limitations](PharmaPy/Bioreactors/TECHNICAL_SUMMARY.md) distinguish
+forward-model qualification from remaining shared-record integration and scientific-review work.
+Generated outputs and published comparison figures are excluded.

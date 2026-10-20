@@ -15,7 +15,7 @@ EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
 
 def build(name='generic_batch', policy='working-volume', mode=None, backend=None):
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
-    case, definition = [read_input_json((p / f)) for f in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p / f) for f in ('case.json', 'mechanism.json')]
     case['operation']['volume_policy'] = policy
     if mode:
         case['operation']['mode'] = mode
@@ -28,7 +28,7 @@ def build(name='generic_batch', policy='working-volume', mode=None, backend=None
     return build_bioreactor(case, definition, p / 'thermo.json')
 
 
-@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'fed_batch_cho'])
+@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'batch_ecoli_dfba', 'fed_batch_cho'])
 @pytest.mark.parametrize('mode', ['batch', 'fed-batch'])
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])
 def test_volume_replay_reset_and_copy(name, mode, backend):
@@ -151,7 +151,7 @@ def test_sampling_preserves_concentrations_and_removes_extensive_biology(name, p
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])
 def test_metabolic_models_share_configured_flow_and_sampling(name, backend):
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
-    case, definition = [read_input_json((p / f)) for f in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p / f) for f in ('case.json', 'mechanism.json')]
     case['operation'].update(mode='fed-batch', volume_policy='working-volume',
                              runtime=dict(value=2., unit='s'))
     case['numerics']['step'] = dict(value=.25, unit='s')
@@ -207,7 +207,7 @@ def _check_working_volume(name):
         Generic example folder; expected working volumes are in L.
     """
     import matplotlib.pyplot as plt
-    notebook = read_input_json((EXAMPLES / name / 'workflow.ipynb'))
+    notebook = read_input_json(EXAMPLES / name / 'workflow.ipynb')
     namespace = {'__name__': '__notebook__'}
     try:
         for cell in notebook['cells']:

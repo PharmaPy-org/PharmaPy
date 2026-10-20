@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "time_unit": "h",
+  "fields": {
+    "biomass": {"species": "biomass", "quantity": "concentration", "unit": "g/L",
+                "event_side": "pre", "time_key": "time_h", "value_key": "g_l"},
+    "glucose": {"species": "glucose", "quantity": "concentration", "unit": "g/L",
+                "event_side": "pre", "time_key": "time_h", "value_key": "g_l"},
+    "acetate": {"species": "acetate", "quantity": "concentration", "unit": "g/L",
+                "event_side": "pre", "time_key": "time_h", "value_key": "g_l"}
+  },
+  "$comment": "Measured fields of reference/F10.json and reference/F11.json (processed source observations, including the source's 0.37 biomass conversion). Samples are drawn before each scheduled withdrawal, so event_side is pre; well-mixed withdrawal leaves concentrations unchanged."
+}
