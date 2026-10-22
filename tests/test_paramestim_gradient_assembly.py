@@ -280,17 +280,17 @@ def test_scalar_gradient_uses_weighted_state_major_residuals():
     np.testing.assert_allclose(gradient, expected_gradient)
 
 
-# Tolerance for closed-form algebraic Jacobian and gradient evaluations
+# Tolerance for closed-form dimensionless Jacobian and gradient evaluations
 # that differ only by IEEE-754 double-precision rounding.
 EXACT_ALGEBRAIC_ATOL = 1e-12  # [-]
-# Tolerances for scipy.optimize.least_squares parameter recovery at its
-# default termination tolerances (ftol = xtol = gtol = 1e-8).
+# Relative tolerance for scipy.optimize.least_squares parameter recovery at
+# its default termination tolerances (ftol = xtol = gtol = 1e-8).
 SCIPY_FIT_RTOL = 1e-6  # [-]
-SCIPY_FIT_ATOL = 1e-8  # [-]
 
 
 @pytest.mark.parametrize(
-    "param_seed, optimize_flags, trial_var, expected_fitted, expected_jac",
+    ("param_seed, optimize_flags, trial_var, expected_fitted, expected_jac, "
+     "exact_jac_atol, exact_grad_atol, fit_param_atol, fit_jac_atol"),
     [
         (
             np.array([0.3, 2.0]),  # [1/s], [mol/L]
@@ -299,6 +299,10 @@ SCIPY_FIT_ATOL = 1e-8  # [-]
             np.array([0.5]),  # [1/s]
             lambda t_s: (  # [mol/L*s]
                 -2.0 * t_s * np.exp(-0.5 * t_s))[np.newaxis, :],
+            1e-12,  # [mol/L*s], IEEE-754 double-precision rounding
+            1e-12,  # [(mol/L)**2*s], IEEE-754 double-precision rounding
+            1e-8,  # [1/s], least_squares default xtol = 1e-8
+            1e-8,  # [mol/L*s], least_squares default ftol/xtol = 1e-8
         ),
         (
             np.array([0.5, 1.4]),  # [1/s], [mol/L]
@@ -307,11 +311,16 @@ SCIPY_FIT_ATOL = 1e-8  # [-]
             np.array([2.0]),  # [mol/L]
             lambda t_s: (  # [-]
                 np.exp(-0.5 * t_s))[np.newaxis, :],
+            1e-12,  # [-], IEEE-754 double-precision rounding
+            1e-12,  # [mol/L], IEEE-754 double-precision rounding
+            1e-8,  # [mol/L], least_squares default xtol = 1e-8
+            1e-8,  # [-], least_squares default ftol/xtol = 1e-8
         ),
     ],
 )
 def test_jac_fun_receives_reconstructed_full_parameters_when_fixed(
-        param_seed, optimize_flags, trial_var, expected_fitted, expected_jac):
+        param_seed, optimize_flags, trial_var, expected_fitted, expected_jac,
+        exact_jac_atol, exact_grad_atol, fit_param_atol, fit_jac_atol):
     """Analytical jac_fun receives full reconstructed parameters when fixed."""
     time_s = np.array([0.0, 1.0, 2.0, 4.0])  # [s]
     true_rate_s_inv = 0.5  # [1/s]
@@ -386,20 +395,20 @@ def test_jac_fun_receives_reconstructed_full_parameters_when_fixed(
 
     jac_at_trial = estimator.get_gradient(trial_var, out_array=True)
     np.testing.assert_allclose(
-        jac_at_trial, expected_trial_jac, rtol=0.0, atol=EXACT_ALGEBRAIC_ATOL)
+        jac_at_trial, expected_trial_jac, rtol=0.0, atol=exact_jac_atol)
     grad_at_trial = estimator.get_gradient(trial_var, out_array=False)
     np.testing.assert_allclose(
         grad_at_trial, expected_trial_jac @ expected_trial_resid,
-        rtol=0.0, atol=EXACT_ALGEBRAIC_ATOL)
+        rtol=0.0, atol=exact_grad_atol)
 
     fitted_scipy, cov_scipy, info_scipy = estimator.estimate_parameters(
         verbose=0)
     np.testing.assert_allclose(
         fitted_scipy, expected_fitted,
-        rtol=SCIPY_FIT_RTOL, atol=SCIPY_FIT_ATOL)
+        rtol=SCIPY_FIT_RTOL, atol=fit_param_atol)
     np.testing.assert_allclose(
         info_scipy["jac"], expected_jac(time_s),
-        rtol=SCIPY_FIT_RTOL, atol=SCIPY_FIT_ATOL)
+        rtol=SCIPY_FIT_RTOL, atol=fit_jac_atol)
     assert cov_scipy.shape == (1, 1)
 
 

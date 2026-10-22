@@ -279,6 +279,8 @@ def _assert_unchanged(caller, before):
         assert caller.dtype == before.dtype
         np.testing.assert_array_equal(caller, before)
     elif isinstance(caller, Experiment):
+        assert (caller.name, caller.author, caller.date) == (
+            before.name, before.author, before.date)
         _assert_unchanged(dict(caller.measurements),
                           dict(before.measurements))
         _assert_unchanged(caller.args, before.args)
@@ -424,3 +426,59 @@ def test_experiment_args_bind_the_phase_modifier_positionally():
         np.testing.assert_allclose(
             estimator.y_runs[index][0, 1], EXPERIMENT_SPECS[name][0],
             rtol=0.0, atol=PROFILE_ATOL)
+
+
+def test_set_param_estimation_preserves_experiment_names_and_metadata():
+    """SetParamEstimation preserves Experiment name, author, and date."""
+    order = ('concentrated', 'dilute')
+    keyword_experiments, modifiers = _experiments(order, 1)
+    solver = {'sundials_opts': {'rtol': SOLVER_RTOL, 'atol': SOLVER_ATOL}}
+    named_sequence = [
+        Experiment(
+            dict(keyword_experiments[name].measurements),
+            name=name,
+            author=f'author_{name}',
+            date=f'2026-10-2{index + 1}',
+        )
+        for index, name in enumerate(order)
+    ]
+    phase_list = [modifiers[name] for name in order]
+
+    # 1. Sequence of named Experiment objects preserves names, metadata, and
+    # objective residuals through the real BatchReactor wrapper.
+    simulation_seq = _batch_simulation(TRIAL_RATE)
+    caller_seq = (named_sequence, phase_list, solver)
+    before_seq = copy.deepcopy(caller_seq)
+    simulation_seq.SetParamEstimation(
+        named_sequence, phase_modifiers=phase_list,
+        optimize_flags=[True, False], wrapper_kwargs=solver)
+    estimator_seq = simulation_seq.ParamInst
+    _assert_unchanged(caller_seq, before_seq)
+
+    assert estimator_seq.experim_names == list(order)
+    for index, name in enumerate(order):
+        rebuilt_exp = estimator_seq.experiments[name]
+        assert rebuilt_exp.name == name
+        assert rebuilt_exp.author == f'author_{name}'
+        assert rebuilt_exp.date == f'2026-10-2{index + 1}'
+        assert rebuilt_exp.kwargs['modify_phase'] == modifiers[name]
+
+    residuals, _, observed, magnitude = _expected_packing(
+        order, 1, TRIAL_RATE)
+    budget = PROFILE_RTOL * np.abs(magnitude) + PROFILE_ATOL  # [mol/L]
+    residual_seq = estimator_seq.get_objective([TRIAL_RATE], out_array=True)
+    np.testing.assert_array_equal(residual_seq[~observed], 0.0)
+    np.testing.assert_array_less(np.abs(residual_seq - residuals), budget)
+
+    # 2. Single named Experiment object preserves its name and metadata.
+    simulation_single = _batch_simulation(TRIAL_RATE)
+    single_exp = named_sequence[0]
+    simulation_single.SetParamEstimation(
+        single_exp, phase_modifiers=modifiers['concentrated'],
+        optimize_flags=[True, False], wrapper_kwargs=solver)
+    estimator_single = simulation_single.ParamInst
+    assert estimator_single.experim_names == ['concentrated']
+    rebuilt_single = estimator_single.experiments['concentrated']
+    assert rebuilt_single.name == 'concentrated'
+    assert rebuilt_single.author == 'author_concentrated'
+    assert rebuilt_single.date == '2026-10-21'
