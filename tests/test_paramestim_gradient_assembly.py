@@ -278,3 +278,164 @@ def test_scalar_gradient_uses_weighted_state_major_residuals():
 
     expected_gradient = np.array([15.5, -19.0])  # [s*L/mol], [s**2*L/mol]
     np.testing.assert_allclose(gradient, expected_gradient)
+
+
+@pytest.mark.parametrize(
+    "param_seed, optimize_flags, trial_var, expected_fitted, expected_jac",
+    [
+        (
+            np.array([0.3, 2.0]),  # [1/s], [mol/L]
+            [True, False],
+            np.array([0.4]),  # [1/s]
+            np.array([0.5]),  # [1/s]
+            lambda t_s: (  # [mol/L*s]
+                -2.0 * t_s * np.exp(-0.5 * t_s))[np.newaxis, :],
+        ),
+        (
+            np.array([0.5, 1.4]),  # [1/s], [mol/L]
+            [False, True],
+            np.array([1.7]),  # [mol/L]
+            np.array([2.0]),  # [mol/L]
+            lambda t_s: (  # [-]
+                np.exp(-0.5 * t_s))[np.newaxis, :],
+        ),
+    ],
+)
+def test_jac_fun_receives_reconstructed_full_parameters_when_fixed(
+        param_seed, optimize_flags, trial_var, expected_fitted, expected_jac):
+    """Analytical jac_fun receives full reconstructed parameters when fixed."""
+    time_s = np.array([0.0, 1.0, 2.0, 4.0])  # [s]
+    true_rate_s_inv = 0.5  # [1/s]
+    true_initial_mol_l = 2.0  # [mol/L]
+    observed_conc_mol_l = (  # [mol/L]
+        true_initial_mol_l * np.exp(-true_rate_s_inv * time_s))
+
+    def decay_two_param(params_eval, x_data_s):
+        """Return c_A(t) = c_0 * exp(-k * t) [mol/L]."""
+        rate_s_inv, initial_mol_l = params_eval  # [1/s], [mol/L]
+        return initial_mol_l * np.exp(-rate_s_inv * x_data_s)
+
+    def decay_two_param_jac(params_eval, x_data_s):
+        """Return sensitivities [dc_A/dk, dc_A/dc_0] in [mol/L*s] and [-]."""
+        rate_s_inv, initial_mol_l = params_eval  # [1/s], [mol/L]
+        exp_term = np.exp(-rate_s_inv * x_data_s)  # [-]
+        return np.column_stack((
+            -initial_mol_l * x_data_s * exp_term,  # [mol/L*s]
+            exp_term,  # [-]
+        ))
+
+    estimator = ParamEstim.ParameterEstimation(
+        decay_two_param,
+        param_seed=param_seed,
+        x_data=time_s,
+        y_data=observed_conc_mol_l,
+        jac_fun=decay_two_param_jac,
+        optimize_flags=optimize_flags,
+        name_params=["rate_s_inv", "initial_mol_l"],
+    )
+
+    # Direct Jacobian and scalar-gradient calls at a non-seed variable vector
+    # must reconstruct the fixed parameter before invoking jac_fun.
+    full_trial = param_seed.copy()  # [1/s], [mol/L]
+    full_trial[np.asarray(optimize_flags)] = trial_var
+    expected_trial_jac = decay_two_param_jac(
+        full_trial, time_s)[:, optimize_flags].T
+    expected_trial_resid = (  # [mol/L]
+        decay_two_param(full_trial, time_s) - observed_conc_mol_l)
+
+    jac_at_trial = estimator.get_gradient(trial_var, out_array=True)
+    np.testing.assert_allclose(
+        jac_at_trial, expected_trial_jac, rtol=0.0, atol=1e-12)
+    grad_at_trial = estimator.get_gradient(trial_var, out_array=False)
+    np.testing.assert_allclose(
+        grad_at_trial, expected_trial_jac @ expected_trial_resid,
+        rtol=0.0, atol=1e-12)
+
+    fitted_scipy, cov_scipy, info_scipy = estimator.estimate_parameters(
+        verbose=0)
+    np.testing.assert_allclose(
+        fitted_scipy, expected_fitted, rtol=1e-6, atol=1e-8)
+    np.testing.assert_allclose(
+        info_scipy["jac"], expected_jac(time_s), rtol=1e-6, atol=1e-8)
+    assert cov_scipy.shape == (1, 1)
+
+
+def test_array_jacobian_refreshes_callback_sensitivities_for_requested_params():
+    """get_gradient(params, out_array=True) refreshes sens_second at params."""
+    time_s = np.array([1.0, 2.0, 4.0])  # [s]
+    rate_mol_l_s = 2.0  # [mol/L/s]
+    acceleration_mol_l_s2 = 3.0  # [mol/L/s**2]
+    params = np.array([rate_mol_l_s, acceleration_mol_l_s2])  # [mol/L/s], [mol/L/s**2]
+    trial_params = params + np.array([0.5, 0.5])  # [mol/L/s], [mol/L/s**2]
+
+    model_conc_mol_l = np.column_stack((  # [mol/L]
+        rate_mol_l_s**2 * time_s,
+        acceleration_mol_l_s2**2 * time_s**2,
+    ))
+    residuals_mol_l = np.array([  # [mol/L]
+        [6.0, -3.0],
+        [8.0, -6.0],
+        [10.0, -9.0],
+    ])
+    observed_conc_mol_l = model_conc_mol_l - residuals_mol_l  # [mol/L]
+    weight_matrix = np.diag([4.0, 9.0])  # [(mol/L)**2]
+
+    def two_state_model_with_sens(params_eval, x_data_s):
+        """Return concentration states [mol/L] and sensitivities."""
+        rate_eval_mol_l_s, accel_eval_mol_l_s2 = params_eval  # [mol/L/s], [mol/L/s**2]
+        states_mol_l = np.column_stack((  # [mol/L]
+            rate_eval_mol_l_s**2 * x_data_s,
+            accel_eval_mol_l_s2**2 * x_data_s**2,
+        ))
+        sens_state_0 = np.column_stack((
+            2.0 * rate_eval_mol_l_s * x_data_s,
+            np.zeros_like(x_data_s),
+        ))  # [s], [s**2]
+        sens_state_1 = np.column_stack((
+            np.zeros_like(x_data_s),
+            2.0 * accel_eval_mol_l_s2 * x_data_s**2,
+        ))  # [s], [s**2]
+        return states_mol_l, np.vstack((sens_state_0, sens_state_1))
+
+    estimator = ParamEstim.ParameterEstimation(
+        two_state_model_with_sens,
+        param_seed=params,
+        x_data=time_s,
+        y_data=observed_conc_mol_l,
+        weight_matrix=weight_matrix,
+        name_params=["rate_mol_l_s", "acceleration_mol_l_s2"],
+        name_states=["linear_conc_mol_l", "quadratic_conc_mol_l"],
+    )
+
+    # Closed-form weighted Jacobian at params: state 0 is divided by sqrt(4)=2
+    # [mol/L] and state 1 by sqrt(9)=3 [mol/L].
+    expected_jac_params = np.array([
+        np.concatenate((rate_mol_l_s * time_s, np.zeros_like(time_s))),
+        np.concatenate((
+            np.zeros_like(time_s),
+            (2.0 / 3.0) * acceleration_mol_l_s2 * time_s**2,
+        )),
+    ])  # [s*L/mol], [s**2*L/mol]
+
+    # 1. Calling get_gradient(params, out_array=True) on a fresh estimator
+    # before get_objective initializes num_model_states and sens_second.
+    jac_fresh = estimator.get_gradient(params, out_array=True)
+    np.testing.assert_allclose(
+        jac_fresh, expected_jac_params, rtol=0.0, atol=1e-12)
+
+    # 2. After evaluating get_objective at trial_params, requesting
+    # get_gradient(params, out_array=True) refreshes sens_second at params.
+    estimator.get_objective(trial_params, out_array=True)
+    jac_refreshed = estimator.get_gradient(params, out_array=True)
+    np.testing.assert_allclose(
+        jac_refreshed, expected_jac_params, rtol=0.0, atol=1e-12)
+
+    # 3. If get_objective(trial_params, set_self=False) overwrites sens_second
+    # while leaving params_residuals at params, scalar get_gradient(params)
+    # still refreshes sens_second back to params.
+    estimator.get_objective(params, set_self=True)
+    estimator.get_objective(trial_params, out_array=True, set_self=False)
+    grad_refreshed = estimator.get_gradient(params, out_array=False)
+    expected_gradient = np.array([62.0, -114.0])  # [s*L/mol], [s**2*L/mol]
+    np.testing.assert_allclose(
+        grad_refreshed, expected_gradient, rtol=0.0, atol=1e-12)

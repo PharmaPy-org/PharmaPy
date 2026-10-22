@@ -10,6 +10,7 @@ import numbers
 
 import numpy as np
 from scipy.linalg import cholesky, solve_triangular
+from scipy.optimize import least_squares
 from collections.abc import Mapping
 from itertools import cycle
 from types import MappingProxyType
@@ -25,6 +26,7 @@ from PharmaPy import Gaussians as gs
 
 from PharmaPy.LevMarq import levenberg_marquardt
 from PharmaPy.Commons import plot_sens, reorder_sens
+from PharmaPy.StatsModule import StatisticsClass
 
 try:
     from cyipopt import minimize_ipopt
@@ -493,6 +495,9 @@ def _frozen(array: np.ndarray) -> np.ndarray:
         array.shape)
 
 
+_MISSING = object()
+
+
 def _optional_label(value, label: str) -> Optional[str]:
     """Validate optional unit or basis metadata.
 
@@ -520,6 +525,38 @@ def _optional_label(value, label: str) -> Optional[str]:
     return value
 
 
+def _optional_experiment_text(value, label: str) -> Optional[str]:
+    """Validate optional ``Experiment`` metadata text.
+
+    Parameters
+    ----------
+    value : str or None
+        Metadata label; None means undeclared.
+    label : str
+        Attribute name used in error messages.
+
+    Returns
+    -------
+    str or None
+        ``value`` unchanged.
+
+    Raises
+    ------
+    TypeError
+        If ``value`` is neither None nor a str.
+    ValueError
+        If ``value`` is an empty str.
+    """
+    if value is not None:
+        if not isinstance(value, str):
+            raise TypeError(
+                f"Experiment {label} must be a str or None; got "
+                f"{type(value).__name__}")
+        if not value:
+            raise ValueError(f"Experiment {label} must be non-empty")
+    return value
+
+
 class Measurement:
     """One observed model-output field sampled within one experiment.
 
@@ -532,19 +569,24 @@ class Measurement:
 
     Parameters
     ----------
-    field : int or str
+    field : int, str or None, optional
         Zero-based column of the model callback output, or its name in the
-        ``output_names`` given to ``ParameterEstimation``.
+        ``output_names`` given to ``ParameterEstimation``. May be omitted
+        (None) when the measurement is passed in an ``Experiment`` mapping,
+        where ``Experiment`` defaults ``field`` to that mapping's key.
     x : array_like
         Independent-variable samples, shape ``(n,)``, in ``x_units``. A
         scalar is a single sampled point. Samples must be finite and
         non-decreasing; a repeated value denotes replicate observations at
         that x.
-    values : array_like
+    values : array_like, optional
         Observations, shape ``(n,)``, already in the units and physical
         basis of the model output column ``field``. NaN marks a missing
         observation, which is excluded from residuals, data counts and
-        degrees of freedom; nothing is interpolated or invented.
+        degrees of freedom; nothing is interpolated or invented. Either
+        ``values`` or its keyword alias ``y`` must be given, not both.
+    y : array_like, optional
+        Keyword alias for ``values``; normalized to ``values``.
     uncertainty : float or array_like, optional
         Standard deviation of the measurement error, a positive scalar or
         shape ``(n,)``, in the units and basis of ``values``. It must be
@@ -554,20 +596,28 @@ class Measurement:
         Label of the observation units, e.g. ``'mol/L'``. No conversion is
         performed; the label documents ``values`` and is checked for
         consistency with other measurements of the same name or field.
+    unit_y : str, optional
+        Keyword alias for ``units``; normalized to ``units``. Cannot be
+        combined with ``units``.
     basis : str, optional
         Label of the observation basis, e.g. ``'molar concentration'``; no
         conversion is performed.
     x_units : str or None, optional
         Label of the independent-variable units. The default is ``'s'``
         (time); None leaves them undeclared.
+    unit_x : str or None, optional
+        Keyword alias for ``x_units``; normalized to ``x_units``. Cannot be
+        combined with ``x_units``.
 
     Raises
     ------
     TypeError
-        If ``field`` or a label has an invalid type, or samples are not
-        numeric.
+        If ``field`` or a label has an invalid type, ``x`` or observation
+        values are omitted, or samples are not numeric.
     ValueError
-        If ``x`` is empty, non-finite or decreasing, ``values`` does not
+        If duplicate alias keywords (``values`` and ``y``, ``units`` and
+        ``unit_y``, or ``x_units`` and ``unit_x``) are given together, ``x``
+        is empty, non-finite or decreasing, ``values`` does not
         match ``x`` in shape, contains infinities or has no observation, or
         ``uncertainty`` is not finite and positive at an observed sample.
 
@@ -581,13 +631,15 @@ class Measurement:
     the replicate samples of the Ziegler 723 K workshop data).
     """
 
-    def __init__(self, field, x, values, *, uncertainty=None, units=None,
-                 basis=None, x_units='s') -> None:
+    def __init__(self, field=None, x=_MISSING, values=_MISSING, *,
+                 y=_MISSING, uncertainty=None, units=_MISSING,
+                 unit_y=_MISSING, basis=None, x_units=_MISSING,
+                 unit_x=_MISSING) -> None:
         """Validate and store a private copy of one measurement.
 
         Parameters
         ----------
-        field, x, values, uncertainty, units, basis, x_units
+        field, x, values, y, uncertainty, units, unit_y, basis, x_units, unit_x
             See the class docstring.
 
         Raises
@@ -595,7 +647,39 @@ class Measurement:
         TypeError, ValueError
             See the class docstring.
         """
-        self._field = _validate_field(field)
+        self._field = None if field is None else _validate_field(field)
+
+        if x is _MISSING:
+            raise TypeError(
+                "Measurement requires independent-variable samples 'x'")
+        if values is not _MISSING and y is not _MISSING:
+            raise ValueError(
+                "Measurement received both 'values' and alias 'y'; pass "
+                "only one")
+        if values is _MISSING and y is _MISSING:
+            raise TypeError(
+                "Measurement requires observation values; pass 'values' or "
+                "'y'")
+        if values is _MISSING:
+            values = y
+
+        if units is not _MISSING and unit_y is not _MISSING:
+            raise ValueError(
+                "Measurement received both 'units' and alias 'unit_y'; pass "
+                "only one")
+        if unit_y is not _MISSING:
+            units = unit_y
+        elif units is _MISSING:
+            units = None
+
+        if x_units is not _MISSING and unit_x is not _MISSING:
+            raise ValueError(
+                "Measurement received both 'x_units' and alias 'unit_x'; "
+                "pass only one")
+        if unit_x is not _MISSING:
+            x_units = unit_x
+        elif x_units is _MISSING:
+            x_units = 's'
 
         x = _float_vector(x, 'Measurement x')  # [x_units]
         if x.size == 0:
@@ -664,14 +748,39 @@ class Measurement:
         self._basis = _optional_label(basis, 'basis')
         self._x_units = _optional_label(x_units, 'x_units')
 
+    def _with_field(self, field) -> 'Measurement':
+        """Return a copy of this measurement with ``field`` set.
+
+        Parameters
+        ----------
+        field : int or str
+            Zero-based model-output column or output name.
+
+        Returns
+        -------
+        Measurement
+            New measurement sharing the immutable arrays and metadata of
+            ``self``, with ``field`` set to ``field``.
+        """
+        clone = object.__new__(Measurement)
+        clone._field = _validate_field(field)
+        clone._x = self._x
+        clone._values = self._values
+        clone._uncertainty = self._uncertainty
+        clone._units = self._units
+        clone._basis = self._basis
+        clone._x_units = self._x_units
+        return clone
+
     @property
     def field(self):
         """Model-output identity.
 
         Returns
         -------
-        int or str
-            Zero-based output column or output name.
+        int, str or None
+            Zero-based output column, output name, or None when undeclared
+            prior to ``Experiment`` mapping normalization.
         """
         return self._field
 
@@ -689,6 +798,18 @@ class Measurement:
     @property
     def values(self) -> np.ndarray:
         """Observations.
+
+        Returns
+        -------
+        numpy.ndarray
+            Read-only, shape ``(n,)``, in ``units``; NaN marks a missing
+            observation.
+        """
+        return self._values
+
+    @property
+    def y(self) -> np.ndarray:
+        """Alias for ``values``.
 
         Returns
         -------
@@ -721,6 +842,17 @@ class Measurement:
         return self._units
 
     @property
+    def unit_y(self) -> Optional[str]:
+        """Alias for ``units``.
+
+        Returns
+        -------
+        str or None
+            Label, or None if undeclared.
+        """
+        return self._units
+
+    @property
     def basis(self) -> Optional[str]:
         """Observation basis label.
 
@@ -742,6 +874,17 @@ class Measurement:
         """
         return self._x_units
 
+    @property
+    def unit_x(self) -> Optional[str]:
+        """Alias for ``x_units``.
+
+        Returns
+        -------
+        str or None
+            Label, or None if undeclared.
+        """
+        return self._x_units
+
 
 class Experiment:
     """One experimental run: named measurements and its callback association.
@@ -749,9 +892,12 @@ class Experiment:
     Parameters
     ----------
     measurements : Mapping[str, Measurement] or sequence of Measurement
-        Named measurements; insertion order is the declared order. In
-        sequence form each measurement is named by its field: the str field
-        itself, or ``f'field_{field}'`` for an int field; replicate
+        Named measurements; insertion order is the declared order. In a
+        mapping, any ``Measurement`` whose ``field`` is None defaults its
+        ``field`` to its mapping key (stored on a normalized copy without
+        modifying the caller's ``Measurement``). In sequence form each
+        measurement must declare a ``field`` and is named by it: the str
+        field itself, or ``f'field_{field}'`` for an int field; replicate
         measurements of one field then need a mapping with distinct names.
     args : tuple or list, optional
         Positional callback arguments for this experiment, passed as
@@ -759,16 +905,29 @@ class Experiment:
         Stored as a tuple; the values themselves are not copied.
     kwargs : Mapping, optional
         Callback keywords in model-defined units; a shallow copy is stored.
+    name : str or None, optional
+        Identifier of this experiment. Used by ``ParameterEstimation`` when
+        a single ``Experiment`` or a sequence of ``Experiment`` objects is
+        passed; when a mapping of experiments is passed, any non-None
+        ``name`` must match its mapping key. The default is None.
+    author : str or None, optional
+        Author or source attribution for this experiment. The default is
+        None.
+    date : str or None, optional
+        Date or timestamp label for this experiment. The default is None.
 
     Raises
     ------
     TypeError
         If ``measurements`` is not a mapping or sequence of
-        ``Measurement`` objects, a name is not a str, ``args`` is not a
-        tuple or list, or ``kwargs`` is not a mapping with str keys.
+        ``Measurement`` objects, a name, ``author`` or ``date`` is not a
+        str, ``args`` is not a tuple or list, or ``kwargs`` is not a
+        mapping with str keys.
     ValueError
-        If there are no measurements, a name is empty, the sequence form
-        repeats a name, or measurements declare different ``x_units``.
+        If there are no measurements, a measurement in sequence form has
+        ``field=None``, a name, ``author`` or ``date`` is empty, the
+        sequence form repeats a name, or measurements declare different
+        ``x_units``.
 
     Notes
     -----
@@ -780,12 +939,15 @@ class Experiment:
     (None) ``x_units`` are compatible with any declared value.
     """
 
-    def __init__(self, measurements, args=(), kwargs=None) -> None:
-        """Validate and store the measurements and callback arguments.
+    def __init__(self, measurements, args=(), kwargs=None,
+                 name: Optional[str] = None,
+                 author: Optional[str] = None,
+                 date: Optional[str] = None) -> None:
+        """Validate and store the measurements, callback arguments and metadata.
 
         Parameters
         ----------
-        measurements, args, kwargs
+        measurements, args, kwargs, name, author, date
             See the class docstring.
 
         Raises
@@ -793,6 +955,10 @@ class Experiment:
         TypeError, ValueError
             See the class docstring.
         """
+        self._name = _optional_experiment_text(name, 'name')
+        self._author = _optional_experiment_text(author, 'author')
+        self._date = _optional_experiment_text(date, 'date')
+
         if isinstance(measurements, Measurement):
             raise TypeError(
                 "Experiment measurements must be a mapping of names to "
@@ -808,11 +974,17 @@ class Experiment:
                         f"Experiment measurements[{index}] must be a "
                         f"Measurement; got {type(measurement).__name__}")
                 field = measurement.field
-                name = field if isinstance(field, str) else f'field_{field}'
-                items.append((name, measurement))
-            names = [name for name, _ in items]
-            repeated = sorted({name for name in names
-                               if names.count(name) > 1})
+                if field is None:
+                    raise ValueError(
+                        f"Experiment measurements[{index}] has field=None; "
+                        "specify field on each Measurement or pass "
+                        "measurements as a mapping keyed by field name")
+                meas_name = (field if isinstance(field, str)
+                             else f'field_{field}')
+                items.append((meas_name, measurement))
+            names = [meas_name for meas_name, _ in items]
+            repeated = sorted({meas_name for meas_name in names
+                               if names.count(meas_name) > 1})
             if repeated:
                 raise ValueError(
                     f"Experiment measurements repeat the names {repeated!r}; "
@@ -828,22 +1000,24 @@ class Experiment:
             raise ValueError("Experiment needs at least one Measurement")
 
         checked = {}
-        for name, measurement in items:
-            if not isinstance(name, str):
+        for meas_name, measurement in items:
+            if not isinstance(meas_name, str):
                 raise TypeError(
                     "Experiment measurement names must be str; got "
-                    f"{type(name).__name__} {name!r}")
-            if not name:
+                    f"{type(meas_name).__name__} {meas_name!r}")
+            if not meas_name:
                 raise ValueError(
                     "Experiment measurement names must be non-empty")
             if not isinstance(measurement, Measurement):
                 raise TypeError(
-                    f"Experiment measurement {name!r} must be a Measurement; "
-                    f"got {type(measurement).__name__}")
-            checked[name] = measurement
+                    f"Experiment measurement {meas_name!r} must be a "
+                    f"Measurement; got {type(measurement).__name__}")
+            if measurement.field is None:
+                measurement = measurement._with_field(meas_name)
+            checked[meas_name] = measurement
 
-        declared_x_units = {name: measurement.x_units
-                            for name, measurement in checked.items()
+        declared_x_units = {meas_name: measurement.x_units
+                            for meas_name, measurement in checked.items()
                             if measurement.x_units is not None}
         if len(set(declared_x_units.values())) > 1:
             raise ValueError(
@@ -870,6 +1044,39 @@ class Experiment:
         self._x_units = next(iter(declared_x_units.values()), None)
         self._args = tuple(args)
         self._kwargs = dict(kwargs)
+
+    @property
+    def name(self) -> Optional[str]:
+        """Experiment identifier.
+
+        Returns
+        -------
+        str or None
+            Declared experiment name, or None if undeclared.
+        """
+        return self._name
+
+    @property
+    def author(self) -> Optional[str]:
+        """Experiment author or source attribution.
+
+        Returns
+        -------
+        str or None
+            Declared author, or None if undeclared.
+        """
+        return self._author
+
+    @property
+    def date(self) -> Optional[str]:
+        """Experiment date or timestamp label.
+
+        Returns
+        -------
+        str or None
+            Declared date label, or None if undeclared.
+        """
+        return self._date
 
     @property
     def measurements(self) -> Mapping:
@@ -1457,20 +1664,23 @@ def _holds_experiments(x_data) -> bool:
     return False
 
 
-def _experiment_collection(x_data) -> Optional[dict]:
+def _experiment_collection(x_data, label: str = 'x_data') -> Optional[dict]:
     """Normalize ``Experiment`` input to an ordered name mapping.
 
     Parameters
     ----------
     x_data : object
-        ``x_data`` argument of ``ParameterEstimation``.
+        ``x_data`` or ``experiments`` argument of ``ParameterEstimation``.
+    label : str, optional
+        Argument name used in error messages. The default is ``'x_data'``.
 
     Returns
     -------
     dict or None
         Experiment name -> ``Experiment`` in experiment order: mapping keys,
-        or ``'exp_1'``, ``'exp_2'``, ... for a single experiment or a list or
-        tuple. None if ``x_data`` holds no ``Experiment`` (legacy input).
+        ``experiment.name`` when declared on a single ``Experiment`` or in a
+        sequence, or ``'exp_1'``, ``'exp_2'``, ... when ``experiment.name``
+        is None. None if ``x_data`` holds no ``Experiment`` (legacy input).
 
     Raises
     ------
@@ -1478,32 +1688,51 @@ def _experiment_collection(x_data) -> Optional[dict]:
         If ``Experiment`` objects are mixed with other entries or a mapping
         key is not a str.
     ValueError
-        If a mapping key is empty.
+        If a mapping key is empty, a mapping key disagrees with a non-None
+        ``experiment.name``, or a sequence repeats an experiment name.
     """
     if not _holds_experiments(x_data):
         return None
     if isinstance(x_data, Experiment):
-        return {'exp_1': x_data}
+        exp_name = x_data.name if x_data.name is not None else 'exp_1'
+        return {exp_name: x_data}
     if isinstance(x_data, Mapping):
         items = list(x_data.items())
+        from_mapping = True
     else:
-        items = [(f'exp_{index + 1}', value)
-                 for index, value in enumerate(x_data)]
+        items = [
+            (value.name if isinstance(value, Experiment)
+             and value.name is not None else f'exp_{index + 1}', value)
+            for index, value in enumerate(x_data)]
+        from_mapping = False
 
     mixed = [name for name, value in items
              if not isinstance(value, Experiment)]
     if mixed:
         raise TypeError(
-            "x_data mixes Experiment objects with other entries "
+            f"{label} mixes Experiment objects with other entries "
             f"{mixed!r}; pass only Experiment objects, or only legacy "
             "arrays")
-    for name, _ in items:
+    for name, experiment in items:
         if not isinstance(name, str):
             raise TypeError(
                 f"Experiment names must be str; got {type(name).__name__} "
                 f"{name!r}")
         if not name:
             raise ValueError("Experiment names must be non-empty")
+        if (from_mapping and experiment.name is not None
+                and experiment.name != name):
+            raise ValueError(
+                f"Experiment mapping key {name!r} disagrees with "
+                f"experiment.name {experiment.name!r}; use matching names "
+                "or omit experiment.name")
+    if not from_mapping:
+        names = [name for name, _ in items]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(
+                f"Experiment sequence repeats the names {repeated!r}; give "
+                "each Experiment a distinct name")
     return dict(items)
 
 
@@ -1935,14 +2164,15 @@ class ParameterEstimation:
     #: keep the legacy ``analyze_data`` layout.
     _compiles_experiments = True
 
-    def __init__(self, func: Callable, param_seed, x_data, y_data=None,
+    def __init__(self, func: Callable, param_seed, x_data=None, y_data=None,
                  measured_ind=None,
                  args_fun=None, kwargs_fun=None,
                  optimize_flags=None,
                  jac_fun=None, dx_finitediff=None,
                  weight_matrix=None,
                  name_params=None, name_states=None,
-                 output_names=None) -> None:
+                 output_names=None,
+                 experiments=None) -> None:
         """ Create a ParameterEstimation object
 
         Parameters
@@ -1955,12 +2185,13 @@ class ParameterEstimation:
             parameter units must match ``param_seed``. See ``x_data`` for x_i.
         param_seed : array-like
             Parameter seed values in the units required by ``func``.
-        x_data : Experiment, mapping or sequence of them, or legacy arrays
+        x_data : Experiment, mapping or sequence of them, or legacy arrays, optional
             Either ``Experiment`` objects or legacy independent-variable
             data. ``Experiment`` input is a single ``Experiment`` (named
-            ``'exp_1'``), a mapping of experiment names to ``Experiment``
-            (insertion order is experiment order), or a list or tuple of
-            ``Experiment`` (named ``'exp_1'``, ``'exp_2'``, ...); then
+            ``experiment.name`` or ``'exp_1'``), a mapping of experiment
+            names to ``Experiment`` (insertion order is experiment order),
+            or a list or tuple of ``Experiment`` (named by each
+            ``experiment.name`` or ``'exp_1'``, ``'exp_2'``, ...); then
             ``y_data``, ``measured_ind``, ``args_fun`` and ``kwargs_fun``
             must be None because each ``Experiment`` holds them, and
             ``self.x_data`` stores the per-experiment model grids.
@@ -1980,6 +2211,7 @@ class ParameterEstimation:
             repeated values are replicate samples, passed to ``func``
             repeatedly. Dictionary insertion order declares experiment
             order; other experiment mappings are aligned by those keys.
+            Either ``x_data`` or ``experiments`` must be supplied, not both.
         y_data : numpy array, list of arrays or dict
             Legacy experimental values for the dependent variable(s) y, in
             the model's state units and physical bases.
@@ -2070,6 +2302,12 @@ class ParameterEstimation:
             order. Str ``Measurement.field`` values resolve through them, and
             the callback output must then have exactly this many columns.
             The default is None.
+        experiments : Experiment, mapping or sequence of Experiment, optional
+            Explicit keyword entry point for ``Experiment`` input: a single
+            ``Experiment``, a mapping of experiment names to ``Experiment``,
+            or a list or tuple of ``Experiment`` objects, normalized through
+            ``_compile_experiments``. Cannot be passed simultaneously with
+            ``x_data``. The default is None.
 
         Returns
         -------
@@ -2081,6 +2319,7 @@ class ParameterEstimation:
         ValueError
             Raised when:
 
+            * both ``x_data`` and ``experiments`` are supplied;
             * legacy experiment mappings (``y_data``, ``args_fun``,
               ``kwargs_fun``) have keys other than those of ``x_data``, or
               several keys while ``x_data`` is unnamed;
@@ -2088,7 +2327,9 @@ class ParameterEstimation:
               ``args_fun`` or ``kwargs_fun`` hold different experiment
               counts;
             * ``y_data``, ``measured_ind``, ``args_fun`` or ``kwargs_fun``
-              accompany ``Experiment`` input, or an experiment name is empty;
+              accompany ``Experiment`` input, an experiment name is empty,
+              a mapping key disagrees with ``experiment.name``, or a
+              sequence of ``Experiment`` objects repeats a name;
             * ``output_names`` is empty, has an empty or repeated name, or is
               given with nested state observation dictionaries;
             * a field names no ``output_names`` entry, a str field is given
@@ -2115,10 +2356,13 @@ class ParameterEstimation:
         TypeError
             Raised when:
 
-            * ``y_data`` is None for legacy input;
-            * ``Experiment`` objects are mixed with other entries, an
-              experiment name is not a str, or ``x_data`` holds bare
-              ``Measurement`` objects not wrapped in an ``Experiment``;
+            * both ``x_data`` and ``experiments`` are None, or ``y_data`` is
+              None for legacy input;
+            * ``Experiment`` objects are mixed with other entries,
+              ``experiments`` does not hold ``Experiment`` objects, an
+              experiment name is not a str, or ``x_data`` or ``experiments``
+              holds bare ``Measurement`` objects not wrapped in an
+              ``Experiment``;
             * ``output_names`` is a single str or holds a non-str entry;
             * with ``Experiment`` input, ``weight_matrix`` is not a
               ``pandas.DataFrame``, or a labelled ``weight_matrix`` holds
@@ -2242,8 +2486,39 @@ class ParameterEstimation:
         self.experim_names = None
         self.output_names = _validate_output_names(output_names)
 
-        experiments = (_experiment_collection(x_data)
-                       if self._compiles_experiments else None)
+        if x_data is not None and experiments is not None:
+            raise ValueError("Pass either x_data or experiments, not both")
+        if x_data is None and experiments is None:
+            raise TypeError(
+                "x_data or experiments is required; pass Experiment objects "
+                "through experiments= (or x_data=) or legacy x_data and "
+                "y_data")
+
+        if experiments is not None:
+            if not self._compiles_experiments:
+                raise TypeError(
+                    "MultipleCurveResolution does not accept Experiment or "
+                    "Measurement objects; pass spectral observations through "
+                    "time_data and y_spectra")
+            if _holds_measurements(experiments):
+                raise TypeError(
+                    "experiments holds Measurement objects; wrap each "
+                    "experiment's measurements in Experiment(...), e.g. "
+                    "experiments=Experiment({'c_A': measurement}) or "
+                    "{'run_1': Experiment([...]), "
+                    "'run_2': Experiment([...])}")
+            experiment_source = 'experiments'
+            experiments = _experiment_collection(experiments,
+                                                 label='experiments')
+            if experiments is None:
+                raise TypeError(
+                    "experiments must be an Experiment or a non-empty "
+                    "mapping, list or tuple of Experiment objects")
+        else:
+            experiment_source = 'x_data'
+            experiments = (_experiment_collection(x_data, label='x_data')
+                           if self._compiles_experiments else None)
+
         if experiments is not None:
             supplied = [label for label, value in (
                 ('y_data', y_data), ('measured_ind', measured_ind),
@@ -2251,10 +2526,10 @@ class ParameterEstimation:
                 if value is not None]
             if supplied:
                 raise ValueError(
-                    f"{', '.join(supplied)} must be None when x_data holds "
-                    "Experiment objects; observations, measured fields and "
-                    "callback arguments live in each Experiment and its "
-                    "Measurement objects")
+                    f"{', '.join(supplied)} must be None when "
+                    f"{experiment_source} holds Experiment objects; "
+                    "observations, measured fields and callback arguments "
+                    "live in each Experiment and its Measurement objects")
             self.experim_names = list(experiments)
             compiled = _compile_experiments(experiments, self.output_names)
             measured_ind = list(compiled.fields)
@@ -2360,6 +2635,8 @@ class ParameterEstimation:
         self.measured_ind = measured_ind
         self.num_model_states = None
         self.sens_second = None  # sensitivities returned along with obj fun
+        # [parameter units], parameters at which sens_second was evaluated.
+        self._params_sens_second = None
 
         # Compiled layout; None for the analyze_data layout.
         self._measurement_names = (None if compiled is None
@@ -2967,6 +3244,11 @@ class ParameterEstimation:
 
         if len(sens_second) > 0:
             self.sens_second = sens_second
+            # [parameter units], parameters at which sens_second was evaluated.
+            self._params_sens_second = np.array(params_in, copy=True)
+        else:
+            self.sens_second = None
+            self._params_sens_second = None
 
         # Weighted-residual units as above, flattened state-major.
         residual_out = np.concatenate([ar.T.ravel()
@@ -3006,8 +3288,9 @@ class ParameterEstimation:
         ----------
         params : array_like
             Optimized parameter vector. Fixed parameters are reconstructed from
-            ``param_seed`` before numerical finite differences are evaluated.
-            Units follow the parameter definitions supplied to the model.
+            ``param_seed`` before evaluating ``jac_fun`` or numerical finite
+            differences. Units follow the parameter definitions supplied to
+            the model.
         out_array : bool, optional
             If True, return the weighted residual Jacobian transposed as
             ``(n_params, n_data)``. If False, return the scalar-objective
@@ -3041,26 +3324,34 @@ class ParameterEstimation:
         parameter covariance.
 
         """
-
+        sens_stale = (
+            self.sens_second is not None and (
+                self._params_sens_second is None or
+                not np.array_equal(params, self._params_sens_second))
+        )
         if not out_array and (
                 self.params_residuals is None or
-                not np.array_equal(params, self.params_residuals)):
+                not np.array_equal(params, self.params_residuals) or
+                sens_stale):
             self.get_objective(params)
+        elif out_array and (self.num_model_states is None or sens_stale):
+            self.get_objective(params, out_array=True, set_self=set_self)
 
         if self.sens_second is None:
             raw_sens = []
+            # [parameter units], full parameter vector with fixed entries.
+            params_full = self.reconstruct_params(params)
+            pick_p = np.where(self.map_variable)[0]
             for ind in range(self.num_datasets):
                 if self.jac_fun is None:
                     pass_to_fun = (self.x_model[ind], self.args_fun[ind],
                                    self.kwargs_fun[ind])
 
-                    pick_p = np.where(self.map_variable)[0]
-                    params_full = self.reconstruct_params(params)
                     sens = numerical_jac_data(self.func_aux, params_full,
                                               pass_to_fun, dx=self.dx_fd,
                                               pick_x=pick_p)
                 else:
-                    sens = self.jac_fun(params, self.x_model[ind],
+                    sens = self.jac_fun(params_full, self.x_model[ind],
                                         *self.args_fun[ind],
                                         **self.kwargs_fun[ind])
 
@@ -3162,7 +3453,7 @@ class ParameterEstimation:
         return {'jac': jacobian, 'fun': residuals}
 
     def optimize_fn(self, optim_options: Optional[dict] = None,
-                    simulate: bool = False, verbose: bool = True,
+                    simulate: bool = False, verbose: int | bool = True,
                     store_iter: bool = True, method: str = 'LM',
                     bounds: Optional[Sequence] = None
                     ) -> tuple[np.ndarray, np.ndarray, dict]:
@@ -3175,8 +3466,9 @@ class ParameterEstimation:
         simulate : bool, optional
             If True, evaluate residuals in simulation mode by disabling the
             optimization residual contribution.
-        verbose : bool, optional
-            If True, request verbose solver output when supported.
+        verbose : int or bool, optional
+            If True (or a positive int for ``'scipy'``/``'least_squares'``),
+            request verbose solver output when supported.
         store_iter : bool, optional
             If True, store unique parameter/objective iterates in
             ``params_iter``, ``objfun_iter`` and the ``paramest_df`` table,
@@ -3185,10 +3477,13 @@ class ParameterEstimation:
             and otherwise the unweighted sum of squared raw residuals in
             squared measured-state units, also with ``weight_matrix`` (see
             ``get_objective``).
-        method : {'LM', 'IPOPT'}, optional
-            Optimization method used for fitting.
+        method : {'LM', 'IPOPT', 'scipy', 'least_squares'}, optional
+            Optimization method used for fitting. ``'scipy'`` and
+            ``'least_squares'`` both select
+            ``scipy.optimize.least_squares``. The default is ``'LM'``.
         bounds : sequence, optional
-            Parameter bounds passed to IPOPT, in the model parameter units.
+            Parameter bounds in the model parameter units, passed to IPOPT or
+            ``scipy.optimize.least_squares``.
 
         Returns
         -------
@@ -3206,37 +3501,45 @@ class ParameterEstimation:
             ``assemble_solver_info``: measured-state units with the default
             identity weights and [-] with state-variance weights or declared
             measurement uncertainties. ``info['jac']`` has shape
-            ``(num_params, len(info['fun']))``; each entry has its ``fun``
-            entry's unit divided by the matching parameter unit.
+            ``(num_params, len(info['fun']))`` across all optimizers; each
+            entry has its ``fun`` entry's unit divided by the matching
+            parameter unit.
             With staggered measurement grids or missing observations, columns
             include unobserved model-grid entries, so their count can exceed
             ``num_data_total``;
             those entries of ``info['fun']`` and columns of ``info['jac']``
             are exactly zero, so they add no residual or information.
-            LM additionally supplies its accepted ``x`` and solver diagnostics.
+            LM and ``scipy.optimize.least_squares`` additionally supply their
+            accepted ``x`` and native solver diagnostics (with ``info['jac']``
+            stored in the canonical ``(num_params, n_data)`` orientation).
 
         Raises
         ------
         ImportError
             If IPOPT is selected without the optional cyipopt dependency.
+        ValueError
+            If ``method`` is not one of ``'LM'``, ``'IPOPT'``, ``'scipy'`` or
+            ``'least_squares'``, or if ``bounds`` is supplied both through
+            ``bounds=`` and ``optim_options``.
         numpy.linalg.LinAlgError
             If the accepted Jacobian yields a singular covariance matrix.
 
         Notes
         -----
-        After LM finishes, the model is evaluated once per experiment at the
-        accepted parameters to refresh ``y_runs``, ``resid_runs``,
-        ``residuals``, and ``weighted_residuals`` before assembling
-        ``y_model``. This includes termination after a rejected trial; it does
-        not imply convergence. Predictions and raw residuals retain the model
-        state units and measured-state order. Repeated calls replace the
-        previous ``y_model`` list.
+        After LM or ``scipy.optimize.least_squares`` finishes, the model is
+        evaluated once per experiment at the accepted parameters to refresh
+        ``y_runs``, ``resid_runs``, ``residuals``, and ``weighted_residuals``
+        before assembling ``y_model``. This includes termination after a
+        rejected trial; it does not imply convergence. Predictions and raw
+        residuals retain the model state units and measured-state order.
+        Repeated calls replace the previous ``y_model`` list.
 
-        The reporting evaluation does not change LM's returned ``x``, ``fun``,
-        ``jac``, or solver counters. It uses the usual objective callback and
-        its history recording; with ``store_iter=True`` duplicate parameter
-        entries are removed as usual. Stateful callbacks must support another
-        evaluation at the same parameters, as during optimization.
+        The reporting evaluation does not change the solver's returned ``x``,
+        ``fun``, ``jac``, or solver counters. It uses the usual objective
+        callback and its history recording; with ``store_iter=True`` duplicate
+        parameter entries are removed as usual. Stateful callbacks must
+        support another evaluation at the same parameters, as during
+        optimization.
 
         """
 
@@ -3281,6 +3584,48 @@ class ParameterEstimation:
 
             info = self.assemble_solver_info(opt_par)
 
+        elif method in ('scipy', 'least_squares'):
+            scipy_options = ({} if optim_options is None
+                             else dict(optim_options))
+            if 'bounds' in scipy_options and bounds is not None:
+                raise ValueError(
+                    "Pass bounds either through bounds= or optim_options, "
+                    "not both")
+            if bounds is not None:
+                scipy_options['bounds'] = bounds
+            if 'verbose' in scipy_options and verbose is True:
+                scipy_options['verbose'] = int(scipy_options['verbose'])
+            else:
+                scipy_options['verbose'] = int(verbose)
+            optim_options = scipy_options
+
+            def _scipy_jac(params_eval, *args_eval):
+                """Return weighted residual Jacobian in SciPy (n_data, n_params) orientation."""
+                return self.get_gradient(params_eval, *args_eval).T
+
+            result = least_squares(
+                self.get_objective,
+                params_var,
+                jac=_scipy_jac,
+                args=(True,),
+                **scipy_options)
+
+            opt_par = np.asarray(result.x)  # [model parameter units]
+
+            # Rejected trial callbacks overwrite model buffers. Refresh them
+            # at the accepted point while retaining native solver metadata
+            # and canonical (num_params, n_data) Jacobian orientation.
+            self.get_objective(opt_par, out_array=True)
+            info = dict(result)
+            # [residual unit / parameter unit], shape (num_params, n_data).
+            info['jac'] = np.asarray(result.jac).T
+            self.sens = info['jac'].T
+
+        else:
+            raise ValueError(
+                f"Unknown optimization method {method!r}; expected 'LM', "
+                "'IPOPT', 'scipy' or 'least_squares'")
+
         self.optim_options = optim_options
 
         # Store
@@ -3313,6 +3658,143 @@ class ParameterEstimation:
         covar_params = self.get_covariance()
 
         return opt_par, covar_params, info
+
+    def estimate_parameters(
+            self, optim_options: Optional[dict] = None,
+            simulate: bool = False, verbose: int | bool = True,
+            store_iter: bool = True, method: str = 'scipy',
+            bounds: Optional[Sequence] = None, **solver_options
+    ) -> tuple[np.ndarray, np.ndarray, dict]:
+        """Estimate variable parameters with ``scipy.optimize.least_squares``.
+
+        Parameters
+        ----------
+        optim_options : dict, optional
+            Solver options passed to ``optimize_fn``. Additional keyword
+            arguments in ``**solver_options`` are merged into this mapping.
+        simulate : bool, optional
+            If True, evaluate residuals in simulation mode by disabling the
+            optimization residual contribution. The default is False.
+        verbose : int or bool, optional
+            Verbosity forwarded to the selected optimizer (``0``, ``1`` or
+            ``2`` for ``scipy.optimize.least_squares``; bool for ``'LM'`` and
+            ``'IPOPT'``). The default is True.
+        store_iter : bool, optional
+            If True, store unique parameter/objective iterates in
+            ``params_iter``, ``objfun_iter`` and ``paramest_df``. The default
+            is True.
+        method : {'scipy', 'least_squares', 'LM', 'IPOPT'}, optional
+            Optimization method forwarded to ``optimize_fn``. The default is
+            ``'scipy'`` (``scipy.optimize.least_squares``).
+        bounds : sequence, optional
+            Parameter bounds in the model parameter units, forwarded to
+            ``optimize_fn``.
+        **solver_options
+            Additional keyword options forwarded to the optimizer (for
+            example ``max_nfev=100``, ``ftol=1e-10``, ``xtol=1e-10``).
+
+        Returns
+        -------
+        opt_par : numpy.ndarray
+            Accepted variable parameters, shape ``(num_params,)``, in the
+            model callback's parameter units.
+        covar_params : numpy.ndarray
+            Estimated covariance, shape ``(num_params, num_params)``. Entry
+            ``(i, j)`` has the product of parameter i and parameter j units.
+        info : dict
+            Solver information at the accepted parameters, with ``info['jac']``
+            in the canonical ``(num_params, len(info['fun']))`` orientation
+            documented by ``optimize_fn``.
+
+        Raises
+        ------
+        TypeError
+            If ``optim_options`` is neither a mapping nor None.
+        ValueError
+            If the same option is given in both ``optim_options`` and
+            ``**solver_options``, or if ``optimize_fn`` rejects ``method`` or
+            ``bounds``.
+        """
+        if optim_options is not None and not isinstance(optim_options, Mapping):
+            raise TypeError(
+                f"optim_options must be a mapping or None; got "
+                f"{type(optim_options).__name__}")
+        if optim_options is not None and solver_options:
+            duplicates = sorted(set(optim_options).intersection(solver_options))
+            if duplicates:
+                raise ValueError(
+                    "Duplicate solver options in optim_options and keyword "
+                    f"arguments: {duplicates!r}")
+            merged_options = {**optim_options, **solver_options}
+        elif optim_options is not None:
+            merged_options = dict(optim_options)
+        elif solver_options:
+            merged_options = dict(solver_options)
+        else:
+            merged_options = None
+
+        return self.optimize_fn(
+            optim_options=merged_options, simulate=simulate, verbose=verbose,
+            store_iter=store_iter, method=method, bounds=bounds)
+
+    def get_confidence_intervals(
+            self, alpha: float = 0.95,
+            covar_params: Optional[np.ndarray] = None,
+            include_mse: bool = True, verbose: bool = True,
+            set_self: bool = True) -> dict:
+        """Compute Student-t parameter confidence intervals at the fitted point.
+
+        Delegates to ``StatisticsClass(self, alpha=alpha).get_intervals(...)``
+        so the intervals use the same linearized covariance and degrees of
+        freedom ``num_data_total - num_params`` as ``get_covariance`` and
+        ``StatisticsClass``.
+
+        Parameters
+        ----------
+        alpha : float, optional
+            Two-sided confidence level [-] in the open interval ``(0, 1)``.
+            The default is 0.95 (95% confidence intervals).
+        covar_params : numpy.ndarray, optional
+            Parameter covariance matrix, shape ``(num_params, num_params)``,
+            with entry ``(i, j)`` in the product of parameter i and parameter
+            j units. If None (the default), ``get_covariance(include_mse=
+            include_mse)`` is used.
+        include_mse : bool, optional
+            Passed to ``get_covariance`` when ``covar_params`` is None. The
+            default is True.
+        verbose : bool, optional
+            If True (the default), print the formatted parameter interval
+            table.
+        set_self : bool, optional
+            If True (the default), store ``confid_intervals``,
+            ``intervals_array`` and ``stats`` on ``self`` (and on ``stats``).
+
+        Returns
+        -------
+        dict
+            Mapping from each optimized parameter name in ``name_params`` to
+            its two-element ``numpy.ndarray`` ``[lower_bound, upper_bound]``
+            in that parameter's physical unit.
+
+        Raises
+        ------
+        AttributeError
+            If no fit has been run, so ``info_opt`` does not exist.
+        """
+        if covar_params is None:
+            # [param_i unit * param_j unit], shape (num_params, num_params).
+            covar_params = self.get_covariance(include_mse=include_mse)
+
+        stats_obj = StatisticsClass(self, alpha=alpha)
+        intervals = stats_obj.get_intervals(
+            covar_params=covar_params, verbose=verbose, set_self=set_self)
+        if set_self:
+            self.confid_intervals = stats_obj.confid_intervals
+            # [parameter units], shape (num_params, 2).
+            self.intervals_array = stats_obj.intervals_array
+            self.stats = stats_obj
+
+        return intervals
 
     def get_covariance(self, include_mse: bool = True) -> np.ndarray:
         """Estimate the parameter covariance at the accepted parameters.

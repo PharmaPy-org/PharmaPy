@@ -1,7 +1,8 @@
 Experiments and measurements in parameter estimation
 ====================================================
 
-``ParameterEstimation`` accepts its data as ``Experiment`` objects. Each
+``ParameterEstimation`` accepts its data as ``Experiment`` objects, passed
+through ``experiments=`` (or positionally through ``x_data``). Each
 experiment holds named ``Measurement`` objects, every one with its own
 independent-variable samples and observations, together with the callback
 arguments that distinguish the experiment. Legacy arrays, lists and
@@ -15,34 +16,41 @@ be in the units and physical basis of the model callback output.
 Measurement schema
 ------------------
 
-``Measurement(field, x, values, *, uncertainty=None, units=None, basis=None,
-x_units='s')`` describes one observed model-output field in one experiment.
+``Measurement(field=None, x=None, values=None, *, y=None, uncertainty=None,
+units=None, unit_y=None, basis=None, x_units='s', unit_x=None)`` describes one
+observed model-output field in one experiment.
 
 ``field``
    Identity of the observed model output: a zero-based ``int`` column of the
    callback output, or a ``str`` name resolved through the ``output_names``
    given to ``ParameterEstimation`` (the callback must then return exactly
-   ``len(output_names)`` columns).
+   ``len(output_names)`` columns). When omitted (``None``) inside an
+   ``Experiment`` measurement mapping, ``field`` defaults to that
+   measurement's mapping key on a normalized copy without modifying the
+   caller's ``Measurement``.
 ``x``
    Independent-variable samples, shape ``(n,)``, in ``x_units``; a scalar is
    a single sampled point. Samples must be finite and non-decreasing.
-``x_units``
+``x_units`` (or ``unit_x``)
    Label of the independent-variable units, ``'s'`` (time in seconds) by
-   default; ``None`` leaves them undeclared.
-``values``
+   default; ``None`` leaves them undeclared. Passing both ``x_units`` and
+   ``unit_x`` raises ``ValueError``.
+``values`` (or ``y``)
    Observations, shape ``(n,)``, already in the units and physical basis of
    the model output column. ``NaN`` marks a missing observation; infinite
-   values are rejected and at least one observation is required.
+   values are rejected and at least one observation is required. Passing both
+   ``values`` and ``y`` raises ``ValueError``.
 ``uncertainty``
    Standard deviation of the measurement error (not a variance and not a
    weight), a positive scalar or one entry per sample, in the units of
    ``values``. It must be finite and positive at every observed sample;
    entries at missing samples are ignored.
-``units`` and ``basis``
+``units`` (or ``unit_y``) and ``basis``
    Labels such as ``'mol/L'`` and ``'molar concentration'``. They are not
    used for conversion. Declared labels must agree for every measurement of
    the same name and of the same model-output field; ``None`` (undeclared)
-   agrees with anything.
+   agrees with anything. Passing both ``units`` and ``unit_y`` raises
+   ``ValueError``.
 
 The arrays are stored as private, read-only float copies: changing the
 caller's arrays afterwards does not affect the measurement, and fitting,
@@ -52,15 +60,17 @@ data.
 Experiment schema
 -----------------
 
-``Experiment(measurements, args=(), kwargs=None)`` describes one
-experimental run.
+``Experiment(measurements, args=(), kwargs=None, *, name=None, author=None,
+date=None)`` describes one experimental run.
 
 ``measurements``
    A mapping of measurement names to ``Measurement`` objects, whose insertion
    order is the declared order, or a sequence of ``Measurement`` objects named
-   after their field (the ``str`` field itself or ``'field_<int>'``).
-   Replicate measurements of one field need the mapping form with distinct
-   names. Declared ``x_units`` must agree for all measurements of all
+   after their field (the ``str`` field itself or ``'field_<int>'``). In a
+   mapping, any ``Measurement`` with ``field=None`` defaults its ``field`` to
+   its mapping key; in a sequence every ``Measurement`` must declare
+   ``field``. Replicate measurements of one field need the mapping form with
+   distinct names. Declared ``x_units`` must agree for all measurements of all
    experiments fitted together, because one model callback receives every
    grid; ``None`` (undeclared) is compatible with any declared label.
 ``args`` and ``kwargs``
@@ -69,9 +79,17 @@ experimental run.
    model defines (for example an initial concentration [mol/L] or an
    initial temperature [K]). ``args`` is stored as a tuple; ``kwargs`` as a
    shallow copy exposed through a read-only view.
+``name``, ``author`` and ``date``
+   Optional non-empty ``str`` metadata labels describing the experimental run.
+   When a single ``Experiment`` or a list/tuple of ``Experiment`` objects is
+   passed to ``ParameterEstimation``, each experiment's ``name`` is used as
+   its identifier when declared (falling back to ``'exp_1'``, ``'exp_2'``,
+   ... when ``name`` is ``None``). In a mapping of experiments, a non-``None``
+   ``experiment.name`` must match its mapping key.
 
 With ``Experiment`` input, ``y_data``, ``measured_ind``, ``args_fun`` and
-``kwargs_fun`` of ``ParameterEstimation`` must be ``None``: observations,
+``kwargs_fun`` of ``ParameterEstimation`` must be ``None``, and ``x_data``
+and ``experiments`` cannot be supplied simultaneously: observations,
 measured fields and callback arguments live in the experiments.
 
 Sampling grids
@@ -113,9 +131,11 @@ Alignment by keys and declared order
 ------------------------------------
 
 * **Experiments.** A mapping of names to ``Experiment`` objects is aligned by
-  its keys, and its insertion order is the experiment order. A list or tuple
-  names its experiments ``'exp_1'``, ``'exp_2'``, ...; a single
-  ``Experiment`` is ``'exp_1'``.
+  its keys, and its insertion order is the experiment order (any non-``None``
+  ``experiment.name`` must match its key). A list or tuple uses each
+  experiment's ``name`` when declared, or ``'exp_1'``, ``'exp_2'``, ... when
+  ``name`` is ``None``; a single ``Experiment`` uses ``experiment.name`` or
+  ``'exp_1'``.
 * **Measurement columns.** Residual columns are the union of measurement
   names in first-appearance order (experiment order, then each experiment's
   declared order). A name must denote the same model-output field in every
@@ -208,9 +228,11 @@ Statistics, covariance and bootstrap
   standard deviations are known in absolute terms,
   ``get_covariance(include_mse=False)`` returns ``inv(J @ J.T)``, the
   covariance that treats them as absolute (``absolute_sigma=True``).
-  ``optimize_fn`` returns the ``include_mse=True`` form. Every
-  ``get_covariance`` call stores its result in ``covar_params``, which
-  ``StatisticsClass.get_intervals`` uses by default.
+  ``optimize_fn`` and ``estimate_parameters`` return the ``include_mse=True``
+  form (and store ``info['jac']`` with shape ``(num_params, n_entries)`` across
+  all optimizers). Every ``get_covariance`` call stores its result in
+  ``covar_params``, which ``get_confidence_intervals`` and
+  ``StatisticsClass.get_intervals`` use by default.
 * **Residual bootstrap.** ``StatisticsClass.get_bootsamples`` and
   ``bootstrap_params`` resample, for each experiment and measurement column,
   only the residuals of observed entries; unobserved entries of the

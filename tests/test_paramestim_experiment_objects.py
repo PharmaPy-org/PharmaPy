@@ -20,6 +20,7 @@ import re
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
 
 from PharmaPy.ParamEstim import (Experiment, Measurement,
                                  MultipleCurveResolution, ParameterEstimation)
@@ -1816,3 +1817,241 @@ def test_repeated_fits_leave_caller_and_measurement_data_unchanged():
     legacy.optimize_fn(verbose=False)
     np.testing.assert_array_equal(times, [0.0, 1.0, 2.0])
     np.testing.assert_array_equal(observed, [2.0, np.nan, 0.8])
+
+
+# ------------------------- rawlings_9-5 API reconciliation (#346 / #347)
+
+
+def test_measurement_aliases_and_default_mapping_field():
+    """Measurement supports y, unit_x, unit_y and mapping-key field default."""
+    times = np.array([0.0, 1.0, 2.0])  # [days]
+    obs_a = np.array([1.0, 0.7, 0.5])  # [mol/L]
+    obs_b = np.array([0.0, 0.3, 0.5])  # [mol/L]
+    meas_a = Measurement(x=times, y=obs_a, unit_x='days', unit_y='mol/L')
+    meas_b = Measurement(
+        field='c_B', x=times, y=obs_b, unit_x='days', unit_y='mol/L')
+
+    assert meas_a.field is None
+    np.testing.assert_array_equal(meas_a.y, obs_a)
+    np.testing.assert_array_equal(meas_a.values, obs_a)
+    assert meas_a.unit_x == 'days'
+    assert meas_a.x_units == 'days'
+    assert meas_a.unit_y == 'mol/L'
+    assert meas_a.units == 'mol/L'
+
+    experiment = Experiment(
+        name='exp1',
+        author='James Rawlings/John Ekerdt',
+        date='2026-10-21',
+        measurements={'c_A': meas_a, 'c_B': meas_b},
+        args=(1.0,),
+    )
+    assert experiment.name == 'exp1'
+    assert experiment.author == 'James Rawlings/John Ekerdt'
+    assert experiment.date == '2026-10-21'
+    assert experiment.measurements['c_A'].field == 'c_A'
+    assert experiment.measurements['c_B'].field == 'c_B'
+    # Caller's Measurement object keeps field=None (not mutated in place).
+    assert meas_a.field is None
+
+
+@pytest.mark.parametrize('kwargs, exception, match', [
+    ({'field': 0, 'x': [0.0, 1.0], 'values': [1.0, 0.5], 'y': [1.0, 0.5]},
+     ValueError,
+     "Measurement received both 'values' and alias 'y'; pass only one"),
+    ({'field': 0, 'x': [0.0, 1.0]},
+     TypeError, "Measurement requires observation values; pass 'values' or 'y'"),
+    ({'field': 0, 'x': [0.0, 1.0], 'y': [1.0, 0.5],
+      'units': 'mol/L', 'unit_y': 'mol/L'},
+     ValueError,
+     "Measurement received both 'units' and alias 'unit_y'; pass only one"),
+    ({'field': 0, 'x': [0.0, 1.0], 'y': [1.0, 0.5],
+      'x_units': 's', 'unit_x': 's'},
+     ValueError,
+     "Measurement received both 'x_units' and alias 'unit_x'; pass only one"),
+])
+def test_measurement_rejects_duplicate_or_missing_aliases(
+        kwargs, exception, match):
+    with pytest.raises(exception, match=match):
+        Measurement(**kwargs)
+
+
+def test_experiment_sequence_rejects_omitted_measurement_field():
+    meas = Measurement(x=[0.0, 1.0], y=[1.0, 0.5])  # [s], [mol/L]
+    with pytest.raises(
+            ValueError,
+            match=r"Experiment measurements\[0\] has field=None; specify "
+                  r"field on each Measurement"):
+        Experiment([meas])
+
+
+@pytest.mark.parametrize('kwargs, exception, match', [
+    ({'name': 123}, TypeError, 'Experiment name must be a str or None'),
+    ({'name': ''}, ValueError, 'Experiment name must be non-empty'),
+    ({'author': 45}, TypeError, 'Experiment author must be a str or None'),
+    ({'author': ''}, ValueError, 'Experiment author must be non-empty'),
+    ({'date': 2026}, TypeError, 'Experiment date must be a str or None'),
+    ({'date': ''}, ValueError, 'Experiment date must be non-empty'),
+])
+def test_experiment_validates_metadata_attributes(kwargs, exception, match):
+    meas = Measurement(0, [0.0, 1.0], [1.0, 0.5])  # [s], [mol/L]
+    with pytest.raises(exception, match=match):
+        Experiment([meas], **kwargs)
+
+
+def test_experiments_keyword_and_experiment_names_match_x_data_contract():
+    """ParameterEstimation(experiments=...) normalizes named experiments."""
+    raw = build_experiments()
+    named_list = [
+        Experiment(
+            {meas: Measurement(
+                x=m.x, y=m.y, unit_x=m.unit_x, unit_y=m.unit_y)
+             for meas, m in raw[name].measurements.items()},
+            args=raw[name].args,
+            kwargs=dict(raw[name].kwargs),
+            name=name,
+            author='Test Author',
+            date='2026-10-22',
+        )
+        for name in ('hot', 'cold')
+    ]
+    output_names = ['c_A', 'c_B', 'T']
+    from_x_data = ParameterEstimation(decay_model, [SEED_RATE], raw)
+    from_kw_list = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=named_list,
+        output_names=output_names)
+    from_kw_single = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=named_list[0],
+        output_names=output_names)
+
+    assert from_kw_list.experim_names == ['hot', 'cold']
+    assert from_kw_single.experim_names == ['hot']
+    pd.testing.assert_frame_equal(
+        from_kw_list.get_residual_layout(),
+        from_x_data.get_residual_layout())
+    np.testing.assert_allclose(
+        from_kw_list.get_objective([SEED_RATE], out_array=True),
+        from_x_data.get_objective([SEED_RATE], out_array=True),
+        rtol=ROUNDOFF_RTOL, atol=ROUNDOFF_ATOL)
+
+
+def test_experiments_keyword_and_name_conflicts_are_rejected():
+    exp_a = single()
+    exp_named_a = Experiment(
+        exp_a.measurements, args=exp_a.args, name='run_a')
+    exp_named_dup = Experiment(
+        exp_a.measurements, args=exp_a.args, name='run_a')
+    with pytest.raises(ValueError, match='Pass either x_data or experiments'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], x_data=exp_a, experiments=exp_a)
+    with pytest.raises(TypeError, match='x_data or experiments is required'):
+        ParameterEstimation(decay_model, [SEED_RATE])
+    with pytest.raises(
+            ValueError,
+            match="Experiment mapping key 'wrong' disagrees with "
+                  "experiment.name 'run_a'"):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], experiments={'wrong': exp_named_a})
+    with pytest.raises(
+            ValueError,
+            match=r"Experiment sequence repeats the names \['run_a'\]"):
+        ParameterEstimation(
+            decay_model, [SEED_RATE],
+            experiments=[exp_named_a, exp_named_dup])
+    with pytest.raises(
+            TypeError,
+            match='experiments must be an Experiment or a non-empty mapping'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], experiments=[1.0, 2.0])
+    with pytest.raises(
+            TypeError,
+            match='experiments holds Measurement objects'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE],
+            experiments=Measurement(0, [0.0, 1.0], [1.0, 0.5]))
+    with pytest.raises(
+            ValueError,
+            match='y_data must be None when experiments holds Experiment'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], experiments=exp_a,
+            y_data=np.array([1.0, 0.8]))
+
+
+def test_estimate_parameters_and_confidence_intervals_match_closed_form_gls():
+    """estimate_parameters (scipy) and get_confidence_intervals match GLS."""
+    observations = gls_observations()  # [mol/L]
+    labelled = pd.DataFrame(
+        GLS_COVARIANCE, index=['y_0', 'y_1'],
+        columns=['y_0', 'y_1'])  # [(mol/L)**2]
+    experiments = gls_experiments()
+
+    estimator_scipy = ParameterEstimation(
+        linear_model, [1.0], experiments=experiments,
+        weight_matrix=labelled, jac_fun=linear_sensitivity,
+        name_params=['rate'])
+    estimator_lm = ParameterEstimation(
+        linear_model, [1.0], experiments=experiments,
+        weight_matrix=labelled, jac_fun=linear_sensitivity,
+        name_params=['rate'])
+
+    rows = gls_rows(observations)
+    information = sum(x @ p @ x for _, x, p in rows)  # [s**2/(mol/L)**2]
+    score = sum(x @ p @ y for y, x, p in rows)  # [s/(mol/L)]
+    rate_hat = score / information  # [mol/L/s]
+    dof = GLS_NUM_OBSERVED - 1  # [-]
+    variance = 2.0 * gls_objective(rows, rate_hat) / dof  # [-]
+    expected_cov_mse = np.array([[variance / information]])  # [(mol/L/s)**2]
+    expected_cov_abs = np.array([[1.0 / information]])  # [(mol/L/s)**2]
+
+    fitted_scipy, cov_scipy, info_scipy = (
+        estimator_scipy.estimate_parameters(max_nfev=100, verbose=0))
+    fitted_lm, cov_lm, info_lm = estimator_lm.optimize_fn(verbose=False)
+
+    np.testing.assert_allclose(fitted_scipy, [rate_hat], rtol=FIT_RTOL)
+    np.testing.assert_allclose(fitted_scipy, fitted_lm, rtol=FIT_RTOL)
+    np.testing.assert_allclose(cov_scipy, expected_cov_mse, rtol=FIT_RTOL)
+    np.testing.assert_allclose(cov_scipy, cov_lm, rtol=FIT_RTOL)
+    # Canonical (num_params, n_residuals) orientation across optimizers.
+    assert info_scipy['jac'].shape == info_lm['jac'].shape
+    np.testing.assert_allclose(
+        info_scipy['jac'], info_lm['jac'], rtol=FIT_RTOL)
+
+    alpha = 0.95  # [-]
+    t_val = stats.t.ppf((1.0 + alpha) / 2.0, dof)  # [-]
+    delta_mse = t_val * np.sqrt(expected_cov_mse[0, 0])  # [mol/L/s]
+    delta_abs = t_val * np.sqrt(expected_cov_abs[0, 0])  # [mol/L/s]
+
+    ci_mse = estimator_scipy.get_confidence_intervals(
+        alpha=alpha, include_mse=True, verbose=False)
+    np.testing.assert_allclose(
+        ci_mse['rate'], [rate_hat - delta_mse, rate_hat + delta_mse],
+        rtol=FIT_RTOL)
+    assert 'intervals' in estimator_scipy.confid_intervals
+
+    ci_abs = estimator_scipy.get_confidence_intervals(
+        alpha=alpha, include_mse=False, verbose=False, set_self=False)
+    np.testing.assert_allclose(
+        ci_abs['rate'], [rate_hat - delta_abs, rate_hat + delta_abs],
+        rtol=FIT_RTOL)
+
+
+def test_estimate_parameters_validates_options_and_methods():
+    estimator = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=single())
+    with pytest.raises(TypeError, match='optim_options must be a mapping'):
+        estimator.estimate_parameters(optim_options=[1, 2])
+    with pytest.raises(
+            ValueError,
+            match=r"Duplicate solver options in optim_options and keyword "
+                  r"arguments: \['max_nfev'\]"):
+        estimator.estimate_parameters(
+            optim_options={'max_nfev': 10}, max_nfev=20)
+    with pytest.raises(
+            ValueError,
+            match='Pass bounds either through bounds= or optim_options'):
+        estimator.estimate_parameters(
+            bounds=([0.0], [2.0]),
+            optim_options={'bounds': ([0.0], [2.0])})
+    with pytest.raises(
+            ValueError, match="Unknown optimization method 'bogus'"):
+        estimator.optimize_fn(method='bogus')
