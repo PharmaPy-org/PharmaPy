@@ -457,11 +457,11 @@ def test_set_param_estimation_preserves_experiment_names_and_metadata():
 
     assert estimator_seq.experim_names == list(order)
     for index, name in enumerate(order):
-        rebuilt_exp = estimator_seq.experiments[name]
-        assert rebuilt_exp.name == name
-        assert rebuilt_exp.author == f'author_{name}'
-        assert rebuilt_exp.date == f'2026-10-2{index + 1}'
-        assert rebuilt_exp.kwargs['modify_phase'] == modifiers[name]
+        meta = estimator_seq.experiment_metadata[name]
+        assert meta['name'] == name
+        assert meta['author'] == f'author_{name}'
+        assert meta['date'] == f'2026-10-2{index + 1}'
+        assert estimator_seq.kwargs_fun[index]['modify_phase'] == modifiers[name]
 
     residuals, _, observed, magnitude = _expected_packing(
         order, 1, TRIAL_RATE)
@@ -478,7 +478,7 @@ def test_set_param_estimation_preserves_experiment_names_and_metadata():
         optimize_flags=[True, False], wrapper_kwargs=solver)
     estimator_single = simulation_single.ParamInst
     assert estimator_single.experim_names == ['concentrated']
-    rebuilt_single = estimator_single.experiments['concentrated']
-    assert rebuilt_single.name == 'concentrated'
-    assert rebuilt_single.author == 'author_concentrated'
-    assert rebuilt_single.date == '2026-10-21'
+    meta_single = estimator_single.experiment_metadata['concentrated']
+    assert meta_single['name'] == 'concentrated'
+    assert meta_single['author'] == 'author_concentrated'
+    assert meta_single['date'] == '2026-10-21'

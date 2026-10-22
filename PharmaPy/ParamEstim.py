@@ -2530,7 +2530,14 @@ class ParameterEstimation:
                     f"{experiment_source} holds Experiment objects; "
                     "observations, measured fields and callback arguments "
                     "live in each Experiment and its Measurement objects")
-            self._experiments = dict(experiments)
+            self._experiment_metadata = {
+                name: {
+                    'name': exp.name,
+                    'author': exp.author,
+                    'date': exp.date,
+                }
+                for name, exp in experiments.items()
+            }
             self.experim_names = list(experiments)
             compiled = _compile_experiments(experiments, self.output_names)
             measured_ind = list(compiled.fields)
@@ -2541,7 +2548,7 @@ class ParameterEstimation:
                     weight_matrix, compiled.measurement_names)
             legacy_fields = None
         else:
-            self._experiments = None
+            self._experiment_metadata = None
             if self._compiles_experiments and _holds_measurements(x_data):
                 raise TypeError(
                     "x_data holds Measurement objects; wrap each "
@@ -2988,19 +2995,22 @@ class ParameterEstimation:
         return columns
 
     @property
-    def experiments(self) -> Optional[Mapping]:
-        """Return a read-only mapping of experiment name to ``Experiment``.
+    def experiment_metadata(self) -> Optional[Mapping]:
+        """Return a read-only mapping of experiment name to metadata dict.
 
         Returns
         -------
         collections.abc.Mapping or None
-            Experiment name -> ``Experiment`` in ``experim_names`` order when
-            constructed from ``Experiment`` objects, or None for legacy array
-            input.
+            Experiment name -> ``{'name', 'author', 'date'}`` mapping in
+            ``experim_names`` order when constructed from ``Experiment``
+            objects, or None for legacy array input.
         """
-        if self._experiments is None:
+        if self._experiment_metadata is None:
             return None
-        return MappingProxyType(self._experiments)
+        return MappingProxyType({
+            name: MappingProxyType(meta)
+            for name, meta in self._experiment_metadata.items()
+        })
 
     def get_residual_layout(self) -> pd.DataFrame:
         """Describe each entry of the weighted residual vector.
