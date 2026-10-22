@@ -416,13 +416,15 @@ def test_supersaturation_uses_a_pure_solvent_concentration_basis():
 
 
 def test_supersaturation_type_selects_the_declared_driving_force():
-    """The three driving-force conventions are distinct and self-consistent.
+    """The driving-force conventions match CrystKinetics (#32).
 
     Only the driving force is evaluated, so the sign of the supersaturation is
-    irrelevant here and the undersaturated fixture is used.
+    irrelevant here and the undersaturated fixture is used. ``'ratio'`` is a
+    deprecated alias for ``'relative'`` (``S - 1``) that emits a
+    ``FutureWarning`` on construction.
     """
     values = {}
-    for sup_sat_type in ("absolute", "relative", "ratio"):
+    for sup_sat_type in ("absolute", "relative"):
         vessel = _build_crystallizer(WARM_TEMP, sup_sat_type=sup_sat_type)
         conc, supersat, solubility = _mechanism(vessel).compute_supersaturation(
             _liquid(vessel)
@@ -432,6 +434,17 @@ def test_supersaturation_type_selects_the_declared_driving_force():
             float(conc[TARGET_INDEX]),
             float(np.atleast_1d(solubility)[0]),
         )
+
+    with pytest.warns(FutureWarning, match="sup_sat_type='ratio' is deprecated"):
+        vessel_ratio = _build_crystallizer(WARM_TEMP, sup_sat_type="ratio")
+    conc_ratio, supersat_ratio, solubility_ratio = (
+        _mechanism(vessel_ratio).compute_supersaturation(_liquid(vessel_ratio))
+    )
+    values["ratio"] = (
+        float(np.atleast_1d(supersat_ratio)[0]),
+        float(conc_ratio[TARGET_INDEX]),
+        float(np.atleast_1d(solubility_ratio)[0]),
+    )
 
     absolute, conc_target, saturation = values["absolute"]
     relative = values["relative"][0]
@@ -443,18 +456,13 @@ def test_supersaturation_type_selects_the_declared_driving_force():
     np.testing.assert_allclose(
         relative, (conc_target - saturation) / saturation, rtol=ALGEBRAIC_RTOL
     )
-    np.testing.assert_allclose(ratio, relative + 1.0, rtol=ALGEBRAIC_RTOL)
-    # "ratio" means c / c_sat; the code reaches it by adding one to the
-    # relative form, so the two expressions are only algebraically equal.
-    np.testing.assert_allclose(
-        ratio, conc_target / saturation, rtol=ALGEBRAIC_RTOL
-    )
+    # Per issue #32, deprecated "ratio" now means S - 1 (same as "relative").
+    np.testing.assert_allclose(ratio, relative, rtol=ALGEBRAIC_RTOL)
     np.testing.assert_allclose(
         absolute, relative * saturation, rtol=ALGEBRAIC_RTOL
     )
 
-    # A silently ignored sup_sat_type would return the same value three times.
-    assert len({absolute, relative, ratio}) == 3
+    assert len({absolute, relative}) == 2
 
 
 def test_supersaturation_is_intensive_in_the_charge_size():

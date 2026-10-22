@@ -18,6 +18,7 @@ from PharmaPy.Connections import interpolate_inputs
 import copy
 import numpy as np
 import os
+import warnings
 from PharmaPy.DataClasses import *
 
 
@@ -777,14 +778,32 @@ class MultiPhaseVessel():
         #Exception is setting the default phase_connections 
         # since those use the same assumptions as PharmaPy 1.0
         if name.startswith("Liquid_"):
+            warnings.warn(
+                f"Accessing {name!r} on {type(self).__name__} is deprecated; "
+                "use self.Phases.Liquids or self.phase_states instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             idx = int(name.split("_")[1]) - 1
             return self.Phases.Liquids[idx]
 
         if name.startswith("Solid_"):
+            warnings.warn(
+                f"Accessing {name!r} on {type(self).__name__} is deprecated; "
+                "use self.Phases.Solids or self.phase_states instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             idx = int(name.split("_")[1]) - 1
             return self.Phases.Solids[idx]
 
         if name.startswith("Vapor_"):
+            warnings.warn(
+                f"Accessing {name!r} on {type(self).__name__} is deprecated; "
+                "use self.Phases.Vapors or self.phase_states instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             idx = int(name.split("_")[1]) - 1
             return self.Phases.Vapors[idx]
 
