@@ -32,6 +32,38 @@ GRAMS_PER_KG = 1000.0  # [g/kg]
 LITERS_PER_M3 = 1000.0  # [L/m**3]
 
 
+def _resolve_phase_family(phase) -> str:
+    """Resolve the canonical phase family of a phase or stream object.
+
+    Parameters
+    ----------
+    phase : object
+        Phase or stream instance.
+
+    Returns
+    -------
+    str
+        ``'liquid'``, ``'solid'``, ``'vapor'``, or ``''`` when unrecognized.
+        Explicit ``phase_family`` takes precedence over class-name substring
+        matching so subclasses whose names contain another family word (such as
+        ``LiquidCrystal(SolidPhase)``) are classified by their declared family.
+    """
+    family = getattr(phase, 'phase_family', None)
+    family_lower = family.lower() if isinstance(family, str) else ''
+    if family_lower in ('liquid', 'solid'):
+        return family_lower
+    if family_lower in ('vapor', 'gas'):
+        return 'vapor'
+    class_name = phase.__class__.__name__
+    if 'Liquid' in class_name:
+        return 'liquid'
+    if 'Solid' in class_name:
+        return 'solid'
+    if 'Vapor' in class_name:
+        return 'vapor'
+    return ''
+
+
 def classify_phases(instance, names=None):
     """Classify phases on an instance using legacy 1-indexed attribute names.
 
@@ -68,15 +100,16 @@ def classify_phases(instance, names=None):
         vapor_count = 1
 
         for phase in phases:
-            if 'Liquid' in phase.__class__.__name__:
+            resolved_family = _resolve_phase_family(phase)
+            if resolved_family == 'liquid':
                 phase_name = 'Liquid_{}'.format(liquid_count)
                 liquid_count += 1
 
-            elif 'Solid' in phase.__class__.__name__:
+            elif resolved_family == 'solid':
                 phase_name = 'Solid_{}'.format(solid_count)
                 solid_count += 1
 
-            elif 'Vapor' in phase.__class__.__name__:
+            elif resolved_family == 'vapor':
                 phase_name = 'Vapor_{}'.format(vapor_count)
                 vapor_count += 1
             else:
@@ -149,9 +182,10 @@ def getPropsPhaseMix(phases, basis='mass'):
         )
         props_matrix.append(all_props[:3])
 
-        if 'Liquid' in phase.__class__.__name__:
+        resolved_family = _resolve_phase_family(phase)
+        if resolved_family == 'liquid':
             ind_liq = ind
-        if 'Solid' in phase.__class__.__name__:
+        elif resolved_family == 'solid':
             if getattr(phase, 'moments', None) is not None and hasattr(phase, 'kv'):
                 mom_solid = np.asarray(phase.moments, dtype=float)
                 conv_exp = np.arange(len(mom_solid))
@@ -1184,6 +1218,7 @@ class BasePhase(ThermoPhysicalManager):
         mole_frac=None,
         total_h=True,
         basis='mass',
+        weights=None,
         **kwargs,
     ):
         """Calculate vapor-phase enthalpy relative to a liquid reference.
@@ -1206,6 +1241,12 @@ class BasePhase(ThermoPhysicalManager):
             enthalpy; if ``False``, return unweighted species enthalpies.
         basis : {'mass', 'mole'}, optional
             Physical basis of the returned enthalpy; default ``'mass'``.
+        weights : array-like, optional
+            Used when ``total_h=False``: species amounts or flow rates [any
+            basis, e.g. kg/s or mol/s] by which the caller weights the returned
+            species enthalpies, shape ``(num_species,)`` or
+            ``(num_temperatures, num_species)``. When given, only species with a
+            nonzero weight in some row require heat-capacity coefficients.
 
         Returns
         -------
@@ -1219,7 +1260,7 @@ class BasePhase(ThermoPhysicalManager):
         ------
         ValueError
             If ``basis`` is invalid, ``temp`` is empty/non-finite/above 1D, or
-            fraction shapes are invalid.
+            fraction or weight shapes are invalid.
         MissingPropertyError
             If required ``cp_liq`` or ``cp_vapor`` coefficients are missing.
         """
@@ -1256,6 +1297,17 @@ class BasePhase(ThermoPhysicalManager):
                     f"with temp; got {frac.shape}"
                 )
             is_used = np.broadcast_to(frac != 0, is_supercritical.shape)
+        elif weights is not None:
+            weights_arr = np.asarray(weights, dtype=float)
+            if weights_arr.shape not in ((num_comp,), (num_temp, num_comp)):
+                raise ValueError(
+                    "weights must have shape "
+                    f"(num_species,) = {(num_comp,)} for a fixed weighting "
+                    "or (num_temperatures, num_species) = "
+                    f"{(num_temp, num_comp)} for a profile paired row by row "
+                    f"with temp; got {weights_arr.shape}"
+                )
+            is_used = np.broadcast_to(weights_arr != 0, is_supercritical.shape)
         else:
             is_used = np.ones_like(is_supercritical)
 

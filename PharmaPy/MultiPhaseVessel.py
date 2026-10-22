@@ -102,12 +102,19 @@ class MultiPhaseVessel():
 
         
         # Phase init
+        self._Phases = None
         self._phase_connections = []
-        if Phases is not None:
-            self.Phases = Phases
         self._intraphase_processes = []
 
         #heat transfer
+        if ht_mode == "coil":
+            raise NotImplementedError(
+                "ht_mode='coil' is not implemented; see issue #168"
+            )
+        if ht_mode not in ("jacket", "bath"):
+            raise ValueError(
+                f"Invalid ht_mode {ht_mode!r}; valid options are 'jacket', 'bath'"
+            )
         self.area_ht = None
         self._Utility = None
         self.ht_mode = ht_mode
@@ -136,6 +143,9 @@ class MultiPhaseVessel():
         #port initialization
         self._inlet_connections = []
         self._outlet_connections = []
+
+        if Phases is not None:
+            self.Phases = Phases
 
         #Integrator
         self.integrator = (integrator if integrator is not None
@@ -936,6 +946,14 @@ class MultiPhaseVessel():
                 phase_ref=process.phaseref,
             )
     def define_output_states(self,overwrite=False):
+        """Register post-solve output state variables in ``output_state_collection``.
+
+        Parameters
+        ----------
+        overwrite : bool, optional
+            If ``True``, replace existing entries in ``output_state_collection``;
+            default ``False``.
+        """
         self.recorded_output_history ={}
         self.output_state_collection.add(
             StateVariable(
@@ -981,6 +999,18 @@ class MultiPhaseVessel():
                                 state_type='post',
                             ),overwrite
                         )
+
+        if self.Utility is not None:
+            self.output_state_collection.add(
+                StateVariable(
+                    name="q_ht",
+                    dim=1,
+                    units="W",
+                    state_type="post",
+                    compute_value=self.compute_qht_value,
+                ),
+                overwrite,
+            )
         
         # Every liquid phase reports its composition, whether or not it
         # happens to carry a reaction. This used to sit inside the
@@ -1118,6 +1148,32 @@ class MultiPhaseVessel():
         return m_flow
     
         
+    def _get_utility_inputs(self, time):
+        """Return utility inlet temperature and mass flow rate at ``time``.
+
+        Parameters
+        ----------
+        time : float
+            Integration time [s].
+
+        Returns
+        -------
+        temp_in : float
+            Utility inlet temperature [K].
+        mass_flow : float
+            Utility mass flow rate [kg/s].
+        """
+        if getattr(self.Utility, "DynamicInlet", None) is not None:
+            utility_inputs = self.Utility.get_inputs(float(time))
+            return (
+                float(utility_inputs["temp_in"]),  # [K]
+                float(utility_inputs["mass_flow"]),  # [kg/s]
+            )
+        return (
+            float(self.Utility.temp_in),  # [K]
+            float(self.Utility.mass_flow),  # [kg/s]
+        )
+
     @staticmethod
     def compute_qht_value(
             state_var,
@@ -1128,13 +1184,44 @@ class MultiPhaseVessel():
             resolved_outlets=None,
             operating_conditions=None,
         ):
-        temp = completed_state[StateKey("global_temp")]
-        temp_ht = context.Utility.temp_in
+        """Compute utility heat-transfer rate at ``time``.
 
-        return context.get_heat_transfer_rate(
+        Parameters
+        ----------
+        state_var : StateVariable
+            Output state variable descriptor for ``q_ht``.
+        time : float
+            Integration time [s].
+        completed_state : dict
+            Completed state dictionary keyed by ``StateKey``.
+        context : MultiPhaseVessel
+            Vessel instance (or replay pseudo-vessel) owning the utility.
+        resolved_inlets : StreamConditions, optional
+            Resolved inlet conditions at ``time``.
+        resolved_outlets : StreamConditions, optional
+            Resolved outlet conditions at ``time``.
+        operating_conditions : dict, optional
+            Operating conditions evaluated at ``time``.
+
+        Returns
+        -------
+        float
+            Heat-transfer rate from the vessel to the utility [W].
+        """
+        if context.adiabatic or context.Utility is None:
+            return 0.0  # [W]
+        temp = completed_state[StateKey("global_temp")]  # [K]
+        temp_ht, mass_flow_ht = context._get_utility_inputs(time)  # [K], [kg/s]
+
+        qdot = context.get_heat_transfer_rate(
             temp,
             temp_ht,
-        )
+        )  # [W]
+        if mass_flow_ht > 0 and getattr(context.Utility, "cp", 0.0) > 0:
+            context.Utility.temp_out = (
+                temp_ht + qdot / (mass_flow_ht * context.Utility.cp)
+            )  # [K]
+        return qdot
     
     @staticmethod
     def compute_mole_conc_value(
@@ -2961,7 +3048,28 @@ class MultiPhaseVessel():
             time,
             completed_state
         ):
-        """Computes enthalpy effects"""
+        """Add sensible enthalpy contributions from resolved inlets to ``contributions``.
+
+        Parameters
+        ----------
+        contributions : dict
+            Heat rates by source [W]; ``"inlet"`` is updated in place.
+        aux : list of ResolvedPhaseTransfer
+            Resolved inlets, each with ``species_flow`` [kg/s],
+            ``stream_phase``, and ``vessel_phase``.
+        time : float
+            Integration time [s], unused here.
+        completed_state : dict
+            Solver and derived states, unused here.
+
+        Notes
+        -----
+        Evaluating per-species enthalpies (``total_h=False``) ensures that each
+        entering species ``j`` contributes ``species_flow[j] * (h_j(T_in) -
+        h_j(T_vessel))`` [W], which vanishes identically when ``T_in ==
+        T_vessel`` in the same phase family regardless of ``self.temp_ref`` or
+        composition differences between the feed and holdup (#272).
+        """
         for inlet in aux:
 
             phase = inlet.stream_phase
@@ -2969,21 +3077,23 @@ class MultiPhaseVessel():
             h_in = phase.getEnthalpy(
                 phase.temp,
                 temp_ref=self.temp_ref,
-                total_h=True,
-                basis='mass'
-            )  # J/kg mixture
+                total_h=False,
+                basis='mass',
+                weights=inlet.species_flow,
+            )  # [J/kg]
             vessel_phase = inlet.vessel_phase
 
             h_vessel = vessel_phase.getEnthalpy(
                 vessel_phase.temp,
                 temp_ref=self.temp_ref,
-                total_h=True,
+                total_h=False,
                 basis="mass",
-            )
+                weights=inlet.species_flow,
+            )  # [J/kg]
 
             contributions["inlet"] += (
                 inlet.species_flow * (h_in - h_vessel)
-            ).sum()
+            ).sum()  # [W]
 
     def add_crossphase_energy_terms(
             self,
@@ -3048,21 +3158,23 @@ class MultiPhaseVessel():
             h_out = phase.getEnthalpy(
                 phase.temp,
                 temp_ref=self.temp_ref,
-                total_h=True,
-                basis='mass'
-            )
+                total_h=False,
+                basis='mass',
+                weights=outlet.species_flow,
+            )  # [J/kg]
 
             vessel_phase = outlet.vessel_phase
             h_vessel = vessel_phase.getEnthalpy(
                 vessel_phase.temp,
                 temp_ref=self.temp_ref,
-                total_h=True,
-                basis='mass'
-            )
+                total_h=False,
+                basis='mass',
+                weights=outlet.species_flow,
+            )  # [J/kg]
 
             contributions["outlet"] -= (
                 outlet.species_flow * (h_out - h_vessel)
-            ).sum()
+            ).sum()  # [W]
 
     def get_heat_transfer_temperature(self):
         """The temperature to use to determine heat transfer from the vessel. The default assumption is to use the temperature of the first liquid phase"""
@@ -3074,18 +3186,31 @@ class MultiPhaseVessel():
             time,
             completed_state
         ):
+        """Add utility heat-transfer contribution to ``contributions``.
 
+        Parameters
+        ----------
+        contributions : dict
+            Heat rates by source [W]; ``"utility"`` is updated in place.
+        time : float
+            Integration time [s].
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+        """
         if not self.has_utility_balance:
             return
 
-        temp = self.get_heat_transfer_temperature()
-        temp_ht = self.Utility.temp_in#completed_state[StateKey("temp_ht")]
+        temp = self.get_heat_transfer_temperature()  # [K]
+        temp_ht, mass_flow_ht = self._get_utility_inputs(time)  # [K], [kg/s]
 
-        qdot = self.get_heat_transfer_rate(temp, temp_ht)
-                                           
-        self.Utility.temp_out = temp_ht +qdot/(self.Utility.mass_flow*self.Utility.cp)
+        qdot = self.get_heat_transfer_rate(temp, temp_ht)  # [W]
 
-        contributions["utility"] -= qdot
+        if mass_flow_ht > 0 and getattr(self.Utility, "cp", 0.0) > 0:
+            self.Utility.temp_out = (
+                temp_ht + qdot / (mass_flow_ht * self.Utility.cp)
+            )  # [K]
+
+        contributions["utility"] -= qdot  # [W]
 
     def add_mixing_energy_terms(self,contributions,time,completed_state):
         "Used to add heat of mixing terms"
@@ -3100,13 +3225,39 @@ class MultiPhaseVessel():
             temp,
             temp_ht
         ):
+        """Calculate the heat-transfer rate from the vessel to the utility.
 
+        Parameters
+        ----------
+        temp : float
+            Vessel temperature [K].
+        temp_ht : float
+            Utility temperature [K].
+
+        Returns
+        -------
+        float
+            Heat-transfer rate ``u_ht * area * (temp - temp_ht)`` [W].
+
+        Raises
+        ------
+        NotImplementedError
+            If ``self.ht_mode == 'coil'``.
+        ValueError
+            If ``self.ht_mode`` is neither ``'jacket'`` nor ``'bath'``.
+        """
         if self.ht_mode == "coil":
-            raise NotImplementedError
+            raise NotImplementedError(
+                "heat_transfer with ht_mode='coil' is not supported; see issue #168"
+            )
+        if self.ht_mode not in ("jacket", "bath"):
+            raise ValueError(
+                f"Invalid ht_mode {self.ht_mode!r}; valid options are 'jacket', 'bath'"
+            )
 
-        area = self.get_heat_transfer_area()
+        area = self.get_heat_transfer_area()  # [m**2]
 
-        return self.u_ht * area * (temp - temp_ht)
+        return self.u_ht * area * (temp - temp_ht)  # [W]
     
         
     def get_heat_transfer_area(self):
@@ -3149,6 +3300,19 @@ class MultiPhaseVessel():
         return final_state
     
     def update_final_conditions(self,completed_state,time,solver_history,output_history):
+        """Update outlet streams, utility outlet temperature, and elapsed time at the final state.
+
+        Parameters
+        ----------
+        completed_state : dict
+            Final solver states keyed by ``StateKey``.
+        time : array-like
+            Integration time grid [s].
+        solver_history : dict
+            Unpacked solver state trajectories keyed by ``StateKey``.
+        output_history : dict
+            Replayed output state trajectories keyed by ``StateKey``.
+        """
         completed_state = self.complete_state(completed_state,time[-1])
         # The final condition is one point in time, as the line above
         # already assumes. Passing the whole array made the controller and
@@ -3159,6 +3323,22 @@ class MultiPhaseVessel():
         # The resolved streams live in a workspace that later evaluations
         # overwrite, so the reported final condition takes its own copy.
         self.outlet_conditions = copy.deepcopy(resolved_outlets)
+
+        if self.Utility is not None:
+            temp_final = completed_state.get(
+                StateKey("global_temp"),
+                self.get_heat_transfer_temperature(),
+            )  # [K]
+            temp_ht, mass_flow_ht = self._get_utility_inputs(time[-1])  # [K], [kg/s]
+            qdot = (
+                0.0
+                if self.adiabatic
+                else self.get_heat_transfer_rate(temp_final, temp_ht)
+            )  # [W]
+            if mass_flow_ht > 0 and getattr(self.Utility, "cp", 0.0) > 0:
+                self.Utility.temp_out = (
+                    temp_ht + qdot / (mass_flow_ht * self.Utility.cp)
+                )  # [K]
 
         self.elapsed_time = time[-1]
 
