@@ -2011,10 +2011,15 @@ def test_estimate_parameters_and_confidence_intervals_match_closed_form_gls():
     np.testing.assert_allclose(fitted_scipy, fitted_lm, rtol=FIT_RTOL)
     np.testing.assert_allclose(cov_scipy, expected_cov_mse, rtol=FIT_RTOL)
     np.testing.assert_allclose(cov_scipy, cov_lm, rtol=FIT_RTOL)
-    # Canonical (num_params, n_residuals) orientation across optimizers.
+    # Canonical (num_params, n_residuals) orientation across optimizers, while
+    # info['scipy_result'] retains the raw OptimizeResult orientation.
     assert info_scipy['jac'].shape == info_lm['jac'].shape
+    assert info_scipy['scipy_result'].jac.shape == info_scipy['jac'].T.shape
     np.testing.assert_allclose(
         info_scipy['jac'], info_lm['jac'], rtol=FIT_RTOL)
+    np.testing.assert_allclose(
+        info_scipy['scipy_result'].jac.T, info_scipy['jac'],
+        rtol=ROUNDOFF_RTOL, atol=ROUNDOFF_ATOL)
 
     alpha = 0.95  # [-]
     t_val = stats.t.ppf((1.0 + alpha) / 2.0, dof)  # [-]
@@ -2033,6 +2038,20 @@ def test_estimate_parameters_and_confidence_intervals_match_closed_form_gls():
     np.testing.assert_allclose(
         ci_abs['rate'], [rate_hat - delta_abs, rate_hat + delta_abs],
         rtol=FIT_RTOL)
+    # set_self=False leaves estimator_scipy.covar_params at the mse covariance.
+    np.testing.assert_allclose(
+        estimator_scipy.covar_params, expected_cov_mse, rtol=FIT_RTOL)
+
+    # After get_covariance(include_mse=False), default get_confidence_intervals()
+    # reuses the stored covar_params without overwriting it back to include_mse=True.
+    estimator_scipy.get_covariance(include_mse=False)
+    ci_reused = estimator_scipy.get_confidence_intervals(
+        alpha=alpha, verbose=False)
+    np.testing.assert_allclose(
+        ci_reused['rate'], [rate_hat - delta_abs, rate_hat + delta_abs],
+        rtol=FIT_RTOL)
+    np.testing.assert_allclose(
+        estimator_scipy.covar_params, expected_cov_abs, rtol=FIT_RTOL)
 
 
 def test_estimate_parameters_validates_options_and_methods():
@@ -2053,5 +2072,124 @@ def test_estimate_parameters_validates_options_and_methods():
             bounds=([0.0], [2.0]),
             optim_options={'bounds': ([0.0], [2.0])})
     with pytest.raises(
+            ValueError,
+            match="Only loss='linear' is supported for least-squares "
+                  "parameter estimation and covariance; got 'soft_l1'"):
+        estimator.estimate_parameters(loss='soft_l1')
+    with pytest.raises(
             ValueError, match="Unknown optimization method 'bogus'"):
         estimator.optimize_fn(method='bogus')
+
+
+def test_get_confidence_intervals_validates_inputs():
+    """get_confidence_intervals validates alpha, include_mse, covar_params, dof."""
+    estimator = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=single())
+    with pytest.raises(AttributeError):
+        estimator.get_confidence_intervals(verbose=False)
+
+    estimator.estimate_parameters(verbose=0)
+    with pytest.raises(TypeError, match='alpha must be a real number'):
+        estimator.get_confidence_intervals(alpha=True, verbose=False)
+    for bad_alpha in (0.0, 1.0, -0.1, 1.2, np.nan):
+        with pytest.raises(
+                ValueError, match='alpha must be strictly between 0 and 1'):
+            estimator.get_confidence_intervals(alpha=bad_alpha, verbose=False)
+    with pytest.raises(TypeError, match='include_mse must be a bool or None'):
+        estimator.get_confidence_intervals(include_mse='yes', verbose=False)
+    with pytest.raises(
+            ValueError,
+            match='Pass either covar_params or include_mse, not both'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[1.0]]), include_mse=True, verbose=False)
+    with pytest.raises(
+            TypeError, match='covar_params must be a real numeric 2D array'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[True]]), verbose=False)
+    with pytest.raises(
+            ValueError,
+            match=r'covar_params must have shape \(1, 1\); got \(2, 2\)'):
+        estimator.get_confidence_intervals(
+            covar_params=np.eye(2), verbose=False)
+    with pytest.raises(
+            ValueError, match='covar_params entries must be finite'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[np.nan]]), verbose=False)
+    with pytest.raises(
+            ValueError,
+            match='covar_params diagonal variances must be non-negative'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[-1.0]]), verbose=False)
+
+    # Zero degrees of freedom (1 observation, 1 parameter) is rejected.
+    one_point_exp = Experiment(
+        [Measurement(0, [1.0], [1.2])], args=(2.0,))  # [s], [mol/L]
+    zero_dof_est = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=one_point_exp)
+    zero_dof_est.info_opt = {
+        'fun': np.array([0.0]),  # [mol/L]
+        'jac': np.array([[1.0]]),  # [mol/L*s]
+    }
+    zero_dof_est.params_convg = np.array([SEED_RATE])  # [1/s]
+    zero_dof_est.y_model = [np.array([1.2])]  # [mol/L]
+    zero_dof_est.resid_runs = [np.array([0.0])]  # [mol/L]
+    with pytest.raises(
+            ValueError,
+            match='Student-t confidence intervals require more observed '
+                  'entries than optimized parameters'):
+        zero_dof_est.get_confidence_intervals(
+            covar_params=np.array([[1.0]]), verbose=False)
+
+
+def test_simexec_experiment_with_wrapper_preserves_metadata():
+    """_experiment_with_wrapper preserves Experiment name, author, and date."""
+    import inspect
+    from PharmaPy.SimExec import _experiment_with_wrapper
+
+    def dummy_wrapper(params, times, modify_phase=None,
+                      modify_controls=None, run_args=None):
+        """Return sample times unchanged for signature-binding verification.
+
+        Parameters
+        ----------
+        params : array_like
+            Model parameters [-].
+        times : array_like
+            Sample times [s].
+        modify_phase : dict, optional
+            Initial phase modifier dictionary.
+        modify_controls : dict, optional
+            Control modifier dictionary.
+        run_args : dict, optional
+            Solver keyword arguments.
+
+        Returns
+        -------
+        array_like
+            Sample times [s].
+        """
+        return times
+
+    experiment = Experiment(
+        {'c_A': Measurement(x=[0.0, 1.0], y=[2.0, 1.2])},
+        name='batch_run_1',
+        author='Daniel Casas-Orozco',
+        date='2026-10-22',
+    )
+    wrapper = {
+        'modify_phase': {'temp': 310.0},  # [K]
+        'modify_controls': {},
+        'run_args': {},
+    }
+    supplied = {
+        'modify_phase': True,
+        'modify_controls': False,
+        'run_args': False,
+    }
+    rebuilt = _experiment_with_wrapper(
+        experiment, 'batch_run_1', wrapper, supplied,
+        inspect.signature(dummy_wrapper))
+    assert rebuilt.name == 'batch_run_1'
+    assert rebuilt.author == 'Daniel Casas-Orozco'
+    assert rebuilt.date == '2026-10-22'
+    assert rebuilt.kwargs['modify_phase'] == {'temp': 310.0}

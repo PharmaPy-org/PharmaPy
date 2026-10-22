@@ -230,9 +230,12 @@ Statistics, covariance and bootstrap
   covariance that treats them as absolute (``absolute_sigma=True``).
   ``optimize_fn`` and ``estimate_parameters`` return the ``include_mse=True``
   form (and store ``info['jac']`` with shape ``(num_params, n_entries)`` across
-  all optimizers). Every ``get_covariance`` call stores its result in
-  ``covar_params``, which ``get_confidence_intervals`` and
-  ``StatisticsClass.get_intervals`` use by default.
+  all optimizers; ``'scipy'``/``'least_squares'`` requires ``loss='linear'``
+  and preserves the raw ``OptimizeResult`` in ``info['scipy_result']``). Every
+  ``get_covariance`` call stores its result in ``covar_params``, which
+  ``get_confidence_intervals`` and ``StatisticsClass.get_intervals`` reuse by
+  default; ``get_confidence_intervals(include_mse=False)`` (or
+  ``covar_params=...``) also accepts an explicit covariance option directly.
 * **Residual bootstrap.** ``StatisticsClass.get_bootsamples`` and
   ``bootstrap_params`` resample, for each experiment and measurement column,
   only the residuals of observed entries; unobserved entries of the

@@ -3511,7 +3511,10 @@ class ParameterEstimation:
             are exactly zero, so they add no residual or information.
             LM and ``scipy.optimize.least_squares`` additionally supply their
             accepted ``x`` and native solver diagnostics (with ``info['jac']``
-            stored in the canonical ``(num_params, n_data)`` orientation).
+            stored in the canonical ``(num_params, n_data)`` orientation and,
+            for ``'scipy'``/``'least_squares'``, the raw
+            ``scipy.optimize.OptimizeResult`` stored in
+            ``info['scipy_result']``).
 
         Raises
         ------
@@ -3519,8 +3522,9 @@ class ParameterEstimation:
             If IPOPT is selected without the optional cyipopt dependency.
         ValueError
             If ``method`` is not one of ``'LM'``, ``'IPOPT'``, ``'scipy'`` or
-            ``'least_squares'``, or if ``bounds`` is supplied both through
-            ``bounds=`` and ``optim_options``.
+            ``'least_squares'``, if ``bounds`` is supplied both through
+            ``bounds=`` and ``optim_options``, or if ``loss`` is not
+            ``'linear'`` when using ``'scipy'``/``'least_squares'``.
         numpy.linalg.LinAlgError
             If the accepted Jacobian yields a singular covariance matrix.
 
@@ -3591,6 +3595,11 @@ class ParameterEstimation:
                 raise ValueError(
                     "Pass bounds either through bounds= or optim_options, "
                     "not both")
+            loss = scipy_options.get('loss', 'linear')
+            if loss != 'linear':
+                raise ValueError(
+                    "Only loss='linear' is supported for least-squares "
+                    f"parameter estimation and covariance; got {loss!r}")
             if bounds is not None:
                 scipy_options['bounds'] = bounds
             if 'verbose' in scipy_options and verbose is True:
@@ -3599,8 +3608,26 @@ class ParameterEstimation:
                 scipy_options['verbose'] = int(verbose)
             optim_options = scipy_options
 
-            def _scipy_jac(params_eval, *args_eval):
-                """Return weighted residual Jacobian in SciPy (n_data, n_params) orientation."""
+            def _scipy_jac(params_eval: np.ndarray,
+                           *args_eval) -> np.ndarray:
+                """Return weighted residual Jacobian in SciPy orientation.
+
+                Parameters
+                ----------
+                params_eval : numpy.ndarray
+                    Variable parameter vector, shape ``(num_params,)``, in the
+                    model callback's parameter units.
+                *args_eval
+                    Positional arguments forwarded to ``get_gradient``
+                    (``out_array=True``).
+
+                Returns
+                -------
+                numpy.ndarray
+                    Weighted residual Jacobian, shape ``(n_data, num_params)``.
+                    Entry ``(k, i)`` is in the unit of weighted residual ``k``
+                    divided by the unit of variable parameter ``i``.
+                """
                 return self.get_gradient(params_eval, *args_eval).T
 
             result = least_squares(
@@ -3617,6 +3644,7 @@ class ParameterEstimation:
             # and canonical (num_params, n_data) Jacobian orientation.
             self.get_objective(opt_par, out_array=True)
             info = dict(result)
+            info['scipy_result'] = result
             # [residual unit / parameter unit], shape (num_params, n_data).
             info['jac'] = np.asarray(result.jac).T
             self.sens = info['jac'].T
@@ -3740,7 +3768,7 @@ class ParameterEstimation:
     def get_confidence_intervals(
             self, alpha: float = 0.95,
             covar_params: Optional[np.ndarray] = None,
-            include_mse: bool = True, verbose: bool = True,
+            include_mse: Optional[bool] = None, verbose: bool = True,
             set_self: bool = True) -> dict:
         """Compute Student-t parameter confidence intervals at the fitted point.
 
@@ -3757,11 +3785,16 @@ class ParameterEstimation:
         covar_params : numpy.ndarray, optional
             Parameter covariance matrix, shape ``(num_params, num_params)``,
             with entry ``(i, j)`` in the product of parameter i and parameter
-            j units. If None (the default), ``get_covariance(include_mse=
-            include_mse)`` is used.
+            j units. If None (the default), ``self.covar_params`` is reused
+            when ``include_mse`` is None and a covariance has already been
+            computed; otherwise ``get_covariance(include_mse=...)`` is used
+            (defaulting to ``include_mse=True``).
         include_mse : bool, optional
-            Passed to ``get_covariance`` when ``covar_params`` is None. The
-            default is True.
+            If given while ``covar_params`` is None, recompute the covariance
+            with ``get_covariance(include_mse=include_mse)``. Cannot be
+            combined with ``covar_params``. The default is None, which reuses
+            ``self.covar_params`` if present and otherwise computes
+            ``get_covariance(include_mse=True)``.
         verbose : bool, optional
             If True (the default), print the formatted parameter interval
             table.
@@ -3780,14 +3813,85 @@ class ParameterEstimation:
         ------
         AttributeError
             If no fit has been run, so ``info_opt`` does not exist.
+        TypeError
+            If ``alpha`` is not a real number, ``include_mse`` is neither a
+            ``bool`` nor None, or ``covar_params`` is not a real numeric
+            array.
+        ValueError
+            If ``alpha`` is not in the open interval ``(0, 1)``, both
+            ``covar_params`` and ``include_mse`` are supplied, the number of
+            observed data entries does not exceed ``num_params``, or
+            ``covar_params`` does not have finite entries of shape
+            ``(num_params, num_params)`` with non-negative diagonal
+            variances.
         """
-        if covar_params is None:
-            # [param_i unit * param_j unit], shape (num_params, num_params).
-            covar_params = self.get_covariance(include_mse=include_mse)
+        if (isinstance(alpha, bool)
+                or not isinstance(alpha, (int, float, np.number))
+                or np.iscomplexobj(alpha)):
+            raise TypeError(
+                "alpha must be a real number in (0, 1); got "
+                f"{type(alpha).__name__}")
+        alpha_val = float(alpha)  # [-]
+        if not np.isfinite(alpha_val) or not (0.0 < alpha_val < 1.0):
+            raise ValueError(
+                f"alpha must be strictly between 0 and 1; got {alpha!r}")
+        if include_mse is not None and not isinstance(include_mse, bool):
+            raise TypeError(
+                "include_mse must be a bool or None; got "
+                f"{type(include_mse).__name__}")
+        if covar_params is not None and include_mse is not None:
+            raise ValueError(
+                "Pass either covar_params or include_mse, not both")
 
-        stats_obj = StatisticsClass(self, alpha=alpha)
+        _ = self.info_opt
+        if self.num_data_total <= self.num_params:
+            raise ValueError(
+                "Student-t confidence intervals require more observed entries "
+                "than optimized parameters "
+                f"(num_data_total={int(self.num_data_total)}, "
+                f"num_params={int(self.num_params)})")
+
+        if covar_params is None:
+            had_covar = hasattr(self, 'covar_params')
+            prev_covar = getattr(self, 'covar_params', None)
+            had_correl = hasattr(self, 'correl_params')
+            prev_correl = getattr(self, 'correl_params', None)
+            if include_mse is not None:
+                # [param_i unit * param_j unit], shape (num_params, num_params).
+                covar_params = self.get_covariance(include_mse=include_mse)
+            elif prev_covar is not None:
+                covar_params = prev_covar
+            else:
+                covar_params = self.get_covariance(include_mse=True)
+            if not set_self:
+                if had_covar:
+                    self.covar_params = prev_covar
+                elif hasattr(self, 'covar_params'):
+                    delattr(self, 'covar_params')
+                if had_correl:
+                    self.correl_params = prev_correl
+                elif hasattr(self, 'correl_params'):
+                    delattr(self, 'correl_params')
+
+        covar_raw = np.asarray(covar_params)
+        if covar_raw.dtype.kind not in ('i', 'u', 'f'):
+            raise TypeError("covar_params must be a real numeric 2D array")
+        # [param_i unit * param_j unit], shape (num_params, num_params).
+        covar_array = np.asarray(covar_raw, dtype=float)
+        expected_shape = (int(self.num_params), int(self.num_params))
+        if covar_array.shape != expected_shape:
+            raise ValueError(
+                f"covar_params must have shape {expected_shape}; got "
+                f"{covar_array.shape}")
+        if not np.all(np.isfinite(covar_array)):
+            raise ValueError("covar_params entries must be finite")
+        if np.any(np.diag(covar_array) < 0.0):
+            raise ValueError(
+                "covar_params diagonal variances must be non-negative")
+
+        stats_obj = StatisticsClass(self, alpha=alpha_val)
         intervals = stats_obj.get_intervals(
-            covar_params=covar_params, verbose=verbose, set_self=set_self)
+            covar_params=covar_array, verbose=verbose, set_self=set_self)
         if set_self:
             self.confid_intervals = stats_obj.confid_intervals
             # [parameter units], shape (num_params, 2).
