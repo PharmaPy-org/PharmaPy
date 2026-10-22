@@ -7,12 +7,13 @@ replicate mapping on multiset-union grids; per-measurement uncertainty
 scaling; validation messages; and caller-data isolation.
 
 Fixtures: an analytic first-order decay A -> B with an adiabatic
-temperature rise, whose states and rate sensitivities have closed forms,
-and a two-output model linear in its rate for closed-form generalized least
-squares (GLS). Expected values come from those closed forms and from
-hand-written layouts, never from estimator internals. Everything runs in
-milliseconds with PharmaPy's Levenberg-Marquardt (LM) solver; no optional
-backend is used.
+temperature rise, whose states and rate sensitivities have closed forms;
+a two-output model linear in its rate for closed-form generalized least
+squares (GLS); and the three-species kinetic network from Rawlings &
+Ekerdt (2002), Example 9.5, exercising the ``rawlings_9-5.ipynb`` workflow
+with ``estimate_parameters`` and ``get_confidence_intervals``. Expected
+values come from those closed forms, physical balances, and hand-written
+layouts, never from estimator internals.
 """
 
 import re
@@ -21,6 +22,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from scipy import stats
+from scipy.integrate import solve_ivp
 
 from PharmaPy.ParamEstim import (Experiment, Measurement,
                                  MultipleCurveResolution, ParameterEstimation)
@@ -2139,3 +2141,213 @@ def test_get_confidence_intervals_validates_inputs():
                   'entries than optimized parameters'):
         zero_dof_est.get_confidence_intervals(
             covar_params=np.array([[1.0]]), verbose=False)
+
+
+# Rawlings, J. B. & Ekerdt, J. G. (2002), Chemical Reactor Analysis and
+# Design Fundamentals, Nob Hill Publishing, Example 9.5 (also the reference
+# case in rawlings_9-5.ipynb for issues #346 and #347):
+#   rxn 1: N + A -> B + A   (r1 = k1 * c_A, N in zero-order excess)
+#   rxn 2: M + B -> A       (r2 = k2 * c_B, M in zero-order excess)
+#   rxn 3: AA + A -> C + A  (r3 = k3 * c_A, AA in zero-order excess)
+#   rxn 4: A -> D           (r4 = k4 * c_A)
+#   rxn 5: C -> S           (r5 = k5 * c_C)
+#   rxn 6: B + C -> V       (r6 = k6 * c_B * c_C)
+# Species k_1..k_5 have units [1/day]; bimolecular k_6 has units [L/(mol*day)].
+RAWLINGS_9_5_TRUE_RATES = np.array(
+    [2.0, 0.025, 1000.0, 0.25, 2.0, 7.5e-6]
+)  # [1/day, 1/day, 1/day, 1/day, 1/day, L/(mol*day)]
+# Initial guess theta_0 = log10(k_0) from rawlings_9-5.ipynb Cell 4.
+RAWLINGS_9_5_LOG10_SEED = np.array(
+    [0.8, -1.13, 3.15, -0.77, -0.16, -5.46]
+)  # [-], log10 of rate constants in their respective units
+RAWLINGS_9_5_INITIAL_CONC = {
+    'A': 1.0,  # [mol/L]
+    'B': 0.0,  # [mol/L]
+    'C': 0.0,  # [mol/L]
+}
+RAWLINGS_9_5_END_TIME_DAYS = 100.0  # [days], batch horizon in Cell 0
+RAWLINGS_9_5_NUM_SAMPLES = 51  # [-], uniform 2-day sampling count in Cell 0
+RAWLINGS_9_5_NOISE_REL_STD = 0.015  # [-], 1.5% relative Gaussian noise in Cell 1
+RAWLINGS_9_5_RNG_SEED = 0  # [-], deterministic PRNG seed in Cell 1
+# Diagonal residual weights in rawlings_9-5.ipynb Cell 4 balancing the
+# O(1) A, O(10) B, and O(500) C concentration scales.
+RAWLINGS_9_5_WEIGHT_DIAG = np.array(
+    [1.0, 1e2, 1e4]
+)  # [(L/mol)**2]
+RAWLINGS_9_5_ODE_TOL = 1e-6  # [-], BDF integration rtol and atol
+RAWLINGS_9_5_MAX_NFEV = 100  # [-], optimizer evaluation limit in Cell 4
+# With 1.5% relative noise on 51 samples, the four identifiable rate constants
+# (k1, k2, k4, k6) are recovered within 15% relative error; 0.20 bounds that.
+RAWLINGS_9_5_IDENTIFIABLE_RTOL = 0.20  # [-]
+# Because k3 and k5 are rapid (k3 = 1000 1/day, k5 = 2 1/day), species C is in
+# quasi-steady state (c_C approx (k3 / k5) * c_A) on the 2-day sampling grid,
+# so only the ratio log10(k3 / k5) = log10(500) is identifiable within 0.05.
+RAWLINGS_9_5_RATIO_LOG10_ATOL = 0.05  # [-]
+# In log10 space, identifiable parameters have 95% CI half-widths below
+# 0.1 decades, whereas the collinear pair (theta_3, theta_5) exceeds 0.5.
+RAWLINGS_9_5_WELL_DETERMINED_CI_MAX = 0.10  # [-], log10-decade half-width
+RAWLINGS_9_5_COLLINEAR_CI_MIN = 0.50  # [-], log10-decade half-width
+# In rawlings_9-5.ipynb Cell 6, J @ J.T has eigenvalues spanning from ~4.5 to
+# ~6.0e7 (condition number ~1.3e7 > 1e6), and its smallest eigenvalue mode is
+# aligned with the equal-perturbation direction (e_3 + e_5) / sqrt(2) that
+# leaves k_3 / k_5 invariant.
+RAWLINGS_9_5_HESSIAN_COND_MIN = 1e6  # [-], ill-conditioned J @ J.T threshold
+RAWLINGS_9_5_COLLINEAR_MODE_ATOL = 0.02  # [-], eigenvector component tolerance
+
+
+def solve_rawlings_9_5(log10_rates, time_days, exp_name, material_specs=None):
+    """Integrate the three-state ODE system of Rawlings & Ekerdt Example 9.5.
+
+    Parameters
+    ----------
+    log10_rates : array_like
+        Base-10 logarithms of rate constants ``(k_1, ..., k_6)`` [-], shape (6,),
+        where ``k_1..k_5`` are in [1/day] and ``k_6`` is in [L/(mol*day)].
+    time_days : numpy.ndarray
+        Sampling times [days], shape (n_times,).
+    exp_name : str
+        Experiment identifier indexing ``material_specs``.
+    material_specs : dict of str to dict of str to float, optional
+        Mapping from ``exp_name`` to initial molar concentrations [mol/L] of
+        species ``'A'``, ``'B'``, and ``'C'``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Simulated molar concentrations ``[c_A, c_B, c_C]`` [mol/L],
+        shape (n_times, 3).
+    """
+    rates = 10.0 ** np.asarray(log10_rates, dtype=float)  # [1/day or L/(mol*day)]
+    k1, k2, k3, k4, k5, k6 = rates
+    specs = material_specs[exp_name]
+    c_init = np.array(
+        [specs['A'], specs['B'], specs['C']], dtype=float
+    )  # [mol/L]
+    t_grid = np.asarray(time_days, dtype=float)  # [days]
+
+    def rhs(_t_days, conc_mol_l):
+        ca, cb, cc = conc_mol_l  # [mol/L]
+        dca_dt = k2 * cb - k4 * ca  # [mol/(L*day)]
+        dcb_dt = k1 * ca - k2 * cb - k6 * cb * cc  # [mol/(L*day)]
+        dcc_dt = k3 * ca - k5 * cc - k6 * cb * cc  # [mol/(L*day)]
+        return [dca_dt, dcb_dt, dcc_dt]
+
+    solution = solve_ivp(
+        rhs,
+        (float(t_grid[0]), float(t_grid[-1])),
+        c_init,
+        t_eval=t_grid,
+        method='BDF',
+        rtol=RAWLINGS_9_5_ODE_TOL,
+        atol=RAWLINGS_9_5_ODE_TOL,
+    )
+    if not solution.success:
+        raise RuntimeError(f'Rawlings 9.5 BDF solver failed: {solution.message}')
+    return solution.y.T
+
+
+def test_rawlings_9_5_collinear_parameter_estimation_and_confidence_intervals():
+    """End-to-end Rawlings & Ekerdt Example 9.5 workflow from rawlings_9-5.ipynb.
+
+    Exercises Measurement(x=..., y=..., unit_x=..., unit_y=...) with omitted
+    field, Experiment(name=..., author=..., measurements=..., args=...,
+    kwargs=...), ParameterEstimation(..., experiments=[experiment],
+    output_names=..., weight_matrix=...), estimate_parameters(), and
+    get_confidence_intervals() on the six-parameter kinetic network with
+    collinear quasi-steady-state parameters (k_3, k_5).
+    """
+    tdata = np.linspace(
+        0.0, RAWLINGS_9_5_END_TIME_DAYS, RAWLINGS_9_5_NUM_SAMPLES
+    )  # [days]
+    experimental_conditions = {'exp1': dict(RAWLINGS_9_5_INITIAL_CONC)}
+    true_log10_rates = np.log10(RAWLINGS_9_5_TRUE_RATES)  # [-]
+    conc_true = solve_rawlings_9_5(
+        true_log10_rates, tdata, 'exp1',
+        material_specs=experimental_conditions,
+    )  # [mol/L]
+
+    rng = np.random.RandomState(RAWLINGS_9_5_RNG_SEED)
+    noise_std = np.abs(conc_true) * RAWLINGS_9_5_NOISE_REL_STD  # [mol/L]
+    conc_noisy = conc_true + rng.normal(0.0, noise_std)  # [mol/L]
+
+    names_meas = ('A', 'B', 'C')
+    measurements = {
+        name: Measurement(x=tdata, y=val, unit_x='days', unit_y='mol/L')
+        for name, val in zip(names_meas, conc_noisy.T)
+    }
+    experiment = Experiment(
+        name='exp1',
+        author='James Rawlings/John Ekerdt',
+        measurements=measurements,
+        args=('exp1',),
+        kwargs={'material_specs': experimental_conditions},
+    )
+
+    weights = pd.DataFrame(
+        np.diag(RAWLINGS_9_5_WEIGHT_DIAG),
+        index=list(names_meas),
+        columns=list(names_meas),
+    )  # [(L/mol)**2]
+
+    estimator = ParameterEstimation(
+        solve_rawlings_9_5,
+        param_seed=RAWLINGS_9_5_LOG10_SEED,
+        experiments=[experiment],
+        output_names=list(names_meas),
+        weight_matrix=weights,
+    )
+    assert estimator.experim_names == ['exp1']
+
+    initial_cost = estimator.get_objective(RAWLINGS_9_5_LOG10_SEED)  # [-]
+    log_estim, cov, info = estimator.estimate_parameters(
+        max_nfev=RAWLINGS_9_5_MAX_NFEV, verbose=0)
+    ci = estimator.get_confidence_intervals(verbose=False)
+
+    assert info['success']
+    assert info['cost'] < initial_cost * 1e-5
+    assert info['jac'].shape == (
+        len(RAWLINGS_9_5_TRUE_RATES),
+        RAWLINGS_9_5_NUM_SAMPLES * len(names_meas),
+    )
+    assert cov.shape == (
+        len(RAWLINGS_9_5_TRUE_RATES), len(RAWLINGS_9_5_TRUE_RATES))
+
+    # Identifiable rate constants (k_1, k_2, k_4, k_6) and the quasi-steady-state
+    # ratio log10(k_3 / k_5) match the ground-truth values used to generate data.
+    k_estim = 10.0 ** log_estim  # [1/day or L/(mol*day)]
+    identifiable_indices = [0, 1, 3, 5]
+    np.testing.assert_allclose(
+        k_estim[identifiable_indices],
+        RAWLINGS_9_5_TRUE_RATES[identifiable_indices],
+        rtol=RAWLINGS_9_5_IDENTIFIABLE_RTOL,
+    )
+    true_log10_ratio = true_log10_rates[2] - true_log10_rates[4]  # [-]
+    fitted_log10_ratio = log_estim[2] - log_estim[4]  # [-]
+    assert fitted_log10_ratio == pytest.approx(
+        true_log10_ratio, abs=RAWLINGS_9_5_RATIO_LOG10_ATOL)
+
+    # Confidence intervals distinguish well-determined parameters from the
+    # collinear pair (theta_3, theta_5), and J @ J.T reflects the singular mode.
+    half_widths = {
+        name: 0.5 * float(bounds[1] - bounds[0])  # [-], log10 decades
+        for name, bounds in ci.items()
+    }
+    for param_name in ('theta_1', 'theta_2', 'theta_4', 'theta_6'):
+        assert half_widths[param_name] < RAWLINGS_9_5_WELL_DETERMINED_CI_MAX
+    for param_name in ('theta_3', 'theta_5'):
+        assert half_widths[param_name] > RAWLINGS_9_5_COLLINEAR_CI_MIN
+
+    hessian_approx = info['jac'] @ info['jac'].T  # [-]
+    assert np.linalg.cond(hessian_approx) > RAWLINGS_9_5_HESSIAN_COND_MIN
+    _, eigvecs = np.linalg.eigh(hessian_approx)  # [-]
+    softest_mode = eigvecs[:, 0]  # [-]
+    if softest_mode[2] < 0.0:
+        softest_mode = -softest_mode  # [-]
+    expected_collinear_mode = np.array(
+        [0.0, 0.0, np.sqrt(0.5), 0.0, np.sqrt(0.5), 0.0]
+    )  # [-]
+    np.testing.assert_allclose(
+        softest_mode,
+        expected_collinear_mode,
+        atol=RAWLINGS_9_5_COLLINEAR_MODE_ATOL,
+    )
