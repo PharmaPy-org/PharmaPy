@@ -215,10 +215,11 @@ def _experiment_with_wrapper(experiment: Experiment, name: str,
     Returns
     -------
     Experiment
-        New experiment with the same measurements and positional callback
-        arguments, and keywords equal to the experiment's own keywords plus
-        each wrapper keyword that the experiment binds neither positionally
-        (through ``args``) nor by keyword.
+        New experiment with the same measurements, positional callback
+        arguments, and metadata (``name``, ``author``, and ``date``), and
+        keywords equal to the experiment's own keywords plus each wrapper
+        keyword that the experiment binds neither positionally (through
+        ``args``) nor by keyword.
 
     Raises
     ------
@@ -263,7 +264,8 @@ def _experiment_with_wrapper(experiment: Experiment, name: str,
                 f"SetParamEstimation also supplies through "
                 f"{WRAPPER_ARGUMENTS[key]}; set it in one place only")
     return Experiment(dict(experiment.measurements), args=experiment.args,
-                      kwargs=kwargs)
+                      kwargs=kwargs, name=experiment.name,
+                      author=experiment.author, date=experiment.date)
 
 
 class SimulationExec:
@@ -921,9 +923,10 @@ class SimulationExec:
         experiment. Callback keywords are passed as a dictionary keyed by
         experiment name for named legacy experiments and as a list in
         ``x_data`` order otherwise. For ``Experiment`` input, new
-        ``Experiment`` objects with the same measurements and ``args`` are
-        built whose ``kwargs`` are the experiment's own keywords plus the
-        wrapper keywords it binds neither positionally nor by keyword. Its
+        ``Experiment`` objects with the same measurements, ``args`` and
+        metadata (``name``, ``author``, and ``date``) are built whose
+        ``kwargs`` are the experiment's own keywords plus the wrapper
+        keywords it binds neither positionally nor by keyword. Its
         ``args`` are bound to the unit's ``paramest_wrapper`` signature
         after the parameters and time grid, so ``args=(phase_modifier,)``
         binds ``modify_phase`` of the reactor wrappers. The caller's
