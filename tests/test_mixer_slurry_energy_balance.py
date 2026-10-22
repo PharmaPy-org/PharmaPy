@@ -466,7 +466,9 @@ def test_mixer_energy_balance_rejects_unknown_solids_inlet(thermo_path):
         thermo_path, temp_common, temp_common
     )
     unsupported_inlet = DynamicCollector()
-    unsupported_inlet.Phases = [
+    # The collector's internal phase installation gives it Liquid_1 and
+    # Solid_1; its public Phases setter rejects user charges (#459).
+    unsupported_inlet._set_phases([
         LiquidPhase(
             thermo_path,
             mass=1.0,  # [kg]
@@ -478,7 +480,7 @@ def test_mixer_energy_balance_rejects_unknown_solids_inlet(thermo_path):
             mass_frac=SOLID_MASS_FRAC,  # [-]
             kv=KV,
         ),
-    ]
+    ])
     test_mixer = Mixer()
     test_mixer.Inlets = [mixer.Inlets[0], unsupported_inlet]
 

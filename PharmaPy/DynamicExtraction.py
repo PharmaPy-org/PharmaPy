@@ -289,7 +289,32 @@ class DynamicExtractor:
         return self._Inlet
 
     @Inlet.setter
-    def Inlet(self, inlet):
+    def Inlet(self, inlet: dict) -> None:
+        """Assign the feed and/or solvent inlet streams.
+
+        Parameters
+        ----------
+        inlet : dict
+            Mapping with the key ``'feed'``, ``'solvent'`` or both, each to
+            a liquid stream with molar flow [mol/s], temperature [K] and
+            mole fractions [-].
+
+        Raises
+        ------
+        KeyError
+            If ``inlet`` has neither ``'feed'`` nor ``'solvent'``.
+        TypeError
+            If ``inlet`` is not a dictionary.
+
+        Notes
+        -----
+        The assignment is merged into the held inlets: each key of
+        ``inlet`` replaces the stream held under it, and keys it does not
+        name are kept, so ``{'solvent': s}`` after ``{'feed': f}`` keeps
+        ``f``. A flowsheet ``Connection`` assigns ``{'feed': stream}``, so
+        a repeated transfer replaces the earlier feed. Earlier releases
+        kept the held stream when a key was assigned again (issue #449).
+        """
         if isinstance(inlet, dict):
             if 'feed' not in inlet.keys() and 'solvent' not in inlet.keys():
                 raise KeyError(
@@ -302,7 +327,7 @@ class DynamicExtractor:
                 "both 'feed' or 'solvent' as keys and "
                 "LiquidStreams as values")
 
-        self.inlets = inlet | self.inlets
+        self.inlets = self.inlets | inlet  # the new streams win
         self._Inlet = self.inlets
 
     def get_stage_dimensions(self, di_states, rhos):

@@ -118,6 +118,61 @@ def _finite_steady_residual(concentration: float,
     return value
 
 
+# Numeric attributes that define a held phase's charge: amounts [kg] and
+# [mol], volume [m**3], temperature [K], pressure [Pa], fractions [-],
+# concentrations [kg/m**3] and [mol/L], population [#/um] on its grid [um],
+# moments [m**n] and shape factor [-].
+_PHASE_STATE_FIELDS = ('mass', 'moles', 'vol', 'temp', 'pres', 'mass_frac',
+                       'mole_frac', 'mass_conc', 'mole_conc', 'distrib',
+                       'x_distrib', 'moments', 'kv')
+
+
+def _phase_state(phase) -> dict:
+    """Record the charge-defining values of a phase.
+
+    Parameters
+    ----------
+    phase : object
+        Liquid or solid phase.
+
+    Returns
+    -------
+    dict
+        Copies of the ``_PHASE_STATE_FIELDS`` values the phase defines, as
+        float arrays in their own units, or None when it lacks one.
+    """
+    state = {}
+    for field in _PHASE_STATE_FIELDS:
+        value = getattr(phase, field, None)
+        state[field] = (None if value is None
+                        else np.array(value, dtype=float))
+    return state
+
+
+def _same_phase_state(state: dict, other: dict) -> bool:
+    """Return whether two recorded phase states are identical.
+
+    Parameters
+    ----------
+    state, other : dict
+        Records returned by ``_phase_state``.
+
+    Returns
+    -------
+    bool
+        True if every field is missing in both or has the same shape and
+        values in both, NaN matching NaN.
+    """
+    for field in _PHASE_STATE_FIELDS:
+        value, reference = state[field], other[field]
+        if value is None or reference is None:
+            if value is not reference:
+                return False
+        elif not np.array_equal(value, reference, equal_nan=True):
+            return False
+    return True
+
+
 class _BaseCryst:
     """Store shared configuration for crystallizer balance models.
 
@@ -333,8 +388,7 @@ class _BaseCryst:
                 self.Slurry.Phases = self._Phases
 
         if self.Slurry is not None:
-            self.__original_phase_dict__ = [
-                copy.deepcopy(phase.__dict__) for phase in self.Slurry.Phases]
+            self.__original_phase_dict__ = self._reset_record()
 
             self.vol_slurry = copy.copy(self.Slurry.vol)
             if isinstance(self.vol_slurry, np.ndarray):
@@ -355,10 +409,7 @@ class _BaseCryst:
             self.target_ind = np.where(name_bool)[0][0]
 
             # Save safe copy of original phases
-            self.__original_phase__ = [copy.deepcopy(self.Liquid_1),
-                                       copy.deepcopy(self.Solid_1)]
-
-            self.__original_phase__ = copy.deepcopy(self.Slurry)
+            self.__original_phase__ = self._charge_snapshot()
 
             self.kron_jtg = np.zeros_like(self.Liquid_1.mass_frac)
             self.kron_jtg[self.target_ind] = 1
@@ -514,6 +565,120 @@ class _BaseCryst:
                 'dim': self.num_distr,
                 'index': list(range(self.num_distr)),
                 'units': 'm**3/m**3'}
+
+    def _kept_from_charge(self, phase) -> bool:
+        """Return whether a held phase keeps its charge-time records.
+
+        Parameters
+        ----------
+        phase : object
+            Phase held in ``Slurry.Phases`` during a ``Phases`` assignment.
+
+        Returns
+        -------
+        bool
+            True only if (1) the assignment is a connection re-transfer
+            that kept ``phase`` (``Connection._assign_batch_phases`` lists
+            the phases it keeps in ``_retained_by_transfer`` for that one
+            assignment) and (2) ``phase`` is unchanged since the end of
+            the unit's last solve (``_solved_states``).
+
+        Notes
+        -----
+        A solve updates the held phases in place: a seed grows and the
+        liquid is depleted. A flowsheet re-solve replaces only the
+        transferred phases and keeps the others, such as the user's seed
+        (issue #441), then assigns ``Phases`` again. Recording a kept phase
+        in its current state would make the previous solve's product the
+        user's charge. A kept phase that the solve changed therefore keeps
+        the records taken when it was charged, while a phase the user
+        edited after the solve, and any phase of a direct user assignment,
+        is recorded afresh.
+        """
+        retained = getattr(self, '_retained_by_transfer', ())
+        if not any(phase is kept for kept in retained):
+            return False
+        solved = next((state for held, state
+                       in getattr(self, '_solved_states', ())
+                       if held is phase), None)
+        return solved is not None and _same_phase_state(_phase_state(phase),
+                                                        solved)
+
+    def _charge_snapshot(self) -> Slurry:
+        """Copy the initial charge for raw-material accounting.
+
+        Returns
+        -------
+        Slurry
+            Deep copy of ``Slurry``, the snapshot that
+            ``SimulationExec.get_holdup`` reports per phase, with amounts
+            [kg], fractions [-], temperature [K] and volume [m**3]. A phase
+            that keeps its charge-time records (see
+            ``_kept_from_charge``) is represented by its copy from the
+            previous snapshot instead of its current state.
+
+        Notes
+        -----
+        The pairs of held phases and their copies are kept in
+        ``_charge_sources`` for the next snapshot (issue #455 follow-up).
+        """
+        previous = getattr(self, '_charge_sources', ())
+        held = list(self.Slurry.Phases)
+        originals = [next((copied for phase, copied in previous
+                           if phase is current), None)
+                     if self._kept_from_charge(current) else None
+                     for current in held]
+        if all(original is None for original in originals):
+            snapshot = copy.deepcopy(self.Slurry)
+        else:
+            snapshot = Slurry()
+            snapshot.Phases = [
+                copy.deepcopy(current) if original is None else original
+                for current, original in zip(held, originals)]
+        self._charge_sources = list(zip(held, snapshot.Phases))
+        return snapshot
+
+    def _reset_record(self) -> list:
+        """Record the held phases' states that ``reset`` restores.
+
+        Returns
+        -------
+        list of dict
+            One deep copy of each held phase's ``__dict__``, in
+            ``Slurry.Phases`` order. A phase that keeps its charge-time
+            records (see ``_kept_from_charge``) keeps its previous copy
+            instead of its current state.
+
+        Notes
+        -----
+        The pairs of held phases and their copies are kept in
+        ``_reset_sources``. Earlier releases recorded every phase again on
+        each assignment, so after a flowsheet re-transfer ``reset()`` and a
+        ``reset_states=True`` solve restored the previous run's crystals
+        instead of the user's seed (issue #466).
+        """
+        previous = getattr(self, '_reset_sources', ())
+        records = []
+        for phase in self.Slurry.Phases:
+            kept = (next((record for held, record in previous
+                          if held is phase), None)
+                    if self._kept_from_charge(phase) else None)
+            records.append(copy.deepcopy(phase.__dict__) if kept is None
+                           else kept)
+        self._reset_sources = list(zip(self.Slurry.Phases, records))
+        return records
+
+    def _record_solved_states(self) -> None:
+        """Record the held phases as the solve left them.
+
+        Notes
+        -----
+        ``_kept_from_charge`` compares a kept phase with this record, so a
+        phase edited after the solve is recorded afresh at the next
+        ``Phases`` assignment.
+        """
+        self._solved_states = [(phase, _phase_state(phase))
+                               for phase in (self.Phases or ())]
 
     def reset(self) -> None:
         """Restore the original phase and slurry inventories for a new run.
@@ -1455,6 +1620,7 @@ class _BaseCryst:
             self.Kinetics.set_params(nominal_params)
 
         self.retrieve_results(time, states)
+        self._record_solved_states()
 
         # ---------- Organize sensitivity
         if eval_sens:
@@ -3508,6 +3674,30 @@ class SemibatchCryst(MSMPR):
                  rad_zero=0, reset_states=False, h_conv=1000, vol_ht=None,
                  basis='mass_conc', jac_type=None, num_interp_points=3,
                  state_events=None, param_wrapper=None):
+        """Create a semibatch crystallizer.
+
+        Parameters
+        ----------
+        target_comp, vol_tank, mask_params, method, scale, controls,
+        adiabatic, rad_zero, reset_states, h_conv, vol_ht, basis, jac_type,
+        num_interp_points, state_events, param_wrapper
+            As for :class:`MSMPR`; ``vol_tank`` is the vessel volume
+            [m**3] and ``h_conv`` the liquid-side heat transfer
+            coefficient [W/m**2/K].
+
+        Notes
+        -----
+        The model is inherited from :class:`MSMPR`, but the unit
+        accumulates its feed and its ``Outlet`` is its ``Slurry`` holdup
+        (total amounts [kg], population [#/um]), not a stream. It
+        therefore declares ``oper_mode = 'Semibatch'`` and
+        ``is_continuous = False`` instead of the inherited continuous
+        flags (issue #447). A flowsheet connection then hands its final
+        holdup to a batch unit or ``Mixer`` and rejects a continuous
+        successor; a connected continuous source becomes its ``Inlet``;
+        and ``SimulationExec.GetLabor`` counts it as a batch unit. No
+        crystallizer method reads these flags.
+        """
 
         super().__init__(target_comp, mask_params,
                          method, scale, vol_tank,
@@ -3516,6 +3706,9 @@ class SemibatchCryst(MSMPR):
                          h_conv, vol_ht, basis,
                          jac_type, num_interp_points, state_events,
                          param_wrapper)
+
+        self.oper_mode = 'Semibatch'
+        self.is_continuous = False
 
     def material_balances(self, time: float, params: "np.ndarray | None",
                           u_inputs: dict, rhos: "Sequence[Sequence[float | None]]",

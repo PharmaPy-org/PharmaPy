@@ -14,7 +14,9 @@ from PharmaPy.StatsModule import StatisticsClass
 
 from PharmaPy.Connections import (Connection, convert_str_flowsheet,
                                   get_inputs_new, topological_bfs)
-from PharmaPy.Errors import PharmaPyNonImplementedError
+from PharmaPy.NameAnalysis import held_state_rows
+from PharmaPy.Errors import (PharmaPyNonImplementedError, PharmaPyTypeError,
+                             PharmaPyValueError)
 from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_object
 
 from PharmaPy.Commons import trapezoidal_rule, check_steady_state
@@ -213,10 +215,11 @@ def _experiment_with_wrapper(experiment: Experiment, name: str,
     Returns
     -------
     Experiment
-        New experiment with the same measurements and positional callback
-        arguments, and keywords equal to the experiment's own keywords plus
-        each wrapper keyword that the experiment binds neither positionally
-        (through ``args``) nor by keyword.
+        New experiment with the same measurements, positional callback
+        arguments, and metadata (``name``, ``author``, and ``date``), and
+        keywords equal to the experiment's own keywords plus each wrapper
+        keyword that the experiment binds neither positionally (through
+        ``args``) nor by keyword.
 
     Raises
     ------
@@ -261,7 +264,8 @@ def _experiment_with_wrapper(experiment: Experiment, name: str,
                 f"SetParamEstimation also supplies through "
                 f"{WRAPPER_ARGUMENTS[key]}; set it in one place only")
     return Experiment(dict(experiment.measurements), args=experiment.args,
-                      kwargs=kwargs)
+                      kwargs=kwargs, name=experiment.name,
+                      author=experiment.author, date=experiment.date)
 
 
 class SimulationExec:
@@ -283,6 +287,10 @@ class SimulationExec:
             ``PharmaPy.Connections.topological_bfs`` cannot schedule every
             unit, including units that appear only as successors. The
             message names the unscheduled units.
+        PharmaPyTypeError
+            If ``flowsheet`` is neither a dict nor a str, such as a list or
+            None. The message names the received type and the two accepted
+            forms (issue #448). It is a ``TypeError``.
         TypeError
             If a successor collection is a set or frozenset.
 
@@ -306,18 +314,22 @@ class SimulationExec:
             graph = flowsheet
         elif isinstance(flowsheet, str):
             graph = convert_str_flowsheet(flowsheet)
+        else:
+            raise PharmaPyTypeError(
+                "flowsheet must be a dict mapping each unit name to its "
+                "successors, such as {'R01': ['R02'], 'R02': []}, or a "
+                "linear string such as 'R01 --> R02'; got "
+                f"{type(flowsheet).__name__}.")
 
         self.graph = graph
         self.in_degree, self.execution_names = topological_bfs(graph)
 
-        # Raw-material provenance, kept across SolveFlowsheet calls (see
+        # Transfer provenance, kept across SolveFlowsheet calls (see
         # _transfer_to_neighbors): per (source, destination) edge, the latest
         # transfer as (transferred matter, source result, destination result,
-        # destination first profile segment), all taken at transfer time;
-        # and the transferred copies the destination still holds plus the
-        # latest one.
+        # destination first profile segment, phases the transferred matter
+        # carried), all taken at transfer time.
         self._transfers = {}
-        self._transfer_history = {}
 
         # Residual counters cover every node, including successor-only units.
         if len(self.execution_names) < len(self.in_degree):
@@ -354,49 +366,99 @@ class SimulationExec:
 
         Notes
         -----
-        Each transfer also updates the persistent raw-material provenance,
-        which survives later ``SolveFlowsheet`` calls. ``_transfers[edge]``
-        for ``edge = (name, successor)`` is overwritten with a tuple of the
+        Each transfer updates the persistent provenance, which survives
+        later ``SolveFlowsheet`` calls. ``_transfers[edge]`` for
+        ``edge = (name, successor)`` is overwritten with a tuple of the
         transferred matter object, the source's ``result``, the
         destination's ``result`` (or None) and the destination's first
-        retained profile segment (``profiles_runs[0]``, or None), all taken
-        at transfer time. ``_transfer_history[edge]`` keeps only the
-        transferred copies the destination still holds, plus the latest
-        one, so discarded copies are freed while copies a ``Mixer`` keeps
-        appending remain countable (issue #441). Only
-        :meth:`_consumed_duration` reads these records.
+        retained profile segment (``profiles_runs[0]``, or None) and the
+        connection's ``transferred_phases`` (the phases a transferred cake
+        or slurry carried), all taken at transfer time. The previously
+        recorded matter and phases of the edge are handed to the
+        ``Connection`` as ``replaced_matter`` and ``replaced_phases``, so a
+        repeated or partial solve replaces the destination's earlier copy
+        instead of adding another (issue #441), while the destination's
+        independent inputs are kept. Earlier copies are then no longer
+        referenced and can be freed. :meth:`_consumed_duration` reads these
+        records.
         """
         # Successor-only units are graph nodes without an adjacency entry.
         for uo_next in self.graph.get(name, ()):
             if pick_units is not None and uo_next not in pick_units:
                 continue
 
+            edge = (name, uo_next)
+            previous = self._transfers.get(edge)
             connection = Connection(
                 source_uo=getattr(self, name),
-                destination_uo=getattr(self, uo_next))
+                destination_uo=getattr(self, uo_next),
+                replaced_matter=None if previous is None else previous[0],
+                replaced_phases=() if previous is None else previous[4],
+                source_name=name, destination_name=uo_next)
 
             conn_name = 'CONN%i' % count
             connections[conn_name] = connection
 
             connection.transfer_data()
-            edge = (name, uo_next)
             source, destination = getattr(self, name), getattr(self, uo_next)
             # Results are compared by identity only, so untimed (algebraic)
             # results such as a BatchExtractor's are recorded safely.
             self._transfers[edge] = (connection.transferred_matter,
                                      source.result,
                                      getattr(destination, 'result', None),
-                                     self._first_profile(destination))
-            held = self._used_inputs(destination)
-            self._transfer_history[edge] = [
-                matter for matter in self._transfer_history.get(edge, [])
-                if any(matter is item for item in held)
-                and matter is not connection.transferred_matter] + [
-                    connection.transferred_matter]
+                                     self._first_profile(destination),
+                                     connection.transferred_phases)
 
             count += 1
 
         return count
+
+    def _check_fan_out(self) -> None:
+        """Reject graph units whose single outlet feeds several successors.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If any unit lists two or more successors. The message names
+            every such unit with its successors, in graph declaration
+            order, and says to connect one successor only, because
+            splitting one outlet among several units is not implemented
+            (per-edge routing, issue #340). ``NotImplementedError`` is
+            used, as for recycles in ``__init__``, because the topology is
+            a valid process intent that PharmaPy cannot yet model, not a
+            malformed input.
+
+        Notes
+        -----
+        ``Connection.FeedConnection`` hands every successor a copy of the
+        source's whole outlet, and no split specification exists, so each
+        branch would receive the full flow [kg/s] or inventory [kg] and the
+        flowsheet would create mass (issue #437). The count is of
+        adjacency entries, so a successor listed twice, as in
+        ``{'A': ['B', 'B']}``, is rejected too: it would receive two full
+        copies of the outlet. ``topological_bfs`` accepts and schedules
+        such graphs, so ``__init__``, ``execution_names`` and the
+        flowsheet diagram remain available for them.
+
+        The whole graph is checked, irrespective of ``pick_units``: a
+        unit transfers its outlet whenever it is picked or already solved,
+        so a partial solve would duplicate the outlet as soon as it, or a
+        later call, reaches a branch.
+        """
+        # str() keeps names readable for NumPy string successor arrays.
+        fanned_out = {str(name): [str(successor) for successor in successors]
+                      for name, successors in self.graph.items()
+                      if len(successors) > 1}
+        if fanned_out:
+            details = '; '.join(f'{name!r} feeds {successors}'
+                                for name, successors in fanned_out.items())
+            raise PharmaPyNonImplementedError(
+                'Flowsheet units connect one outlet to several successors: '
+                f'{details}. Every successor would receive a full copy of '
+                'the outlet stream, duplicating its mass, because PharmaPy '
+                'has no stream-split contract. Connect each of these units '
+                'to one successor only; splitting an outlet among several '
+                'units (per-edge routing, issue #340) is not supported yet.')
 
     def SolveFlowsheet(self, kwargs_run=None, pick_units=None, verbose=True,
                        steady_state_di=None, tolerances_ss=None, ss_time=0):
@@ -406,13 +468,18 @@ class SimulationExec:
         The flowsheet is executed in topological order. Unit operations listed
         in ``pick_units`` are solved before their output data are transferred
         to selected graph successors. Units not selected in ``pick_units`` can
-        still transfer existing output data when already solved.
+        still transfer existing output data when already solved. A transfer
+        replaces the copy the previous transfer on the same edge handed to
+        the destination and keeps the destination's own inputs, so repeated
+        and partial solves do not accumulate connected inputs (issue #441;
+        see :meth:`_transfer_to_neighbors`).
 
         Parameters
         ----------
         kwargs_run : dict, optional
             Keyword arguments passed to each unit operation ``solve_unit`` call,
-            keyed by unit operation name.
+            keyed by unit operation name, in the units each ``solve_unit``
+            documents (for example ``runtime`` [s]).
         pick_units : sequence of str, optional
             Unit operation names to solve. If omitted, all unit operations in
             the execution order are solved.
@@ -420,18 +487,60 @@ class SimulationExec:
             If true, print progress messages for each solved unit operation.
         steady_state_di : dict, optional
             Steady-state event configuration keyed by unit operation name.
+            Each value holds keyword arguments of
+            ``PharmaPy.Commons.check_steady_state``, such as ``time_stop``
+            [s], ``tau`` [s], ``num_tau`` [-] and ``threshold`` (in the
+            units of the state derivatives' norms); missing ``time_stop``
+            and ``tau`` are filled in (see Notes). Ignored for a ``Mixer``.
         tolerances_ss : dict, optional
-            Reserved steady-state tolerance mapping.
+            Reserved; accepted for API compatibility and not read.
         ss_time : float, optional
-            Initial steady-state time horizon accumulator.
+            Initial value [s] of the residence-time accumulator used as the
+            default steady-state ``time_stop``; default 0 s.
 
         Returns
         -------
         None
-            Results are stored on ``time_processing``, ``result``, and
+            Results are stored on ``time_processing`` (time span [s] of each
+            solved unit with a timed result, keyed by name), ``result``, and
             ``connections`` attributes.
 
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            Before any unit is solved, if a unit's outlet feeds several
+            successors, which would each receive the full outlet (issue
+            #437); see :meth:`_check_fan_out`.
+        PharmaPyValueError
+            Before any unit is solved, if a unit other than a ``Mixer`` is
+            fed by several units, whose streams it would replace, drop or
+            stack unmixed (issue #444); see :meth:`_check_fan_in`.
+        PharmaPySpecificationError
+            After a source is solved and before its outlet is transferred,
+            if the source or its successor lacks the attributes the
+            connection reads (issue #445); see
+            ``PharmaPy.Connections.Connection._check_contract``.
+        PharmaPyValueError
+            After a source is solved and before its outlet is transferred,
+            if its successor cannot take the outlet's amount basis: a
+            holdup [kg] for a continuous unit or ``DynamicCollector``, or a
+            stream [kg/s] for a batch unit (issue #436), or a stream for a
+            semibatch unit without an initial charge, or a holdup for a
+            semibatch unit charged by the user (issue #438); see
+            ``PharmaPy.Connections.Connection._check_route``.
+
+        Notes
+        -----
+        For each picked unit listed in ``steady_state_di`` (except a
+        ``Mixer``), its residence time ``tau`` [s] from ``_get_tau`` (0 s if
+        the unit has none) is added to ``ss_time`` [s]. The running total
+        and ``tau`` become the defaults of ``time_stop`` and ``tau`` in the
+        unit's ``steady_state_di`` entry, which is updated in place; a
+        ``check_steady_state`` event is appended to the unit's
+        ``state_event_list``, and ``any_event=False`` is passed to its
+        ``solve_unit`` (and stored in its ``kwargs_run`` entry, if any).
         """
+        self._check_fan_out()
 
         if kwargs_run is None:
             kwargs_run = {}
@@ -445,13 +554,14 @@ class SimulationExec:
         if tolerances_ss is None:
             tolerances_ss = {}
 
+        self._check_fan_in()
+
         time_processing = {}
 
         # Run loop
         connections = {}
         count = 1
 
-        # ss_time = 0
         for ind, name in enumerate(self.execution_names):
             instance = getattr(self, name)
 
@@ -471,18 +581,17 @@ class SimulationExec:
                 if name in steady_state_di:
                     kw_ss = steady_state_di[name]
 
-                    tau = 0
+                    tau = 0  # [s], no residence time without _get_tau
                     if hasattr(instance, '_get_tau'):
-                        tau = instance._get_tau()
+                        tau = instance._get_tau()  # [s]
 
-                    ss_time += tau
+                    ss_time += tau  # [s], cumulative residence time
 
                     if instance.__class__.__name__ == 'Mixer':
                         pass
                     else:
-                        defaults = {'time_stop': ss_time,
-                                    # 'threshold': 1e-6,
-                                    'tau': tau}
+                        defaults = {'time_stop': ss_time,  # [s]
+                                    'tau': tau}  # [s]
 
                         for key, val in defaults.items():
                             kw_ss.setdefault(key, val)
@@ -493,11 +602,9 @@ class SimulationExec:
                                     'kwargs': kw_ss
                                     }
 
-                        # instance.state_event_list = [ss_event]
                         instance.state_event_list.append(ss_event)
                         kwargs_uo['any_event'] = False
 
-                # check_modeling_objects(instance, name)
                 instance.solve_unit(**kwargs_uo)
 
                 uo_type = instance.__module__
@@ -513,13 +620,14 @@ class SimulationExec:
                 count = self._transfer_to_neighbors(
                     name, connections, count, pick_units)
 
-                # Processing times
-                if hasattr(instance.result, 'time'):
+                # Processing times; steady-state units such as a flash
+                # publish no timed result.
+                if hasattr(getattr(instance, 'result', None), 'time'):
                     time_prof = instance.result.time
-                    time_processing[name] = time_prof[-1] - time_prof[0]
+                    time_processing[name] = time_prof[-1] - time_prof[0]  # [s]
 
             # instance is already solved, pass data to connection
-            elif isinstance(instance.outputs, dict):
+            elif isinstance(getattr(instance, 'outputs', None), dict):
                 count = self._transfer_to_neighbors(
                     name, connections, count, pick_units)
 
@@ -527,6 +635,153 @@ class SimulationExec:
 
         self.result = SimulationResult(self)
         self.connections = connections
+
+    def _check_fan_in(self) -> None:
+        """Reject non-Mixer units that receive streams from several units.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a unit other than a ``Mixer`` has two or more distinct
+            predecessors. The message names every such unit, in order of
+            first appearance as a successor, with its class and its
+            predecessors in graph declaration order, and gives the remedy
+            for each (see :meth:`_fan_in_remedy`): combine predecessors of
+            the same amount basis in a ``Mixer`` first, or, for a semibatch
+            unit fed by a holdup and a stream or a ``DynamicExtractor``,
+            connect one input and assign the other directly on the unit.
+            ``ValueError`` is used because the flowsheet specification is
+            inconsistent with a destination that does not mix its inlets,
+            and the remedies already exist in PharmaPy.
+        AttributeError
+            If such a destination has not been assigned to the executor,
+            as when ``SolveFlowsheet`` reaches an unassigned unit. An
+            unassigned predecessor does not prevent the
+            ``PharmaPyValueError``; its amount basis is unknown.
+
+        Notes
+        -----
+        Only a ``Mixer`` combines the streams it receives into one mass- and
+        energy-balanced mixture: ``Connection.PassPhases`` appends each
+        transfer to its ``Inlets``. Any other destination would replace
+        its ``Inlet`` or ``Phases`` with each further transfer (a
+        semibatch unit replaces the feed of a stream or the charge it
+        received from a holdup, issue #438), or, for a ``BatchCryst`` or
+        ``Drying`` unit, stack the transferred phases into a holdup list
+        that is not a mixture of the feeds (a ``Slurry`` replaces a
+        ``BatchCryst``'s phases instead), so a predecessor's flow [kg/s]
+        or inventory [kg] would be dropped or left unmixed (issue #444).
+        A ``Mixer`` is identified by its class name, as in
+        ``Connection.PassPhases``. Predecessors are counted once each, so
+        a duplicated adjacency entry is left to :meth:`_check_fan_out`.
+
+        The whole graph is checked, irrespective of ``pick_units``: an
+        already solved predecessor transfers whenever its destination is
+        picked, so a partial solve could still replace a stream.
+        """
+        predecessors = {}
+        for name, successors in self.graph.items():
+            for successor in successors:
+                # str() keeps names readable for NumPy string arrays.
+                sources = predecessors.setdefault(str(successor), [])
+                if str(name) not in sources:
+                    sources.append(str(name))
+
+        merged = {}
+        for name, sources in predecessors.items():
+            if len(sources) > 1:
+                unit_class = type(getattr(self, name)).__name__
+                if unit_class != 'Mixer':
+                    merged[name] = (unit_class, sources)
+        if merged:
+            details = '; '.join(
+                f'{name!r} ({unit_class}) receives {sources}'
+                for name, (unit_class, sources) in merged.items())
+            remedies = {name: self._fan_in_remedy(name, sources)
+                        for name, (_, sources) in merged.items()}
+            mixable = [name for name, remedy in remedies.items()
+                       if remedy is None]
+            if mixable and len(mixable) == len(merged):
+                advice = ('Connect the predecessors to a Mixer and the '
+                          'Mixer to the unit.')
+            else:
+                advice = ' '.join(
+                    ([f'Connect the predecessors of {mixable} to a Mixer '
+                      'and the Mixer to the unit.'] if mixable else [])
+                    + [remedy for remedy in remedies.values()
+                       if remedy is not None])
+            raise PharmaPyValueError(
+                'Flowsheet units that are not a Mixer are fed by several '
+                f'units: {details}. Only a Mixer combines several inlets '
+                'into one balanced mixture; any other unit would keep '
+                'only one transferred stream, or stack them unmixed. '
+                f'{advice}')
+
+    def _fan_in_remedy(self, name: str, sources: Sequence[str]
+                       ) -> Optional[str]:
+        """Return the remedy for a non-Mixer unit fed by several units.
+
+        Parameters
+        ----------
+        name : str
+            Destination unit name.
+        sources : sequence of str
+            Its predecessors, in graph declaration order.
+
+        Returns
+        -------
+        str or None
+            None when a ``Mixer`` of the predecessors is the remedy; else
+            the sentence for the destination:
+
+            * a ``DynamicExtractor``, whose connected input is its
+              ``'feed'``: mixing the feed with the solvent would remove the
+              countercurrent contact the unit models;
+            * a ``DynamicCollector`` with a predecessor known to hand over
+              a holdup [kg]: it collects streams only, so the holdup is
+              discharged through a ``BatchToFlowConnector`` first;
+            * any other unit whose predecessors are known to hand over a
+              holdup [kg] and a stream [kg/s]: a ``Mixer`` cannot mix an
+              inventory with a flow rate, so one input is connected and
+              the other assigned directly (the charge through ``Phases``,
+              the feed through ``Inlet``), whatever the unit's current
+              ``oper_mode`` (an ``Evaporator`` becomes semibatch once it
+              has an ``Inlet``).
+
+        Notes
+        -----
+        A predecessor's basis is its ``is_continuous`` flag. It is unknown
+        for an unassigned predecessor or one that does not declare it yet,
+        such as a ``Mixer`` fed only through the flowsheet; with any basis
+        unknown, the bases are not known to differ, and the ``Mixer``
+        remedy is given unless a known holdup feeds a ``DynamicCollector``.
+        """
+        destination = getattr(self, name)
+        unit_class = type(destination).__name__
+        if unit_class == 'DynamicExtractor':
+            return (f"{name!r} (DynamicExtractor) takes one connected "
+                    "input, its 'feed' Inlet; mixing the feed with the "
+                    'solvent would remove the countercurrent contact. '
+                    'Connect the feed source and assign the solvent '
+                    f"directly: {name}.Inlet = {{'solvent': stream}}.")
+        flags = [getattr(getattr(self, source, None), 'is_continuous', None)
+                 for source in sources]
+        known = [bool(flag) for flag in flags if flag is not None]
+        if unit_class == 'DynamicCollector':
+            if False in known:
+                return (f'{name!r} (DynamicCollector) collects streams '
+                        '[kg/s] only: discharge each holdup [kg] through a '
+                        'BatchToFlowConnector, then combine the streams in '
+                        'a Mixer and connect the Mixer to the collector.')
+            return None
+        if len(known) == len(flags) and len(set(known)) > 1:
+            return (f'{name!r} ({unit_class}) takes one connected input: a '
+                    'stream [kg/s] as its feed (Inlet) or a holdup [kg] as '
+                    'its initial charge (Phases), and a Mixer cannot mix a '
+                    'holdup with a stream. Connect one predecessor and '
+                    'assign the other input directly on the unit: the '
+                    'charge through Phases or the feed through Inlet.')
+        return None
 
     def SetParamEstimation(self, x_data, y_data=None, y_spectra=None,
                            fit_spectra=False,
@@ -668,9 +923,10 @@ class SimulationExec:
         experiment. Callback keywords are passed as a dictionary keyed by
         experiment name for named legacy experiments and as a list in
         ``x_data`` order otherwise. For ``Experiment`` input, new
-        ``Experiment`` objects with the same measurements and ``args`` are
-        built whose ``kwargs`` are the experiment's own keywords plus the
-        wrapper keywords it binds neither positionally nor by keyword. Its
+        ``Experiment`` objects with the same measurements, ``args`` and
+        metadata (``name``, ``author``, and ``date``) are built whose
+        ``kwargs`` are the experiment's own keywords plus the wrapper
+        keywords it binds neither positionally nor by keyword. Its
         ``args`` are bound to the unit's ``paramest_wrapper`` signature
         after the parameters and time grid, so ``args=(phase_modifier,)``
         binds ``modify_phase`` of the reactor wrappers. The caller's
@@ -1212,8 +1468,16 @@ class SimulationExec:
         normalized) and multiplied by the mass or molar flow, or by the
         volume flow times the density of each sample's composition and
         temperature. Volume is the consumed volume flow, or mass flow over
-        that density. Without a consumed composition, the static mass
-        fractions are used. Samples whose composition is exactly zero, such
+        a density: the sample's total mass concentration [kg/m**3] for a
+        concentration composition (authoritative, issue #439; earlier
+        releases used ideal mixing); the stream's ``getInventoryDensity``
+        for fraction samples that repeat its own stored fractions, such as
+        an uncontrolled composition (see
+        :func:`PharmaPy.NameAnalysis.held_state_rows`); otherwise the
+        ``getDensity`` of the sample's fractions and temperature. Without a
+        consumed composition,
+        the static mass fractions are used. Samples whose composition is
+        exactly zero, such
         as a stopped feed, contribute no material; they add no volume when
         volume is derived from the mass or molar flow, whereas a consumed
         ``vol_flow`` is reported as supplied. Non-finite values propagate to
@@ -1277,10 +1541,25 @@ class SimulationExec:
                 mole_frac = converted  # [-]
 
             density = np.zeros(num_times)  # [kg/m**3], zero for unfed rows
-            if fed.any():
-                density[fed] = _broadcast_samples(stream.getDensity(
-                    mass_frac=mass_frac[fed], temp=temp[fed]),
-                    (np.count_nonzero(fed),))  # [kg/m**3]
+            if fed.any() and comp_name == 'mass_conc':
+                # Authoritative concentrations (issue #439): the total
+                # mass concentration is the sample's density.
+                density[fed] = row_total[fed]  # [kg/m**3]
+            elif fed.any() and comp_name == 'mole_conc':
+                density[fed] = composition[fed] @ molar_mass  # [kg/m**3]
+            elif fed.any():
+                # Rows repeating the stream's own fractions, such as an
+                # uncontrolled composition, are its held state: its
+                # inventory density applies (issue #439), ideal mixing to
+                # any other row.
+                held = fed & held_state_rows(stream, composition, comp_name)
+                ideal = fed & ~held
+                if held.any():
+                    density[held] = stream.getInventoryDensity()  # [kg/m**3]
+                if ideal.any():
+                    density[ideal] = _broadcast_samples(stream.getDensity(
+                        mass_frac=mass_frac[ideal], temp=temp[ideal]),
+                        (np.count_nonzero(ideal),))  # [kg/m**3]
 
             if flow_name == 'mole_flow':
                 species_moles = flow[:, np.newaxis] * mole_frac  # [mol/s]
@@ -1562,7 +1841,7 @@ class SimulationExec:
         Parameters
         ----------
         uo : object
-            Solved unit operation with ``result.time`` [s].
+            Solved unit operation, normally with ``result.time`` [s].
 
         Returns
         -------
@@ -1573,6 +1852,11 @@ class SimulationExec:
 
         Notes
         -----
+        A unit without a timed result, such as a steady-state
+        ``IsothermalFlash``, ``AdiabaticFlash`` or ``ContinuousExtractor``
+        fed directly by a raw stream, processes a flow without a time
+        span, so its duration is NaN (issue #451).
+
         A unit that is not instantaneous (see :meth:`_is_instantaneous`)
         consumes its feed from its first result time to its last, or to its
         recorded ``inlet_stop_time`` [s] if earlier; a dynamic unit solved
@@ -1587,23 +1871,31 @@ class SimulationExec:
         ``SolveFlowsheet`` calls. The transfer is verified when the source
         has not been re-solved since it, the successor has been solved
         since it, the transferred object is among the successor's inputs
-        (identity), and the successor holds no other object transferred on
-        that edge. Otherwise the duration is NaN, with one of these reasons:
+        (identity) exactly once. A repeated transfer on the edge replaces
+        every entry of the successor's earlier copy (issue #441), so no
+        older copy survives; the latest one is held more than once only
+        when the earlier copy was duplicated by hand. ``SolveFlowsheet``
+        rejects a graph in which any unit has several successors before
+        solving it (issue #437), so a unit of the solved flowsheet has at
+        most one. Otherwise the duration is NaN, with one of these reasons:
 
         * the unit is not part of the solved flowsheet;
         * terminal unit, with no successor;
-        * fan-out to several successors, each receiving a full copy of the
-          outlet (issue #437);
         * the successor was not solved, or no transfer to it is recorded;
+        * the successor has no timed result, because its solve failed or
+          it is a steady-state unit without a time profile, such as a
+          flash (issue #445);
         * the source was re-solved after its outlet was transferred;
         * the successor was not solved after the transfer;
-        * the successor holds the transferred stream as a holdup
-          (``Phases``) rather than as a feed (issues #436, #438);
-        * the successor no longer holds the transferred outlet: its latest
-          solve ignored the transfer (issue #438), or another transfer
-          replaced it (fan-in, issue #444);
-        * the successor holds several copies of the outlet, for example a
-          ``Mixer`` re-solved in the same flowsheet (issue #441);
+        * the successor no longer holds the transferred outlet as a feed
+          (``Inlets`` or ``Inlet``): its input was replaced after the
+          transfer, for example by assigning a new ``Inlet`` and solving
+          it again (``SolveFlowsheet`` rejects several predecessors of a
+          non-``Mixer`` unit, issue #444);
+        * the successor holds the transferred outlet more than once, which
+          only happens when a transferred copy is assigned again by hand,
+          for example ``mixer.Inlets = mixer.Inlets[-1]``, before or after
+          a repeated solve;
         * the successor keeps several solve segments in ``profiles_runs``,
           as when a ``CSTR`` or ``ContinuousEvaporator`` continues an
           earlier solve (issues #278, #443);
@@ -1618,7 +1910,13 @@ class SimulationExec:
         time (a first, fresh, ``reset()`` or ``reset_states=True`` run).
         That solve's own span is used, capped by its ``inlet_stop_time``.
         """
-        time = np.atleast_1d(np.asarray(uo.result.time, dtype=float))  # [s]
+        time = getattr(getattr(uo, 'result', None), 'time', None)  # [s]
+        if time is None:
+            # A steady-state unit processes a flow [mol/s] or [kg/s]
+            # without a time span (issue #451).
+            return np.nan, ('it has no timed result: it is a steady-state '
+                            'unit such as a flash, or its solve failed')
+        time = np.atleast_1d(np.asarray(time, dtype=float))  # [s]
         if not self._is_instantaneous(uo):
             start_time, end_time = time[0], time[-1]  # [s]
             stop_time = getattr(uo, 'inlet_stop_time', None)  # [s]
@@ -1633,20 +1931,19 @@ class SimulationExec:
         if not successors:
             return np.nan, ('no downstream unit consumes its outlet '
                             '(terminal unit)')
-        if len(successors) > 1:
-            return np.nan, (
-                f'its outlet feeds {len(successors)} units {successors}, each '
-                'receiving a full copy of it (fan-out, issue #437)')
-        successor = successors[0]
+        successor = successors[0]  # the only one; fan-out is never solved
         consumer = self.uos_instances.get(successor)
         record = getattr(self, '_transfers', {}).get((name, successor))
-        if consumer is None or not hasattr(getattr(consumer, 'result', None),
-                                           'time'):
+        if consumer is None:
             return np.nan, f"downstream unit '{successor}' was not solved"
+        if not hasattr(getattr(consumer, 'result', None), 'time'):
+            return np.nan, (f"downstream unit '{successor}' has no timed "
+                            'result: its solve failed, or it is a '
+                            'steady-state unit such as a flash')
         if record is None:
             return np.nan, ('no transfer to downstream unit '
                             f"'{successor}' is recorded")
-        matter, source_result, consumer_result, first = record
+        matter, source_result, consumer_result, first, _ = record
         if uo.result is not source_result:
             return np.nan, ('it was re-solved after its outlet was '
                             f"transferred to downstream unit '{successor}'")
@@ -1656,19 +1953,18 @@ class SimulationExec:
         used = self._used_inputs(consumer)
         feeds = self._used_inputs(consumer, ('Inlets', 'Inlet'))
         if not any(item is matter for item in feeds):
-            if any(item is matter for item in used):
-                return np.nan, (f"downstream unit '{successor}' holds its "
-                                'outlet stream as a holdup (Phases), not as '
-                                'a feed (issues #436, #438)')
+            # Every successor of a continuous outlet holds it as a feed:
+            # Connection rejects a batch successor (issue #436) and gives
+            # a semibatch one the stream as its Inlet (issue #438).
             return np.nan, (
                 f"downstream unit '{successor}' no longer holds the "
-                'transferred outlet (it ignored the transfer, see issue '
-                '#438, or another transfer replaced it, see issue #444)')
-        history = self._transfer_history.get((name, successor), [])
-        copies = sum(any(item is old for old in history) for item in used)
+                'transferred outlet as a feed (its input was replaced '
+                'after the transfer)')
+        copies = sum(item is matter for item in used)  # [-]
         if copies > 1:
-            return np.nan, (f"downstream unit '{successor}' holds {copies} "
-                            'copies of its outlet (issue #441)')
+            return np.nan, (f"downstream unit '{successor}' holds the "
+                            f'transferred outlet {copies} times (it was '
+                            'assigned again by hand)')
         runs = getattr(consumer, 'profiles_runs', None)
         if not self._is_instantaneous(consumer) and runs is not None:
             # Only a result from exactly one solve after the transfer is
@@ -1723,15 +2019,19 @@ class SimulationExec:
         Warns
         -----
         RuntimeWarning
-            If the unit is instantaneous and its consumed duration is
-            undefined, so its static continuous totals are NaN. The message
-            names the unit and the reason: not part of the solved flowsheet;
-            terminal unit; fan-out (issue #437); successor not solved or no
-            transfer recorded; source re-solved after the transfer;
-            successor not solved after the transfer; outlet held as a
-            holdup rather than a feed (issues #436, #438); transferred
-            outlet no longer held by the successor (issues #438, #444);
-            several outlet copies held by the successor (issue #441);
+            If the unit's consumed duration is undefined, so its static
+            continuous totals are NaN: a unit without a timed result, such
+            as a steady-state flash fed directly by a raw stream (issue
+            #451), or an instantaneous unit. The message names the unit and
+            the reason, for an instantaneous unit: not part of the solved
+            flowsheet;
+            terminal unit; successor not solved or no transfer recorded;
+            successor without a timed result (failed solve, or a
+            steady-state unit such as a flash, issue #445);
+            source re-solved after the transfer; successor not solved
+            after the transfer; transferred outlet no longer held as a
+            feed by the successor (an input replaced after the transfer);
+            transferred outlet held several times by the successor;
             several solve segments kept by the successor (issues #278,
             #443); no solve segment kept by the successor (for example
             after ``reset()``); or, defensively, only the segment it held
@@ -1741,17 +2041,24 @@ class SimulationExec:
         -----
         Continuous raw inlets with a ``DynamicInlet`` are accounted from the
         feed the unit consumes at each of its result times. Batch and static
-        continuous records are read from the stream's stored state; static
-        continuous totals are the flow times the fed duration
+        continuous records are read from the stream's stored state. A raw
+        inlet that is a phase, an amount [kg] without a flow rate, is
+        reported as its amount for any unit, including a steady-state flash
+        fed a ``LiquidPhase``; earlier releases raised ``AttributeError``
+        for it. Static continuous stream totals are the flow times the fed
+        duration
         (:meth:`_consumed_duration`). Both stop at a unit's recorded
         ``inlet_stop_time`` [s], set by an ``Evaporator`` with
         ``stop_at_maxvol=False`` when its volume event shuts the inlet.
+        Their volume [m**3] is the total over the phase's density, for a
+        liquid ``getInventoryDensity``: the sum of its authoritative
+        concentrations, or the ideal-mixing density (issue #439).
         An instantaneous unit (``is_instantaneous`` class flag and a result
         spanning 0 s, such as a static continuous ``Mixer``) is charged for
         the time its outlet is consumed by its single, verified successor;
         otherwise its totals are NaN with a warning rather than a silent
         zero (see :meth:`_consumed_duration`, which is deliberately
-        conservative pending issues #437 and #438). A ``DynamicInlet``
+        conservative). A ``DynamicInlet``
         that controls no field on such a unit feeds the static stream and
         is accounted the same way; one that controls fields cannot reach an
         instantaneous ``Mixer``, which rejects it at solve time, and raises
@@ -1823,9 +2130,18 @@ class SimulationExec:
 
                 stream_data[name_stream] = {}
 
-                dens = stream.getDensity(basis=basis)  # [kg/m**3] or [mol/L]
+                # A liquid's own amount converts to volume through its
+                # inventory density, which follows authoritative
+                # concentrations (issue #439); other phases use getDensity.
+                density_method = getattr(stream, 'getInventoryDensity',
+                                         stream.getDensity)
+                dens = density_method(basis=basis)  # [kg/m**3] or [mol/L]
 
-                if uo.oper_mode == 'Batch':
+                # A phase is an amount whatever the unit's mode: a flash,
+                # a continuous unit, also separates a LiquidPhase inlet
+                # (issue #445). Stream inlets keep the mode's branch.
+                is_amount = not hasattr(stream, 'mass_flow')
+                if uo.oper_mode == 'Batch' or is_amount:
                     if basis == 'mass':
                         total = stream.mass  # [kg]
                         stream_data[name_stream] = {'mass': total}
@@ -1841,8 +2157,10 @@ class SimulationExec:
                         if reason is not None:
                             unit_name = (self._unit_name(uo)
                                          or type(uo).__name__)
+                            kind = ('instantaneous unit'
+                                    if self._is_instantaneous(uo) else 'unit')
                             warnings.warn(
-                                f"Raw inlets of instantaneous unit "
+                                f"Raw inlets of {kind} "
                                 f"'{unit_name}' have no defined fed duration: "
                                 f'{reason}; their totals are reported as NaN.',
                                 RuntimeWarning, stacklevel=2)
@@ -1889,8 +2207,28 @@ class SimulationExec:
         Returns
         -------
         dict
-            Initial holdup records including composition fractions [-],
-            temperature [K], pressure [Pa], and volume [m**3].
+            ``{'Initial_holdup': records}`` with one record per raw phase of
+            the initial holdup, keyed by phase name, including the amount
+            [kg] or [mol], composition fractions [-], temperature [K],
+            pressure [Pa], and volume [m**3]. Empty if the unit keeps no
+            initial holdup or none of its phases is a raw material.
+
+        Raises
+        ------
+        AttributeError
+            If the snapshot is neither a phase nor a mixed phase, such as
+            the attribute dictionary kept by ``DeliquoringStep`` and
+            ``DisplacementWashing`` (issue #311).
+
+        Notes
+        -----
+        The initial holdup is accounted per phase (issue #455). A phase
+        transferred from an upstream unit (``transferred_from_uo``) is
+        charged to its source and skipped; the others were charged by the
+        user and are reported. A crystallizer seeded by the user and
+        completed by a transferred liquid therefore reports its seed
+        crystals. A ``Connection`` marks every phase of a transferred
+        mixture, so a wholly transferred holdup reports nothing.
         """
         out = {}
 
@@ -1904,9 +2242,19 @@ class SimulationExec:
 
             fields += ['temp', 'pres', 'vol']
 
-            if not phases.transferred_from_uo:
-                out = self.get_from_phases(phases, fields)
-                out = {'Initial_holdup': out}
+            if getattr(phases, '__module__', None) == 'PharmaPy.MixedPhases':
+                held = list(phases.Phases)
+                raw = [phase for phase in held
+                       if not phase.transferred_from_uo]
+            else:
+                raw = [] if phases.transferred_from_uo else [phases]
+
+            records = {}
+            for phase in raw:
+                records.update(self.get_from_phases(phase, fields))
+
+            if records:
+                out = {'Initial_holdup': records}
 
         return out
 
@@ -1927,8 +2275,10 @@ class SimulationExec:
             accepted for API compatibility but currently does not change the
             returned table.
         include_holdups : bool, optional
-            If true, include initial holdups that were not transferred from an
-            upstream unit operation.
+            If true, include the phases of initial holdups that were not
+            transferred from an upstream unit operation, such as a
+            crystallizer's seed completed by a transferred liquid (see
+            :meth:`get_holdup`).
 
         Returns
         -------
@@ -1946,8 +2296,9 @@ class SimulationExec:
         Warns
         -----
         RuntimeWarning
-            From :meth:`get_raw_inlets`, once per instantaneous unit whose
-            raw totals are NaN.
+            From :meth:`get_raw_inlets`, once per unit whose raw totals
+            are NaN: an instantaneous unit without a verified consumer, or a
+            steady-state unit without a timed result, such as a flash.
 
         Notes
         -----
@@ -1958,7 +2309,7 @@ class SimulationExec:
         [s], such as an ``Evaporator`` inlet shut by its volume event.
         The raw totals of an instantaneous unit, such as a static
         continuous ``Mixer``, are NaN unless it has a single, verified
-        consumer (see :meth:`_consumed_duration`; issues #437, #438, #441).
+        consumer (see :meth:`_consumed_duration`; issue #430).
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be either 'mass' or 'mole'")
@@ -2131,15 +2482,15 @@ class SimulationExec:
         Warns
         -----
         RuntimeWarning
-            From :meth:`get_raw_inlets`, once per instantaneous unit whose
-            raw totals are NaN.
+            From :meth:`get_raw_inlets`, once per unit whose raw totals
+            are NaN: an instantaneous unit without a verified consumer, or a
+            steady-state unit without a timed result, such as a flash.
 
         Notes
         -----
         ``raw_cost`` prices the ``GetRawMaterials`` totals, so the entries
         of an instantaneous unit without a single, verified consumer are NaN
-        like its totals (see :meth:`_consumed_duration`; issues #437, #438,
-        #441).
+        like its totals (see :meth:`_consumed_duration`; issue #430).
         """
 
         opex_items = ('duties', 'raw_materials', 'labor')
