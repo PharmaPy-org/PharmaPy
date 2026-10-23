@@ -1,0 +1,214 @@
+"""Conservation and stream consistency when native inventory limiting activates."""
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import pytest
+
+from PharmaPy.DataClasses import (MaterialContributionBuffer, PhaseRef,
+                                  ResolvedPhaseTransfer, StateCollection,
+                                  StateKey, StateVariable)
+from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
+from PharmaPy.Streams_Refactored import LiquidStream
+from PharmaPy.Phases_Refactored import LiquidPhase
+
+
+def system(inventories):
+    unit = MultiPhaseVessel(isothermal=True)
+    unit.solver_state_collection = StateCollection()
+    state = {}
+    for index, inventory in enumerate(inventories):
+        ref = PhaseRef("liquid", index)
+        unit.solver_state_collection.add(StateVariable(
+            "mass_j", len(inventory), "kg", state_type="diff", phaseref=ref))
+        state[StateKey("mass_j", ref)] = np.array(inventory, dtype=float)
+    unit._compile_positivity_layout()
+    unit._material_slice_by_phase = {key.phaseref: value for key, value in
+                                    unit.solver_state_collection.material_slices.items()}
+    return unit, state, MaterialContributionBuffer(unit.solver_state_collection.material_dim)
+
+
+def limit(unit, state, buffer, dt=1.):
+    if np.any(buffer.contributions[buffer.CROSSPHASE]) and not buffer.aux[buffer.CROSSPHASE]:
+        buffer.aux[buffer.CROSSPHASE].append({"material_writes": [
+            (part, buffer.contributions[buffer.CROSSPHASE, part].copy())
+            for part in unit.solver_state_collection.material_slices.values()]})
+    return unit.apply_rate_scaling(buffer, state, dt)
+
+
+def test_no_depletion_and_bypass_leave_all_rates_unchanged():
+    unit, state, buffer = system([[1., 1.]])
+    buffer.contributions[buffer.INTRAPHASE] = [-.2, .2]
+    before = buffer.contributions.copy()
+    limit(unit, state, buffer)
+    np.testing.assert_array_equal(buffer.contributions, before)
+    buffer.contributions *= 10.
+    before = buffer.contributions.copy()
+    limit(unit, state, buffer, dt=0.)
+    np.testing.assert_array_equal(buffer.contributions, before)
+
+
+def test_reaction_depletion_is_rejected_without_altering_stoichiometry():
+    unit, state, buffer = system([[1., 0.]])
+    buffer.contributions[buffer.INTRAPHASE] = [-2., 2.]
+    before = buffer.contributions.copy()
+    with pytest.raises(RuntimeError, match="reduce the integration step"):
+        limit(unit, state, buffer)
+    np.testing.assert_array_equal(buffer.contributions, before)
+    # A shorter step is valid and keeps the complete reaction unchanged.
+    limit(unit, state, buffer, dt=.5)
+    np.testing.assert_array_equal(buffer.contributions, before)
+
+
+@pytest.mark.parametrize("inventory", [-2.e-12, -1.e-8, 0.])
+@pytest.mark.parametrize("production", [0., 1.e-13])
+def test_nonconsuming_trial_state_is_not_rejected_or_clipped(inventory, production):
+    """Allow stationary/recovering trial states without certifying their accuracy.
+
+    Parameters
+    ----------
+    inventory : float
+        Trial species inventory [kg]. Negative cases straddle the existing
+        depletion threshold and remain far below ordinary solver tolerances.
+    production : float
+        Nonnegative species rate [kg/s]. The positive case does not restore
+        the negative inventory within the one-second limiting horizon.
+    """
+    unit, state, buffer = system([[inventory, 1.]])  # [kg]
+    buffer.contributions[buffer.INTRAPHASE] = [production, -production]  # [kg/s]
+    original_state = {key: value.copy() for key, value in state.items()}  # [kg]
+    original_rates = buffer.contributions.copy()  # [kg/s]
+    assert not limit(unit, state, buffer)
+    for key in state:
+        np.testing.assert_array_equal(state[key], original_state[key])
+    np.testing.assert_array_equal(buffer.contributions, original_rates)
+
+
+@pytest.mark.parametrize("inventory", [-2.e-12, 0.])
+def test_empty_trial_inventory_still_rejects_consumption(inventory):
+    """Reject actual depletion even when the solver trial inventory is negative.
+
+    Parameters
+    ----------
+    inventory : float
+        Empty or slightly negative trial inventory [kg]. The imposed
+        consumption is much larger than the existing depletion tolerance.
+    """
+    unit, state, buffer = system([[inventory, 1.]])  # [kg]
+    buffer.contributions[buffer.INTRAPHASE] = [-1.e-4, 1.e-4]  # [kg/s]
+    original_state = {key: value.copy() for key, value in state.items()}  # [kg]
+    original_rates = buffer.contributions.copy()  # [kg/s]
+    with pytest.raises(RuntimeError, match="Inventory depletion"):
+        limit(unit, state, buffer)
+    for key in state:
+        np.testing.assert_array_equal(state[key], original_state[key])
+    np.testing.assert_array_equal(buffer.contributions, original_rates)
+
+
+def test_transfer_pairing_and_reaction_rates_are_preserved():
+    unit, state, buffer = system([[1., 0.], [0., 0.]])
+    buffer.contributions[buffer.INTRAPHASE] = [-.2, .2, 0., 0.]
+    buffer.contributions[buffer.CROSSPHASE] = [-2., 0., 2., 0.]
+    reaction = buffer.contributions[buffer.INTRAPHASE].copy()
+    limit(unit, state, buffer)
+    np.testing.assert_array_equal(buffer.contributions[buffer.INTRAPHASE], reaction)
+    np.testing.assert_allclose(buffer.contributions[buffer.CROSSPHASE], [-.8, 0., .8, 0.])
+    assert buffer.aux[buffer.CROSSPHASE][0]["transfer_scale"] == pytest.approx(.4)
+    assert buffer.contributions.sum() == pytest.approx(0.)
+
+
+def test_negative_spectator_does_not_block_conservative_transfer_limiting():
+    """Preserve a paired transfer beside a negative, nonconsuming trial species."""
+    unit, state, buffer = system([[.5, -2.e-12], [0., 0.]])  # [kg]
+    buffer.contributions[buffer.CROSSPHASE] = [-2., 0., 2., 0.]  # [kg/s]
+    original_state = {key: value.copy() for key, value in state.items()}  # [kg]
+    assert limit(unit, state, buffer)
+    # [kg/s] The half-kilogram donor supports 0.5 kg/s for one second.
+    np.testing.assert_allclose(buffer.contributions[buffer.CROSSPHASE],
+                               [-.5, 0., .5, 0.])
+    for key in state:
+        np.testing.assert_array_equal(state[key], original_state[key])
+
+
+def test_receiver_depletion_cannot_be_hidden_by_scaling_donor():
+    unit, state, buffer = system([[1.], [0.]])
+    buffer.contributions[buffer.INTRAPHASE] = [0., -1.5]
+    buffer.contributions[buffer.CROSSPHASE] = [-2., 2.]
+    before = buffer.contributions.copy()
+    with pytest.raises(RuntimeError, match="Inventory depletion"):
+        limit(unit, state, buffer)
+    np.testing.assert_array_equal(buffer.contributions, before)
+
+
+def test_independent_transfers_keep_their_own_material_and_heat_factors():
+    unit, state, buffer = system([[.5], [0.], [10.], [0.]])
+    buffer.contributions[buffer.CROSSPHASE] = [-2., 2., -2., 2.]
+    for offset, heat in ((0, 100.), (2, 200.)):
+        mechanism = SimpleNamespace(get_heat_generation=lambda heat=heat, **kw: heat)
+        buffer.aux[buffer.CROSSPHASE].append({
+            "connection": SimpleNamespace(mechanism=mechanism),
+            "material_writes": [(slice(offset, offset + 1), np.array([-2.])),
+                                (slice(offset + 1, offset + 2), np.array([2.]))],
+        })
+    limit(unit, state, buffer)
+    np.testing.assert_allclose(buffer.contributions[buffer.CROSSPHASE], [-.5, .5, -2., 2.])
+    energy = {"crossphase": 0.}
+    unit.add_crossphase_energy_terms(energy, buffer.aux[buffer.CROSSPHASE], 0., state)
+    assert energy["crossphase"] == pytest.approx(225.)
+
+
+@pytest.mark.parametrize("available", [0., .25])
+@pytest.mark.parametrize("temperature_difference", [0., 10.])
+def test_outlet_species_volume_composition_and_energy_stay_consistent(available, temperature_difference):
+    """Check limited outflow and its relative sensible-heat contribution.
+
+    Parameters
+    ----------
+    available : float
+        Inventory of each species [kg] over the one-second limiting horizon.
+    temperature_difference : float
+        Outlet minus vessel temperature [K]. Equal temperatures remove no
+        sensible heat from the temperature balance, even with nonzero flow.
+    """
+    unit, state, buffer = system([[available] * 4])
+    thermo = Path(__file__).parents[1] / "tests/fixtures/native_four_species.json"
+    vessel = LiquidPhase(thermo, mass=1., temp=310., mass_frac=np.full(4, .25), verbose=False)  # [kg], [K], [-]
+    stream = LiquidStream(thermo, mass_flow=4., temp=310. + temperature_difference,
+                          mass_frac=np.full(4, .25), verbose=False)  # [kg/s], [K], [-]
+    heat_capacity = 2000.  # [J/(kg K)] Constant, identical fixture value for each species.
+    for phase in (vessel, stream):
+        phase.cp_liq = (heat_capacity * np.asarray(phase.mw) / 1000.)[:, None]  # [J/(mol K)]
+    transfer = ResolvedPhaseTransfer(None, SimpleNamespace(sink_phaseref=PhaseRef("liquid", 0)), vessel, stream, stream.vol_flow,
+                                     stream.mass_j_flow.copy(), "outlet")
+    original_volume = transfer.vol_flow
+    buffer.aux[buffer.OUTLET].append(transfer)
+    buffer.contributions[buffer.OUTLET] = -transfer.species_flow
+    limit(unit, state, buffer)
+    np.testing.assert_allclose(-buffer.contributions[buffer.OUTLET], stream.mass_j_flow)
+    np.testing.assert_allclose(transfer.species_flow, stream.mass_j_flow)
+    np.testing.assert_allclose(stream.mass_frac, [.25] * 4)
+    assert transfer.vol_flow == pytest.approx(original_volume * available)
+    assert stream.vol_flow == pytest.approx(transfer.vol_flow)
+    energy = {"outlet": 0.}
+    unit.add_outlet_energy_terms(energy, buffer.aux[buffer.OUTLET], 0., state)
+    expected_heat = -stream.mass_flow * heat_capacity * temperature_difference  # [W]
+    assert energy["outlet"] == pytest.approx(expected_heat)
+
+
+def test_transfer_heat_is_scaled_with_material():
+    """Verify paired heat scaling using real constant heat-capacity properties."""
+    unit, state, buffer = system([[1.], [0.]])
+    buffer.contributions[buffer.CROSSPHASE] = [-2., 2.]
+    limit(unit, state, buffer)
+    unit._timers = {}
+    mechanism = SimpleNamespace(get_heat_generation=lambda **kw: 100.)
+    buffer.aux[buffer.CROSSPHASE][0]["connection"] = SimpleNamespace(mechanism=mechanism)
+    thermo = Path(__file__).parents[1] / "tests/fixtures/native_four_species.json"
+    phase = LiquidPhase(thermo, mass=1., mass_frac=np.full(4, .25), verbose=False)
+    heat_capacity = 10.  # [J/(kg K)], constant synthetic property for all species
+    phase.cp_liq = (heat_capacity * np.asarray(phase.mw) / 1000.)[:, None]  # [J/(mol K)]
+    unit.Phases = phase
+    result = unit.energy_balances(0., state, buffer)
+    assert result[StateKey("global_temp")] == pytest.approx(5.)
+    buffer.reset()
+    assert buffer.aux[buffer.CROSSPHASE] == []

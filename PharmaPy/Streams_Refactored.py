@@ -609,8 +609,12 @@ class LiquidStream(BaseStream):
             verbose=verbose,
             **kwargs,
         )
-        self.cp_liq = np.atleast_2d(self.cp_liq)
-        self.p_vap = np.atleast_2d(self.p_vap)
+        # Match LiquidPhase: missing correlations are checked when evaluated,
+        # not required for construction of an isothermal stream.
+        for property_name in ('cp_liq', 'p_vap'):
+            if property_name in self.__dict__:
+                setattr(self, property_name,
+                        np.atleast_2d(self.__dict__[property_name]))
 class VaporStream(BaseStream):
     LEGACY_CLASS_NAME = 'VaporStream'
     phase_family = 'vapor'
