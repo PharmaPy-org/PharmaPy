@@ -8,7 +8,10 @@ convert legacy state arrays (rows = samples, columns = fields) and
 
 Fixtures are small asymmetric arrays (five samples, three fields, a
 replicate time and NaN entries at distinct positions) whose expected
-columns are written out by hand. Core lane; no solver is used.
+columns are written out by hand. A multi-basis phase composition (mass
+fractions, molar concentrations, component and mixture densities) uses
+the worked example posted on #336; its internal consistency is checked
+independently. Core lane; no solver is used.
 """
 
 import json
@@ -32,6 +35,34 @@ IDENTITIES = (
     FieldIdentity('T', 'state', 'K'),
     FieldIdentity('mu_0', 'state', '#/m**3',
                   basis='number per unit volume'),
+)
+
+# Worked example by Daniel Casas-Orozco on #336 (issue comment
+# 6200391817): LiquidPhase(path, mass=1, mole_conc={'A': 1.0, 'B': 1.0},
+# mass_frac={'ACN': 0.3, 'THF': 0.7}) and its results as posted, rounded
+# to three decimals. A and B are solutes of his component file; ACN is
+# acetonitrile and THF tetrahydrofuran. Species keep his (non-alphabetical)
+# order. LiquidPhase cannot take both measures yet; its own regression test
+# belongs to #336.
+SPECIES = ('A', 'B', 'ACN', 'THF')
+# A phase specification has no time axis; one sample at 0 s stands in for
+# the record's independent variable (default x_units 's').
+PHASE_TIME = [0.0]  # [s]
+MASS_FRAC = [[0.108, 0.216, 0.203, 0.473]]  # [-], mass basis
+MOLE_CONC = [[1.000, 1.000, 4.580, 6.083]]  # [mol/L]
+RHO_SPECIES = [[1096.226, 1096.226, 777.719, 905.234]]  # [kg/m**3]
+RHO_MIX = [926.677]  # [kg/m**3]
+# Largest rounding error of a value posted with three decimals, in the
+# units of that value.
+POSTED_HALF_UNIT = 5e-4
+PHASE_IDENTITIES = (
+    FieldIdentity('mass_frac', 'state', '-', basis='mass fraction'),
+    FieldIdentity('mole_conc', 'state', 'mol/L',
+                  basis='molar concentration'),
+    FieldIdentity('rho_species', 'algebraic', 'kg/m**3',
+                  basis='pure-component liquid mass density'),
+    FieldIdentity('rho_mix', 'algebraic', 'kg/m**3',
+                  basis='mixture mass density'),
 )
 
 
@@ -259,3 +290,98 @@ def test_field_records_are_read_only_copies():
 def test_field_record_validation(build, error, message):
     with pytest.raises(error, match=message):
         build()
+
+
+def test_multi_basis_phase_composition_round_trips_units_and_bases():
+    mapping = {'mass_frac': MASS_FRAC, 'mole_conc': MOLE_CONC,
+               'rho_species': RHO_SPECIES, 'rho_mix': RHO_MIX}
+    columns = {'mass_frac': SPECIES, 'mole_conc': SPECIES,
+               'rho_species': SPECIES}
+    fields = fields_from_mapping(PHASE_TIME, mapping, PHASE_IDENTITIES,
+                                 columns=columns, experiment='issue_336')
+    text = json.dumps([field.to_dict() for field in fields], allow_nan=False)
+    restored = tuple(FieldRecord.from_dict(data)
+                     for data in json.loads(text))
+
+    assert restored == fields
+    # The two densities share units; only the basis tells them apart.
+    assert [(field.name, field.identity.kind, field.identity.units,
+             field.identity.basis) for field in restored] == [
+        ('mass_frac', 'state', '-', 'mass fraction'),
+        ('mole_conc', 'state', 'mol/L', 'molar concentration'),
+        ('rho_species', 'algebraic', 'kg/m**3',
+         'pure-component liquid mass density'),
+        ('rho_mix', 'algebraic', 'kg/m**3', 'mixture mass density')]
+    assert [field.columns for field in restored] == [SPECIES] * 3 + [None]
+    assert {field.experiment for field in restored} == {'issue_336'}
+    assert dict(zip(restored[1].columns, restored[1].values[0])) == {
+        'A': 1.0, 'B': 1.0, 'ACN': 4.58, 'THF': 6.083}  # [mol/L]
+
+    x, values = fields_to_mapping(restored)
+    assert_bits_equal(x, PHASE_TIME)
+    assert list(values) == list(mapping)
+    for name, expected in mapping.items():
+        assert_bits_equal(values[name], expected)
+
+    # Reordered species keep their own order and carry their values along.
+    # A and B share mole_conc and rho_species, so only mass_frac would show
+    # an A/B swap.
+    order = [3, 0, 2, 1]  # THF, A, ACN, B
+    shuffled = fields_from_mapping(
+        PHASE_TIME,
+        {name: np.asarray(mapping[name])[:, order] for name in columns},
+        PHASE_IDENTITIES[:3],
+        columns={name: tuple(SPECIES[i] for i in order)
+                 for name in columns})
+    shuffled = tuple(FieldRecord.from_dict(json.loads(json.dumps(
+        field.to_dict(), allow_nan=False))) for field in shuffled)
+    assert len(shuffled) == len(columns)
+    for original, moved in zip(restored, shuffled):
+        assert moved.columns == ('THF', 'A', 'ACN', 'B')
+        assert (dict(zip(moved.columns, moved.values[0]))
+                == dict(zip(original.columns, original.values[0])))
+
+
+def test_issue_336_worked_example_is_self_consistent():
+    # Each check allows the first-order propagation of the rounding of
+    # every posted value, POSTED_HALF_UNIT in its own units.
+    mass_frac = np.asarray(MASS_FRAC[0])  # [-]
+    mole_conc = np.asarray(MOLE_CONC[0])  # [mol/L]
+    rho_species = np.asarray(RHO_SPECIES[0])  # [kg/m**3]
+    rho_mix = RHO_MIX[0]  # [kg/m**3]
+    half = POSTED_HALF_UNIT
+
+    assert abs(mass_frac.sum() - 1.0) <= mass_frac.size * half
+
+    # The solvent keeps the specified blend, mass_frac={'ACN': 0.3, ...};
+    # r = w_ACN / s with s = w_ACN + w_THF has
+    # |dr/dw_ACN| + |dr/dw_THF| = 1/s.
+    specified_acn = 0.3  # [-], ACN share of the solvent
+    acn = mass_frac[SPECIES.index('ACN')]  # [-]
+    thf = mass_frac[SPECIES.index('THF')]  # [-]
+    solvent = acn + thf  # [-]
+    assert abs(acn / solvent - specified_acn) <= half / solvent
+
+    # Additive volumes, the mixing rule of the #336 balances:
+    # 1 / rho_mix = sum_i w_i / rho_i.
+    specific_volume = np.sum(mass_frac / rho_species)  # [m**3/kg]
+    volume_error = half * np.sum(1 / rho_species
+                                 + mass_frac / rho_species**2)  # [m**3/kg]
+    assert (abs(1 / specific_volume - rho_mix)
+            <= rho_mix**2 * volume_error + half)
+
+    # Mass and molar bases agree through M_i = w_i rho_mix / c_i, since
+    # [kg/m**3] equals [g/L]. Solvent molar masses use the conventional
+    # atomic weights of IUPAC CIAAW, "Standard atomic weights of the
+    # elements 2021 (IUPAC Technical Report)", Pure Appl. Chem. 94 (2022)
+    # 573-600, doi:10.1515/pac-2019-0603.
+    carbon, hydrogen = 12.011, 1.008  # [g/mol]
+    nitrogen, oxygen = 14.007, 15.999  # [g/mol]
+    molar_mass = {'ACN': 2 * carbon + 3 * hydrogen + nitrogen,  # C2H3N
+                  'THF': 4 * carbon + 8 * hydrogen + oxygen}  # C4H8O
+    for name, expected in molar_mass.items():  # [g/mol]
+        index = SPECIES.index(name)
+        implied = mass_frac[index] * rho_mix / mole_conc[index]  # [g/mol]
+        relative_error = half * (1 / mass_frac[index] + 1 / mole_conc[index]
+                                 + 1 / rho_mix)  # [-]
+        assert implied == pytest.approx(expected, rel=relative_error)
