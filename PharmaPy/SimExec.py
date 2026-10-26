@@ -309,6 +309,8 @@ class SimulationExec:
 
         self.uos_instances = {}
         self.oper_mode = []
+        # Wall-clock duration of the latest EstimateParams optimization.
+        self.optimization_time = None  # [s]
 
         if isinstance(flowsheet, dict):
             graph = flowsheet
@@ -1121,15 +1123,54 @@ class SimulationExec:
 
     def EstimateParams(self, optim_options=None, method='LM', bounds=None,
                        verbose=True):
-        tic = time.time()
+        """Fit the estimator built by ``SetParamEstimation``.
+
+        Parameters
+        ----------
+        optim_options : dict, optional
+            Solver options of the selected method, passed to
+            ``ParameterEstimation.optimize_fn``. The default is None.
+        method : {'LM', 'IPOPT', 'scipy', 'least_squares'}, optional
+            Optimization method; see ``ParameterEstimation.optimize_fn``.
+            The default is ``'LM'``.
+        bounds : sequence, optional
+            Parameter bounds in the model parameter units, for IPOPT or
+            ``scipy.optimize.least_squares``. The default is None.
+        verbose : int or bool, optional
+            If truthy, request verbose solver output and print the
+            optimization time; if falsy, print nothing here. The default is
+            True.
+
+        Returns
+        -------
+        tuple
+            ``(opt_par, covar_params, info)`` of
+            ``ParameterEstimation.optimize_fn``: the accepted variable
+            parameters in the model callback's parameter units, their
+            covariance and the solver information.
+
+        Raises
+        ------
+        AttributeError
+            If ``SetParamEstimation`` has not been called, so that
+            ``ParamInst`` does not exist.
+
+        Notes
+        -----
+        The wall-clock duration of the optimization [s] is stored as
+        ``optimization_time``, whether or not it is printed. Errors of
+        ``ParameterEstimation.optimize_fn`` propagate and leave
+        ``optimization_time`` unchanged.
+        """
+        tic = time.time()  # [s], wall clock
         results = self.ParamInst.optimize_fn(optim_options=optim_options,
                                              method=method,
                                              bounds=bounds, verbose=verbose)
-        toc = time.time()
+        self.optimization_time = time.time() - tic  # [s]
 
-        elapsed = toc - tic
-
-        print('Optimization time: {:.2e} s.'.format(elapsed))
+        if verbose:
+            print('Optimization time: {:.2e} s.'.format(
+                self.optimization_time))
 
         return results
 

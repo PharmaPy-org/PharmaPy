@@ -15,6 +15,11 @@ the last experiment's trajectory when several experiments share one unit.
 This reporting step does not establish convergence. Inspect the solver's
 termination diagnostics before interpreting the fit.
 
+:code:`SimulationExec.EstimateParams` stores the wall-clock duration of the
+optimization in seconds as :code:`optimization_time`. It prints the
+:code:`Optimization time` line only when :code:`verbose` is true; earlier
+versions printed it also with :code:`verbose=False`.
+
 :code:`y_model`, :code:`y_runs`, and :code:`resid_runs` retain experiment order,
 measured-state order, and the model's state units (for example [mol/L]).
 :code:`weighted_residuals` applies the observation weighting once and follows
