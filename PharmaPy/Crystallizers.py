@@ -12,7 +12,7 @@ from PharmaPy.Commons import (reorder_sens, plot_sens, trapezoidal_rule,
                               unpack_states, complete_dict_states,
                               flatten_states)
 
-from PharmaPy.ProcessControl import analyze_controls
+from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 
 from PharmaPy.jac_module import numerical_jac, numerical_jac_central, dx_jac_x
 from PharmaPy.Connections import get_inputs, get_inputs_new
@@ -208,8 +208,12 @@ class _BaseCryst:
             Working vessel volume [m**3], or None to infer it at initialization.
             This stored volume is not expanded by a headspace factor.
         controls : dict or None
-            Controlled-state callables. Each callable must return the units of
-            its controlled state, such as temperature [K].
+            Controlled state names mapped to callables ``f(time, *args,
+            **kwargs)`` of time [s] or to records with ``fun`` and optional
+            ``args`` and ``kwargs``. Each callable must return the units of
+            its controlled state, such as temperature [K]. The unit stores
+            new records (see ``ProcessControl.normalize_controls``) and does
+            not modify the supplied dictionaries. None means no controls.
         adiabatic : bool
             If True, exclude utility heat transfer while retaining the vessel
             energy balance.
@@ -249,7 +253,14 @@ class _BaseCryst:
         ------
         ValueError
             If vol_ht is neither None nor a finite, strictly positive real
-            scalar volume [m**3].
+            scalar volume [m**3], or a control record has entries other than
+            ``fun``, ``args`` and ``kwargs``.
+        KeyError
+            If a control record has no ``fun`` entry.
+        TypeError
+            If a control or its ``fun`` is not callable, or a record's
+            ``args`` is not a tuple or list or its ``kwargs`` is not a
+            dictionary.
 
         Warns
         -----
@@ -296,11 +307,8 @@ class _BaseCryst:
         self.scale_flag = True
         self.vol_tank = vol_tank
 
-        # Controls
-        if controls is None:
-            self.controls = {}
-        else:
-            self.controls = analyze_controls(controls)
+        # New records: the caller's control dictionaries are never shared.
+        self.controls = normalize_controls(controls)
 
         self.method = method
         self.rad = rad_zero  # [um], same length basis as the CSD grid
@@ -1656,8 +1664,13 @@ class _BaseCryst:
             volume [m**3]. Explicit amounts follow liquid phase precedence.
             Solid arguments retain the units of ``SolidPhase.updatePhase``.
         modify_controls : dict, optional
-            Updates to each named control specification; units follow the
-            controlled state.
+            Control modifier of this experiment: configured control names
+            mapped to partial control records. ``fun`` and ``args`` replace
+            the configured entries and ``kwargs`` is merged key by key, for
+            example ``{'temp': {'kwargs': {'slope': -1.0}}}`` with a slope in
+            [K/s] for a control ``fun(time, start=310.0, slope=0.0)``
+            returning [K]. Argument units are those of the control function.
+            None or an empty dictionary evaluates the configured controls.
         scale_factor : float, optional
             Legacy unused scaling argument [-]; defaults to 1e-3.
         run_args : dict, optional
@@ -1677,8 +1690,17 @@ class _BaseCryst:
 
         Raises
         ------
+        TypeError
+            If ``modify_controls``, one of its entries, or an entry's
+            ``kwargs`` is not a dictionary, or the merged control record has
+            a non-callable ``fun`` or non-sequence ``args``. Raised before
+            the crystallizer is reset or integrated.
         ValueError
-            If a nonempty phase modifier names neither ``Liquid`` nor ``Solid``.
+            If ``modify_controls`` names a control that is not configured or
+            an entry has keys other than ``fun``, ``args`` and ``kwargs``;
+            raised before the crystallizer is reset or integrated.
+            Also if a nonempty phase modifier names neither ``Liquid`` nor
+            ``Solid``.
 
         Notes
         -----
@@ -1687,6 +1709,16 @@ class _BaseCryst:
         conserving liquid mass. Slurry volume and population caches are
         refreshed from the modified phase inventories before initialization.
         Supplied modifier dictionaries are not changed.
+        Each call evaluates a new copy of the configured ``controls`` with
+        ``modify_controls`` applied (see
+        ``ProcessControl.apply_control_modifier``) and restores the
+        configured ``controls`` object afterwards, also when the evaluation
+        raises. Successive calls, such as the experiments of one objective
+        evaluation, therefore never inherit another call's modifier: a call
+        without a modifier uses the configured controls. The reported
+        ``result`` and heat duty describe the modified controls. Modifiers
+        cannot add or remove controls, so the integrated states are those of
+        the configured crystallizer.
         This wrapper owns the estimation reset: solve_unit's reset_states flag
         is temporarily disabled so it preserves these modifiers, then restored
         even if the solve raises an exception.
@@ -1697,6 +1729,10 @@ class _BaseCryst:
         when differentiating the reported SI moments. Runtime callback values
         retain this established convention.
         """
+        # Validate and build this call's controls before changing any state.
+        experiment_controls = apply_control_modifier(
+            self.controls, modify_controls, 'crystallizer')
+
         self.reset()
 
         self.Kinetics.set_params(params)
@@ -1720,11 +1756,9 @@ class _BaseCryst:
             self.Solid_1.updatePhase(**solid_mod)
             self._refresh_slurry_inventory()
 
-        if isinstance(modify_controls, dict):
-            for key, val in modify_controls.items():
-                self.controls[key].update(val)
-
+        configured_controls = self.controls
         reset_states = self.reset_states
+        self.controls = experiment_controls
         self.reset_states = False
         try:
             if self.param_wrapper is None:
@@ -1770,6 +1804,7 @@ class _BaseCryst:
 
         finally:
             self.reset_states = reset_states
+            self.controls = configured_controls
 
         return result
 
@@ -2070,11 +2105,16 @@ class BatchCryst(_BaseCryst):
     scale : float
         Scaling factor by which crystal size distribution will be
         multiplied.
-    controls : dict of dicts (funcs) (optional, default = None)
-        Dictionary with keys representing the state (e.g.'Temp')
-        which is controlled and the value indicating the function
-        to use while computing the varible. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). Record entries other than ``fun``,
+        ``args`` and ``kwargs`` raise ValueError; a missing ``fun`` raises
+        KeyError; non-sequence ``args`` or non-dictionary ``kwargs`` raise
+        TypeError. The unit stores copies of the records and their
+        ``kwargs``, so later changes to the caller's dictionaries do not
+        affect it. Default None (no controls).
     cfun_solub: callable
         User defined function for the solubility function :
         func(conc)
@@ -2682,11 +2722,16 @@ class MSMPR(_BaseCryst):
     scale : float
         Scaling factor by which crystal size distribution will be
         multiplied.
-    controls : dict of dicts (funcs) (optional, default = None)
-        Dictionary with keys representing the state (e.g.'Temp')
-        which is controlled and the value indicating the function
-        to use while computing the varible. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). Record entries other than ``fun``,
+        ``args`` and ``kwargs`` raise ValueError; a missing ``fun`` raises
+        KeyError; non-sequence ``args`` or non-dictionary ``kwargs`` raise
+        TypeError. The unit stores copies of the records and their
+        ``kwargs``, so later changes to the caller's dictionaries do not
+        affect it. Default None (no controls).
     cfun_solub: callable
         User defined function for the solubility function :
         func(conc)
@@ -3651,11 +3696,16 @@ class SemibatchCryst(MSMPR):
     scale : float
         Scaling factor by which crystal size distribution will be
         multiplied.
-    controls : dict of dicts (funcs) (optional, default = None)
-        Dictionary with keys representing the state (e.g.'Temp')
-        which is controlled and the value indicating the function
-        to use while computing the varible. Functions are of the form
-        f(time) = state_value
+    controls : dict, optional
+        State names mapped to callables ``f(time)`` or records
+        ``{'fun': f, 'args': (), 'kwargs': {}}``. Only ``fun`` is required
+        in a record. Time is [s] and the returned state uses its physical
+        units (temperature [K]). Record entries other than ``fun``,
+        ``args`` and ``kwargs`` raise ValueError; a missing ``fun`` raises
+        KeyError; non-sequence ``args`` or non-dictionary ``kwargs`` raise
+        TypeError. The unit stores copies of the records and their
+        ``kwargs``, so later changes to the caller's dictionaries do not
+        affect it. Default None (no controls).
     adiabatic : bool (optional, default =True)
         Boolean value indicating whether the heat transfer of
         the crystallization is considered.

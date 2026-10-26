@@ -15,7 +15,7 @@ from PharmaPy.Connections import get_inputs_new
 
 from PharmaPy.Plotting import plot_function, plot_distrib
 from PharmaPy.Results import DynamicResult
-from PharmaPy.ProcessControl import analyze_controls
+from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 from PharmaPy.CheckModule import check_modeling_objects
 from PharmaPy.jac_module import numerical_jac_central
 from PharmaPy.ThermoModule import MissingPropertyError
@@ -105,59 +105,6 @@ def _requested_rows(time_profile, requested_times) -> np.ndarray:
         rows[index] = matches[min(count, matches.size - 1)]
         replicates[matches[0]] = count + 1
     return rows
-
-
-# Entries of a normalized control record: the callable, its positional
-# arguments after time, and its keyword arguments (see analyze_controls).
-_CONTROL_RECORD_FIELDS = ('fun', 'args', 'kwargs')
-
-
-def _normalize_controls(controls: Optional[dict]) -> dict:
-    """Normalize and validate reactor control records.
-
-    Parameters
-    ----------
-    controls : dict or None
-        Controlled state names mapped to callables ``f(time, *args,
-        **kwargs)`` or to records with ``fun`` and optional ``args`` and
-        ``kwargs``. Time is [s]; the returned value is in the controlled
-        state's units (temperature [K], volume [m**3]). None means no
-        controls.
-
-    Returns
-    -------
-    dict
-        New dictionary of new records with exactly the ``fun``, ``args``
-        and ``kwargs`` entries; missing ``args`` and ``kwargs`` default to
-        an empty tuple and dictionary. The supplied mapping and records
-        are not modified; ``args`` and ``kwargs`` values are not copied.
-
-    Raises
-    ------
-    ValueError
-        If a record has entries other than ``fun``, ``args`` and ``kwargs``.
-    KeyError
-        If a record has no ``fun`` entry.
-    TypeError
-        If ``fun`` is not callable, ``args`` is not a tuple or list, or
-        ``kwargs`` is not a dictionary.
-    """
-    # analyze_controls fills defaults in records; copy to preserve caller data.
-    normalized = analyze_controls({
-        name: dict(control) if isinstance(control, dict) else control
-        for name, control in (controls or {}).items()})
-    for name, control in normalized.items():
-        if set(control) != set(_CONTROL_RECORD_FIELDS):
-            raise ValueError(
-                f"Control {name!r} must be callable or have exactly "
-                "fun, args, kwargs keys")
-        if not callable(control['fun']):
-            raise TypeError(f"Control {name!r} 'fun' must be callable")
-        if (not isinstance(control['args'], (tuple, list))
-                or not isinstance(control['kwargs'], dict)):
-            raise TypeError(
-                f"Control {name!r} requires sequence args and dictionary kwargs")
-    return normalized
 
 
 def _reject_params_control(params_control) -> None:
@@ -501,7 +448,7 @@ class _BaseReactor:
         self.temp_control = None
         self.resid_time = None
         self.oper_mode = None
-        self.controls = _normalize_controls(controls)
+        self.controls = normalize_controls(controls)
 
         if state_events is None:
             state_events = []
@@ -1482,77 +1429,6 @@ class _BaseReactor:
         di_out = flatten_states(self.profiles_runs)
         return di_out
 
-    def _controls_with_modifier(self, modify_controls: Optional[dict]) -> dict:
-        """Return the configured controls updated by one experiment's modifier.
-
-        Parameters
-        ----------
-        modify_controls : dict or None
-            Configured control names mapped to partial control records.
-            ``fun`` and ``args`` replace the configured entries; ``kwargs``
-            is merged key by key into the configured keyword arguments, so
-            keywords it omits keep their configured values. Values are in
-            the units of the control function's arguments; the control
-            returns the controlled state's units (temperature [K], volume
-            [m**3]) from time [s]. None or an empty dictionary means the
-            configured controls.
-
-        Returns
-        -------
-        dict
-            New normalized control records (see ``_normalize_controls``)
-            with fresh ``kwargs`` dictionaries, one per configured control.
-            ``self.controls`` and ``modify_controls`` are not modified.
-
-        Raises
-        ------
-        TypeError
-            If ``modify_controls``, one of its entries, or an entry's
-            ``kwargs`` is not a dictionary, or the merged record has a
-            non-callable ``fun`` or non-sequence ``args``.
-        ValueError
-            If ``modify_controls`` names a control that is not configured
-            (the message lists the configured names), or an entry has keys
-            other than ``fun``, ``args`` and ``kwargs``.
-        """
-        if modify_controls is None:
-            modify_controls = {}
-        if not isinstance(modify_controls, dict):
-            raise TypeError(
-                "modify_controls must be a dictionary mapping configured "
-                "control names to partial control records, or None; got "
-                f"{type(modify_controls).__name__}")
-        unknown = [name for name in modify_controls if name not in self.controls]
-        if unknown:
-            raise ValueError(
-                f"modify_controls names unknown controls {unknown!r}; the "
-                f"reactor's configured controls are {list(self.controls)!r}")
-
-        merged = {}
-        for name, record in self.controls.items():
-            update = modify_controls.get(name, {})
-            if not isinstance(update, dict):
-                raise TypeError(
-                    f"modify_controls[{name!r}] must be a dictionary with "
-                    f"entries among {list(_CONTROL_RECORD_FIELDS)!r}; got "
-                    f"{type(update).__name__}")
-            unknown_entries = [entry for entry in update
-                               if entry not in _CONTROL_RECORD_FIELDS]
-            if unknown_entries:
-                raise ValueError(
-                    f"modify_controls[{name!r}] has unknown entries "
-                    f"{unknown_entries!r}; allowed entries are "
-                    f"{list(_CONTROL_RECORD_FIELDS)!r}")
-            kwargs_update = update.get('kwargs', {})
-            if not isinstance(kwargs_update, dict):
-                raise TypeError(
-                    f"modify_controls[{name!r}]['kwargs'] must be a "
-                    f"dictionary; got {type(kwargs_update).__name__}")
-            merged[name] = {**record, **update,
-                            'kwargs': {**record['kwargs'], **kwargs_update}}
-
-        return _normalize_controls(merged)
-
     def paramest_wrapper(self, params, t_vals, modify_phase=None,
                          modify_controls=None, reord_sens=True, run_args={}):
         """Reset and evaluate a reactor for parameter estimation.
@@ -1621,7 +1497,8 @@ class _BaseReactor:
         geometry and initial states, rather than conserving liquid mass.
         The supplied modifier dictionaries are not changed.
         Each call evaluates a new copy of the configured ``controls`` with
-        ``modify_controls`` applied (see ``_controls_with_modifier``) and
+        ``modify_controls`` applied (see
+        ``ProcessControl.apply_control_modifier``) and
         restores the configured ``controls`` object afterwards, also when
         the evaluation raises. Successive calls, such as the experiments of
         one objective evaluation, therefore never inherit another call's
@@ -1639,7 +1516,8 @@ class _BaseReactor:
         ``IndexError`` (issue #418).
         """
         # Validate and build this call's controls before changing any state.
-        experiment_controls = self._controls_with_modifier(modify_controls)
+        experiment_controls = apply_control_modifier(
+            self.controls, modify_controls, 'reactor')
 
         self.reset()
 

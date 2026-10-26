@@ -465,9 +465,10 @@ come from upstream units. The experiment forms are:
 
 Only modifier keys and entry types are validated by ``SetParamEstimation``;
 the unit's ``paramest_wrapper`` applies the modifier fields when the objective
-is evaluated. The batch, CSTR and semibatch reactor callbacks evaluate every
-experiment with a fresh copy of the reactor's configured ``controls``, updated
-by that experiment's control modifier:
+is evaluated. The batch, CSTR and semibatch reactor callbacks and the batch,
+MSMPR and semibatch crystallizer callbacks evaluate every experiment with a
+fresh copy of the unit's configured ``controls``, updated by that experiment's
+control modifier:
 
 * keys of the modifier are names of configured controls, and each value is a
   partial control record. ``fun`` and ``args`` replace the configured entries;
@@ -482,16 +483,20 @@ by that experiment's control modifier:
   inherits another one's modifier, whatever the experiment order;
 * an unknown control name or a record entry other than ``fun``, ``args`` and
   ``kwargs`` raises ``ValueError``, and a non-dictionary entry or ``kwargs``
-  raises ``TypeError``, before the reactor is reset or integrated. The merged
+  raises ``TypeError``, before the unit is reset or integrated. The merged
   record is validated like a configured control;
-* neither the reactor's configured controls nor the caller's modifier
+* neither the unit's configured controls nor the caller's modifier
   dictionaries are modified, also when an evaluation raises. Modifiers cannot
   add or remove controls, so the integrated states are those of the configured
-  reactor.
+  unit.
 
 Earlier releases silently ignored reactor control modifiers and integrated
 every experiment with the configured controls
 (`issue #271 <https://github.com/PharmaPy-org/PharmaPy/issues/271>`__).
+Crystallizers applied a modifier permanently and shallowly: a ``kwargs`` entry
+replaced all configured keyword arguments, later experiments without a
+modifier inherited it, and the caller's control dictionaries were changed in
+place (`issue #492 <https://github.com/PharmaPy-org/PharmaPy/issues/492>`__).
 
 Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request
