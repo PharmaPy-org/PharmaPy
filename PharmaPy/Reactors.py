@@ -107,6 +107,86 @@ def _requested_rows(time_profile, requested_times) -> np.ndarray:
     return rows
 
 
+# Entries of a normalized control record: the callable, its positional
+# arguments after time, and its keyword arguments (see analyze_controls).
+_CONTROL_RECORD_FIELDS = ('fun', 'args', 'kwargs')
+
+
+def _normalize_controls(controls: Optional[dict]) -> dict:
+    """Normalize and validate reactor control records.
+
+    Parameters
+    ----------
+    controls : dict or None
+        Controlled state names mapped to callables ``f(time, *args,
+        **kwargs)`` or to records with ``fun`` and optional ``args`` and
+        ``kwargs``. Time is [s]; the returned value is in the controlled
+        state's units (temperature [K], volume [m**3]). None means no
+        controls.
+
+    Returns
+    -------
+    dict
+        New dictionary of new records with exactly the ``fun``, ``args``
+        and ``kwargs`` entries; missing ``args`` and ``kwargs`` default to
+        an empty tuple and dictionary. The supplied mapping and records
+        are not modified; ``args`` and ``kwargs`` values are not copied.
+
+    Raises
+    ------
+    ValueError
+        If a record has entries other than ``fun``, ``args`` and ``kwargs``.
+    KeyError
+        If a record has no ``fun`` entry.
+    TypeError
+        If ``fun`` is not callable, ``args`` is not a tuple or list, or
+        ``kwargs`` is not a dictionary.
+    """
+    # analyze_controls fills defaults in records; copy to preserve caller data.
+    normalized = analyze_controls({
+        name: dict(control) if isinstance(control, dict) else control
+        for name, control in (controls or {}).items()})
+    for name, control in normalized.items():
+        if set(control) != set(_CONTROL_RECORD_FIELDS):
+            raise ValueError(
+                f"Control {name!r} must be callable or have exactly "
+                "fun, args, kwargs keys")
+        if not callable(control['fun']):
+            raise TypeError(f"Control {name!r} 'fun' must be callable")
+        if (not isinstance(control['args'], (tuple, list))
+                or not isinstance(control['kwargs'], dict)):
+            raise TypeError(
+                f"Control {name!r} requires sequence args and dictionary kwargs")
+    return normalized
+
+
+def _reject_params_control(params_control) -> None:
+    """Reject the unsupported ``params_control`` argument of ``solve_unit``.
+
+    Parameters
+    ----------
+    params_control : object
+        Value passed as ``params_control``. The argument never had an
+        effect on a tank-reactor solve; it is kept in its position only so
+        that positional arguments after it bind as in earlier releases.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If ``params_control`` is not None.
+    """
+    if params_control is not None:
+        raise ValueError(
+            "params_control is not supported by solve_unit and never had an "
+            "effect; configure the reactor's controls (the controls "
+            "constructor argument) or pass per-experiment control modifiers "
+            "to paramest_wrapper(..., modify_controls=...)")
+
+
 def check_stoichiometry(stoich, mws):
     mass_bce = np.dot(stoich, mws)
 
@@ -421,21 +501,7 @@ class _BaseReactor:
         self.temp_control = None
         self.resid_time = None
         self.oper_mode = None
-        # analyze_controls fills defaults in records; copy to preserve caller data.
-        self.controls = analyze_controls({
-            name: dict(control) if isinstance(control, dict) else control
-            for name, control in (controls or {}).items()})
-        for name, control in self.controls.items():
-            if set(control) != {'fun', 'args', 'kwargs'}:
-                raise ValueError(
-                    f"Control {name!r} must be callable or have exactly "
-                    "fun, args, kwargs keys")
-            if not callable(control['fun']):
-                raise TypeError(f"Control {name!r} 'fun' must be callable")
-            if (not isinstance(control['args'], (tuple, list))
-                    or not isinstance(control['kwargs'], dict)):
-                raise TypeError(
-                    f"Control {name!r} requires sequence args and dictionary kwargs")
+        self.controls = _normalize_controls(controls)
 
         if state_events is None:
             state_events = []
@@ -1416,6 +1482,77 @@ class _BaseReactor:
         di_out = flatten_states(self.profiles_runs)
         return di_out
 
+    def _controls_with_modifier(self, modify_controls: Optional[dict]) -> dict:
+        """Return the configured controls updated by one experiment's modifier.
+
+        Parameters
+        ----------
+        modify_controls : dict or None
+            Configured control names mapped to partial control records.
+            ``fun`` and ``args`` replace the configured entries; ``kwargs``
+            is merged key by key into the configured keyword arguments, so
+            keywords it omits keep their configured values. Values are in
+            the units of the control function's arguments; the control
+            returns the controlled state's units (temperature [K], volume
+            [m**3]) from time [s]. None or an empty dictionary means the
+            configured controls.
+
+        Returns
+        -------
+        dict
+            New normalized control records (see ``_normalize_controls``)
+            with fresh ``kwargs`` dictionaries, one per configured control.
+            ``self.controls`` and ``modify_controls`` are not modified.
+
+        Raises
+        ------
+        TypeError
+            If ``modify_controls``, one of its entries, or an entry's
+            ``kwargs`` is not a dictionary, or the merged record has a
+            non-callable ``fun`` or non-sequence ``args``.
+        ValueError
+            If ``modify_controls`` names a control that is not configured
+            (the message lists the configured names), or an entry has keys
+            other than ``fun``, ``args`` and ``kwargs``.
+        """
+        if modify_controls is None:
+            modify_controls = {}
+        if not isinstance(modify_controls, dict):
+            raise TypeError(
+                "modify_controls must be a dictionary mapping configured "
+                "control names to partial control records, or None; got "
+                f"{type(modify_controls).__name__}")
+        unknown = [name for name in modify_controls if name not in self.controls]
+        if unknown:
+            raise ValueError(
+                f"modify_controls names unknown controls {unknown!r}; the "
+                f"reactor's configured controls are {list(self.controls)!r}")
+
+        merged = {}
+        for name, record in self.controls.items():
+            update = modify_controls.get(name, {})
+            if not isinstance(update, dict):
+                raise TypeError(
+                    f"modify_controls[{name!r}] must be a dictionary with "
+                    f"entries among {list(_CONTROL_RECORD_FIELDS)!r}; got "
+                    f"{type(update).__name__}")
+            unknown_entries = [entry for entry in update
+                               if entry not in _CONTROL_RECORD_FIELDS]
+            if unknown_entries:
+                raise ValueError(
+                    f"modify_controls[{name!r}] has unknown entries "
+                    f"{unknown_entries!r}; allowed entries are "
+                    f"{list(_CONTROL_RECORD_FIELDS)!r}")
+            kwargs_update = update.get('kwargs', {})
+            if not isinstance(kwargs_update, dict):
+                raise TypeError(
+                    f"modify_controls[{name!r}]['kwargs'] must be a "
+                    f"dictionary; got {type(kwargs_update).__name__}")
+            merged[name] = {**record, **update,
+                            'kwargs': {**record['kwargs'], **kwargs_update}}
+
+        return _normalize_controls(merged)
+
     def paramest_wrapper(self, params, t_vals, modify_phase=None,
                          modify_controls=None, reord_sens=True, run_args={}):
         """Reset and evaluate a reactor for parameter estimation.
@@ -1434,7 +1571,13 @@ class _BaseReactor:
             If no amount key is present, retain the charged volume [m**3].
             An explicit amount follows the phase's mass/volume/moles precedence.
         modify_controls : dict, optional
-            Replacement control parameters; units follow the controlled state.
+            Control modifier of this experiment: configured control names
+            mapped to partial control records. ``fun`` and ``args`` replace
+            the configured entries and ``kwargs`` is merged key by key, for
+            example ``{'temp': {'kwargs': {'slope': 0.05}}}`` with a slope in
+            [K/s] for a control ``fun(time, slope=0.0)`` returning [K].
+            Argument units are those of the control function. None or an
+            empty dictionary evaluates the configured controls.
         reord_sens : bool, optional
             If True, stack time-by-parameter sensitivities by state. Otherwise
             retain the parameter-by-time-by-state layout. Defaults to True.
@@ -1456,8 +1599,16 @@ class _BaseReactor:
 
         Raises
         ------
+        TypeError
+            If ``modify_controls``, one of its entries, or an entry's
+            ``kwargs`` is not a dictionary, or the merged control record has
+            a non-callable ``fun`` or non-sequence ``args``. Raised before
+            the reactor is reset or integrated.
         ValueError
-            If a requested time is absent from the solver output: CVode's
+            If ``modify_controls`` names a control that is not configured or
+            an entry has keys other than ``fun``, ``args`` and ``kwargs``;
+            raised before the reactor is reset or integrated.
+            Also if a requested time is absent from the solver output: CVode's
             default (non-continuous) output can omit requested points inside
             its last internal step before the end time (pass
             ``run_args={'sundials_opts': {'report_continuously': True}}``
@@ -1468,7 +1619,16 @@ class _BaseReactor:
         -----
         Composition-only modifiers preserve the reset charged volume used by
         geometry and initial states, rather than conserving liquid mass.
-        The supplied modifier dictionary is not changed.
+        The supplied modifier dictionaries are not changed.
+        Each call evaluates a new copy of the configured ``controls`` with
+        ``modify_controls`` applied (see ``_controls_with_modifier``) and
+        restores the configured ``controls`` object afterwards, also when
+        the evaluation raises. Successive calls, such as the experiments of
+        one objective evaluation, therefore never inherit another call's
+        modifier: a call without a modifier uses the configured controls.
+        The reported ``result`` describes the modified controls. Modifiers
+        cannot add or remove controls, so the integrated states are those
+        of the configured reactor.
         CVode reports the initial state and merges repeated initial times,
         so rows are selected by requested time (``_requested_rows``) before
         any sensitivity reordering; a grid that starts at the initial time
@@ -1478,6 +1638,9 @@ class _BaseReactor:
         integration duration and currently fails inside CVode with
         ``IndexError`` (issue #418).
         """
+        # Validate and build this call's controls before changing any state.
+        experiment_controls = self._controls_with_modifier(modify_controls)
+
         self.reset()
 
         if isinstance(modify_phase, dict):
@@ -1485,38 +1648,41 @@ class _BaseReactor:
                 modify_phase = {'vol': self.Liquid_1.vol, **modify_phase}  # vol [m**3]
             self.Liquid_1.updatePhase(**modify_phase)
 
-        if isinstance(modify_controls, dict):
-            self.params_control = modify_controls
-
         self.Kinetics.set_params(params)
         self.elapsed_time = 0
 
-        if self.return_sens:
-            t_prof, states, sens = self.solve_unit(time_grid=t_vals,
-                                                   verbose=False,
-                                                   eval_sens=True, **run_args)
-            rows = _requested_rows(t_prof, t_vals)
-            states = states[rows]
-            sens = [block[rows] for block in sens]
+        configured_controls = self.controls
+        self.controls = experiment_controls
+        try:
+            if self.return_sens:
+                t_prof, states, sens = self.solve_unit(time_grid=t_vals,
+                                                       verbose=False,
+                                                       eval_sens=True,
+                                                       **run_args)
+                rows = _requested_rows(t_prof, t_vals)
+                states = states[rows]
+                sens = [block[rows] for block in sens]
 
-            if reord_sens:
-                sens = reorder_sens(sens)
+                if reord_sens:
+                    sens = reorder_sens(sens)
+                else:
+                    sens = np.stack(sens)
+
+                c_prof = states[:, :self.Kinetics.num_species]
+
+                return c_prof, sens
+
             else:
-                sens = np.stack(sens)
+                t_prof, states = self.solve_unit(time_grid=t_vals,
+                                                 verbose=False,
+                                                 eval_sens=False, **run_args)
+                states = states[_requested_rows(t_prof, t_vals)]
 
-            c_prof = states[:, :self.Kinetics.num_species]
+                c_prof = states[:, :self.Kinetics.num_species]
 
-            return c_prof, sens
-
-        else:
-            t_prof, states = self.solve_unit(time_grid=t_vals,
-                                             verbose=False,
-                                             eval_sens=False, **run_args)
-            states = states[_requested_rows(t_prof, t_vals)]
-
-            c_prof = states[:, :self.Kinetics.num_species]
-
-            return c_prof
+                return c_prof
+        finally:
+            self.controls = configured_controls
 
     def plot_profiles(self, pick_comp=None, **fig_kwargs):
         """
@@ -1819,8 +1985,11 @@ class BatchReactor(_BaseReactor):
             runtime; repeated grids continue from the retained final state.
         eval_sens : bool, optional
             Whether to solve parameter sensitivities.
-        params_control : dict or None, optional
-            Control parameters retained for downstream use.
+        params_control : None, optional
+            Unsupported; it never had an effect and is kept only so that
+            later positional arguments bind as in earlier releases. Any value
+            other than None raises ValueError. Configure ``controls`` or pass
+            ``modify_controls`` to ``paramest_wrapper`` instead.
         verbose : bool, optional
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
@@ -1849,7 +2018,8 @@ class BatchReactor(_BaseReactor):
         Raises
         ------
         ValueError
-            If an active bath or jacket balance has no Utility.
+            If ``params_control`` is not None (raised before any other
+            check), or an active bath or jacket balance has no Utility.
         ImportError
             If the optional Assimulo solver backend is unavailable.
         MissingPropertyError
@@ -1863,6 +2033,8 @@ class BatchReactor(_BaseReactor):
         Otherwise continuation retains liquid and jacket states and appends
         cumulative heat duty. Control differentiation uses the completed span.
         """
+        _reject_params_control(params_control)
+
         self._reset_species_presence()
 
         check_modeling_objects(self)
@@ -1881,8 +2053,6 @@ class BatchReactor(_BaseReactor):
             raise ValueError("Control differentiation steps must be finite and positive")
         self.control_step_fraction = control_step_fraction  # [-]
         self.control_minimum_step = control_minimum_step  # [s]
-
-        self.params_control = params_control
 
         if runtime is not None:
             final_time = runtime + self.elapsed_time
@@ -2354,8 +2524,11 @@ class CSTR(_BaseReactor):
             The last offset overrides ``runtime`` when both are supplied.
         eval_sens : bool, optional
             Direct sensitivity evaluation; only False is supported.
-        params_control : dict or None, optional
-            Control parameters stored on the reactor for downstream use.
+        params_control : None, optional
+            Unsupported; it never had an effect and is kept only so that
+            later positional arguments bind as in earlier releases. Any value
+            other than None raises ValueError. Configure ``controls`` or pass
+            ``modify_controls`` to ``paramest_wrapper`` instead.
         verbose : bool, optional
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
@@ -2389,6 +2562,8 @@ class CSTR(_BaseReactor):
         ImportError
             If the optional Assimulo backend is unavailable.
         ValueError
+            If ``params_control`` is not None (raised before any other
+            check).
             If an active bath or jacket energy balance has no Utility.
         MissingPropertyError
             If the energy balance needs ``cp_liq`` for a present species
@@ -2403,6 +2578,8 @@ class CSTR(_BaseReactor):
         The RHS is evaluated before constructing the solver so input failures
         propagate directly.
         """
+        _reject_params_control(params_control)
+
         self._reset_species_presence()
 
         check_modeling_objects(self)
@@ -2419,7 +2596,6 @@ class CSTR(_BaseReactor):
         self.control_step_fraction = control_step_fraction  # [-]
         self.control_minimum_step = control_minimum_step  # [s]
 
-        self.params_control = params_control
         self.set_names()
         self._require_utility()
         for name in self.controls:
@@ -2698,8 +2874,11 @@ class SemibatchReactor(CSTR):
             The last offset overrides ``runtime`` when both are supplied.
         eval_sens : bool, optional
             Direct sensitivity evaluation; only False is supported.
-        params_control : dict or None, optional
-            Control parameters stored on the reactor for downstream use.
+        params_control : None, optional
+            Unsupported; it never had an effect and is kept only so that
+            later positional arguments bind as in earlier releases. Any value
+            other than None raises ValueError. Configure ``controls`` or pass
+            ``modify_controls`` to ``paramest_wrapper`` instead.
         verbose : bool, optional
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
@@ -2733,6 +2912,8 @@ class SemibatchReactor(CSTR):
         ImportError
             If the optional Assimulo backend is unavailable.
         ValueError
+            If ``params_control`` is not None (raised before any other
+            check).
             If an active bath or jacket energy balance has no Utility.
         MissingPropertyError
             If the energy balance needs ``cp_liq`` for a present species
@@ -2747,6 +2928,8 @@ class SemibatchReactor(CSTR):
         The RHS is evaluated before constructing the solver so input failures
         propagate directly.
         """
+        _reject_params_control(params_control)
+
         self._reset_species_presence()
 
         check_modeling_objects(self)
@@ -2763,7 +2946,6 @@ class SemibatchReactor(CSTR):
         self.control_step_fraction = control_step_fraction  # [-]
         self.control_minimum_step = control_minimum_step  # [s]
 
-        self.params_control = params_control
         self.set_names()
         self._require_utility()
         for name in self.controls:
@@ -2840,53 +3022,6 @@ class SemibatchReactor(CSTR):
         self.flatten_states()
 
         return time, states
-
-    # def retrieve_results(self, time, states):
-    #     conc_prof = states[:, :self.num_concentr]
-    #     vol_prof = states[:, self.num_concentr]
-
-    #     if self.isothermal:
-    #         temp_prof = np.ones_like(time) * self.Liquid_1.temp
-    #         tht_prof = None
-
-    #     elif self.temp_control is not None:
-    #         conc_prof = states.copy()
-    #         temp_prof = self.temp_control(**self.params_control['temp'])
-
-    #     else:
-    #         temp_prof = states[:, self.num_concentr + 1]
-
-    #         if 'temp_ht' in self.states_uo:
-    #             tht_prof = states[:, -1]
-    #         else:
-    #             tht_prof = None
-
-    #     # Heat profile
-    #     u_inputs = self.get_inputs(time)
-
-    #     self.heat_prof = self.energy_balances(time, conc_prof, vol_prof,
-    #                                           temp_prof,
-    #                                           tht_prof, u_inputs,
-    #                                           heat_prof=True)
-
-    #     self.temp_runs.append(temp_prof)
-    #     self.conc_runs.append(conc_prof)
-    #     self.vol_runs.append(vol_prof)
-
-    #     if tht_prof is not None:
-    #         self.tempHt_runs.append(tht_prof)
-
-    #     # Final state
-    #     self.elapsed_time = time[-1]
-    #     self.concentr = self.conc_runs[-1][-1]
-    #     self.temp = self.temp_runs[-1][-1]
-    #     self.vol = self.vol_runs[-1][-1]
-
-    #     self.Liquid_1.temp = self.temp
-    #     self.Liquid_1.vol = self.vol
-    #     self.Liquid_1.updatePhase(vol=self.vol, mole_conc=self.concentr)
-    #     self.Outlet = self.Liquid_1
-    #     self.outputs = states
 
 
 class PlugFlowReactor(_BaseReactor):

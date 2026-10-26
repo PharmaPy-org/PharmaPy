@@ -464,8 +464,34 @@ come from upstream units. The experiment forms are:
   ``ValueError``.
 
 Only modifier keys and entry types are validated by ``SetParamEstimation``;
-applying control modifiers inside reactor callbacks is tracked in
-`issue #271 <https://github.com/PharmaPy-org/PharmaPy/issues/271>`__.
+the unit's ``paramest_wrapper`` applies the modifier fields when the objective
+is evaluated. The batch, CSTR and semibatch reactor callbacks evaluate every
+experiment with a fresh copy of the reactor's configured ``controls``, updated
+by that experiment's control modifier:
+
+* keys of the modifier are names of configured controls, and each value is a
+  partial control record. ``fun`` and ``args`` replace the configured entries;
+  ``kwargs`` is merged key by key, so keywords it omits keep their configured
+  values. For a configured control
+  ``{'temp': {'fun': ramp, 'kwargs': {'start': 330.0, 'slope': 0.0}}}`` with
+  ``ramp(time, start, slope)`` returning ``start + slope * time`` [K], the
+  modifier ``{'temp': {'kwargs': {'slope': 0.05}}}`` evaluates
+  ``330.0 + 0.05 * time`` [K] (slope in [K/s]);
+* an experiment without a control modifier (none supplied, ``{}`` or ``None``)
+  uses the configured controls. No experiment or objective evaluation
+  inherits another one's modifier, whatever the experiment order;
+* an unknown control name or a record entry other than ``fun``, ``args`` and
+  ``kwargs`` raises ``ValueError``, and a non-dictionary entry or ``kwargs``
+  raises ``TypeError``, before the reactor is reset or integrated. The merged
+  record is validated like a configured control;
+* neither the reactor's configured controls nor the caller's modifier
+  dictionaries are modified, also when an evaluation raises. Modifiers cannot
+  add or remove controls, so the integrated states are those of the configured
+  reactor.
+
+Earlier releases silently ignored reactor control modifiers and integrated
+every experiment with the configured controls
+(`issue #271 <https://github.com/PharmaPy-org/PharmaPy/issues/271>`__).
 
 Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request

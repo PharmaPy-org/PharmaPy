@@ -965,12 +965,18 @@ class SimulationExec:
         control_modifiers : dict, list or tuple, optional
             Per-experiment control-parameter updates passed to the unit's
             ``paramest_wrapper`` as ``modify_controls``, aligned with the
-            experiments exactly like ``phase_modifiers``. Each entry is a
-            dictionary in the units of the controlled state and its control
-            function arguments; for a crystallizer temperature control
-            ``my_control(time, temp_init, ramp)`` an entry is
-            ``{'temp': {'args': (320.0, -0.2)}}``. The default is None, which
-            passes an empty dictionary to every experiment.
+            experiments exactly like ``phase_modifiers``. Each entry maps
+            configured control names to partial control records in the
+            units of the control function's arguments; for a temperature
+            control ``my_control(time, temp_init, ramp)`` returning [K], an
+            entry is ``{'temp': {'args': (320.0, -0.2)}}`` with the initial
+            temperature [K] and ramp [K/s]. Batch, CSTR and semibatch
+            reactors evaluate each experiment with a copy of their
+            configured controls in which ``fun`` and ``args`` are replaced
+            and ``kwargs`` is merged key by key, so an experiment without a
+            modifier (an empty or None entry) uses the configured controls,
+            never another experiment's modifier. See the Notes. The default
+            is None, which passes an empty dictionary to every experiment.
         pick_unit : str, optional
             Name of the flowsheet unit to fit; any graph node is valid,
             including a unit that appears only as a successor. Required
@@ -1076,9 +1082,14 @@ class SimulationExec:
         ``wrapper_kwargs``) are not modified; the modifier dictionaries are
         passed to the callback without copying.
 
-        Only modifier keys and entry types are validated here. Applying
-        control modifiers inside the reactor callbacks is tracked by
-        issue #271.
+        Only modifier keys and entry types are validated here; the unit's
+        ``paramest_wrapper`` applies the modifier fields when the objective
+        is evaluated. The batch, CSTR and semibatch reactor callbacks raise
+        ``ValueError`` for a control name that the reactor does not
+        configure or a record entry other than ``fun``, ``args`` and
+        ``kwargs``, and ``TypeError`` for a non-dictionary entry or
+        ``kwargs``, before the reactor is reset or integrated. They never
+        modify the configured controls or the modifier dictionaries.
 
         Reactor callbacks return exactly one row per requested sample time
         (replicates repeated), so experiments need not sample the initial
