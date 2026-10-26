@@ -783,6 +783,55 @@ class SimulationExec:
                     'charge through Phases or the feed through Inlet.')
         return None
 
+    def _estimation_unit(self, pick_unit: Optional[str] = None):
+        """Return the unit operation fitted by ``SetParamEstimation``.
+
+        Parameters
+        ----------
+        pick_unit : str, optional
+            Name of the flowsheet unit to fit. The default is None, which
+            selects the only unit of a single-unit flowsheet.
+
+        Returns
+        -------
+        object
+            The unit operation attached to this ``SimulationExec`` under
+            the resolved name.
+
+        Raises
+        ------
+        RuntimeError
+            If the flowsheet holds two or more units and ``pick_unit`` is
+            None.
+        PharmaPyValueError
+            If ``pick_unit`` is not a unit of the flowsheet graph. The
+            message lists the valid unit names in execution order. It is a
+            ``ValueError``.
+        AttributeError
+            If the resolved unit has not been attached to this
+            ``SimulationExec``.
+
+        Notes
+        -----
+        Units are the nodes of the flowsheet graph in ``execution_names``
+        order, including units that appear only as successors and so have
+        no adjacency entry, such as ``'R02'`` in ``{'R01': ['R02']}``. On a
+        single-unit flowsheet ``pick_unit`` may be omitted or must name that
+        unit.
+        """
+        unit_names = self.execution_names
+        if pick_unit is None:
+            if len(unit_names) > 1:
+                raise RuntimeError(
+                    "Two or more unit operations detected. Select one using "
+                    f"the 'pick_unit' argument; valid names: {unit_names!r}")
+            pick_unit = unit_names[0]
+        elif pick_unit not in unit_names:
+            raise PharmaPyValueError(
+                f"pick_unit {pick_unit!r} is not a unit of the flowsheet; "
+                f"valid names: {unit_names!r}")
+        return getattr(self, pick_unit)
+
     def SetParamEstimation(self, x_data, y_data=None, y_spectra=None,
                            fit_spectra=False,
                            wrapper_kwargs=None,
@@ -867,8 +916,13 @@ class SimulationExec:
             ``{'temp': {'args': (320.0, -0.2)}}``. The default is None, which
             passes an empty dictionary to every experiment.
         pick_unit : str, optional
-            Unit operation to fit when the flowsheet holds more than one.
-            The default is None.
+            Name of the flowsheet unit to fit; any graph node is valid,
+            including a unit that appears only as a successor. Required
+            when the flowsheet holds more than one unit. On a single-unit
+            flowsheet it may be omitted or must name that unit. The
+            selected unit supplies the callback, its signature for binding
+            ``Experiment`` arguments, the parameter seed and the names. The
+            default is None.
         **inputs_paramest
             Further keyword arguments of ``ParameterEstimation`` (or
             ``MultipleCurveResolution``), for example ``measured_ind``,
@@ -887,8 +941,11 @@ class SimulationExec:
         Raises
         ------
         RuntimeError
-            If the flowsheet holds two or more unit operations and
-            ``pick_unit`` is None.
+            If the flowsheet holds two or more unit operations, counting
+            successor-only units, and ``pick_unit`` is None.
+        PharmaPyValueError
+            If ``pick_unit`` is not a unit of the flowsheet graph; the
+            message lists the valid names. It is a ``ValueError``.
         ValueError
             If ``phase_modifiers`` or ``control_modifiers``
 
@@ -950,15 +1007,14 @@ class SimulationExec:
         include the charge time, until issue #328 is fixed: their grids
         must start at the charge time (0 s) without replicates there; add
         0 s to one measurement with a NaN value as a workaround.
+
+        In a multi-unit flowsheet only the ``pick_unit`` unit is fitted, in
+        isolation from its neighbours: its callback starts from the unit's
+        current phases and inlets and does not re-solve upstream units or
+        transfer material downstream. Run ``SolveFlowsheet`` first when a
+        downstream unit's inputs come from upstream units.
         """
-        if len(self.graph) == 1:
-            target_unit = getattr(self, list(self.graph.keys())[0])
-        else:
-            if pick_unit is None:
-                raise RuntimeError("Two or more unit operations detected. "
-                                   "Select one using the 'pick_unit' argument")
-            else:
-                pass  # remember setting reset_states to True!!
+        target_unit = self._estimation_unit(pick_unit)
 
         experiments = _experiment_collection(x_data)
         if experiments is not None:

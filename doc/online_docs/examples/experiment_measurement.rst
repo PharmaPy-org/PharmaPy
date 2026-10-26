@@ -433,7 +433,16 @@ Using experiments through SimulationExec
 ``paramest_wrapper`` (time [s] is the independent variable). Every
 experiment receives its own wrapper keywords ``modify_phase``,
 ``modify_controls`` and ``run_args``, built from ``phase_modifiers``,
-``control_modifiers`` and a per-experiment copy of ``wrapper_kwargs``:
+``control_modifiers`` and a per-experiment copy of ``wrapper_kwargs``.
+In a flowsheet with several units, name the fitted unit with ``pick_unit``,
+for example ``pick_unit='R02'`` for ``{'R01': ['R02']}``: every graph node,
+including a unit that appears only as a successor, can be selected, and the
+selected unit supplies the callback, the signature that binds experiment
+``args``, the parameter seed and the parameter names. Omitting ``pick_unit``
+there raises ``RuntimeError``, and a name outside the graph raises
+``ValueError`` listing the valid names. The selected unit is fitted alone,
+from its current phases and inlets; run ``SolveFlowsheet`` first when they
+come from upstream units. The experiment forms are:
 
 * **Named experiments** (a dictionary ``x_data`` or a mapping of
   ``Experiment`` objects): modifiers are dictionaries keyed by exactly the
