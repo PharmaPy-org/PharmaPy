@@ -107,8 +107,8 @@ once per evaluation, and every measurement reads its own rows.
   otherwise invented, also when the grids only partially overlap.
 * **Single sampled point.** A scalar ``x`` (or a one-element array) is a
   valid measurement, for example one temperature reading. A reactor
-  experiment must still request at least one time after the charge time;
-  see the reactor callback limits under SimulationExec below.
+  experiment sampled only at the charge time returns the charged state; see
+  the reactor callbacks under SimulationExec below.
 * **Replicates.** A repeated x value within a measurement denotes replicate
   observations at that x; the k-th replicate maps to the k-th model-grid row
   holding that x, so the callback receives the repeated value. Replicates
@@ -513,13 +513,14 @@ Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request
 order with replicates repeated, so an experiment need not sample the initial
 time: endpoint-only measurements and replicate samples at the charge time
-are supported. Each reactor experiment must still request at least one time
-after the charge time. A grid made only of charge-time samples, such as
-``[0.0]`` or ``[0.0, 0.0]``, has zero integration duration:
-``SetParamEstimation`` accepts it, but evaluating the objective currently
-fails inside CVode with ``IndexError``. Support for such zero-duration
-experiments is tracked in
-`issue #418 <https://github.com/PharmaPy-org/PharmaPy/issues/418>`__.
+are supported. So are experiments sampled only at the charge time, such as
+``[0.0]`` or ``[0.0, 0.0]``: they have zero integration duration, so the
+callback does not integrate and returns the charged state in every requested
+row, with exactly zero sensitivities, since the charged state does not depend
+on the kinetic parameters. Such an experiment observes the charge but carries
+no kinetic information, and the reactor's ``result`` is None after it is
+evaluated. Earlier releases failed inside CVode with ``IndexError``
+(`issue #418 <https://github.com/PharmaPy-org/PharmaPy/issues/418>`__).
 Crystallizer callbacks still return the solver rows, which
 include the charge time, until
 `issue #328 <https://github.com/PharmaPy-org/PharmaPy/issues/328>`__ is

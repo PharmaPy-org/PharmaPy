@@ -108,6 +108,42 @@ def _requested_rows(time_profile, requested_times) -> np.ndarray:
     return rows
 
 
+def _charge_time_only(time_grid, start_time) -> bool:
+    """Tell whether every requested output time is the integration start.
+
+    Parameters
+    ----------
+    time_grid : array_like or None
+        Absolute output times [s] that ``solve_unit`` passes to CVode,
+        shape ``(num_times,)``, or None when it integrates a ``runtime``.
+    start_time : float
+        Absolute start time [s] of the integration, CVode's ``t0``: the
+        charge time of a reset reactor.
+
+    Returns
+    -------
+    bool
+        True if ``time_grid`` is given, not empty, and every entry equals
+        ``start_time``.
+
+    Notes
+    -----
+    Times are compared by exact equality, on the same absolute floats
+    (offsets plus elapsed time) that CVode receives, so the rule agrees
+    with the solver's own start time and with the exact matching of
+    ``_requested_rows``. Such a grid has zero integration duration, and
+    every requested row is the charged state. A time that differs from
+    the start by even one unit in the last place is a genuine output
+    point after the charge: CVode integrates to it or reports its own
+    error, and any tolerance would instead replace a requested state
+    after the charge by the charged state.
+    """
+    if time_grid is None:
+        return False
+    grid = np.asarray(time_grid, dtype=float)  # [s]
+    return bool(grid.size) and bool(np.all(grid == start_time))
+
+
 def _reject_params_control(params_control) -> None:
     """Reject the unsupported ``params_control`` argument of ``solve_unit``.
 
@@ -619,6 +655,85 @@ class _BaseReactor:
             self._simulating = False
             self._missing_data_error = None
             self._missing_data_traceback = None
+
+    def _charge_state_profile(self, states_init: np.ndarray,
+                              eval_sens: bool) -> tuple:
+        """Return the charged state as the profile of a zero-duration solve.
+
+        Parameters
+        ----------
+        states_init : numpy.ndarray
+            Initial states in ``name_states`` order, as CVode would receive
+            them, shape ``(num_states,)``: concentrations [mol/L], the
+            optional Semibatch volume [m**3] and active temperatures [K].
+        eval_sens : bool
+            Whether to also return parameter sensitivities.
+
+        Returns
+        -------
+        time : numpy.ndarray
+            The start time [s], shape ``(1,)``. Requested replicates of it
+            share this row, as they share CVode's initial output row.
+        states : numpy.ndarray
+            Copy of ``states_init``, shape ``(1, num_states)``.
+        sensitivities : list of numpy.ndarray, optional
+            Returned only for ``eval_sens=True``: one zero array of shape
+            ``(1, num_states)`` per kinetic parameter, in
+            ``Kinetics.concat_params()`` order (CVode's ``p0``), in state
+            units per parameter unit. The initial states do not depend on
+            the kinetic parameters, so their sensitivities are exactly zero,
+            as the integrated path also sets at its initial row.
+
+        Notes
+        -----
+        Nothing is integrated, so ``_discard_solve_artifacts`` replaces the
+        artifacts of any earlier solve: profiles become None and the heat
+        duty and outlet describe the charge. The liquid phase,
+        ``elapsed_time`` and ``profiles_runs`` keep the charged state that
+        the solve started from.
+        """
+        time = np.array([self.elapsed_time], dtype=float)  # [s]
+        # Copy of the charge, shape (1, num_states).
+        states = np.array(states_init, dtype=float,
+                          ndmin=2)  # [mol/L], [m**3], [K]
+        self._discard_solve_artifacts(states[0])
+        if not eval_sens:
+            return time, states
+
+        num_params = len(self.Kinetics.concat_params())  # [-]
+        sensitivities = [np.zeros_like(states)
+                         for _ in range(num_params)]  # [state units/param units]
+        return time, states, sensitivities
+
+    def _discard_solve_artifacts(self, charged_states: np.ndarray) -> None:
+        """Replace per-solve artifacts after a solve without integration.
+
+        Parameters
+        ----------
+        charged_states : numpy.ndarray
+            Charged states in ``name_states`` order, shape
+            ``(num_states,)``: concentrations [mol/L], the optional
+            Semibatch volume [m**3] and active temperatures [K]. Unused
+            here; subclasses that store a terminal state use it.
+
+        Notes
+        -----
+        Profile artifacts, which only an integration defines, become None:
+        ``result`` (as before any solve, when it is absent), ``sensit`` and
+        ``outputs`` (their values on a fresh unit). Artifacts that describe
+        the reactor at the end of the evaluation take the charge: the
+        cumulative ``heat_duty`` [J] since the reset is recomputed over the
+        retained ``profiles_runs`` (empty after the
+        ``paramest_wrapper`` reset, so [0, 0] J with ``duty_type`` [0, 0]),
+        and ``Outlet`` is ``Liquid_1``, the charged holdup that a Batch
+        solve also publishes. ``CSTR`` overrides the outlet and adds its
+        solver profiles.
+        """
+        self.result = None
+        self.sensit = None
+        self.outputs = None
+        self._finalize_tank_heat_duty()
+        self.Outlet = self.Liquid_1
 
     def _structural_presence(self) -> np.ndarray:
         """Mark species with a nonzero stoichiometric coefficient.
@@ -1467,7 +1582,9 @@ class _BaseReactor:
             Species molar concentrations [mol/L], shape
             ``(num_times, kinetics.num_species)``: exactly one row per
             requested time in ``t_vals`` order, with replicate times
-            repeated. The initial state is included only if requested.
+            repeated. The initial state is included only if requested; a
+            grid of charge-time samples only returns the charged state in
+            every row (see the Notes).
         sens : numpy.ndarray, optional
             Returned with ``c_prof`` only when ``return_sens`` is True.
             Sensitivities have units of each state per kinetic parameter unit,
@@ -1491,6 +1608,10 @@ class _BaseReactor:
             ``run_args={'sundials_opts': {'report_continuously': True}}``
             or a ``maxh`` below the sample spacing), the integration ended
             early (terminating state event or stop), or the grid decreases.
+        NotImplementedError
+            If ``return_sens`` is True for a reactor without direct
+            sensitivity evaluation (``CSTR``, ``SemibatchReactor``), from
+            ``solve_unit``; also for a grid of charge-time samples only.
 
         Notes
         -----
@@ -1511,10 +1632,24 @@ class _BaseReactor:
         so rows are selected by requested time (``_requested_rows``) before
         any sensitivity reordering; a grid that starts at the initial time
         without initial replicates is returned unchanged.
-        ``t_vals`` must contain at least one time after the charge time. A
-        grid made only of charge-time samples, such as ``[0.0]``, has zero
-        integration duration and currently fails inside CVode with
-        ``IndexError`` (issue #418).
+        A grid made only of charge-time samples, such as ``[0.0]`` or
+        ``[0.0, 0.0]``, has zero integration duration. The charge time is
+        the solver's start time, the reset elapsed time, and is matched
+        exactly (see ``_charge_time_only``). Such a grid is not integrated:
+        ``solve_unit`` returns the charged state after its usual checks,
+        so every requested row is the charge (replicates repeated), with
+        the columns and units of an integrated grid, and the
+        sensitivities, when returned, are exactly zero in the same layout
+        (issue #418). The reactor keeps its charged state at the reset
+        elapsed time, and the artifacts of earlier solves are replaced
+        (``_discard_solve_artifacts``): ``result``, ``sensit``, ``outputs``
+        and the CSTR and semibatch ``statesProf`` are None, ``heat_duty``
+        is [0, 0] J, the CSTR and semibatch ``states`` hold the charged
+        states, and ``Outlet`` is the charged ``Liquid_1`` (None for a
+        CSTR, whose outlet stream needs a flow history).
+        Units without sensitivity support (CSTR, semibatch)
+        raise the same ``NotImplementedError`` for such a grid as for any
+        other when ``return_sens`` is True.
         """
         # Validate and build this call's controls before changing any state.
         experiment_controls = apply_control_modifier(
@@ -1537,6 +1672,7 @@ class _BaseReactor:
                 t_prof, states, sens = self.solve_unit(time_grid=t_vals,
                                                        verbose=False,
                                                        eval_sens=True,
+                                                       _charge_state_rows=True,
                                                        **run_args)
                 rows = _requested_rows(t_prof, t_vals)
                 states = states[rows]
@@ -1554,7 +1690,9 @@ class _BaseReactor:
             else:
                 t_prof, states = self.solve_unit(time_grid=t_vals,
                                                  verbose=False,
-                                                 eval_sens=False, **run_args)
+                                                 eval_sens=False,
+                                                 _charge_state_rows=True,
+                                                 **run_args)
                 states = states[_requested_rows(t_prof, t_vals)]
 
                 c_prof = states[:, :self.Kinetics.num_species]
@@ -1852,7 +1990,8 @@ class BatchReactor(_BaseReactor):
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
                    params_control=None, verbose=True, sundials_opts=None,
                    control_step_fraction: float = 1 / 1024,
-                   control_minimum_step: float = 1 / 1024):
+                   control_minimum_step: float = 1 / 1024,
+                   _charge_state_rows: bool = False):
         """Integrate Batch balances and store cumulative tank results.
 
         Parameters
@@ -1882,6 +2021,15 @@ class BatchReactor(_BaseReactor):
             Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
             for cancellation control at ordinary process temperatures. Reduce
             it for faster controls; completed boundaries take precedence.
+        _charge_state_rows : bool, optional
+            Private handoff from ``paramest_wrapper``. If True and every
+            output time of ``time_grid`` equals the start time (see
+            ``_charge_time_only``), return the start time [s], shape
+            ``(1,)``, and the charged states, shape ``(1, num_states)``,
+            without integrating; earlier solve artifacts such as ``result``
+            are then replaced (see ``_charge_state_profile``). The default
+            False integrates, which
+            needs a time after the start.
 
         Returns
         -------
@@ -1997,6 +2145,10 @@ class BatchReactor(_BaseReactor):
 
         self.derivatives = call_fn(self.elapsed_time, states_init,
                                    *list(kw_problem.values()))
+
+        if _charge_state_rows and _charge_time_only(time_grid,
+                                                    self.elapsed_time):
+            return self._charge_state_profile(states_init, eval_sens)
 
         # Set solver
         solver = CVode(problem)
@@ -2391,7 +2543,8 @@ class CSTR(_BaseReactor):
                    params_control=None, verbose=True, sundials_opts=None,
                    any_event: bool = True,
                    control_step_fraction: float = 1 / 1024,
-                   control_minimum_step: float = 1 / 1024):
+                   control_minimum_step: float = 1 / 1024,
+                   _charge_state_rows: bool = False):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -2424,6 +2577,15 @@ class CSTR(_BaseReactor):
             Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
             for cancellation control at ordinary process temperatures. Reduce
             it for faster controls; completed boundaries take precedence.
+        _charge_state_rows : bool, optional
+            Private handoff from ``paramest_wrapper``. If True and every
+            output time of ``time_grid`` equals the start time (see
+            ``_charge_time_only``), return the start time [s], shape
+            ``(1,)``, and the charged states, shape ``(1, num_states)``,
+            without integrating; earlier solve artifacts such as ``result``
+            are then replaced (see ``_charge_state_profile``). The default
+            False integrates, which
+            needs a time after the start.
 
         Returns
         -------
@@ -2530,6 +2692,10 @@ class CSTR(_BaseReactor):
             problem.handle_event = partial(
                 handle_events, state_event_list=self.state_event_list,
                 any_event=any_event)
+
+        if _charge_state_rows and _charge_time_only(time_grid,
+                                                    self.elapsed_time):
+            return self._charge_state_profile(states_init, eval_sens)
 
         # Set solver
         solver = CVode(problem)
@@ -2640,6 +2806,33 @@ class CSTR(_BaseReactor):
         outputs['vol_flow'] = dp['inlet_vol_flow']  # [m**3/s], retained inlet history
         self.outputs = outputs
 
+    def _discard_solve_artifacts(self, charged_states: np.ndarray) -> None:
+        """Replace per-solve artifacts after a solve without integration.
+
+        Parameters
+        ----------
+        charged_states : numpy.ndarray
+            Charged states in ``name_states`` order, shape
+            ``(num_states,)``: concentrations of all phase species
+            [mol/L], the Semibatch volume [m**3] and active temperatures
+            [K].
+
+        Notes
+        -----
+        Extends ``_BaseReactor._discard_solve_artifacts``. The solver
+        profile ``statesProf`` becomes None and the terminal state
+        ``states`` is a copy of ``charged_states``. A ``SemibatchReactor``
+        keeps ``Outlet`` as its charged holdup ``Liquid_1``, as its solve
+        does. A ``CSTR`` outlet is a stream built from the solved terminal
+        state and inlet flow; no flow passed during a zero-duration
+        evaluation, so ``Outlet`` is None.
+        """
+        super()._discard_solve_artifacts(charged_states)
+        self.statesProf = None
+        self.states = np.array(charged_states, dtype=float)  # [mol/L], [m**3], [K]
+        if self.__class__.__name__ != 'SemibatchReactor':
+            self.Outlet = None
+
 
 class SemibatchReactor(CSTR):
     """
@@ -2741,7 +2934,8 @@ class SemibatchReactor(CSTR):
                    params_control=None, verbose=True, sundials_opts=None,
                    any_event: bool = True,
                    control_step_fraction: float = 1 / 1024,
-                   control_minimum_step: float = 1 / 1024):
+                   control_minimum_step: float = 1 / 1024,
+                   _charge_state_rows: bool = False):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -2774,6 +2968,15 @@ class SemibatchReactor(CSTR):
             Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
             for cancellation control at ordinary process temperatures. Reduce
             it for faster controls; completed boundaries take precedence.
+        _charge_state_rows : bool, optional
+            Private handoff from ``paramest_wrapper``. If True and every
+            output time of ``time_grid`` equals the start time (see
+            ``_charge_time_only``), return the start time [s], shape
+            ``(1,)``, and the charged states, shape ``(1, num_states)``,
+            without integrating; earlier solve artifacts such as ``result``
+            are then replaced (see ``_charge_state_profile``). The default
+            False integrates, which
+            needs a time after the start.
 
         Returns
         -------
@@ -2871,6 +3074,10 @@ class SemibatchReactor(CSTR):
             problem.handle_event = partial(
                 handle_events, state_event_list=self.state_event_list,
                 any_event=any_event)
+
+        if _charge_state_rows and _charge_time_only(time_grid,
+                                                    self.elapsed_time):
+            return self._charge_state_profile(states_init, eval_sens)
 
         # Set solver
         solver = CVode(problem)

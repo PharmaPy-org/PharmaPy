@@ -1108,10 +1108,10 @@ class SimulationExec:
 
         Reactor callbacks return exactly one row per requested sample time
         (replicates repeated), so experiments need not sample the initial
-        time. Each reactor experiment must still request at least one time
-        after the charge time: an all-charge-time grid such as ``[0.0]`` has
-        zero integration duration and currently fails inside CVode with
-        ``IndexError`` when the objective is evaluated (issue #418).
+        time. An experiment sampled only at the charge time, such as
+        ``[0.0]`` or ``[0.0, 0.0]``, is not integrated: its rows are the
+        charged state, with exactly zero sensitivities, since the charged
+        state does not depend on the kinetic parameters (issue #418).
         Crystallizer callbacks still return the solver rows, which
         include the charge time, until issue #328 is fixed: their grids
         must start at the charge time (0 s) without replicates there; add
