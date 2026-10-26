@@ -19,7 +19,8 @@ from PharmaPy.Errors import (PharmaPyNonImplementedError, PharmaPyTypeError,
                              PharmaPyValueError)
 from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_object
 
-from PharmaPy.Commons import trapezoidal_rule, check_steady_state
+from PharmaPy.Commons import (_real_float_array, check_steady_state,
+                              trapezoidal_rule)
 from PharmaPy.CheckModule import check_modeling_objects
 
 import inspect
@@ -266,6 +267,59 @@ def _experiment_with_wrapper(experiment: Experiment, name: str,
     return Experiment(dict(experiment.measurements), args=experiment.args,
                       kwargs=kwargs, name=experiment.name,
                       author=experiment.author, date=experiment.date)
+
+
+def _explicit_param_seed(unit, param_seed) -> np.ndarray:
+    """Return a validated copy of a seed supplied for a unit without kinetics.
+
+    Parameters
+    ----------
+    unit : object
+        Unit operation fitted by ``SimulationExec.SetParamEstimation``
+        without a ``Kinetics`` object, such as a ``Filter``. If it declares
+        ``name_params``, those are all of its parameter names. If it has a
+        ``validate_param_seed`` method, that method applies the unit's own
+        seed rules, such as ``Filter.validate_param_seed``.
+    param_seed : array_like
+        Real parameter seed in the unit's estimation basis and parameter
+        order, as its ``paramest_wrapper`` receives it, for example a
+        ``Filter``'s (alpha [m/kg], medium resistance [1/m]), or their
+        natural logarithms [-] when ``log_params`` is True. A scalar is
+        one parameter.
+
+    Returns
+    -------
+    numpy.ndarray
+        New float array of shape (num_params,), equal to ``param_seed``
+        in the same basis and order, without a unit conversion. The
+        caller's array is neither modified nor shared.
+
+    Raises
+    ------
+    ValueError
+        If the seed is not an array of real (integer or floating-point)
+        numbers, for example a dictionary, string or complex seed, is not
+        one-dimensional, has a number of entries other than the length of
+        the unit's ``name_params`` (when declared), or has a non-finite
+        entry; the message names the expected parameters. Also the
+        ``ValueError`` of the unit's ``validate_param_seed``, for example
+        for a ``Filter`` with callable resistances or a nonpositive
+        physical resistance.
+    """
+    names = getattr(unit, 'name_params', None)
+    expected = ('' if names is None
+                else f" with one entry per parameter {list(names)!r}")
+    message = (f"param_seed for a {type(unit).__name__} must be a finite "
+               f"one-dimensional array of real numbers{expected}, in the "
+               f"unit's estimation basis; got {param_seed!r}")
+    seed = np.atleast_1d(_real_float_array(param_seed, message))  # copy; [unit's parameter units]
+    if (seed.ndim != 1 or (names is not None and len(seed) != len(names))
+            or not np.all(np.isfinite(seed))):
+        raise ValueError(message)
+    validate = getattr(unit, 'validate_param_seed', None)
+    if validate is not None:
+        validate(seed.copy())
+    return seed
 
 
 class SimulationExec:
@@ -929,8 +983,8 @@ class SimulationExec:
             Further keyword arguments of ``ParameterEstimation`` (or
             ``MultipleCurveResolution``), for example ``measured_ind``,
             ``optimize_flags``, ``weight_matrix``, ``name_params`` or
-            ``output_names``. ``param_seed``, if given, is set on the unit's
-            kinetics before the seed is read back. For legacy input
+            ``output_names``. ``param_seed``, if given, takes precedence
+            over the unit's default seed; see the Notes. For legacy input
             ``name_states`` is replaced by the unit's ``states_uo``; for
             ``Experiment`` input a supplied ``name_states`` is passed
             through, and otherwise the estimator names the states after
@@ -964,6 +1018,14 @@ class SimulationExec:
             (``phase_modifiers``, ``control_modifiers`` or
             ``wrapper_kwargs``) is given, and for the input errors of
             ``ParameterEstimation``.
+
+            Also if ``param_seed`` is given for a unit without ``Kinetics``
+            and is not a finite one-dimensional array of real numbers (a
+            dictionary, string or complex seed is rejected) with one entry
+            per name in the unit's ``name_params`` (when declared), or
+            violates the unit's ``validate_param_seed`` rules, for example
+            a ``Filter`` with callable resistances or a nonpositive
+            physical alpha or medium resistance.
         TypeError
             If a modifier argument for named experiments is not a mapping,
             an unnamed modifier argument is not a mapping, list or tuple, a
@@ -990,6 +1052,25 @@ class SimulationExec:
         after the parameters and time grid, so ``args=(phase_modifier,)``
         binds ``modify_phase`` of the reactor wrappers. The caller's
         experiments are not modified.
+
+        The parameter seed is read from the selected unit. For a unit with
+        ``Kinetics``, a given ``param_seed`` is first set on the kinetics
+        with ``Kinetics.set_params``, and the seed is then read back with
+        ``Kinetics.concat_params``. For a unit without kinetics, such as a
+        ``Filter``, a given ``param_seed`` is passed to the estimator as a
+        float copy, in the unit's estimation basis and parameter order
+        without conversion (natural logarithms of alpha [m/kg] and medium
+        resistance [1/m] for a ``Filter`` with ``log_params=True``,
+        physical values otherwise). The unit's default ``param_seed`` is
+        not evaluated, and its configured parameters are never changed or
+        converted; a ``Filter`` reads its configured alpha and r_medium
+        only to check that they are not callable. A unit that defines
+        ``validate_param_seed`` checks the seed with its own rules, so a
+        ``Filter`` applies the estimability and domain rules of
+        ``Filter.param_seed`` to the supplied seed. Without ``param_seed``
+        the unit's ``param_seed`` attribute (or ``params``) is used, with
+        its validation, for example ``Filter.param_seed`` rejecting
+        callable resistances.
 
         Caller data (``x_data``, ``y_data``, the modifier dictionaries and
         ``wrapper_kwargs``) are not modified; the modifier dictionaries are
@@ -1080,13 +1161,14 @@ class SimulationExec:
             kwargs_wrapper = (dict(zip(names, wrappers)) if names is not None
                               else wrappers)
 
-        # Get 1D array of parameters from the UO class
+        # 1D parameter seed in the unit's estimation basis.
         param_seed = inputs_paramest.pop('param_seed', None)
-        if param_seed is not None:
-            target_unit.Kinetics.set_params(param_seed)
-
         if hasattr(target_unit, 'Kinetics'):
+            if param_seed is not None:
+                target_unit.Kinetics.set_params(param_seed)
             param_seed = target_unit.Kinetics.concat_params()
+        elif param_seed is not None:
+            param_seed = _explicit_param_seed(target_unit, param_seed)
         else:
             param_seed = getattr(target_unit, 'param_seed', target_unit.params)
 

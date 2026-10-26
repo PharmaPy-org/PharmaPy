@@ -95,6 +95,20 @@ the restore failure is reported as a :code:`RuntimeWarning`, which is dropped
 when warnings are turned into errors. A keyboard interrupt aborts without the
 extra evaluation.
 
+An explicit :code:`param_seed` given to :code:`SimulationExec.SetParamEstimation`
+takes precedence over the fitted unit's default seed. For a unit with kinetics
+it is set on the kinetics and read back, as before. For a unit without kinetics,
+such as a :code:`Filter`, it is passed to the estimator as a float copy in the
+unit's estimation basis and parameter order, without conversion: alpha [m/kg]
+and medium resistance [1/m], or their natural logarithms when the Filter has
+:code:`log_params=True`. The unit's configured parameters are not changed. A
+seed that is not a finite one-dimensional array of real numbers with one entry
+per parameter raises :code:`ValueError`, as does a Filter seed that breaks the
+rules of :code:`Filter.param_seed`: callable configured resistances are not
+estimable, and alpha and the medium resistance (after exponentiation when
+:code:`log_params=True`) must be finite and strictly positive. Earlier versions
+raised :code:`AttributeError` for such units.
+
 Liquid heat capacity
 ====================
 
