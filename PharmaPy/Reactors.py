@@ -17,6 +17,7 @@ from PharmaPy.Plotting import plot_function, plot_distrib
 from PharmaPy.Results import DynamicResult
 from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 from PharmaPy.CheckModule import check_modeling_objects
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.jac_module import numerical_jac_central
 from PharmaPy.ThermoModule import MissingPropertyError
 
@@ -2945,10 +2946,19 @@ class PlugFlowReactor(_BaseReactor):
         implemented and raises NotImplementedError at construction (issue
         #168); other values raise ValueError.
     return_sens : bool (optional, default = True)
-        whether or not the paramest_wrapper method should return
-        the sensitivity system along with the concentratio profiles.
-        Use False if you want the parameter estimation platform to
-        estimate the sensitivity system using finite differences
+        Kept for a constructor signature consistent with the tank
+        reactors; it has no effect, because PFR parameter estimation is
+        not supported (see the Notes).
+
+    Notes
+    -----
+    Parameter estimation is not supported: no estimation output contract
+    (axial positions, states, units and sensitivities of the callback) is
+    defined for the distributed model. ``paramest_wrapper`` and
+    ``SimulationExec.SetParamEstimation`` raise
+    ``PharmaPyNonImplementedError`` (a ``NotImplementedError``) through
+    ``validate_param_estimation`` (issue #401). Estimate the kinetics with
+    a ``BatchReactor`` model of the kinetic experiments instead.
     """
     
     def __init__(self, diam_in, num_discr,
@@ -2982,7 +2992,8 @@ class PlugFlowReactor(_BaseReactor):
         ht_mode : str, optional
             Heat-transfer geometry selector, bath or jacket (tube area).
         return_sens : bool, optional
-            Parameter-estimation sensitivity return policy.
+            Stored for consistency with the tank reactors; no effect,
+            since PFR parameter estimation is not supported (issue #401).
         state_events : list of dict or None, optional
             Termination conditions in the named states' physical units.
 
@@ -3526,6 +3537,74 @@ class PlugFlowReactor(_BaseReactor):
         self.tau = tau
 
         return tau
+
+    def validate_param_estimation(self) -> None:
+        """Reject parameter estimation, which the PFR does not support.
+
+        ``SimulationExec.SetParamEstimation`` calls this hook of the
+        selected unit before any setup, and ``paramest_wrapper`` calls it
+        first, so estimation fails with the same actionable error at setup
+        and on a direct callback call.
+
+        Returns
+        -------
+        None
+            Never returns normally.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            Always. It is a ``NotImplementedError``. No estimation output
+            contract is defined for the distributed model: which axial
+            positions and states the callback would return, in which
+            units, and how sensitivities would be supplied (issue #401).
+        """
+        raise PharmaPyNonImplementedError(
+            "PlugFlowReactor does not support parameter estimation: no "
+            "estimation output contract is defined for the distributed "
+            "model (which axial positions and states the callback returns, "
+            "in which units, and how sensitivities are supplied; issue "
+            "#401). Estimate the kinetic parameters with a BatchReactor "
+            "model of the kinetic experiments instead, then assign the "
+            "fitted Kinetics to the PlugFlowReactor")
+
+    def paramest_wrapper(self, params, t_vals, modify_phase=None,
+                         modify_controls=None, reord_sens=True,
+                         run_args=None):
+        """Reject the parameter-estimation callback of the PFR.
+
+        The signature matches the tank-reactor callback
+        (``_BaseReactor.paramest_wrapper``) so that ``Experiment``
+        arguments bind identically, but no argument is used.
+
+        Parameters
+        ----------
+        params : dict or array-like
+            Kinetic parameters in the attached kinetics model's order and
+            units; not set on the kinetics.
+        t_vals : array-like
+            Evaluation times [s], shape ``(num_times,)``; not used.
+        modify_phase : dict, optional
+            Initial-phase modifier; not used.
+        modify_controls : dict, optional
+            Control modifier; not used.
+        reord_sens : bool, optional
+            Sensitivity layout flag; not used.
+        run_args : dict, optional
+            ``solve_unit`` keyword arguments; not used.
+
+        Returns
+        -------
+        None
+            Never returns normally.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            Always, from ``validate_param_estimation``, before the reactor,
+            its kinetics or any argument is changed (issue #401).
+        """
+        self.validate_param_estimation()
 
     def solve_unit(self, runtime=None, time_grid=None, verbose=True,
                    any_event=True, sundials_opts=None):

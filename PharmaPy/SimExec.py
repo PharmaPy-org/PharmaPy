@@ -1009,6 +1009,11 @@ class SimulationExec:
         PharmaPyValueError
             If ``pick_unit`` is not a unit of the flowsheet graph; the
             message lists the valid names. It is a ``ValueError``.
+        NotImplementedError
+            If the selected unit does not support parameter estimation, as
+            declared by its ``validate_param_estimation`` method; raised
+            before any other input is processed. ``PlugFlowReactor`` raises
+            ``PharmaPyNonImplementedError`` (issue #401).
         ValueError
             If ``phase_modifiers`` or ``control_modifiers``
 
@@ -1093,6 +1098,14 @@ class SimulationExec:
         unit is reset or integrated. They never modify the configured
         controls or the modifier dictionaries.
 
+        A unit that defines ``validate_param_estimation`` is checked with it
+        first, before any input is processed; the hook raises when the
+        unit has no estimation contract. ``PlugFlowReactor`` estimation is
+        not supported, since no output contract (axial positions, states,
+        units and sensitivities) is defined for the distributed model;
+        estimate the kinetics with a ``BatchReactor`` model instead
+        (issue #401).
+
         Reactor callbacks return exactly one row per requested sample time
         (replicates repeated), so experiments need not sample the initial
         time. Each reactor experiment must still request at least one time
@@ -1111,6 +1124,12 @@ class SimulationExec:
         downstream unit's inputs come from upstream units.
         """
         target_unit = self._estimation_unit(pick_unit)
+        # A unit without an estimation contract declares it through this
+        # optional hook, so setup fails before any input is processed.
+        validate_estimation = getattr(target_unit, 'validate_param_estimation',
+                                      None)
+        if validate_estimation is not None:
+            validate_estimation()
 
         experiments = _experiment_collection(x_data)
         if experiments is not None:

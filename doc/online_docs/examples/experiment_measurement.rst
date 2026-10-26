@@ -498,6 +498,17 @@ replaced all configured keyword arguments, later experiments without a
 modifier inherited it, and the caller's control dictionaries were changed in
 place (`issue #492 <https://github.com/PharmaPy-org/PharmaPy/issues/492>`__).
 
+``PlugFlowReactor`` does not support parameter estimation: no output contract
+(which axial positions and states its callback returns, in which units, and
+how sensitivities are supplied) is defined for the distributed model.
+``SetParamEstimation`` raises ``NotImplementedError``
+(``PharmaPyNonImplementedError``) for it before any other setup, and so does a
+direct call of its ``paramest_wrapper``
+(`issue #401 <https://github.com/PharmaPy-org/PharmaPy/issues/401>`__).
+Estimate the kinetics with a ``BatchReactor`` model of the kinetic experiments
+instead. Earlier releases accepted the unit and failed at the first objective
+evaluation with ``TypeError``.
+
 Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request
 order with replicates repeated, so an experiment need not sample the initial
