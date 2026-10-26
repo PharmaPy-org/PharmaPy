@@ -7,4 +7,5 @@ Documentation
    unit_operations.rst
    kinetics.rst
    phases.rst
+   records.rst
 
