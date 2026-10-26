@@ -50,6 +50,7 @@ physical basis of the model.
 from collections.abc import Mapping, Sequence
 from importlib import metadata
 from importlib.resources import files
+import inspect
 import json
 import math
 import numbers
@@ -64,6 +65,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from PharmaPy.LevMarq import levenberg_marquardt
 from PharmaPy.ParamEstim import (Experiment, Measurement,
                                  ParameterEstimation, _compile_experiments,
                                  _float_vector, _frozen,
@@ -73,7 +75,11 @@ from PharmaPy.ParamEstim import (Experiment, Measurement,
 #: Identifier of the record format written to the ``'schema'`` entry.
 RECORD_SCHEMA = 'pharmapy.calibration-record'
 #: Version of the record format; incremented on incompatible changes. This
-#: release reads and writes version 1 only.
+#: release reads and writes version 1 only. The optional
+#: ``solver.default_options`` entry (issue #483) was added to version 1
+#: before any release shipped the format, so the version was kept; it may
+#: be absent when reading, which states that the defaulted options were
+#: not recorded.
 RECORD_SCHEMA_VERSION = 1
 
 #: Kinds of stored model fields: differential states, algebraic variables,
@@ -131,6 +137,12 @@ _MAX_FLOAT_ITEMSIZE = 8
 #: settings and are overwritten on every call, so records omit them.
 _INJECTED_OPTIONS = {'LM': ('full_output', 'verbose'),
                      'IPOPT': ('print_level',)}
+#: Parameters of ``levenberg_marquardt`` that are not tunable options: the
+#: start point, the residual and Jacobian callbacks, and the callback
+#: arguments that ``optimize_fn`` passes itself (``args=(True,)``). The
+#: remaining keyword parameters with a default, less ``_INJECTED_OPTIONS``,
+#: are the options whose defaults a record states (issue #483).
+_LM_CALL_PARAMETERS = ('x', 'func', 'deriv', 'args')
 #: Sentinel for "detect the installed PharmaPy version".
 _DETECT = object()
 #: Sentinel for an argument that was not given.
@@ -2215,6 +2227,18 @@ class SolverSettings(_ImmutableRecord):
         ``'print_level'`` (IPOPT) in the caller's dict; such entries are
         recorded as given and overwritten again on a rerun, without effect
         on the fit.
+    default_options : Mapping[str, object], optional
+        Optimizer defaults in force for the options that ``options`` does
+        not set, e.g. the ``levenberg_marquardt`` keyword defaults
+        ``max_fun_eval``, ``eps_1``, ``eps_2`` and ``tol_fun`` of an LM fit
+        (issue #483). No key may also appear in ``options``. None (the
+        default) states that they were not recorded: records written before
+        this entry existed, and IPOPT fits. The ``options`` of an IPOPT fit
+        hold the caller's options plus the entries cyipopt writes into the
+        dict (``tol``, ``mu_strategy``, ``hessian_approximation``;
+        ``print_level`` is injected by ``optimize_fn`` and omitted); Ipopt's
+        native defaults, e.g. ``max_iter`` and ``acceptable_tol``, are not
+        recorded.
     model_solver : Mapping[str, object], optional
         Settings of the model's own solver, e.g. CVode ``rtol``/``atol``
         passed through the model callback, for documentation.
@@ -2236,17 +2260,22 @@ class SolverSettings(_ImmutableRecord):
         unsupported value.
     ValueError
         If ``method``, the Jacobian source or the step descriptor is
-        unknown, or a value is not finite.
+        unknown, a value is not finite, or a key appears in both
+        ``options`` and ``default_options``.
 
     Notes
     -----
     Mapping values follow the record codec (see the module docstring).
+    ``options`` keeps the settings as written by the caller;
+    ``CalibrationRecord.optimizer_inputs`` merges ``default_options`` under
+    them so that a rerun uses the settings of the original fit.
     """
 
-    __slots__ = ('_method', '_options', '_model_solver', '_outcome',
-                 '_derivatives')
+    __slots__ = ('_method', '_options', '_default_options', '_model_solver',
+                 '_outcome', '_derivatives')
 
     def __init__(self, method: str, *, options: Optional[Mapping] = None,
+                 default_options: Optional[Mapping] = None,
                  model_solver: Optional[Mapping] = None,
                  outcome: Optional[Mapping] = None,
                  derivatives: Optional[Mapping] = None) -> None:
@@ -2254,7 +2283,7 @@ class SolverSettings(_ImmutableRecord):
 
         Parameters
         ----------
-        method, options, model_solver, outcome, derivatives
+        method, options, default_options, model_solver, outcome, derivatives
             See the class docstring.
 
         Raises
@@ -2266,6 +2295,17 @@ class SolverSettings(_ImmutableRecord):
                                      'SolverSettings method'))
         self._set('_options', _encode_mapping(
             {} if options is None else options, 'SolverSettings options'))
+        if default_options is not None:
+            default_options = _encode_mapping(
+                default_options, 'SolverSettings default_options')
+            repeated = [key for key in default_options
+                        if key in self._options]
+            if repeated:
+                raise ValueError(
+                    f"SolverSettings default_options {repeated!r} are also "
+                    "given in options; an option is either set by the "
+                    "caller or defaulted, not both")
+        self._set('_default_options', default_options)
         self._set('_model_solver', None if model_solver is None else
                   _encode_mapping(model_solver,
                                   'SolverSettings model_solver'))
@@ -2296,6 +2336,21 @@ class SolverSettings(_ImmutableRecord):
             record.
         """
         return _decode_mapping(self._options, 'SolverSettings options')
+
+    @property
+    def default_options(self) -> Optional[dict]:
+        """Optimizer defaults in force for the options not given.
+
+        Returns
+        -------
+        dict or None
+            New dict on every access, without any key of ``options``, or
+            None if the defaults were not recorded (see the class
+            docstring).
+        """
+        return (None if self._default_options is None else
+                _decode_mapping(self._default_options,
+                                'SolverSettings default_options'))
 
     @property
     def model_solver(self) -> Optional[dict]:
@@ -2344,10 +2399,12 @@ class SolverSettings(_ImmutableRecord):
         -------
         dict
             JSON object with keys ``method``, ``options``,
-            ``model_solver``, ``outcome`` and ``derivatives``.
+            ``default_options``, ``model_solver``, ``outcome`` and
+            ``derivatives``.
         """
         return json.loads(json.dumps(
             {'method': self._method, 'options': self._options,
+             'default_options': self._default_options,
              'model_solver': self._model_solver,
              'outcome': self._outcome, 'derivatives': self._derivatives}))
 
@@ -2358,7 +2415,9 @@ class SolverSettings(_ImmutableRecord):
         Parameters
         ----------
         data : dict
-            JSON object; all keys but ``method`` may be omitted.
+            JSON object; all keys but ``method`` may be omitted. An omitted
+            ``default_options``, as in records written before it existed
+            (issue #483), reads as None.
 
         Returns
         -------
@@ -2370,14 +2429,13 @@ class SolverSettings(_ImmutableRecord):
         TypeError, ValueError
             If ``data`` has missing or unknown keys or invalid entries.
         """
-        _check_keys(data, ('method',),
-                    ('options', 'model_solver', 'outcome', 'derivatives'),
-                    'SolverSettings')
+        optional = ('options', 'default_options', 'model_solver', 'outcome',
+                    'derivatives')
+        _check_keys(data, ('method',), optional, 'SolverSettings')
         decoded = {key: (None if data.get(key) is None else
                          _decode_mapping(data[key],
                                          f'SolverSettings {key}'))
-                   for key in ('options', 'model_solver', 'outcome',
-                               'derivatives')}
+                   for key in optional}
         return cls(data['method'], **decoded)
 
 
@@ -2909,7 +2967,7 @@ def _weight_matrix_array(weight_matrix, names: list) -> np.ndarray:
 
 
 def _effective_options(options: Mapping, method: str) -> dict:
-    """Return the optimizer options a fit used, as recordable str entries.
+    """Return the options left in ``optim_options``, as recordable entries.
 
     Parameters
     ----------
@@ -2925,8 +2983,13 @@ def _effective_options(options: Mapping, method: str) -> dict:
     dict
         Options with bytes keys and bytes values decoded as UTF-8, without
         the entries ``optimize_fn`` injects itself (``_INJECTED_OPTIONS``).
-        For IPOPT these are the effective settings, including defaults that
-        cyipopt added; passing them back reproduces the fit.
+        For IPOPT these are the caller's options plus the entries cyipopt
+        1.7 writes into the dict when they are missing (``tol``,
+        ``mu_strategy`` and, without a Hessian, ``hessian_approximation``;
+        ``print_level`` is injected and omitted here). Passing them back
+        sets those options again; Ipopt's native defaults, e.g.
+        ``max_iter`` and ``acceptable_tol``, are not in the dict and are
+        not recorded.
 
     Raises
     ------
@@ -2971,6 +3034,69 @@ def _effective_options(options: Mapping, method: str) -> dict:
         effective[name] = value
     return {key: value for key, value in effective.items()
             if key not in _INJECTED_OPTIONS[method]}
+
+
+def _default_options(method: str, given: Mapping) -> Optional[dict]:
+    """Return the optimizer defaults in force for the options not given.
+
+    Parameters
+    ----------
+    method : {'LM', 'IPOPT'}
+        Optimization method of the fit.
+    given : Mapping[str, object]
+        Options the caller set, as returned by ``_effective_options``.
+
+    Returns
+    -------
+    dict or None
+        For LM, the keyword defaults of ``levenberg_marquardt`` read from
+        its signature, so that they cannot drift from the code that ran
+        the fit, in signature order: every parameter with a default except
+        ``_LM_CALL_PARAMETERS``, the entries ``optimize_fn`` injects
+        (``_INJECTED_OPTIONS``) and the keys of ``given``. For IPOPT, None:
+        ``given`` holds the caller's options and the entries cyipopt writes
+        into the dict (see ``_effective_options``); Ipopt's native
+        defaults, e.g. ``max_iter`` and ``acceptable_tol``, are not
+        available there and are not recorded, which None states.
+
+    Notes
+    -----
+    The stopping criteria are the defaults issue #483 asks to record. In
+    ``levenberg_marquardt``, with residuals ``r`` [residual units] (``[-]``
+    when the measurements declare uncertainties), Jacobian ``J`` [residual
+    units / parameter units] of shape ``(n_parameters, n_residuals)`` and
+    gradient ``b = J @ r``:
+
+    * ``max_fun_eval`` [-]: maximum number of model evaluations;
+    * ``eps_1`` [residual units**2 / parameter units]: stop when
+      ``norm(b) < eps_1`` after an accepted step;
+    * ``eps_2`` [-]: stop when ``norm(step) < eps_2 * norm(x)``;
+    * ``tol_fun`` [residual units]: stop when ``norm(r) < tol_fun``.
+
+    With parameters of different units these norms mix units, as in
+    ``levenberg_marquardt`` itself. ``fletcher_modif``, ``mu`` and
+    ``d_diag`` are recorded too, because they change the iterates. The
+    damping term is ``mu * D.T @ D`` with ``D = diag(d_diag)``. With
+    ``d_diag=None``, ``fletcher_modif=False`` uses unit scaling (``D`` the
+    identity), so ``mu`` is in [residual units**2 / parameter units**2];
+    ``fletcher_modif=True`` uses Fletcher's Jacobian-based scaling, which
+    starts every entry of ``D`` at the largest parameter row norm
+    ``max(norm(J, axis=1))`` and, after each accepted step, replaces an
+    entry by its parameter's current row norm when that is larger; ``D``
+    then carries Jacobian units and ``mu`` is [-]. ``mu=None`` selects the
+    initial damping
+    ``1e-2 * max(diag(J @ J.T))`` after Nielsen (1999). Recording None
+    states that the rule, not a caller value, was used; passing it back
+    is identical to omitting it, and a release that changes such a
+    default to a number shows up as a difference.
+    """
+    if method != 'LM':
+        return None
+    skipped = set(_LM_CALL_PARAMETERS) | set(_INJECTED_OPTIONS['LM'])
+    return {name: parameter.default for name, parameter in
+            inspect.signature(levenberg_marquardt).parameters.items()
+            if parameter.default is not inspect.Parameter.empty
+            and name not in skipped and name not in given}
 
 
 def _same_value(first, second) -> bool:
@@ -4003,12 +4129,29 @@ covariance_include_mse
             ``optimize_fn`` may mutate, issue #476), and ``bounds``: one
             ``(lower, upper)`` pair per optimized parameter in parameter
             units (None for an unbounded side), or None when no bound is
-            declared.
+            declared. ``optim_options`` holds the recorded
+            ``solver.default_options`` followed by ``solver.options``, so
+            the rerun uses the settings of the original fit even if the
+            installed optimizer defaults have changed.
 
         Raises
         ------
         ValueError
             If the record has no solver settings.
+
+        Notes
+        -----
+        The two mappings share no key (``SolverSettings`` rejects it). To
+        rerun with only the options as the caller wrote them, under the
+        installed defaults, replace ``optim_options`` by
+        ``record.solver.options``.
+
+        The rerun passes the recorded defaults explicitly, so a record
+        captured with ``from_estimation`` from the rerun estimator lists
+        them as given ``options``, and its ``default_options`` holds only
+        options neither record states (``{}`` for LM). The effective
+        settings, ``options`` and ``default_options`` together, are the
+        same as in this record.
         """
         if self._solver is None:
             raise ValueError(f"Record {self._case!r} has no solver settings; "
@@ -4017,8 +4160,10 @@ covariance_include_mse
                   if item.optimized]  # [parameter units]
         if all(pair == (None, None) for pair in bounds):
             bounds = None
+        optim_options = self._solver.default_options or {}
+        optim_options.update(self._solver.options)
         return {'method': self._solver.method,
-                'optim_options': self._solver.options, 'bounds': bounds}
+                'optim_options': optim_options, 'bounds': bounds}
 
     def check_rerun(self, estimator: ParameterEstimation, *, rtol: float,
                     atol: float) -> np.ndarray:
@@ -4226,10 +4371,15 @@ covariance_include_mse
             method, options (``estimator.optim_options`` without the
             entries ``optimize_fn`` injects itself: ``full_output`` and
             ``verbose`` for LM, ``print_level`` for IPOPT; issue #476) and
-            outcome. For IPOPT these are the effective options: cyipopt
-            rewrites the options dict in place (#476), so its bytes keys and
-            values are decoded to str and the defaults it adds, such as
-            ``mu_strategy``, are kept. The solver settings also record how
+            outcome. For LM, ``default_options`` holds the
+            ``levenberg_marquardt`` keyword defaults of every option the
+            caller did not set (issue #483; see ``SolverSettings``). For
+            IPOPT, cyipopt rewrites the options dict in place (#476), so
+            its bytes keys and values are decoded to str and the entries it
+            writes (``tol``, ``mu_strategy``, ``hessian_approximation``)
+            are kept; Ipopt's native defaults are not recorded and
+            ``default_options`` is None. The solver settings also record
+            how
             the sensitivities were obtained (``derivatives``: the Jacobian
             source and ``dx_finitediff`` as ``'default'``, ``'callable'``
             or the numeric step). Also the covariance in the
@@ -4294,6 +4444,12 @@ covariance_include_mse
         is ``1/2 * fun @ fun`` of the weighted residuals
         ``info_opt['fun']`` ([-] with declared uncertainties), so the model
         is not evaluated again.
+
+        An estimator fitted by ``rerun`` (or with ``optimizer_inputs``)
+        received the recorded defaults as explicit options, so its record
+        lists them as given ``options`` and its ``default_options`` is
+        ``{}`` for LM; the effective settings are identical to those of the
+        record it was rerun from.
         """
         if not isinstance(estimator, ParameterEstimation):
             raise TypeError("estimator must be a ParameterEstimation; got "
@@ -4404,6 +4560,7 @@ covariance_include_mse
         outcome['objective'] = 0.5 * float(residuals @ residuals)
         options = _effective_options(getattr(estimator, 'optim_options', {}),
                                      method)
+        default_options = _default_options(method, options)
         if estimator.sens_second is not None:
             jacobian = 'model_sensitivities'  # precedence of get_gradient
         elif estimator.jac_fun is not None:
@@ -4419,6 +4576,7 @@ covariance_include_mse
         elif callable(step):
             step = 'callable'
         solver = SolverSettings(method, options=options,
+                                default_options=default_options,
                                 model_solver=model_solver, outcome=outcome,
                                 derivatives={'jacobian': jacobian,
                                              'dx_finitediff': step})

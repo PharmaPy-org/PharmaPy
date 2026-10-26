@@ -29,7 +29,9 @@ back as ``NaN``. Infinite values are rejected.
 
 ``schema`` and ``schema_version``
    ``'pharmapy.calibration-record'`` and the format version, currently ``1``.
-   Other values are rejected when reading.
+   Other values are rejected when reading. The optional
+   ``solver.default_options`` entry was added to version ``1`` before any
+   release shipped the format; a file without it still loads.
 ``case`` and ``description``
    Identifier of the calibration case and optional free text.
 ``model``
@@ -100,7 +102,15 @@ back as ``NaN``. Infinite values are rejected.
 ``solver``
    ``null`` before fitting, otherwise the optimizer settings: ``method``
    (``'LM'`` or ``'IPOPT'``), ``options`` (the ``optim_options`` passed to
-   ``optimize_fn`` without the entries it writes itself), ``model_solver``
+   ``optimize_fn`` without the entries it writes itself),
+   ``default_options`` (the optimizer defaults in force for the options not
+   passed: for Levenberg-Marquardt the ``levenberg_marquardt`` keyword
+   defaults such as ``max_fun_eval``, ``eps_1``, ``eps_2`` and ``tol_fun``;
+   ``null`` when not recorded and for IPOPT, whose ``options`` hold the
+   options passed plus the entries cyipopt writes into the dict, ``tol``,
+   ``mu_strategy`` and ``hessian_approximation``, while Ipopt's native
+   defaults such as ``max_iter`` and ``acceptable_tol`` are not recorded),
+   ``model_solver``
    (settings of the model's own integrator, for documentation),
    ``outcome`` (e.g. ``stop_criterion``, ``num_iter``, ``num_fun_eval`` and
    ``objective``, ``1/2 * r @ r`` of the weighted residuals) and
@@ -329,7 +339,13 @@ user-supplied, here an identifier of the guide's own model definition;
 PharmaPy never detects it, so pass the commit or version of your model
 code.
 
-The rerun replays bit-identical data, seeds and options through the same
+``optimizer_inputs()`` passes the recorded ``default_options`` together
+with ``options``, so the rerun uses the stopping criteria of the original
+fit even if a later PharmaPy release changes the optimizer defaults. A
+record captured from the rerun estimator therefore lists the replayed
+defaults as given ``options`` (its ``default_options`` is empty); the
+effective settings are identical to the original record's. The
+rerun replays bit-identical data, seeds and options through the same
 deterministic Levenberg-Marquardt iterations, so the tolerance passed to
 ``check_rerun`` can be a few units in the last place. Choose it for the
 model and solver at hand and state why it is adequate; across platforms or
