@@ -1291,6 +1291,10 @@ class Evaporator:
         ------
         ValueError
             If the configured activity model is unknown during VLE evaluation.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``, from
+            ``getKeqVLE``: if an included species with a nonzero liquid
+            fraction lacks the Antoine or Henry data its ratio needs.
 
         Notes
         -----
@@ -1299,7 +1303,9 @@ class Evaporator:
         pressure sum extrapolated Antoine for every included species.
         Species excluded by ``is_supercritic`` retain explicit vapor partial
         pressures and are indexed out before multiplying K by liquid fraction;
-        missing Henry data for these excluded species cannot poison the sum.
+        missing Henry data for these excluded species cannot poison the sum,
+        and ``getKeqVLE`` receives them with zero weight, so it does not
+        require their data.
         Every excluded supercritical species (not only nitrogen) replaces
         its VLE equation with x_i = 0, in species order. This agrees with
         its exclusion from liquid component holdup and the flash seed.
@@ -1338,12 +1344,13 @@ class Evaporator:
 
             vol_eqn = vol_liq + vol_vap - self.vol_tot
 
-            k_i = self.Liquid_1.getKeqVLE(
-                temp, pres, x_liq, gamma_model=self.activity_model)  # [-]
-
             # One closure per species, retaining species order. Excluded
-            # supercritical species cannot occupy the liquid phase.
+            # supercritical species cannot occupy the liquid phase, so their
+            # ratios are never used and need no property data.
             condensable = ~self.is_supercritic
+            k_i = self.Liquid_1.getKeqVLE(
+                temp, pres, x_liq, gamma_model=self.activity_model,
+                weights=x_liq * condensable)  # [-]
             equilibria = x_liq.copy()  # [-], x_i = 0 for excluded species
             equilibria[condensable] = (y_vap[condensable]
                                       - k_i[condensable] * x_liq[condensable])

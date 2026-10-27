@@ -7,7 +7,8 @@ from typing import Optional, Sequence, Tuple, Union
 
 import numpy as np
 from numpy.typing import ArrayLike
-from PharmaPy.ThermoModule import (ThermoPhysicalManager,
+from PharmaPy.ThermoModule import (MissingPropertyError,
+                                  ThermoPhysicalManager,
                                   validate_activity_model)
 from PharmaPy.Commons import trapezoidal_rule
 from PharmaPy.Errors import PharmaPyValueError
@@ -309,6 +310,12 @@ class LiquidPhase(ThermoPhysicalManager):
             or ``moles`` is supplied with authoritative concentrations (no
             ``name_solv``) whose total is zero, which leaves the fractions
             (and, for mass or moles, the volume) undefined.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero fraction or concentration has no ``rho_liq``
+            [kg/m**3], which the ideal-mixing volume and concentrations
+            need; with ``name_solv``, the solvent always needs it. Absent
+            species need none.
         RuntimeWarning
             If more than one composition measure is supplied.
 
@@ -765,6 +772,12 @@ class LiquidPhase(ThermoPhysicalManager):
             amount, explicit or retained, is reconciled; or if a per-point
             amount, explicit or retained, does not have one entry per point
             of a two-dimensional composition.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. As in the
+            constructor: if a species with a nonzero fraction or
+            concentration in the updated composition has no ``rho_liq``
+            [kg/m**3]; with a solvent closure, the solvent always needs it.
+            Absent species need none.
         """
 
         explicit_amount = any(_amount_supplied(amount)
@@ -876,6 +889,10 @@ class LiquidPhase(ThermoPhysicalManager):
         ValueError
             If ``basis`` is neither 'mass' nor 'mole', raised by
             ``ThermoPhysicalManager.getDensityMix``.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero fraction in some row has no ``rho_liq``; absent
+            species need none and occupy no volume.
 
         Notes
         -----
@@ -1035,9 +1052,12 @@ class LiquidPhase(ThermoPhysicalManager):
             If ``basis`` is neither 'mass' nor 'mole', for both ``total_h``
             modes, raised by ``ThermoPhysicalManager.getEnthalpy``.
         MissingPropertyError
-            A subclass of ``AttributeError``.
+            A subclass of ``AttributeError`` and ``ValueError``.
             If a species that the result needs has no ``cp_liq`` data; see
             ``ThermoPhysicalManager.getEnthalpy``.
+            Also raised, whatever the fractions or weights, if the property is
+            stored as one scalar per species instead of a coefficient list (see
+            ``_property_rows``).
         """
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
@@ -1083,9 +1103,16 @@ class LiquidPhase(ThermoPhysicalManager):
         Raises
         ------
         MissingPropertyError
-            A subclass of ``AttributeError``.
-            From ``getKeqVLE`` if a species at or below its critical
-            temperature has no ``p_vap`` coefficients.
+            A subclass of ``AttributeError`` and ``ValueError``.
+            From ``getKeqVLE`` at the converged root, if a species with a
+            nonzero fraction has no ``p_vap`` coefficients at or below its
+            critical temperature. Already from the Newton iterates, which
+            evaluate the same ratios, if a species with a nonzero fraction is
+            above its critical temperature at an iterate without
+            ``henry_constant`` [Pa], if no species supplies ``t_crit``, if no
+            species supplies ``henry_constant`` while some species is
+            supercritical at an iterate, or if ``p_vap`` is stored as one
+            scalar per species (from the Antoine seed).
         RuntimeError
             If the Newton iteration does not converge.
 
@@ -1156,9 +1183,16 @@ class LiquidPhase(ThermoPhysicalManager):
             Raises
             ------
             MissingPropertyError
-                A subclass of ``AttributeError``.
-                From ``getKeqVLE`` if a species at or below its critical
-                temperature has no ``p_vap`` coefficients.
+                A subclass of ``AttributeError`` and ``ValueError``.
+                From ``getKeqVLE`` at the converged root, if a species with
+                a nonzero fraction has no ``p_vap`` coefficients at or below
+                its critical temperature. Already from the Newton iterates,
+                which evaluate the same ratios, if a species with a nonzero
+                fraction is above its critical temperature at an iterate
+                without ``henry_constant`` [Pa], if no species supplies
+                ``t_crit``, if no species supplies ``henry_constant`` while
+                some species is supercritical at an iterate, or if ``p_vap``
+                is stored as one scalar per species (from the Antoine seed).
             RuntimeError
                 If the Newton iteration does not converge.
 
@@ -1298,30 +1332,102 @@ class LiquidPhase(ThermoPhysicalManager):
         Raises
         ------
         MissingPropertyError
-            A subclass of ``AttributeError``. If a species with a nonzero
-            fraction in some row has no ``visc_liq`` coefficients.
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            species with a nonzero fraction in some row has no ``visc_liq``
+            coefficients.
+            Also raised, whatever the fractions or weights, if the property is
+            stored as one scalar per species instead of a coefficient list (see
+            ``_property_rows``).
         """
         viscosity = self.getViscosityMix(temp, mass_frac, mole_frac,
                                          phase='liquid')
 
         return viscosity
 
-    def getSurfTensionPure(self, temp=None):
-        surface_pure = self.surf_tension
-        surface_pure[np.isnan(surface_pure)] = 0
+    def getSurfTensionPure(self, temp: Optional[float] = None) -> np.ndarray:
+        """Return the pure-component surface tensions.
 
-        return surface_pure
+        Parameters
+        ----------
+        temp : float, optional
+            Temperature [K]. Accepted for interface compatibility and
+            ignored: the stored surface tensions are constants.
 
-    def getSurfTension(self, mass_frac=None, mole_frac=None, temp=None):
+        Returns
+        -------
+        numpy.ndarray
+            Surface tensions [N/m], shape ``(num_species,)``, in database
+            order. A copy: modifying it leaves the stored data unchanged.
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If any
+            species has no ``surf_tension``; every species is returned, so
+            every species needs it.
+
+        Notes
+        -----
+        Earlier releases returned 0 N/m for a species without data and
+        wrote those zeros into the stored ``surf_tension`` array.
+        """
+        surface_pure = self._scalar_values('surf_tension')  # [N/m]
+        num_sp = len(surface_pure)
+        self._check_species_rows(
+            'surf_tension', surface_pure, np.arange(num_sp),
+            np.ones(num_sp, dtype=bool),
+            'are evaluated as pure components, so their surface tension')
+
+        return surface_pure.copy()  # [N/m]
+
+    def getSurfTension(self, mass_frac: Optional[np.ndarray] = None,
+                       mole_frac: Optional[np.ndarray] = None,
+                       temp: Optional[float] = None
+                       ) -> Union[float, np.ndarray]:
+        """Return the mass-fraction-weighted liquid surface tension.
+
+        Parameters
+        ----------
+        mass_frac : numpy.ndarray, optional
+            Liquid mass fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``; the phase mass fractions when
+            ``None``.
+        mole_frac : numpy.ndarray, optional
+            Unused; retained for interface compatibility.
+        temp : float, optional
+            Temperature [K]. Unused: the stored surface tensions are
+            constants.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            ``sum_i w_i * sigma_i`` [N/m]: a scalar for one composition,
+            shape ``(num_points,)`` for a composition profile.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            species with a nonzero mass fraction in some row has no
+            ``surf_tension``. A species whose fraction is zero in every row
+            needs none and contributes exactly zero. Nonzero is bitwise: a
+            round-off-level fraction counts as present.
+
+        Notes
+        -----
+        Earlier releases weighted a missing surface tension as 0 N/m, also
+        for present species.
+        """
         if mass_frac is None:
             mass_frac = self.mass_frac
 
-        if temp is None:
-            temp = self.temp
-
-        surfacePure = self.getSurfTensionPure(temp)
-        surfaceMix = np.dot(mass_frac, surfacePure)
+        surface_pure = self._scalar_values('surf_tension')  # [N/m]
+        missing = self._check_species_rows(
+            'surf_tension', surface_pure, np.arange(len(surface_pure)),
+            self._needed_by_weights(mass_frac, len(surface_pure)),
+            'carry a nonzero mass fraction, so the mixture surface tension')
+        surface_used = np.where(missing, 0.0, surface_pure)  # [N/m]
+        surfaceMix = np.dot(mass_frac, surface_used)  # [N/m]
 
         return surfaceMix
 
@@ -1597,7 +1703,40 @@ class VaporPhase(ThermoPhysicalManager):
 
         self.__set_amounts(mass, vol, moles, mass_frac, mole_frac, temp, pres)
 
-    def getCp(self, temp, mass_frac=None, mole_frac=None, basis='mass'):
+    def getCp(self, temp: ArrayLike,
+              mass_frac: Optional[np.ndarray] = None,
+              mole_frac: Optional[np.ndarray] = None,
+              basis: str = 'mass') -> Union[float, np.ndarray]:
+        """Return the vapor mixture heat capacity on the requested basis.
+
+        Parameters
+        ----------
+        temp : float or array-like
+            Temperature [K], scalar or shape ``(num_temps,)``.
+        mass_frac, mole_frac : numpy.ndarray, optional
+            Vapor fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``; the stored mass fractions when
+            neither is given.
+        basis : {'mass', 'mole'}, optional
+            Basis of the result; default mass.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Mixture heat capacity from ``cp_vapor``, [J/kg/K] or [J/mol/K],
+            shaped as in ``ThermoPhysicalManager.getCpMix``.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole'.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero fraction in some row has no ``cp_vapor``
+            coefficients. Also raised, whatever the fractions, if
+            ``cp_vapor`` is stored as one scalar per species instead of a
+            coefficient list (see ``_property_rows``).
+        """
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
 
@@ -1632,6 +1771,9 @@ class VaporPhase(ThermoPhysicalManager):
         ValueError
             If ``temp`` has more than one dimension, is empty, or contains a
             non-finite value.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If no
+            species supplies ``t_crit``; the error names every species.
 
         Notes
         -----
@@ -1668,7 +1810,10 @@ class VaporPhase(ThermoPhysicalManager):
                 f"{temp_values[non_finite].tolist()} at positions "
                 f"{non_finite.tolist()}")
 
-        is_supercritical = temp_values[:, np.newaxis] > self.t_crit  # [-]
+        t_crit = self._require_property(
+            't_crit', 'are classified as sub- or supercritical, so their '
+            'enthalpy or latent heat')  # [K]
+        is_supercritical = temp_values[:, np.newaxis] > t_crit  # [-]
 
         return temp_values, is_supercritical
 
@@ -1710,12 +1855,18 @@ class VaporPhase(ThermoPhysicalManager):
         ------
         ValueError
             If ``basis`` is neither 'mass' nor 'mole'; if ``temp`` is empty,
-            non-finite, or has more than one dimension; or if a species with
-            critical data is evaluated at or below its critical temperature
-            while its ``t_crit``, ``tref_hvap`` or ``delta_hvap`` is not
-            finite or its ``tref_hvap`` is not strictly below its ``t_crit``,
-            which leaves the Watson reference undefined; or, defensively, if
+            non-finite, or has more than one dimension; or, defensively, if
             an evaluated Watson ratio is not finite and non-negative.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with critical data is evaluated at or below its critical
+            temperature while its ``t_crit``, ``tref_hvap`` or
+            ``delta_hvap`` is not finite or its ``tref_hvap`` is not
+            strictly below its ``t_crit``, which leaves the Watson reference
+            undefined; every species is returned, so every species
+            evaluated at or below its critical temperature needs valid
+            Watson data, whatever its fraction in a mixture. Also raised,
+            naming every species, if no species supplies ``t_crit``.
 
         Notes
         -----
@@ -1735,12 +1886,59 @@ class VaporPhase(ThermoPhysicalManager):
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be 'mass' or 'mole'")
         temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
+
+        deltahvap = self._latent_heat(
+            temp_values, is_supercritical, basis,
+            np.ones_like(is_supercritical))  # [J/kg] or [J/mol], by basis
+
+        if len(temp_values) == 1:
+            deltahvap = deltahvap[0]  # [J/kg] or [J/mol], by basis
+
+        return deltahvap
+
+    def _latent_heat(self, temp_values: np.ndarray,
+                     is_supercritical: np.ndarray, basis: str,
+                     is_used: np.ndarray) -> np.ndarray:
+        """Evaluate the Watson latent heat of the entries a result uses.
+
+        Parameters
+        ----------
+        temp_values : ndarray
+            Temperatures [K], shape ``(num_temperatures,)``, as returned by
+            ``_classify_criticality``.
+        is_supercritical : ndarray of bool
+            Criticality mask [-], shape ``(num_temperatures, num_species)``.
+        basis : {'mass', 'mole'}
+            Basis of the returned latent heat; validated by the caller.
+        is_used : ndarray of bool
+            True for an entry whose latent heat the result uses, same shape
+            as ``is_supercritical``. ``getHeatVaporization`` uses every
+            entry; a mixture enthalpy only those with a nonzero fraction.
+
+        Returns
+        -------
+        ndarray
+            Latent heat [J/kg] for ``basis='mass'`` or [J/mol] for
+            ``basis='mole'``, shape ``(num_temperatures, num_species)``.
+            Supercritical entries, species without critical data and
+            unused entries are exactly zero.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``.
+            If a used entry at or below its species' critical temperature
+            has an invalid Watson reference (see ``getHeatVaporization``).
+        ValueError
+            Defensively, if an evaluated Watson ratio is not finite and
+            non-negative.
+        """
         num_temp, num_comp = is_supercritical.shape
 
         # Species without critical data (NaN t_crit) never condense, so only
-        # subcritical entries of species with critical data use Watson.
+        # used subcritical entries of species with critical data use Watson.
         has_critical_data = ~np.isnan(self.t_crit)  # [-]
-        uses_watson = ~is_supercritical & has_critical_data  # [-]
+        uses_watson = ~is_supercritical & has_critical_data & is_used  # [-]
         rows, cols = np.nonzero(uses_watson)
 
         # ParseDatabase creates no attribute for a field that every species
@@ -1764,7 +1962,7 @@ class VaporPhase(ThermoPhysicalManager):
             invalid = ~valid_reference  # [-]
             names = [self.name_species[ind]
                      for ind in watson_columns[invalid]]
-            raise ValueError(
+            raise MissingPropertyError(
                 "The Watson latent-heat correlation needs finite t_crit, "
                 "tref_hvap and delta_hvap with tref_hvap < t_crit for every "
                 "species evaluated at or below its critical temperature; "
@@ -1796,9 +1994,6 @@ class VaporPhase(ThermoPhysicalManager):
             # at zero latent heat instead of being dropped.
             deltahvap[rows, cols] = (deltahvap[rows, cols] / self.mw[cols]
                                      * 1000)  # [J/kg], 1000 g/kg
-
-        if num_temp == 1:
-            deltahvap = deltahvap[0]  # [J/kg] or [J/mol], by basis
 
         return deltahvap
 
@@ -1908,19 +2103,22 @@ class VaporPhase(ThermoPhysicalManager):
             If ``basis`` is neither 'mass' nor 'mole'; if ``temp`` is empty,
             non-finite, or has more than one dimension; if a supplied
             ``mass_frac`` or ``mole_frac`` is not one- or
-            two-dimensional with ``num_species`` entries on its last axis; if
-            the Watson reference of a species evaluated at or below its
-            critical temperature is invalid (see ``getHeatVaporization``); or
+            two-dimensional with ``num_species`` entries on its last axis; or
             if, for ``total_h=True``, the weighting composition is neither
             ``(num_species,)`` nor ``(num_temperatures, num_species)``. A
             scalar ``temp`` therefore accepts only a one-row profile.
         MissingPropertyError
-            A subclass of ``AttributeError``.
-            If a species is supercritical at a requested temperature but the
-            property database supplies no ``cp_vapor`` data for it, or is at
-            or below its critical temperature without ``cp_liq`` data. Data
-            missing for one species only (a NaN row, see ``ParseDatabase``)
-            count as missing. The error names the species and the property.
+            A subclass of ``AttributeError`` and ``ValueError``.
+            If a used entry is supercritical but the property database
+            supplies no ``cp_vapor`` data for its species, or is at or below
+            its critical temperature without ``cp_liq`` data or with an
+            invalid Watson reference (see ``getHeatVaporization``). Data
+            missing for one species only (a NaN entry or row, see
+            ``ParseDatabase``) count as missing. The error names the species
+            and the property. Also raised if no species supplies ``t_crit``.
+            Also raised, whatever the fractions or weights, if the property is
+            stored as one scalar per species instead of a coefficient list (see
+            ``_property_rows``).
 
         Notes
         -----
@@ -1933,12 +2131,11 @@ class VaporPhase(ThermoPhysicalManager):
         sensible heat is taken as exactly zero, never NaN times zero. Nonzero
         is bitwise: a round-off-level fraction counts as present, so a
         species carried as a solver state may need data at a nominal zero
-        fraction. With
-        ``total_h=False``, every entry is returned and needs its data. This
-        zero-fraction exemption covers heat-capacity data only: the latent
-        heat still requires valid ``delta_hvap`` and ``tref_hvap`` for every
-        species at or below its critical temperature, whatever its fraction
-        (see ``getHeatVaporization`` and issue #424).
+        fraction. The same exemption covers the latent heat: a zero-fraction
+        entry needs no ``delta_hvap`` or ``tref_hvap`` and adds exactly zero,
+        so the mixture enthalpy equals the one computed without that species
+        (issue #424). With ``total_h=False``, every entry is returned and
+        needs its data, as does the public ``getHeatVaporization``.
         The supercritical classification is strictly ``T > Tc``; see
         ``_classify_criticality`` for the equality rule. The mixture
         enthalpy is the row-wise species sum of species enthalpy times the
@@ -2015,10 +2212,10 @@ class VaporPhase(ThermoPhysicalManager):
 
         h_sensible = np.where(is_supercritical, h_vapor, h_liquid)  # [J/kg] or [J/mol]
 
-        # Zero for supercritical entries, Watson value otherwise.
-        latent_heat = np.reshape(
-            self.getHeatVaporization(temp_values, basis=basis),
-            (num_temp, num_comp))  # [J/kg] or [J/mol], by basis
+        # Zero for supercritical and unused entries, Watson value otherwise.
+        latent_heat = self._latent_heat(
+            temp_values, is_supercritical, basis,
+            is_used)  # [J/kg] or [J/mol], by basis
 
         h_species = h_sensible + latent_heat  # [J/kg] or [J/mol], by basis
 
@@ -2062,9 +2259,16 @@ class VaporPhase(ThermoPhysicalManager):
         Raises
         ------
         MissingPropertyError
-            A subclass of ``AttributeError``.
-            From ``getKeqVLE`` if a species at or below its critical
-            temperature has no ``p_vap`` coefficients.
+            A subclass of ``AttributeError`` and ``ValueError``.
+            From ``getKeqVLE`` at the converged root, if a species with a
+            nonzero fraction has no ``p_vap`` coefficients at or below its
+            critical temperature. Already from the Newton iterates, which
+            evaluate the same ratios, if a species with a nonzero fraction is
+            above its critical temperature at an iterate without
+            ``henry_constant`` [Pa], if no species supplies ``t_crit``, if no
+            species supplies ``henry_constant`` while some species is
+            supercritical at an iterate, or if ``p_vap`` is stored as one
+            scalar per species (from the Antoine seed).
         RuntimeError
             If the Newton iteration does not converge.
 
@@ -2280,6 +2484,13 @@ class SolidPhase(ThermoPhysicalManager):
         RuntimeError
             If the species mass fractions sum to less than the existing
             composition threshold of 0.99 [-].
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If
+            ``moments`` or ``distrib`` is given, so that the mixture density
+            relates mass and volume, and a present species has no
+            ``rho_solid`` [kg/m**3]; a species at the zero sentinel needs
+            none (see ``getDensity``). Without them the density is not
+            evaluated.
         """
         if mass_frac is None:
             raise ValueError("SolidPhase requires mass_frac; provide species "
@@ -2349,10 +2560,9 @@ class SolidPhase(ThermoPhysicalManager):
             #       'one of the two either when declaring this phase, or in a '
             #       'Slurry object to which this phase is aggregated')
 
-        # Mass and volume
-        dens = self.getDensity()
-
+        # Mass and volume; the density is needed only to relate them.
         if solid_spec:
+            dens = self.getDensity()  # [kg/m**3]
             if self.mass == 0:
                 self.vol = self.moments[3] * kv
                 self.mass = self.vol * dens
@@ -2427,6 +2637,12 @@ class SolidPhase(ThermoPhysicalManager):
         ValueError
             If the supplied grid has fewer than two points. The existing
             grid, widths, distribution, and inventory remain unchanged.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. As in the
+            constructor: if a ``distrib`` or ``mass`` update relates mass and
+            volume through the density and a present species of the stored
+            composition has no ``rho_solid`` [kg/m**3]; a species at the zero
+            sentinel needs none.
 
         Notes
         -----
@@ -2700,12 +2916,23 @@ class SolidPhase(ThermoPhysicalManager):
         ValueError
             If ``basis`` is neither 'mass' nor 'mole', raised by
             ``ThermoPhysicalManager.getDensityMix``.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero fraction has no ``rho_solid``; absent species need
+            none and occupy no volume.
+
+        Notes
+        -----
+        With the stored composition, a species at the zero sentinel ``eps``
+        without ``rho_solid`` is absent, as in ``getCp`` (see
+        ``_stored_fractions``); fractions passed explicitly keep the bitwise
+        nonzero rule.
         """
         if temp is None:
             temp = self.temp
 
         if mass_frac is None and mole_frac is None:
-            mass_frac = self.mass_frac
+            mass_frac, _ = self._stored_fractions('rho_solid')  # [-]
 
         densSolid = self.getDensityMix(mass_frac, mole_frac, phase='solid',
                                        temp=temp, basis=basis)
@@ -2815,8 +3042,15 @@ class SolidPhase(ThermoPhysicalManager):
 
         return porosity
 
-    def _stored_fractions(self) -> tuple:
-        """Return the stored composition for a ``cp_solid`` mixture value.
+    def _stored_fractions(self, prop_name: str = 'cp_solid') -> tuple:
+        """Return the stored composition for a mixture value of a property.
+
+        Parameters
+        ----------
+        prop_name : {'cp_solid', 'rho_solid'}, optional
+            Database key of the property that the mixture value weights:
+            the ``cp_solid`` coefficient rows (default) or the scalar
+            ``rho_solid`` [kg/m**3].
 
         Returns
         -------
@@ -2824,7 +3058,7 @@ class SolidPhase(ThermoPhysicalManager):
             Stored mass and mole fractions [-], shape ``(num_species,)`` or
             ``(num_rows, num_species)``. A species whose stored mass fraction
             is at or below the zero sentinel ``eps`` in every row and that
-            has no ``cp_solid`` data gets exact zeros in both arrays.
+            has no ``prop_name`` data gets exact zeros in both arrays.
 
         Notes
         -----
@@ -2833,21 +3067,29 @@ class SolidPhase(ThermoPhysicalManager):
         declared zero, or a mixture or copy of one (such as a solid built
         from another solid's ``mass_frac``), and is physically zero at
         double precision. Such a species is absent for the decision whether
-        ``cp_solid`` data are needed, also when the mole-fraction basis is
+        ``prop_name`` data are needed, also when the mole-fraction basis is
         evaluated. With data it keeps its ``eps`` weight, so results are
-        unchanged; without data its contribution is exactly zero, as the
-        zero rows of releases before #414 gave. A stored fraction above
-        ``eps`` is present however small, and fractions passed to a method
-        keep the bitwise nonzero rule.
+        unchanged; without data its contribution is exactly zero. For
+        ``cp_solid`` that is what the zero rows of releases before #414 gave;
+        for ``rho_solid``, earlier releases returned a NaN density (or raised
+        ``AttributeError`` when no species supplied ``rho_solid``). A stored
+        fraction above ``eps`` is present however small, and fractions
+        passed to a method keep the bitwise nonzero rule. A ``cp_solid``
+        stored as one scalar per species raises ``MissingPropertyError``
+        from ``_property_rows`` before any fraction is considered.
         """
         mass_frac = np.asarray(self.mass_frac, dtype=float)  # [-]
         mole_frac = np.asarray(self.mole_frac, dtype=float)  # [-]
-        rows = self._property_rows('cp_solid')  # [J/mol/K/K**k], ascending k
-        if mass_frac.shape[-1] != len(rows):
+        if prop_name == 'rho_solid':
+            lacking = np.isnan(self._scalar_values(prop_name))  # [-]
+        else:
+            rows = self._property_rows(prop_name)  # [J/mol/K/K**k], ascending k
+            lacking = np.isnan(rows).any(axis=1)  # [-]
+        if mass_frac.shape[-1] != len(lacking):
             return self.mass_frac, self.mole_frac
 
         sentinel = np.atleast_2d(mass_frac <= eps).all(axis=0)  # [-]
-        absent = sentinel & np.isnan(rows).any(axis=1)
+        absent = sentinel & lacking
         if not absent.any():
             return self.mass_frac, self.mole_frac
 
@@ -2880,8 +3122,11 @@ class SolidPhase(ThermoPhysicalManager):
         ValueError
             If ``basis`` is neither 'mass' nor 'mole'.
         MissingPropertyError
-            A subclass of ``AttributeError``. If a species with a nonzero
-            fraction has no ``cp_solid`` data.
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            species with a nonzero fraction has no ``cp_solid`` data.
+            Also raised, whatever the fractions or weights, if the property is
+            stored as one scalar per species instead of a coefficient list (see
+            ``_property_rows``).
         """
         if temp is None:
             temp = self.temp
@@ -2948,11 +3193,14 @@ class SolidPhase(ThermoPhysicalManager):
             If ``basis`` is neither 'mass' nor 'mole', for both ``total_h``
             modes, raised by ``ThermoPhysicalManager.getEnthalpy``.
         MissingPropertyError
-            A subclass of ``AttributeError``. If a species that the result
-            needs has no ``cp_solid`` data: every species for
-            ``total_h=False``, species with a nonzero fraction otherwise. In
-            the stored composition, a species at the zero sentinel ``eps``
-            is absent (see ``_stored_fractions``).
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            species that the result needs has no ``cp_solid`` data: every
+            species for ``total_h=False``, species with a nonzero fraction
+            otherwise. In the stored composition, a species at the zero
+            sentinel ``eps`` is absent (see ``_stored_fractions``).
+            Also raised, whatever the fractions or weights, if the property is
+            stored as one scalar per species instead of a coefficient list (see
+            ``_property_rows``).
 
         Notes
         -----
