@@ -23,7 +23,8 @@ from matplotlib.ticker import AutoMinorLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import pandas as pd
-from PharmaPy.jac_module import numerical_jac_data, dx_jac_p, numerical_jac
+from PharmaPy.jac_module import (numerical_jac_data, dx_jac_p, numerical_jac,
+                                 PARAMETER_MAGNITUDE_FLOOR)
 from PharmaPy import Gaussians as gs
 
 from PharmaPy.LevMarq import levenberg_marquardt
@@ -2521,15 +2522,14 @@ class ParameterEstimation:
             # 1e-3, as in the CVODES parameter increment (dx_jac_p Notes).
             rel_tol = 1e-6
             # Parameter magnitude below which the step stops shrinking
-            # [parameter units]. Design assumption: 1e-6 is the value this
-            # closure always passed as dx_jac_p's abstol, which earlier
-            # versions ignored, so every |p| >= 1e-6 keeps its previous
-            # step |p| * 1e-3. Below that the step is 1e-9 away from zero
-            # (positive at zero): larger than the previous 1e-3 * |p| for
-            # 0 < |p| < 1e-6, and nonzero at zero, where the zero step made
-            # the Jacobian column NaN. Pass
-            # dx_finitediff for parameters whose natural scale is smaller.
-            abs_tol = 1e-6
+            # [parameter units], 1e-6; its rationale is documented at
+            # jac_module.PARAMETER_MAGNITUDE_FLOOR. Every |p| >= 1e-6 keeps
+            # its previous step |p| * 1e-3. Below that the step is 1e-9 away
+            # from zero (positive at zero): larger than the previous
+            # 1e-3 * |p| for 0 < |p| < 1e-6, and nonzero at zero, where the
+            # zero step made the Jacobian column NaN. Pass dx_finitediff for
+            # parameters whose natural scale is smaller.
+            abs_tol = PARAMETER_MAGNITUDE_FLOOR
 
             def dparam_fun(param):
                 """Default finite-difference step of the parameters.

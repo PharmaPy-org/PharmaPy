@@ -99,8 +99,10 @@ back as ``NaN``. Infinite values are rejected.
    not allowed when the measurements declare uncertainties.
 ``solver``
    ``null`` before fitting, otherwise the optimizer settings: ``method``
-   (``'LM'`` or ``'IPOPT'``), ``options`` (the ``optim_options`` passed to
-   ``optimize_fn`` without the entries it writes itself), ``model_solver``
+   (``'LM'`` or ``'IPOPT'``), ``options`` (the effective options of the
+   fit: the given ``optim_options`` without the entries ``optimize_fn`` sets
+   itself, plus, for IPOPT, the entries cyipopt writes into
+   ``optimize_fn``'s private copy, such as its defaults), ``model_solver``
    (settings of the model's own integrator, for documentation),
    ``outcome`` (e.g. ``stop_criterion``, ``num_iter``, ``num_fun_eval`` and
    ``objective``, ``1/2 * r @ r`` of the weighted residuals) and

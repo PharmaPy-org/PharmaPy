@@ -2212,11 +2212,13 @@ class SolverSettings(_ImmutableRecord):
     method : {'LM', 'IPOPT'}
         ``method`` of ``ParameterEstimation.optimize_fn``.
     options : Mapping[str, object], optional
-        ``optim_options`` passed to ``optimize_fn``. ``optimize_fn`` sets
-        ``'full_output'`` and ``'verbose'`` (LM) or ``'print_level'``
-        (IPOPT) in its own copy of the options; such entries given here are
-        recorded as given and replaced again on a rerun, without effect on
-        the fit.
+        Effective optimizer options of the fit: the ``optim_options`` given
+        to ``optimize_fn`` without the entries it sets itself, plus, for
+        IPOPT, the entries cyipopt writes into ``optimize_fn``'s private
+        copy (its defaults). ``optimize_fn`` sets ``'full_output'`` and
+        ``'verbose'`` (LM) or ``'print_level'`` (IPOPT) in that copy; such
+        entries given here are recorded as given and replaced again on a
+        rerun, without effect on the fit.
     model_solver : Mapping[str, object], optional
         Settings of the model's own solver, e.g. CVode ``rtol``/``atol``
         passed through the model callback, for documentation.

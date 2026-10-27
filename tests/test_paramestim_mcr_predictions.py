@@ -127,9 +127,15 @@ def test_bootstrap_nominal_is_the_mcr_prediction():
     expected = _expected_predictions(fitted, True)
 
     statistics = StatisticsClass(estimator)
-    np.random.seed(BOOTSTRAP_SEED)
-    samples = statistics.get_bootsamples(BOOTSTRAP_SAMPLES,
-                                         fix_initial=True)
+    # Seed the legacy global generator for reproducible draws, then restore
+    # its state so later tests do not inherit this seed.
+    previous_state = np.random.get_state()
+    try:
+        np.random.seed(BOOTSTRAP_SEED)
+        samples = statistics.get_bootsamples(BOOTSTRAP_SAMPLES,
+                                             fix_initial=True)
+    finally:
+        np.random.set_state(previous_state)
 
     data = case._data()
     for nominal, reference, runs, name in zip(

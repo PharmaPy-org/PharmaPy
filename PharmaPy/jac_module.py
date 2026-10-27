@@ -16,6 +16,16 @@ import numpy as np
 #: Numerical Optimization, 2nd ed., Springer, 2006, Sec. 8.1).
 eps = np.sqrt(np.finfo(float).eps)
 
+#: Parameter magnitude below which ``dx_jac_p`` stops shrinking the step
+#: [parameter units]. ``ParameterEstimation`` passes it as the ``abstol``
+#: of its default step, and ``numerical_jac_central`` passes it to a
+#: callable ``dx`` given no ``abs_tol``. Design assumption: 1e-6 is the
+#: ``abstol`` that ``ParameterEstimation`` always passed to ``dx_jac_p``,
+#: which earlier versions ignored, so every ``|p| >= 1e-6`` keeps its
+#: previous step ``|p| * sqrt(reltol)``; below it the step stays nonzero,
+#: including at zero. Pass explicit steps for parameters of smaller scale.
+PARAMETER_MAGNITUDE_FLOOR = 1e-6
+
 
 def dx_jac_x(x, abstol, reltol, eps):
     sigma_zero = 1
@@ -116,9 +126,8 @@ def dx_jac_p(p, abstol, reltol, eps):
         Positive lower bound on the parameter magnitude that scales the step
         [parameter units], scalar or broadcastable to ``p``. Parameters
         with ``|p| < abstol``, including zero, are perturbed as if their
-        magnitude were ``abstol``, away from zero. None, which
-        ``numerical_jac_central`` passes to a callable ``dx`` by default,
-        applies no floor: the step is ``|p| * sqrt(max(reltol, eps))``,
+        magnitude were ``abstol``, away from zero. None applies no floor,
+        the legacy rule: the step is ``|p| * sqrt(max(reltol, eps))``,
         zero for a zero parameter, as in earlier versions.
     reltol : float
         Relative accuracy of the model outputs being differentiated [-],
@@ -261,7 +270,10 @@ def numerical_jac_central(func, x, rel_tol=None, abs_tol=None, dx=None,
         Relative tolerance passed to a callable ``dx`` rule [-].
     abs_tol : float or array-like, optional
         Absolute tolerance passed to a callable ``dx`` rule [coordinate
-        units].
+        units]. The default is None, which passes
+        ``PARAMETER_MAGNITUDE_FLOOR`` (1e-6), so that ``dx=dx_jac_p`` has
+        a nonzero step at a zero coordinate. Earlier versions passed None,
+        which gave ``dx_jac_p`` a zero step and a NaN column there.
     dx : float, array-like, or callable, optional
         Difference step [coordinate units], or a step-selection callable
         ``dx(x, abs_tol, rel_tol, eps)``. The default is None, which uses
@@ -276,6 +288,11 @@ def numerical_jac_central(func, x, rel_tol=None, abs_tol=None, dx=None,
     numpy.ndarray
         Jacobian [output units / coordinate units].
 
+    Raises
+    ------
+    ValueError
+        If the step of a coordinate is zero or infinite.
+
     Notes
     -----
     Interior coordinates use centered differences. A leading nonnegative
@@ -288,11 +305,15 @@ def numerical_jac_central(func, x, rel_tol=None, abs_tol=None, dx=None,
     if dx is None:
         dx = _default_steps(x)
     elif callable(dx):
+        if abs_tol is None:
+            abs_tol = PARAMETER_MAGNITUDE_FLOOR  # [coordinate units]
         dx = dx(x, abs_tol, rel_tol, eps)
     else:
         dx = dx * np.ones_like(x)
 
     num_x = len(x)
+    _check_steps(np.asarray(dx), np.arange(num_x))
+
     jac = []
     delx = np.zeros_like(x)
     f_zero = None

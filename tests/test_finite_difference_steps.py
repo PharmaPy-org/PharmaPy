@@ -295,7 +295,7 @@ def test_dx_jac_p_without_a_floor_keeps_the_relative_step():
 
 
 def test_numerical_jac_central_with_the_parameter_step_rule():
-    """Default ``abs_tol=None`` reaches ``dx_jac_p`` as its ``abstol``."""
+    """With the default ``abs_tol``, ``|p| >= 1e-6`` keeps ``1e-3 |p|``."""
     point = np.array([3.0, -2.0])  # [-]
 
     def quadratic(x):
@@ -324,6 +324,44 @@ def test_numerical_jac_central_with_the_parameter_step_rule():
     atol = (UNIT_ROUNDOFF * f_max / steps
             + UNIT_ROUNDOFF * (np.abs(point) + steps) / steps
             * np.abs(expected).max(axis=0))
+    assert np.all(np.abs(jacobian - expected) <= atol)
+
+
+def test_numerical_jac_central_with_the_parameter_step_rule_at_zero():
+    """Default ``abs_tol``: the floor step 1e-9 at a zero coordinate.
+
+    ``(x0**2 + 3 x0, x1**2)`` at ``(0, 2)`` has the Jacobian
+    ``diag(3, 4)``; central differences are exact for quadratics up to
+    rounding.
+    """
+    point = np.array([0.0, 2.0])  # [-]
+
+    def shifted_quadratic(x):
+        """Evaluate ``(x0**2 + 3 x0, x1**2)``.
+
+        Parameters
+        ----------
+        x : numpy.ndarray
+            Coordinates [-], shape (2,).
+
+        Returns
+        -------
+        numpy.ndarray
+            Function values [-], shape (2,).
+        """
+        return np.array([x[0]**2 + 3 * x[0], x[1]**2])
+
+    jacobian = numerical_jac_central(shifted_quadratic, point, dx=dx_jac_p,
+                                     rel_tol=DEFAULT_REL_TOL)
+
+    expected = np.diag([3.0, 4.0])
+    steps = np.array([FLOOR_STEP, PREVIOUS_RELATIVE_STEP * point[1]])  # [-]
+    f_max = np.array([[(steps[0])**2 + 3 * steps[0], point[1]**2],
+                      [0.0, (point[1] + steps[1])**2]])
+    atol = (UNIT_ROUNDOFF * f_max / steps
+            + UNIT_ROUNDOFF * ((np.abs(point) + steps) / steps + 2)
+            * np.abs(expected).max(axis=0))
+    assert np.all(np.isfinite(jacobian))
     assert np.all(np.abs(jacobian - expected) <= atol)
 
 
@@ -494,7 +532,8 @@ def test_numerical_jac_central_with_an_integer_seed():
     assert np.all(np.abs(jacobian - expected) <= atol)
 
 
-@pytest.mark.parametrize('jac_fun', [numerical_jac, numerical_jac_data])
+@pytest.mark.parametrize('jac_fun', [numerical_jac, numerical_jac_data,
+                                     numerical_jac_central])
 @pytest.mark.parametrize('bad_step', [0.0, np.inf, -np.inf])
 def test_forward_differences_reject_invalid_steps(jac_fun, bad_step):
     steps = np.array([1e-6, bad_step])

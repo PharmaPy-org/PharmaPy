@@ -193,8 +193,13 @@ the optimized parameter is :code:`theta_2` in :code:`name_params`,
 :code:`name_params_plot`, the :code:`paramest_df` columns and
 :code:`name_params_total` alike. Earlier releases numbered the optimized
 parameters only, so that parameter was labelled :code:`theta_1`, the name of
-the fixed parameter in :code:`name_params_total`. Labels are unchanged when
-every parameter is optimized or :code:`name_params` is given.
+the fixed parameter in :code:`name_params_total`. :code:`name_params`,
+:code:`name_params_total` and the :code:`paramest_df` columns are unchanged
+when every parameter is optimized or :code:`name_params` is given. Default
+plot labels (:code:`name_params_plot`) now brace the index, e.g.
+:code:`$\theta_{10}$`, so that multi-digit indices form one subscript
+(earlier :code:`$\theta_10$` rendered as theta_1 followed by 0); single-digit
+labels render as before.
 
 Liquid heat capacity
 ====================
