@@ -64,7 +64,7 @@ conda activate pharmapy-ipopt
 python -m pip install -e . --no-deps
 python -c "import cyipopt, assimulo; print(cyipopt.__version__, cyipopt.IPOPT_VERSION, assimulo.__version__)"
 python -m pytest tests/test_paramestim_cyipopt.py tests/test_simexec_cyipopt.py \
-    tests/test_records_ipopt.py -v
+    tests/test_records_ipopt.py tests/test_paramestim_mcr_cyipopt.py -v
 ```
 
 NumPy 1.26.4 satisfies the Assimulo 3.4.3 binary's NumPy constraint. The first
@@ -78,10 +78,13 @@ missing-dependency lane. Existing CI does not install cyipopt, so run this
 explicit command when changing the IPOPT estimation path. Headless machines can
 set `MPLBACKEND=Agg` and `QT_QPA_PLATFORM=offscreen` for these plotting imports.
 
-MCR's scalar-gradient and post-solve result-assembly defects remain tracked in
-[#240](https://github.com/PharmaPy-org/PharmaPy/issues/240#issuecomment-6040658764).
-These tests cover ordinary `ParameterEstimation`; they do not encode known MCR
-failures as expected success or certify MCR/IPOPT fitting.
+The fourth, `tests/test_paramestim_mcr_cyipopt.py`, needs only cyipopt: it fits
+`MultipleCurveResolution` with real IPOPT for model-returned and
+finite-difference sensitivities
+([#240](https://github.com/PharmaPy-org/PharmaPy/issues/240)) and checks the
+returned parameters, covariance, data-only `info`, residual ordering,
+information and an active absorptivity penalty against Levenberg-Marquardt
+and independent least-squares references.
 
 ## Parameter-estimation workshop regression
 

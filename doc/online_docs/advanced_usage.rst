@@ -73,6 +73,35 @@ Jacobian had that sign for non-spectral states; both now equal the derivative
 of the weighted residuals. Spectra must still be recorded at every model-grid
 time of an experiment.
 
+The pure-component absorptivities :code:`eps` are resolved by least squares at
+every evaluation and are not fitted parameters. :code:`MultipleCurveResolution`
+minimizes one objective, :code:`f = 1/2 r_data @ r_data + mult_penalty *
+sum(max(-eps, 0)**2)`, with every optimizer: :code:`get_objective(params,
+out_array=True)` returns the weighted data residuals :code:`r_data` followed
+by one penalty row :code:`sqrt(2 * mult_penalty) * max(-eps, 0)` per
+absorptivity, so that :code:`f = 1/2 r @ r` for this augmented vector
+:code:`r`, and the analytic IPOPT gradient includes the penalty derivative. Previously
+Levenberg-Marquardt ignored the penalty, the analytic scalar gradient returned
+a residual sensitivity instead of the objective gradient, and IPOPT fits
+failed after solving. The penalty rows are zero when every absorptivity is
+nonnegative, leaving such fits unchanged to roundoff. :code:`optimize_fn`
+reports the data residuals in :code:`info['fun']` and :code:`info['jac']`
+(covariance, statistics, degrees of freedom and, for SciPy fits,
+:code:`sens` use them only) and the penalty rows in
+:code:`info['fun_penalty']` and :code:`info['jac_penalty']`. The analytic
+derivatives assume concentration profiles of constant rank, including
+rank-deficient ones such as proportional species, and are undefined where
+the rank changes. With :code:`global_analysis=False` each experiment resolves
+its own absorptivities (:code:`epsilon_mcr` then has shape
+:code:`(n_experiments, n_species, n_wavelengths)`); this mode previously
+raised :code:`AttributeError`. The state-update keyword of
+:code:`get_objective` is now :code:`set_self`, as in
+:code:`ParameterEstimation`; :code:`update_self` remains a deprecated alias
+that emits :code:`DeprecationWarning`. The MCR-specific :code:`func_aux`
+override, which always raised :code:`AttributeError`, was removed, so
+:code:`MultipleCurveResolution.func_aux` is the inherited
+:code:`ParameterEstimation.func_aux`.
+
 :code:`StatisticsClass.bootstrap_params` returns the bootstrap estimates, one row
 per generated dataset, and stores them in :code:`boot_params`. Each dataset is
 fitted on an isolated copy of the estimator. The estimator's observations,

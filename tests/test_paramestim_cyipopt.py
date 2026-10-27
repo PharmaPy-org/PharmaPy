@@ -1,9 +1,8 @@
 """Real IPOPT fits for GLS, observation masks and bootstrap state (#397).
 
 Reuse the independently derived linear-model expectations from the core tests.
-These small fits require cyipopt, but not Assimulo. MCR's scalar-gradient and
-post-solve failures remain owned by #240; this module does not treat either
-failure as a passing optimization contract.
+These small fits require cyipopt, but not Assimulo. MCR IPOPT fits are
+covered by ``test_paramestim_mcr_cyipopt`` (#240).
 """
 
 import numpy as np
