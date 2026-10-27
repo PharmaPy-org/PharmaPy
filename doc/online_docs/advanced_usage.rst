@@ -90,6 +90,18 @@ the restore failure is reported as a :code:`RuntimeWarning`, which is dropped
 when warnings are turned into errors. A keyboard interrupt aborts without the
 extra evaluation.
 
+:code:`StatsModule.ParallelProblem(estimator).run_fit(sample)` fits one given
+dataset the same way: :code:`sample` holds one array per experiment in the
+layout of one :code:`get_bootsamples` dataset, shape
+:code:`(n_times, n_measured)` on the model grid (a 1-D array is accepted for a
+single measured state), and the method returns the parameters fitted to it.
+The fit runs on an isolated copy with the estimator's solver method and
+options, the estimator is unchanged, and the model is evaluated at
+:code:`params_convg` afterwards. Earlier versions set an unused :code:`y_fit`
+attribute and refitted the original observations, so the sample was ignored.
+NaN or infinite values are accepted only at unobserved entries, and
+:code:`MultipleCurveResolution` estimators are rejected (tracked in #505).
+
 Liquid heat capacity
 ====================
 

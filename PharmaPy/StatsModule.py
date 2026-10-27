@@ -18,20 +18,337 @@ import time
 import warnings
 
 
+def _isolated_estimator(estimator):
+    """Return a shallow copy of an estimator safe to evaluate and fit.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator; it is not modified.
+
+    Returns
+    -------
+    ParameterEstimation
+        Copy sharing the model callable, its arguments, the data layout
+        and the weighting with ``estimator``, but owning every container
+        that ``optimize_fn`` or the objective callback modify in place.
+
+    Notes
+    -----
+    ``optimize_fn`` and its callbacks rebind estimator attributes
+    (``y_data``, ``params_convg``, ``info_opt``, ``resid_runs``,
+    ``y_model``, ``covar_params`` and others), so rebinding them on the
+    copy leaves the original fit untouched. The exceptions, which are
+    modified in place, are the iteration histories ``params_iter`` and
+    ``objfun_iter`` (appended to while they are lists; ``objfun_iter``
+    stays a list after ``optimize_fn(store_iter=False)``), the cache
+    ``_observed_roots``, and the solver options, which ``optimize_fn``
+    writes into and which callers pass as a separate copy. The copy gets
+    its own lists and cache. Model callables and their arguments are
+    shared, not copied, so models that close over external objects keep
+    working.
+    """
+    isolated = copy.copy(estimator)
+    for name in ('params_iter', 'objfun_iter'):
+        history = getattr(isolated, name, None)
+        if isinstance(history, list):
+            setattr(isolated, name, list(history))
+
+    roots = getattr(isolated, '_observed_roots', None)
+    if isinstance(roots, dict):
+        isolated._observed_roots = dict(roots)
+
+    return isolated
+
+
+def _fit_bootstrap_sample(estimator, y_sample: list) -> np.ndarray:
+    """Fit one dataset without modifying the fitted estimator.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator whose model, weighting, solver method
+        (``opt_method``) and solver options (``optim_options``) are reused;
+        it is not modified.
+    y_sample : list of numpy.ndarray
+        One dataset per experiment, in ``x_data`` order, with the layout of
+        ``StatisticsClass.get_bootsamples``: shape ``(n_times,
+        n_measured)``, model-grid rows and measured-state columns in the
+        states' units.
+
+    Returns
+    -------
+    numpy.ndarray
+        Optimized parameters, shape ``(num_params,)``, in the model's
+        parameter units.
+
+    Raises
+    ------
+    Exception
+        Whatever ``optimize_fn`` raises for this dataset.
+
+    Notes
+    -----
+    The fit runs on ``_isolated_estimator(estimator)``, and the solver
+    receives a copy of the options because ``optimize_fn`` writes keys into
+    it. A stateful model callable is shared and is left at its last
+    evaluation; see ``_restore_model_state``.
+    """
+    isolated = _isolated_estimator(estimator)
+    isolated.y_data = y_sample  # [measured-state units]
+
+    options = estimator.optim_options
+    params, _, _ = isolated.optimize_fn(
+        method=estimator.opt_method,
+        verbose=False, store_iter=False,
+        optim_options=None if options is None else dict(options))
+
+    return params  # [model-parameter units]
+
+
+def _restore_model_state(estimator) -> None:
+    """Re-evaluate the model at the estimator's accepted parameters.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator; it is not modified.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    Exception
+        Whatever the model raises at the accepted parameters.
+
+    Notes
+    -----
+    Refits and evaluations on isolated copies share the estimator's model
+    callable. A stateful callable, such as a ``SimulationExec`` unit
+    operation, is left at its last evaluation; this re-evaluates the model
+    at the accepted ``params_convg``, matching the final refresh that
+    ``optimize_fn`` performs after an LM fit. (After an IPOPT fit, whose
+    last model calls are finite-difference perturbations, the callable ends
+    at the accepted parameters rather than at that perturbed point.)
+
+    The objective is evaluated on ``_isolated_estimator(estimator)``, so
+    every attribute it rebinds or appends to (residuals, predictions,
+    sensitivities, histories) belongs to the copy and the estimator stays
+    unchanged. Nothing is evaluated when the estimator has no accepted
+    parameters (``params_convg``).
+    """
+    accepted = getattr(estimator, 'params_convg', None)  # [param units]
+    if accepted is None:
+        return
+
+    _isolated_estimator(estimator).get_objective(accepted, True)
+
+
+def _restore_model_state_after_error(estimator, failed_step: str) -> None:
+    """Restore the model after a failure without masking that failure.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator whose model callable is restored; it is not
+        modified.
+    failed_step : str
+        Description of the failed operation for the warning message.
+
+    Returns
+    -------
+    None
+
+    Warns
+    -----
+    RuntimeWarning
+        If the model fails at the accepted parameters. The report is
+        dropped when warnings are turned into errors.
+
+    Notes
+    -----
+    Call from an ``except`` block and re-raise afterwards: the caller's
+    exception always takes priority over a restoration failure.
+    """
+    try:
+        _restore_model_state(estimator)
+    except Exception as refresh_error:
+        try:
+            warnings.warn(
+                "Could not restore the model at the accepted parameters "
+                "after {} failed: {}".format(failed_step, refresh_error),
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        except Exception:
+            # A warnings filter set to 'error' turns the report into an
+            # exception; the original error still takes priority.
+            pass
+
+
 class ParallelProblem:
+    """Refit a fitted estimator to one given dataset.
+
+    The dataset replaces the observations of an isolated copy of the
+    estimator, which is then refitted with the estimator's solver method
+    and options, as ``StatisticsClass.bootstrap_params`` does for each
+    bootstrap dataset. The estimator itself is never modified.
+    """
+
     def __init__(self, instance):
+        """Store the fitted estimator.
+
+        Parameters
+        ----------
+        instance : ParameterEstimation
+            Estimator on which ``optimize_fn`` has been run.
+        """
         self.instance = instance
 
     def run_fit(self, sample):
-        self.instance.y_fit = sample
+        """Fit the given dataset and return its parameter estimates.
 
-        # Optimize
-        params, _, _ = self.instance.optimize_fn(
-            method=self.instance.opt_method,
-            verbose=False, store_iter=False,
-            optim_options=self.instance.optim_options)
+        Parameters
+        ----------
+        sample : list of array-like
+            One dataset per experiment, in ``x_data`` order, in the layout
+            of ``StatisticsClass.get_bootsamples`` (one entry of a
+            bootstrap sample): shape ``(n_times, n_measured)`` on the
+            estimator's model grid, measured-state columns in the states'
+            units, NaN where unobserved. A 1-D array of length ``n_times``
+            is accepted for an experiment with one measured state.
 
-        return params
+        Returns
+        -------
+        numpy.ndarray
+            Optimized parameters for ``sample``, shape ``(num_params,)``, in
+            the model's parameter units.
+
+        Raises
+        ------
+        RuntimeError
+            If the estimator has not been fitted (no ``optimize_fn`` run).
+        ValueError
+            If ``sample`` does not hold one array per experiment with the
+            shape of that experiment's observations, holds NaN or infinite
+            values at observed positions, or the estimator stores nested
+            ``MultipleCurveResolution`` observations (#505).
+        Exception
+            Whatever ``optimize_fn`` raises for this dataset.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the fit raises and the model then also fails at the accepted
+            parameters; the fit's exception is still raised.
+
+        Notes
+        -----
+        The fit runs on an isolated copy (see ``_fit_bootstrap_sample``), so
+        the estimator keeps its observations, accepted parameters,
+        residuals, predictions, solver information and histories. A stateful
+        model callable is returned to the accepted parameters afterwards
+        (``_restore_model_state``), also when the fit raises.
+        """
+        estimator = self.instance
+        if getattr(estimator, 'params_convg', None) is None:
+            raise RuntimeError(
+                "ParallelProblem.run_fit needs a fitted estimator; run "
+                "optimize_fn first")
+
+        y_sample = _validated_sample(estimator, sample)
+
+        try:
+            params = _fit_bootstrap_sample(
+                estimator, y_sample)  # [model-parameter units]
+        except Exception:
+            _restore_model_state_after_error(estimator, 'the sample fit')
+            raise
+
+        _restore_model_state(estimator)
+
+        return params  # [model-parameter units]
+
+
+def _validated_sample(estimator, sample) -> list:
+    """Check a refit dataset against the estimator's observation layout.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator defining the number of experiments and the shape
+        ``(n_times, n_measured)`` of each experiment's observations.
+    sample : list of array-like
+        One dataset per experiment, in ``x_data`` order [measured-state
+        units].
+
+    Returns
+    -------
+    list of numpy.ndarray
+        Float arrays, one per experiment, with the observations' shapes
+        [measured-state units]; 1-D single-state entries become columns.
+
+    Raises
+    ------
+    ValueError
+        If the estimator stores nested ``'spectra'``/``'non_spectra'``
+        observations (``MultipleCurveResolution``, not supported, #505); if
+        ``sample`` is not a list or tuple with one entry per experiment; if
+        an entry's shape differs from the experiment's observations; or if
+        an entry is NaN or infinite at an observed position.
+
+    Notes
+    -----
+    Observed positions are those of the estimator's observation masks
+    (``x_masks``; every entry when the mask is None). Unobserved entries,
+    which ``get_bootsamples`` sets to NaN, may hold any value: their
+    residuals are zeroed before the fit.
+    """
+    if any(isinstance(observed, dict) for observed in estimator.y_data):
+        raise ValueError(
+            "ParallelProblem.run_fit does not support nested 'spectra'/"
+            "'non_spectra' observations (MultipleCurveResolution); bootstrap "
+            "refits of that layout are tracked in #505")
+
+    num_datasets = estimator.num_datasets
+    if (not isinstance(sample, (list, tuple))
+            or len(sample) != num_datasets):
+        found = (f"a list of {len(sample)} entries"
+                 if isinstance(sample, (list, tuple))
+                 else type(sample).__name__)
+        raise ValueError(
+            f"sample must be a list with one array per experiment "
+            f"({num_datasets}, in x_data order, as one entry of "
+            f"get_bootsamples); got {found}")
+
+    y_sample = []
+    for ind, (values, observed, x_mask) in enumerate(zip(
+            sample, estimator.y_data, estimator.x_masks)):
+        name = estimator.experim_names[ind]
+        expected_shape = np.shape(observed)  # (n_times, n_measured)
+        values = np.asarray(values, dtype=float)  # [measured-state units]
+        if values.ndim == 1 and expected_shape[1:] == (1,):
+            values = values[:, np.newaxis]
+        if values.shape != expected_shape:
+            raise ValueError(
+                f"sample entry {ind} ({name!r}) has shape "
+                f"{np.shape(sample[ind])}; expected {expected_shape} "
+                "(model-grid rows, measured-state columns)")
+
+        observed_mask = (np.ones(expected_shape, dtype=bool) if x_mask is None
+                         else np.asarray(x_mask, dtype=bool))
+        invalid = observed_mask & ~np.isfinite(values)
+        if invalid.any():
+            positions = [tuple(pos) for pos in np.argwhere(invalid).tolist()]
+            raise ValueError(
+                f"sample entry {ind} ({name!r}) is NaN or infinite at "
+                f"observed (row, column) positions {positions}; only "
+                "unobserved entries may be non-finite")
+        y_sample.append(values)
+
+    return y_sample
 
 
 class StatisticsClass:
@@ -530,114 +847,6 @@ class StatisticsClass:
 
         return y_boot
 
-    def _isolated_estimator(self):
-        """Return a shallow copy of the estimator safe to evaluate and fit.
-
-        Returns
-        -------
-        ParameterEstimation
-            Copy sharing the model callable, its arguments, the data layout
-            and the weighting with ``self.inst``, but owning every container
-            that ``optimize_fn`` or the objective callback modify in place.
-
-        Notes
-        -----
-        ``optimize_fn`` and its callbacks rebind estimator attributes
-        (``y_data``, ``params_convg``, ``info_opt``, ``resid_runs``,
-        ``y_model``, ``covar_params`` and others), so rebinding them on the
-        copy leaves the original fit untouched. The exceptions, which are
-        modified in place, are the iteration histories ``params_iter`` and
-        ``objfun_iter`` (appended to while they are lists; ``objfun_iter``
-        stays a list after ``optimize_fn(store_iter=False)``), the cache
-        ``_observed_roots``, and the solver options, which ``optimize_fn``
-        writes into and which callers pass as a separate copy. The copy gets
-        its own lists and cache. Model callables and their arguments are
-        shared, not copied, so models that close over external objects keep
-        working.
-        """
-        estimator = copy.copy(self.inst)
-        for name in ('params_iter', 'objfun_iter'):
-            history = getattr(estimator, name, None)
-            if isinstance(history, list):
-                setattr(estimator, name, list(history))
-
-        roots = getattr(estimator, '_observed_roots', None)
-        if isinstance(roots, dict):
-            estimator._observed_roots = dict(roots)
-
-        return estimator
-
-    def _fit_bootstrap_sample(self, y_sample: list) -> np.ndarray:
-        """Fit one bootstrap dataset without modifying the fitted estimator.
-
-        Parameters
-        ----------
-        y_sample : list of numpy.ndarray
-            One generated dataset per experiment, in ``x_data`` order, with
-            the layout of ``get_bootsamples``: shape ``(n_times,
-            n_measured)``, measured-state columns in the states' units.
-
-        Returns
-        -------
-        numpy.ndarray
-            Optimized parameters, shape ``(num_params,)``, in the model's
-            parameter units.
-
-        Raises
-        ------
-        Exception
-            Whatever ``optimize_fn`` raises for this dataset.
-
-        Notes
-        -----
-        The fit runs on ``_isolated_estimator()``, and the solver receives a
-        copy of the options because ``optimize_fn`` writes keys into it.
-        """
-        estimator = self._isolated_estimator()
-        estimator.y_data = y_sample  # [measured-state units]
-
-        options = self.inst.optim_options
-        params, _, _ = estimator.optimize_fn(
-            method=self.inst.opt_method,
-            verbose=False, store_iter=False,
-            optim_options=None if options is None else dict(options))
-
-        return params  # [model-parameter units]
-
-    def _restore_model_state(self) -> None:
-        """Re-evaluate the model at the accepted parameters.
-
-        Bootstrap refits share the estimator's model callable. A stateful
-        callable, such as a ``SimulationExec`` unit operation, is left at its
-        last bootstrap evaluation; this re-evaluates the model at the
-        accepted ``params_convg``, matching the final refresh that
-        ``optimize_fn`` performs after an LM fit. (After an IPOPT fit, whose
-        last model calls are finite-difference perturbations, the callable
-        ends at the accepted parameters rather than at that perturbed point.)
-
-        Returns
-        -------
-        None
-
-        Raises
-        ------
-        Exception
-            Whatever the model raises at the accepted parameters.
-
-        Notes
-        -----
-        The objective is evaluated on ``_isolated_estimator()``, so every
-        attribute it rebinds or appends to (residuals, predictions,
-        sensitivities, histories) belongs to the copy and the estimator
-        stays unchanged. Nothing is evaluated when the estimator has no
-        accepted parameters (``params_convg``).
-        """
-        accepted = getattr(self.inst, 'params_convg', None)  # [param units]
-        if accepted is None:
-            return
-
-        self._isolated_estimator().get_objective(accepted, True)
-
     def bootstrap_params(self, num_samples: int = 100) -> np.ndarray:
         """Estimate parameters for residual-bootstrap response samples.
 
@@ -714,8 +923,8 @@ class StatisticsClass:
 
                 # Optimize
                 try:
-                    params = self._fit_bootstrap_sample(
-                        y_sample)  # [model-parameter units]
+                    params = _fit_bootstrap_sample(
+                        self.inst, y_sample)  # [model-parameter units]
                 except np.linalg.LinAlgError as exc:
                     warnings.warn(
                         "Bootstrap optimization failed for sample {}: "
@@ -730,7 +939,7 @@ class StatisticsClass:
         except Exception as error:
             # Restore shared model state, but never mask the sample error.
             try:
-                self._restore_model_state()
+                _restore_model_state(self.inst)
             except Exception as refresh_error:
                 try:
                     warnings.warn(
@@ -747,7 +956,7 @@ class StatisticsClass:
             raise error
         # Interrupts (BaseException) propagate without further model runs.
 
-        self._restore_model_state()
+        _restore_model_state(self.inst)
         toc = time.time()  # [s]
 
         self.boot_params = boot_params  # [model-parameter units]
