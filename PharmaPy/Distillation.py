@@ -636,7 +636,11 @@ class _BaseDistillation(StructuralPresenceMixin):
         dict
             Material balances [mol/s, -], minimum reflux ratio [-], minimum
             and actual stage counts [-], actual reflux ratio [-], and feed tray
-            number [-].
+            number [-]. The minimum stage count is the Fenske value (a
+            float); an estimated actual stage count (``num_plates`` None,
+            zero or negative) is rounded up to an int, and a feed tray
+            estimated with Kirkbride is an int (issue #523); a given
+            ``num_plates`` or ``num_feed`` is returned as given.
 
         Raises
         ------
@@ -714,13 +718,15 @@ class _BaseDistillation(StructuralPresenceMixin):
         else:
             reflux = self.reflux  # [-]
 
-        # Actual number of stages
+        # Actual number of stages: an estimate is rounded up to a whole
+        # number of equilibrium stages, an int that calc_plates can use as
+        # an array dimension and a range bound (issue #523).
         if self.num_plates == 0 or self.num_plates is None:
             print('Using Gilliland correlation for number of stages')
             num_plates = self.molokanov_equation(reflux, min_reflux, num_min)  # [-]
-            num_plates = np.ceil(num_plates)  # [-]
+            num_plates = int(np.ceil(num_plates))  # [-]
         elif self.num_plates < 0:
-            num_plates = np.ceil(num_min * abs(self.num_plates))  # [-]
+            num_plates = int(np.ceil(num_min * abs(self.num_plates)))  # [-]
         elif self.num_plates > 0:
             if self.num_plates < np.ceil(num_min):
                 print('Warning: Specified number of plates (%i) is lower than '
@@ -734,12 +740,12 @@ class _BaseDistillation(StructuralPresenceMixin):
             num_rect, num_strip = self.kirkbride_correlation(
                 mat_bce, num_plates, z_feed)  # [-]
 
+            # Kirkbride rounds the section sizes; the feed stage is a
+            # whole stage number (issue #523).
             if num_rect > num_strip:
-                num_feed = num_rect  # [-]
-                num_rect -= 1
+                num_feed = int(num_rect)  # [-]
             else:
-                num_feed = num_rect + 1  # [-]
-                num_strip -= 1
+                num_feed = int(num_rect) + 1  # [-]
 
         elif self.num_feed > num_plates:
             raise ValueError(
