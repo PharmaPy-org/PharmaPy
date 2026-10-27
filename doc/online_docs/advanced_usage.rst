@@ -106,6 +106,30 @@ unobserved), and :code:`StatisticsClass.get_bootsamples` adds drawn spectral
 residuals to them; earlier releases reported :code:`2 * data - prediction` for
 every spectral channel (issue #500).
 
+Finite-difference Jacobians perturb a floating-point copy of the parameters,
+so integer seeds such as :code:`[1]` are no longer truncated to a zero
+perturbation (which gave :code:`MultipleCurveResolution` an all-zero Jacobian
+and a singular fit). The default :code:`dx_finitediff` step has magnitude
+:code:`1e-3 * max(|p|, 1e-6)` in parameter units. It was :code:`1e-3 * |p|`,
+so it is unchanged for :code:`|p| >= 1e-6`. For :code:`0 < |p| < 1e-6` it
+grows from :code:`1e-3 * |p|` to 1e-9 and points away from zero (negative for
+a negative parameter, so models such as :code:`log(-p)` stay defined), so
+derivatives, fits and covariances involving such parameters change; pass
+:code:`dx_finitediff` to keep a smaller step. Only a zero parameter
+previously had a zero step: its Jacobian column was NaN, and
+Levenberg-Marquardt returned the seed with a NaN covariance; it now fits.
+A user step that is zero or infinite for an estimated parameter raises
+:code:`ValueError` instead of producing NaN or zero derivatives (issue #239).
+Without a :code:`dx` argument, :code:`numerical_jac`,
+:code:`numerical_jac_data` and :code:`numerical_jac_central` in
+:code:`PharmaPy.jac_module` now use the step :code:`eps * max(|x|, 1)`
+(:code:`eps` about 1.49e-8) instead of a fixed :code:`eps`: unchanged for
+:code:`|x| <= 1`, and relative for larger coordinates, where the fixed step was
+lost to rounding (:code:`x = 1e9` gave a zero derivative).
+:code:`numerical_jacv` now perturbs the state by a relative step along
+:code:`v` rather than by a unit-length displacement, so it returns the local
+directional derivative (e.g. 2, not 3, for :code:`x**2` at 1 along 1).
+
 :code:`StatisticsClass.bootstrap_params` returns the bootstrap estimates, one row
 per generated dataset, and stores them in :code:`boot_params`. Each dataset is
 fitted on an isolated copy of the estimator. The estimator's observations,

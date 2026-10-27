@@ -106,9 +106,11 @@ back as ``NaN``. Infinite values are rejected.
    ``objective``, ``1/2 * r @ r`` of the weighted residuals) and
    ``derivatives``: ``jacobian`` is ``'model_sensitivities'``, ``'jac_fun'``
    or ``'finite_difference'`` and ``dx_finitediff`` is ``'default'`` (the
-   relative step ``ParameterEstimation`` installs), ``'callable'`` (a user
-   function, which a record cannot hold and must be passed again on a
-   rerun) or the numeric step in parameter units, which is replayed.
+   step of magnitude ``1e-3 * max(|p|, 1e-6)`` that ``ParameterEstimation``
+   installs),
+   ``'callable'`` (a user function, which a record cannot hold and must be
+   passed again on a rerun) or the numeric step in parameter units, which
+   is replayed.
 ``covariance``
    ``null``, or the parameter covariance of the optimized parameters:
    ``parameters`` (their names, in record order), ``include_mse`` and

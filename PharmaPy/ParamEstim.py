@@ -2297,10 +2297,18 @@ class ParameterEstimation:
             which is formed by stacking jacobian matrices for each state
             vertically, with units of state / parameter. If None, it is
             computed using finite differences. The default is None.
-        dx_finitediff : float, optional
+        dx_finitediff : float, array-like or callable, optional
             perturbation in the parameter space used to estimate the
-            parametric jacobian, in the corresponding parameter units.
-            The default is None.
+            parametric jacobian, in the corresponding parameter units, or
+            a callable mapping the full parameter vector to the steps.
+            Steps of estimated parameters must be nonzero and not
+            infinite. The default is None, which uses forward-difference
+            steps of magnitude ``1e-3 * max(|param|, 1e-6)`` [parameter
+            units]: a relative step of 1e-3 [-] (positive) for
+            ``|param| >= 1e-6``, and an absolute step of 1e-9 [parameter
+            units] away from zero for smaller magnitudes (positive at
+            zero), so a small negative parameter stays negative (see
+            ``jac_module.dx_jac_p``).
         weight_matrix : numpy array, optional
             Symmetric positive-definite measurement-error covariance with
             dimension N_meas x N_meas. Rows and columns follow the measured
@@ -2506,10 +2514,38 @@ class ParameterEstimation:
             param_seed = param_seed[np.newaxis]
 
         if dx_finitediff is None:
-            abs_tol = 1e-6 * np.ones_like(param_seed)
+            # Relative accuracy assumed for the model outputs [-]: the
+            # default rtol of Assimulo's CVode (1e-6 in Assimulo 3.4), the
+            # integrator of PharmaPy's ODE unit models unless sundials
+            # options override it. The relative step is its square root,
+            # 1e-3, as in the CVODES parameter increment (dx_jac_p Notes).
             rel_tol = 1e-6
+            # Parameter magnitude below which the step stops shrinking
+            # [parameter units]. Design assumption: 1e-6 is the value this
+            # closure always passed as dx_jac_p's abstol, which earlier
+            # versions ignored, so every |p| >= 1e-6 keeps its previous
+            # step |p| * 1e-3. Below that the step is 1e-9 away from zero
+            # (positive at zero): larger than the previous 1e-3 * |p| for
+            # 0 < |p| < 1e-6, and nonzero at zero, where the zero step made
+            # the Jacobian column NaN. Pass
+            # dx_finitediff for parameters whose natural scale is smaller.
+            abs_tol = 1e-6
 
             def dparam_fun(param):
+                """Default finite-difference step of the parameters.
+
+                Parameters
+                ----------
+                param : numpy.ndarray
+                    Parameter values [parameter units], shape (n,).
+
+                Returns
+                -------
+                numpy.ndarray
+                    Steps of magnitude ``1e-3 * max(|param|, 1e-6)``
+                    [parameter units], shape (n,), negative only for
+                    ``-1e-6 < param < 0``; see ``jac_module.dx_jac_p``.
+                """
                 dp = dx_jac_p(param, abs_tol, rel_tol, eps)
                 return dp
 
@@ -3379,6 +3415,13 @@ class ParameterEstimation:
             squared state units; ``get_objective`` documents the residual
             units.
 
+        Raises
+        ------
+        ValueError
+            If the finite-difference path is used (no ``jac_fun`` and no
+            model-returned sensitivities) and ``dx_finitediff`` gives a
+            zero or infinite step for an optimized parameter.
+
         Notes
         -----
         Analytical (``jac_fun`` or model-returned) and finite-difference
@@ -3722,7 +3765,10 @@ class ParameterEstimation:
             If ``method`` is not one of ``'LM'``, ``'IPOPT'``, ``'scipy'`` or
             ``'least_squares'``, if ``bounds`` is supplied both through
             ``bounds=`` and ``optim_options``, or if ``loss`` is not
-            ``'linear'`` when using ``'scipy'``/``'least_squares'``.
+            ``'linear'`` when using ``'scipy'``/``'least_squares'``, or if
+            finite-difference sensitivities are used and ``dx_finitediff``
+            gives a zero or infinite step for an optimized parameter (see
+            ``get_gradient``).
         numpy.linalg.LinAlgError
             If the accepted Jacobian yields a singular covariance matrix.
 
@@ -5185,6 +5231,13 @@ class MultipleCurveResolution(ParameterEstimation):
             entries are zero) followed by those of the penalty rows, per
             parameter unit. Otherwise the gradient of ``get_objective``,
             shape ``(n_params,)``, in objective unit per parameter unit.
+
+        Raises
+        ------
+        ValueError
+            If the finite-difference path is used (no model-returned
+            sensitivities) and ``dx_finitediff`` gives a zero or infinite
+            step for an optimized parameter.
 
         Notes
         -----

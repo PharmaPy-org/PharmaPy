@@ -96,9 +96,10 @@ OPTIMIZATION_METHODS = ('LM', 'IPOPT')
 #: ``ParameterEstimation.get_gradient``: sensitivities returned by the model
 #: callback, a user ``jac_fun``, or finite differences.
 JACOBIAN_SOURCES = ('model_sensitivities', 'jac_fun', 'finite_difference')
-#: Non-numeric ``dx_finitediff`` descriptors: the default relative step
-#: that ``ParameterEstimation`` installs when ``dx_finitediff`` is None, or
-#: a user callable, which a record cannot hold.
+#: Non-numeric ``dx_finitediff`` descriptors: the default step of
+#: magnitude ``1e-3 * max(|p|, 1e-6)`` that ``ParameterEstimation``
+#: installs when ``dx_finitediff`` is None, or a user callable, which a
+#: record cannot hold.
 STEP_DESCRIPTORS = ('default', 'callable')
 
 #: Distribution name of PharmaPy (``[project].name`` in pyproject.toml).
@@ -2225,10 +2226,11 @@ class SolverSettings(_ImmutableRecord):
     derivatives : Mapping, optional
         How the parameter sensitivities were obtained: ``'jacobian'`` is
         one of ``JACOBIAN_SOURCES`` and ``'dx_finitediff'`` is
-        ``'default'`` (the relative step ``ParameterEstimation`` installs),
-        ``'callable'`` (a user function, not recordable) or the numeric
-        step in parameter units, replayed by
-        ``CalibrationRecord.estimation_inputs``. None if unknown.
+        ``'default'`` (the step of magnitude ``1e-3 * max(|p|, 1e-6)``
+        that ``ParameterEstimation`` installs), ``'callable'`` (a user
+        function, not recordable) or the numeric step in parameter units,
+        replayed by ``CalibrationRecord.estimation_inputs``. None if
+        unknown.
 
     Raises
     ------
