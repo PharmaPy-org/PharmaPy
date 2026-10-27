@@ -23,6 +23,11 @@ VALID_ACTIVITY_MODELS = ('ideal', 'UNIFAC', 'UNIQUAC')
 _CP_PROPERTY_BY_PHASE = {'liquid': 'cp_liq', 'solid': 'cp_solid',
                          'vapor': 'cp_vapor'}
 
+# Database key of the pure-component density [kg/m**3] of each phase that the
+# density methods accept. Vapor densities come from the ideal-gas law
+# (VaporPhase.getDensity), not from a stored property, so 'vapor' is rejected.
+_DENSITY_PROPERTY_BY_PHASE = {'liquid': 'rho_liq', 'solid': 'rho_solid'}
+
 # Meaning of the list-valued properties that the property methods evaluate,
 # and the output unit and coefficient convention of each correlation, quoted
 # in missing-data errors. Temperatures T are in [K].
@@ -636,9 +641,9 @@ class ThermoPhysicalManager:
         mass_frac, mole_frac : ndarray, optional
             Species fractions [-], shape ``(num_species,)`` for a fixed
             composition or ``(num_rows, num_species)`` for a composition
-            profile. Used only when ``total_h`` is ``True``. The fraction
-            matching ``basis`` is used when supplied; otherwise the other one
-            is converted.
+            profile. Used only when ``total_h`` is ``True``, which requires
+            at least one of them. The fraction matching ``basis`` is used
+            when supplied; otherwise the other one is converted.
         phase : {'liquid', 'solid', 'vapor'}, optional
             Selects the ``cp_liq``, ``cp_solid`` or ``cp_vapor`` heat-capacity
             polynomial [J/mol/K]; default liquid.
@@ -682,8 +687,10 @@ class ThermoPhysicalManager:
             If ``basis`` is neither 'mass' nor 'mole'. The check precedes any
             computation and applies to both ``total_h`` modes. NumPy also
             raises it, for ``total_h=True``, when ``num_temps`` and
-            ``num_rows`` differ and neither is one. Also raised for an
-            unknown ``phase``.
+            ``num_rows`` differ and neither is one. Also raised, before any
+            computation, for a ``phase`` other than ``'liquid'``,
+            ``'solid'`` or ``'vapor'``, and for ``total_h=True`` when
+            neither ``mass_frac`` nor ``mole_frac`` is given.
         MissingPropertyError
             A subclass of ``AttributeError``.
             If a selected species that the result needs has no
@@ -716,6 +723,12 @@ class ThermoPhysicalManager:
         cp_cts = cp_cts[idx]  # [J/mol/K/K**k], ascending k
         species_idx = np.asarray(idx)
 
+        if total_h and mass_frac is None and mole_frac is None:
+            raise ValueError(
+                "getEnthalpy(total_h=True) weights the species enthalpies by "
+                "composition and needs mass_frac or mole_frac [-]; neither "
+                "was given (pass total_h=False for species enthalpies)")
+
         if not total_h:
             if weights is None:
                 needed = np.ones(len(cp_cts), dtype=bool)
@@ -733,7 +746,7 @@ class ThermoPhysicalManager:
         exp = ind_poly + 1
 
         integral = []
-        for ind, val in enumerate(temp):
+        for val in temp:
             temp_term = val**exp - temp_ref**exp
             integral.append(np.dot(cp_cts / exp, temp_term))
 
@@ -743,7 +756,7 @@ class ThermoPhysicalManager:
             if basis == 'mass':
                 integralMass = integral * 1000 / self.mw[idx]  # J/kg_i
                 if mass_frac is None:
-                    mass_frac = self.frac_to_frac(mole_frac=mole_frac, ind=ind)
+                    mass_frac = self.frac_to_frac(mole_frac=mole_frac)
 
                 if mass_frac.ndim == 1:
                     frac_selected = mass_frac[idx]  # [-]
@@ -753,7 +766,7 @@ class ThermoPhysicalManager:
                 h_selected = integralMass  # [J/kg]
             elif basis == 'mole':
                 if mole_frac is None:
-                    mole_frac = self.frac_to_frac(mass_frac, ind=ind)
+                    mole_frac = self.frac_to_frac(mass_frac)
 
                 if mole_frac.ndim == 1:
                     frac_selected = mole_frac[idx]  # [-]
@@ -857,13 +870,67 @@ class ThermoPhysicalManager:
 
         return heat_of_rxn  # J/mol
 
-    def getDensityPure(self, phase='liquid', temp=None):
-        if phase == 'liquid':
-            rhoMass = self.rho_liq  # TODO: T-dependent rho
-        elif phase == 'solid':
-            rhoMass = self.rho_solid
+    @staticmethod
+    def _validate_density_phase(phase: str) -> str:
+        """Check the phase of a density request.
 
-        rhoMole = rhoMass / self.mw  # kmol/m**3  (mol/L)
+        Parameters
+        ----------
+        phase : {'liquid', 'solid'}
+            Phase whose pure-component density is requested.
+
+        Returns
+        -------
+        str
+            Database key of the phase's pure density [kg/m**3],
+            ``'rho_liq'`` or ``'rho_solid'``.
+
+        Raises
+        ------
+        ValueError
+            If ``phase`` is not a key of ``_DENSITY_PROPERTY_BY_PHASE``; this
+            includes ``'vapor'``, whose density is not a stored property.
+        """
+        if phase not in _DENSITY_PROPERTY_BY_PHASE:
+            raise ValueError(
+                f"phase must be one of {tuple(_DENSITY_PROPERTY_BY_PHASE)}, "
+                f"got {phase!r}")
+
+        return _DENSITY_PROPERTY_BY_PHASE[phase]
+
+    def getDensityPure(self, phase: str = 'liquid',
+                       temp: Optional[float] = None) -> tuple:
+        """Return pure-component densities on the mass and molar bases.
+
+        Parameters
+        ----------
+        phase : {'liquid', 'solid'}, optional
+            Selects the ``rho_liq`` or ``rho_solid`` database entry; default
+            liquid. Vapor densities are not stored properties (see
+            ``VaporPhase.getDensity``), so ``'vapor'`` is rejected.
+        temp : float, optional
+            Temperature [K]. Accepted for interface compatibility and
+            ignored: the stored pure densities are temperature independent.
+
+        Returns
+        -------
+        rho_mass : ndarray
+            Pure densities [kg/m**3], shape ``(num_species,)``, in database
+            order.
+        rho_mole : ndarray
+            Pure molar densities [kmol/m**3] (equivalently [mol/L]),
+            ``rho_mass / mw`` with ``mw`` in [g/mol], same shape.
+
+        Raises
+        ------
+        ValueError
+            If ``phase`` is not one of ``'liquid'`` or ``'solid'``, checked
+            before any computation.
+        """
+        prop_name = self._validate_density_phase(phase)
+        rhoMass = getattr(self, prop_name)  # [kg/m**3]
+
+        rhoMole = rhoMass / self.mw  # [kmol/m**3], equivalently [mol/L]
 
         return rhoMass, rhoMole
 
@@ -881,10 +948,12 @@ class ThermoPhysicalManager:
             used when supplied; otherwise the other one is converted.
         phase : {'liquid', 'solid'}, optional
             Selects the ``rho_liq`` or ``rho_solid`` pure density
-            [kg/m**3]; default liquid.
+            [kg/m**3]; default liquid. ``'vapor'`` is rejected, as in
+            ``getDensityPure``.
         temp : float, optional
-            Temperature [K]; defaults to ``self.temp``. The pure densities
-            are temperature independent, so it does not change the result.
+            Temperature [K]. Accepted for interface compatibility and
+            ignored: the stored pure densities are temperature independent,
+            so neither ``temp`` nor a ``temp`` attribute is required.
         basis : {'mass', 'mole'}, optional
             Physical basis of the returned density; default mass.
 
@@ -898,7 +967,8 @@ class ThermoPhysicalManager:
         Raises
         ------
         ValueError
-            If ``basis`` is neither 'mass' nor 'mole'. The check precedes any
+            If ``basis`` is neither 'mass' nor 'mole', or ``phase`` is not
+            one of ``'liquid'`` or ``'solid'``. Both checks precede any
             computation.
 
         Notes
@@ -909,10 +979,7 @@ class ThermoPhysicalManager:
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be 'mass' or 'mole'")
 
-        if temp is None:
-            temp = self.temp
-
-        rhoMass, rhoMole = self.getDensityPure(phase, temp)
+        rhoMass, rhoMole = self.getDensityPure(phase)  # [kg/m**3], [kmol/m**3]
 
         if basis == 'mass':
             if mass_frac is None:
