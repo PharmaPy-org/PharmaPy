@@ -969,7 +969,9 @@ class LiquidPhase(ThermoPhysicalManager):
     def getCp(self, temp: Optional[ArrayLike] = None,
               mass_frac: Optional[np.ndarray] = None,
               mole_frac: Optional[np.ndarray] = None,
-              basis: str = 'mass') -> Union[float, np.ndarray]:
+              basis: str = 'mass',
+              weights: Optional[np.ndarray] = None
+              ) -> Union[float, np.ndarray]:
         """Return liquid heat capacity on the requested mixture basis.
 
         Parameters
@@ -984,6 +986,10 @@ class LiquidPhase(ThermoPhysicalManager):
         basis : {'mass', 'mole'}, optional
             Mixture basis; defaults to mass, consistently with getEnthalpy.
             Callers requiring molar heat capacity must request 'mole'.
+        weights : numpy.ndarray, optional
+            Presence weights [-], with exactly the shape of the fractions on
+            the requested basis, that decide in their place which species
+            need ``cp_liq``; see ``ThermoPhysicalManager.getCpMix``.
 
         Returns
         -------
@@ -996,7 +1002,17 @@ class LiquidPhase(ThermoPhysicalManager):
         Raises
         ------
         ValueError
-            If basis is neither 'mass' nor 'mole'.
+            If basis is neither 'mass' nor 'mole', or if ``weights`` does
+            not have exactly the shape of the fractions on the requested
+            basis, raised by ``ThermoPhysicalManager.getCpMix``.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero fraction (or, with ``weights``, a nonzero weight)
+            in some row has no ``cp_liq``. A species whose fraction (weight)
+            is zero in every row needs none and, without it, contributes
+            exactly zero; with ``weights``, a zero-weight species that has
+            ``cp_liq`` still contributes its fraction times its heat
+            capacity.
         """
         if temp is None:
             temp = self.temp
@@ -1005,7 +1021,8 @@ class LiquidPhase(ThermoPhysicalManager):
             mass_frac = self.mass_frac
             mole_frac = self.mole_frac
 
-        cpLiq = super().getCpMix(temp, mass_frac, mole_frac, basis=basis)
+        cpLiq = super().getCpMix(temp, mass_frac, mole_frac, basis=basis,
+                                 weights=weights)
 
         return cpLiq
 

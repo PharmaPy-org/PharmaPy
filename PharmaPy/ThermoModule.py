@@ -947,7 +947,9 @@ class ThermoPhysicalManager:
         return cpMass, cpMole
 
     def getCpMix(self, temp, mass_frac=None, mole_frac=None, phase='liquid',
-                 basis: str = 'mass'):
+                 basis: str = 'mass',
+                 weights: Optional[np.ndarray] = None
+                 ) -> Union[float, np.ndarray]:
         """Mix pure heat capacities over the species axis.
 
         Parameters
@@ -963,6 +965,15 @@ class ThermoPhysicalManager:
             Pure-component Cp correlation; default liquid.
         basis : {'mass', 'mole'}, optional
             Cp basis, default mass.
+        weights : ndarray, optional
+            Presence weights [any basis, e.g. 0/1], with exactly the shape
+            of the fractions on the requested basis, ``(num_species,)`` or
+            ``(num_temperatures, num_species)``. When given, they replace
+            the fractions in deciding which species need coefficients: a
+            species with zero weight in every row needs none and, without
+            them, contributes exactly zero. The fractions still weight the
+            sum. Solver-based units pass a structural presence mask here,
+            so that round-off fractions of absent species need no data.
 
         Returns
         -------
@@ -976,12 +987,18 @@ class ThermoPhysicalManager:
         ------
         ValueError
             If basis is neither 'mass' nor 'mole', or ``phase`` is unknown.
+            Also raised if ``weights`` does not have exactly the shape of
+            the fractions on the requested basis (one- or two-dimensional,
+            one entry per species on the last axis), as a scalar or short
+            array would otherwise switch the check off.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``.
-            If a species with a nonzero fraction in some composition row has
-            no coefficients for the phase. A species whose fraction is zero
-            in every row needs none and contributes exactly zero. Nonzero is
-            bitwise: a round-off-level fraction counts as present.
+            If a species with a nonzero fraction (or, with ``weights``, a
+            nonzero weight) in some composition row has no coefficients for
+            the phase. A species whose fraction (weight) is zero in every
+            row needs none and contributes exactly zero. Nonzero is
+            bitwise: a round-off-level fraction counts as present unless
+            ``weights`` says otherwise.
             Also raised, whatever the fractions or weights, if the property is
             stored as one scalar per species instead of a coefficient list (see
             ``_property_rows``).
@@ -1005,12 +1022,19 @@ class ThermoPhysicalManager:
             frac = mole_frac  # [-]
             cp_pure = cp_mole  # [J/mol/K]
 
-        # Only species present in some composition row need coefficients;
-        # absent species without them contribute exactly zero, not NaN * 0.
-        needed = np.atleast_2d(np.asarray(frac) != 0).any(axis=0)
+        # Only species present in some composition row (or with a nonzero
+        # weight) need coefficients; absent species without them contribute
+        # exactly zero, not NaN * 0.
+        if weights is None:
+            needed = np.atleast_2d(np.asarray(frac) != 0).any(axis=0)
+            reason = 'carry a nonzero fraction, so the mixture heat capacity'
+        else:
+            weights = self._validate_weights_shape(
+                weights, frac, 'mass_frac' if basis == 'mass' else 'mole_frac')
+            needed = self._needed_by_weights(weights, len(cp_cts))
+            reason = 'carry a nonzero weight, so the mixture heat capacity'
         missing = self._check_species_rows(
-            prop_name, cp_cts, np.arange(len(cp_cts)), needed,
-            'carry a nonzero fraction, so the mixture heat capacity')
+            prop_name, cp_cts, np.arange(len(cp_cts)), needed, reason)
         cp_pure = np.where(missing, 0.0, cp_pure)  # [J/kg/K] or [J/mol/K]
 
         if frac.ndim == 1:
