@@ -35,6 +35,14 @@ try:
 except ImportError:
     have_cyipopt = False
 
+#: Values of ``method`` accepted by ``ParameterEstimation.optimize_fn``;
+#: ``'scipy'`` and ``'least_squares'`` both select
+#: ``scipy.optimize.least_squares``.
+OPTIMIZATION_METHODS = ('LM', 'IPOPT', 'scipy', 'least_squares')
+#: Marks an estimator attribute that did not exist when ``optimize_fn``
+#: saved the previous fit.
+_ABSENT = object()
+
 linestyles = cycle(['-', '--', '-.', ':'])
 
 eps = np.finfo(float).eps
@@ -2164,6 +2172,19 @@ class ParameterEstimation:
     #: with a different residual definition (``MultipleCurveResolution``)
     #: keep the legacy ``analyze_data`` layout.
     _compiles_experiments = True
+    #: Attributes that describe the last completed ``optimize_fn`` fit; a
+    #: call that raises restores them (see ``_restore_fit_state``). The fit
+    #: results and iteration histories are followed by the evaluation
+    #: buffers that ``get_objective`` and ``get_gradient`` overwrite at
+    #: every trial and that consumers such as ``StatisticsClass`` read.
+    _FIT_ATTRIBUTES = ('opt_method', 'optim_options', 'optimize_flag',
+                       'params_convg', 'info_opt', 'cond_number',
+                       'params_iter', 'objfun_iter', 'paramest_df',
+                       'y_model', 'covar_params', 'correl_params',
+                       'y_runs', 'resid_runs', 'residuals',
+                       'params_residuals', 'weighted_residuals', 'sens',
+                       'sens_second', '_params_sens_second',
+                       'num_model_states')
 
     def __init__(self, func: Callable, param_seed, x_data=None, y_data=None,
                  measured_ind=None,
@@ -3555,6 +3576,41 @@ class ParameterEstimation:
         """
         return None
 
+    def _fit_state(self) -> dict:
+        """Save the attributes that describe the last completed fit.
+
+        Returns
+        -------
+        dict
+            The object bound to each name in ``_FIT_ATTRIBUTES``, or
+            ``_ABSENT`` if the attribute does not exist. Values keep their
+            units (``params_convg`` in parameter units, ``covar_params`` in
+            their products, and so on).
+
+        Notes
+        -----
+        Saving references suffices: ``optimize_fn`` binds new iteration
+        history lists after saving, and evaluations bind new buffers
+        instead of modifying the saved objects in place.
+        """
+        return {name: getattr(self, name, _ABSENT)
+                for name in self._FIT_ATTRIBUTES}
+
+    def _restore_fit_state(self, state: dict) -> None:
+        """Restore the attributes saved by ``_fit_state``.
+
+        Parameters
+        ----------
+        state : dict
+            Result of ``_fit_state``. Each saved object is rebound, and
+            attributes saved as ``_ABSENT`` are deleted if they exist now.
+        """
+        for name, value in state.items():
+            if value is not _ABSENT:
+                setattr(self, name, value)
+            elif hasattr(self, name):
+                delattr(self, name)
+
     def optimize_fn(self, optim_options: Optional[dict] = None,
                     simulate: bool = False, verbose: int | bool = True,
                     store_iter: bool = True, method: str = 'LM',
@@ -3579,7 +3635,10 @@ class ParameterEstimation:
             (twice the objective) when measurements declare uncertainties,
             and otherwise the unweighted sum of squared raw residuals in
             squared measured-state units, also with ``weight_matrix`` (see
-            ``get_objective``).
+            ``get_objective``). Every call starts new histories, so they
+            describe this fit only. If False, ``params_iter`` and
+            ``objfun_iter`` keep every evaluation of this call, in order,
+            and no ``paramest_df`` is stored.
         method : {'LM', 'IPOPT', 'scipy', 'least_squares'}, optional
             Optimization method used for fitting. ``'scipy'`` and
             ``'least_squares'`` both select
@@ -3654,144 +3713,182 @@ class ParameterEstimation:
         support another evaluation at the same parameters, as during
         optimization.
 
+        ``method`` and the availability of cyipopt are validated before any
+        attribute changes. ``opt_method``, ``optim_options``,
+        ``params_convg`` and ``info_opt`` are assigned together after the
+        solver returns, so they always describe the same fit.
+        ``optimize_flag`` is set to ``not simulate`` during the solve,
+        because ``get_objective`` reads it. A call that raises, during the
+        solve or afterwards (for example ``get_covariance`` with a singular
+        ``J @ J.T``), restores every attribute named in the class's
+        ``_FIT_ATTRIBUTES`` to its value before the call, or removes it if a
+        first fit had not yet created it: the fit results (``opt_method``,
+        ``optim_options``, ``optimize_flag``, ``params_convg``,
+        ``info_opt``, ``y_model``, ``covar_params``, ``correl_params``), the
+        iteration histories (``params_iter``, ``objfun_iter``,
+        ``cond_number``, ``paramest_df``), the evaluation buffers that
+        ``get_objective`` and ``get_gradient`` overwrite (``y_runs``,
+        ``resid_runs``, ``residuals``, ``weighted_residuals``, ``sens`` and
+        the others listed there), and the attributes subclasses add, such as
+        ``epsilon_mcr`` and the projections of
+        ``MultipleCurveResolution``, which also clears its evaluation cache
+        (see ``_restore_fit_state``).
+
         """
-
-        self.optimize_flag = not simulate
-        self.opt_method = method
-
-        params_var = self.param_seed[self.map_variable]  # [model parameter units]
-
-        if method == 'LM':
-            if optim_options is None:
-                optim_options = {'full_output': True, 'verbose': verbose}
-            else:
-                optim_options['full_output'] = True
-                optim_options['verbose'] = verbose
-
-            opt_par, inv_hessian, info = levenberg_marquardt(
-                params_var,
-                self.get_objective,
-                self.get_gradient,
-                args=(True,),
-                **optim_options)
-
-            # Rejected trial callbacks overwrite model buffers. Refresh them
-            # at the accepted point while retaining native LM result metadata.
-            self.get_objective(opt_par, out_array=True)
-
-        elif method == 'IPOPT':
-            if not have_cyipopt:
-                raise ImportError('cyipopt is an optional import. Please install cyipopt to use IPOPT as a solver for parameter estimation. conda install -c conda-forge cyipopt')
-            if optim_options is None:
-                optim_options = {'print_level': int(verbose) * 5}
-            else:
-                optim_options['print_level'] = int(verbose) * 5
-
-            kwargs_fun = {'out_array': False}
-            result = minimize_ipopt(self.get_objective, params_var,
-                                    jac=self.get_gradient,
-                                    bounds=bounds, options=optim_options,
-                                    kwargs=kwargs_fun)
-
-            opt_par = result['x']
-
-            info = self.assemble_solver_info(opt_par)
-
-        elif method in ('scipy', 'least_squares'):
-            scipy_options = ({} if optim_options is None
-                             else dict(optim_options))
-            if 'bounds' in scipy_options and bounds is not None:
-                raise ValueError(
-                    "Pass bounds either through bounds= or optim_options, "
-                    "not both")
-            loss = scipy_options.get('loss', 'linear')
-            if loss != 'linear':
-                raise ValueError(
-                    "Only loss='linear' is supported for least-squares "
-                    f"parameter estimation and covariance; got {loss!r}")
-            if bounds is not None:
-                scipy_options['bounds'] = bounds
-            if 'verbose' in scipy_options and verbose is True:
-                scipy_options['verbose'] = int(scipy_options['verbose'])
-            else:
-                scipy_options['verbose'] = int(verbose)
-            optim_options = scipy_options
-
-            def _scipy_jac(params_eval: np.ndarray,
-                           *args_eval) -> np.ndarray:
-                """Return weighted residual Jacobian in SciPy orientation.
-
-                Parameters
-                ----------
-                params_eval : numpy.ndarray
-                    Variable parameter vector, shape ``(num_params,)``, in the
-                    model callback's parameter units.
-                *args_eval
-                    Positional arguments forwarded to ``get_gradient``
-                    (``out_array=True``).
-
-                Returns
-                -------
-                numpy.ndarray
-                    Weighted residual Jacobian, shape ``(n_data, num_params)``.
-                    Entry ``(k, i)`` is in the unit of weighted residual ``k``
-                    divided by the unit of variable parameter ``i``.
-                """
-                return self.get_gradient(params_eval, *args_eval).T
-
-            result = least_squares(
-                self.get_objective,
-                params_var,
-                jac=_scipy_jac,
-                args=(True,),
-                **scipy_options)
-
-            opt_par = np.asarray(result.x)  # [model parameter units]
-
-            # Rejected trial callbacks overwrite model buffers. Refresh them
-            # at the accepted point while retaining native solver metadata
-            # and canonical (num_params, n_data) Jacobian orientation.
-            self.get_objective(opt_par, out_array=True)
-            info = dict(result)
-            info['scipy_result'] = result
-            # [residual unit / parameter unit], shape (num_params, n_data).
-            info['jac'] = np.asarray(result.jac).T
-
-        else:
+        if method not in OPTIMIZATION_METHODS:
             raise ValueError(
                 f"Unknown optimization method {method!r}; expected 'LM', "
                 "'IPOPT', 'scipy' or 'least_squares'")
+        if method == 'IPOPT' and not have_cyipopt:
+            raise ImportError(
+                'cyipopt is an optional import. Please install cyipopt to '
+                'use IPOPT as a solver for parameter estimation. conda '
+                'install -c conda-forge cyipopt')
 
-        # Statistics use the data residuals; see _data_solver_info.
-        info = self._data_solver_info(info)
-        if method in ('scipy', 'least_squares'):
-            # (n_data, num_params) [residual unit / parameter unit]
-            self.sens = info['jac'].T
+        params_var = self.param_seed[self.map_variable]  # [model parameter units]
 
-        self.optim_options = optim_options
+        previous_fit = self._fit_state()
+        # This fit's iteration history (#479): get_objective appends to these
+        # lists only, so arrays left by an earlier fit would keep its history.
+        self.params_iter = []
+        self.objfun_iter = []
+        self.cond_number = []
+        if hasattr(self, 'paramest_df'):
+            del self.paramest_df
+        self.optimize_flag = not simulate
+        try:
+            if method == 'LM':
+                if optim_options is None:
+                    optim_options = {'full_output': True, 'verbose': verbose}
+                else:
+                    optim_options['full_output'] = True
+                    optim_options['verbose'] = verbose
 
-        # Store
-        self.params_convg = opt_par  # [model parameter units]
-        self.info_opt = info
+                opt_par, inv_hessian, info = levenberg_marquardt(
+                    params_var,
+                    self.get_objective,
+                    self.get_gradient,
+                    args=(True,),
+                    **optim_options)
 
-        self.cond_number = np.array(self.cond_number)
-        self.params_iter = np.array(self.params_iter)
-        _, idx = np.unique(self.params_iter, axis=0, return_index=True)
+                # Rejected trial callbacks overwrite model buffers. Refresh
+                # them at the accepted point while retaining native LM result
+                # metadata.
+                self.get_objective(opt_par, out_array=True)
 
-        if store_iter:
-            self.params_iter = self.params_iter[np.sort(idx)]
-            self.objfun_iter = np.array(self.objfun_iter)[np.sort(idx)]
+            elif method == 'IPOPT':
+                if optim_options is None:
+                    optim_options = {'print_level': int(verbose) * 5}
+                else:
+                    optim_options['print_level'] = int(verbose) * 5
 
-            col_names = ['obj_fun'] + self.name_params
-            self.paramest_df = pd.DataFrame(
-                np.column_stack((self.objfun_iter, self.params_iter)),
-                columns=col_names)
+                kwargs_fun = {'out_array': False}
+                result = minimize_ipopt(self.get_objective, params_var,
+                                        jac=self.get_gradient,
+                                        bounds=bounds, options=optim_options,
+                                        kwargs=kwargs_fun)
 
-        # Model prediction with final parameters, [model state units], one
-        # array per experiment; see _model_predictions.
-        self.y_model = self._model_predictions()
+                opt_par = result['x']
 
-        covar_params = self.get_covariance()
+                info = self.assemble_solver_info(opt_par)
+
+            else:  # 'scipy' or 'least_squares'
+                scipy_options = ({} if optim_options is None
+                                 else dict(optim_options))
+                if 'bounds' in scipy_options and bounds is not None:
+                    raise ValueError(
+                        "Pass bounds either through bounds= or optim_options, "
+                        "not both")
+                loss = scipy_options.get('loss', 'linear')
+                if loss != 'linear':
+                    raise ValueError(
+                        "Only loss='linear' is supported for least-squares "
+                        f"parameter estimation and covariance; got {loss!r}")
+                if bounds is not None:
+                    scipy_options['bounds'] = bounds
+                if 'verbose' in scipy_options and verbose is True:
+                    scipy_options['verbose'] = int(scipy_options['verbose'])
+                else:
+                    scipy_options['verbose'] = int(verbose)
+                optim_options = scipy_options
+
+                def _scipy_jac(params_eval: np.ndarray,
+                               *args_eval) -> np.ndarray:
+                    """Return weighted residual Jacobian in SciPy orientation.
+
+                    Parameters
+                    ----------
+                    params_eval : numpy.ndarray
+                        Variable parameter vector, shape ``(num_params,)``,
+                        in the model callback's parameter units.
+                    *args_eval
+                        Positional arguments forwarded to ``get_gradient``
+                        (``out_array=True``).
+
+                    Returns
+                    -------
+                    numpy.ndarray
+                        Weighted residual Jacobian, shape
+                        ``(n_data, num_params)``. Entry ``(k, i)`` is in the
+                        unit of weighted residual ``k`` divided by the unit of
+                        variable parameter ``i``.
+                    """
+                    return self.get_gradient(params_eval, *args_eval).T
+
+                result = least_squares(
+                    self.get_objective,
+                    params_var,
+                    jac=_scipy_jac,
+                    args=(True,),
+                    **scipy_options)
+
+                opt_par = np.asarray(result.x)  # [model parameter units]
+
+                # Rejected trial callbacks overwrite model buffers. Refresh
+                # them at the accepted point while retaining native solver
+                # metadata and canonical (num_params, n_data) Jacobian
+                # orientation.
+                self.get_objective(opt_par, out_array=True)
+                info = dict(result)
+                info['scipy_result'] = result
+                # [residual unit / parameter unit], shape (num_params, n_data).
+                info['jac'] = np.asarray(result.jac).T
+
+            # Statistics use the data residuals; see _data_solver_info.
+            info = self._data_solver_info(info)
+            if method in ('scipy', 'least_squares'):
+                # (n_data, num_params) [residual unit / parameter unit]
+                self.sens = info['jac'].T
+
+            # Store
+            self.opt_method = method
+            self.optim_options = optim_options
+            self.params_convg = opt_par  # [model parameter units]
+            self.info_opt = info
+
+            self.cond_number = np.array(self.cond_number)
+            self.params_iter = np.array(self.params_iter)
+            _, idx = np.unique(self.params_iter, axis=0, return_index=True)
+
+            if store_iter:
+                self.params_iter = self.params_iter[np.sort(idx)]
+                self.objfun_iter = np.array(self.objfun_iter)[np.sort(idx)]
+
+                col_names = ['obj_fun'] + self.name_params
+                self.paramest_df = pd.DataFrame(
+                    np.column_stack((self.objfun_iter, self.params_iter)),
+                    columns=col_names)
+
+            # Model prediction with final parameters, [model state units], one
+            # array per experiment; see _model_predictions.
+            self.y_model = self._model_predictions()
+
+            covar_params = self.get_covariance()
+        except BaseException:
+            # Keep the previous fit, also when the post-solve assembly fails,
+            # e.g. a singular covariance (#479).
+            self._restore_fit_state(previous_fit)
+            raise
 
         return opt_par, covar_params, info
 
@@ -4430,6 +4527,10 @@ class MultipleCurveResolution(ParameterEstimation):
     # Spectral residuals are not model outputs minus observations, so data
     # keep the legacy analyze_data layout (see __init__ Notes).
     _compiles_experiments = False
+    #: Also restore the resolved absorptivities and the projections of the
+    #: last evaluation after a failed ``optimize_fn`` call.
+    _FIT_ATTRIBUTES = ParameterEstimation._FIT_ATTRIBUTES + (
+        'epsilon_mcr', 'projection_kwargs', '_projection_blocks')
 
     def __init__(self, func, param_seed, time_data, y_spectra, mult_penalty=1,
                  global_analysis=True,
@@ -5368,6 +5469,26 @@ class MultipleCurveResolution(ParameterEstimation):
             # [objective unit]
             penalty = self.mult_penalty*(np.maximum(-molar_abs, 0)**2).sum()
             return residual + penalty
+
+    def _restore_fit_state(self, state: dict) -> None:
+        """Restore the saved fit and invalidate the evaluation cache.
+
+        Parameters
+        ----------
+        state : dict
+            Result of ``_fit_state``, including ``epsilon_mcr`` [absorptivity
+            units] and the projection buffers.
+
+        Notes
+        -----
+        The cache ``_params_mcr_eval``/``_mcr_evaluation`` that
+        ``get_gradient`` reuses describes the last trial evaluation, not the
+        restored fit, so it is cleared and the next gradient evaluates the
+        model again.
+        """
+        super()._restore_fit_state(state)
+        self._params_mcr_eval = None
+        self._mcr_evaluation = None
 
     def _data_solver_info(self, info: dict) -> dict:
         """Move the absorptivity-penalty rows out of the solver information.

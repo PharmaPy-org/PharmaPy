@@ -123,6 +123,24 @@ the restore failure is reported as a :code:`RuntimeWarning`, which is dropped
 when warnings are turned into errors. A keyboard interrupt aborts without the
 extra evaluation.
 
+:code:`optimize_fn` validates :code:`method` against :code:`'LM'`,
+:code:`'IPOPT'`, :code:`'scipy'` and :code:`'least_squares'` and checks that
+cyipopt is installed for IPOPT before changing the estimator (issue #479). A
+call that raises, during the solve or afterwards (for example a singular
+covariance), keeps the previous fit: :code:`opt_method`, :code:`optim_options`,
+:code:`optimize_flag`, :code:`params_convg`, :code:`info_opt`, :code:`y_model`,
+:code:`covar_params`, :code:`correl_params`, :code:`paramest_df`, the
+iteration histories and the evaluation buffers (:code:`y_runs`,
+:code:`resid_runs`, :code:`residuals`, :code:`weighted_residuals`,
+:code:`sens`, and :code:`epsilon_mcr` for :code:`MultipleCurveResolution`)
+that :code:`StatisticsClass` resamples. Earlier releases relabelled the
+previous fit with the requested method before solving and left the buffers
+at the last trial evaluation. Every call now also starts new iteration
+histories: after a refit, :code:`params_iter`, :code:`objfun_iter` and
+:code:`paramest_df` describe that refit, whereas earlier releases kept the
+first fit's history, and :code:`store_iter=False` stores no
+:code:`paramest_df`.
+
 Liquid heat capacity
 ====================
 
