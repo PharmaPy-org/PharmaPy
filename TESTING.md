@@ -70,7 +70,9 @@ python -m pytest tests/test_paramestim_cyipopt.py tests/test_simexec_cyipopt.py 
 NumPy 1.26.4 satisfies the Assimulo 3.4.3 binary's NumPy constraint. The first
 module needs only cyipopt; besides weighted, masked and bootstrap fits it checks
 that IPOPT fits leave the caller's `optim_options` unchanged
-([#476](https://github.com/PharmaPy-org/PharmaPy/issues/476)). The second
+([#476](https://github.com/PharmaPy-org/PharmaPy/issues/476)) and that they
+report Ipopt's termination outcome in `info`, warning when it is unsuccessful
+([#475](https://github.com/PharmaPy-org/PharmaPy/issues/475)). The second
 requires both cyipopt and Assimulo. The third, `tests/test_records_ipopt.py`,
 needs only cyipopt: it captures an IPOPT fit of the analytic two-experiment
 decay case in a `CalibrationRecord` (explicit bounds, the effective options

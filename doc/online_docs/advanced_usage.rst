@@ -155,6 +155,14 @@ calibration records. SciPy fits already used a shallow copy, so only in-place
 edits of nested values, such as arrays or the bounds, reached their stored
 options.
 
+IPOPT fits report Ipopt's termination outcome in :code:`info`:
+:code:`success`, :code:`status`, :code:`message` and the iteration count
+:code:`nit` (issue #475). An unsuccessful termination, for example at
+:code:`max_iter`, emits a :code:`RuntimeWarning` naming the status and
+message; the returned parameters, covariance and statistics then describe the
+last iterate, not a converged estimate. Earlier releases discarded the outcome,
+so such fits were indistinguishable from converged ones.
+
 Liquid heat capacity
 ====================
 

@@ -3697,6 +3697,11 @@ class ParameterEstimation:
             ``info['fun_penalty']`` and ``info['jac_penalty']``, while native
             solver diagnostics such as SciPy's ``cost`` and ``grad`` describe
             the full residual vector.
+            IPOPT fits add cyipopt's termination outcome: ``info['success']``
+            (bool, True only for Ipopt status 0, ``Solve_Succeeded``),
+            ``info['status']`` (int, Ipopt's return status),
+            ``info['message']`` (str, Ipopt's status message) and, when
+            cyipopt reports it, ``info['nit']`` (int, iterations [-]).
 
         Raises
         ------
@@ -3709,6 +3714,14 @@ class ParameterEstimation:
             ``'linear'`` when using ``'scipy'``/``'least_squares'``.
         numpy.linalg.LinAlgError
             If the accepted Jacobian yields a singular covariance matrix.
+
+        Warns
+        -----
+        RuntimeWarning
+            If IPOPT terminates unsuccessfully (``info['success']`` False),
+            for example at its iteration limit. The warning names the status
+            and message; the returned parameters, covariance and statistics
+            then describe the last iterate, not a converged estimate.
 
         Notes
         -----
@@ -3813,6 +3826,23 @@ class ParameterEstimation:
                 opt_par = result['x']
 
                 info = self.assemble_solver_info(opt_par)
+                # Keep the termination outcome (#475); cyipopt returns the
+                # message as bytes.
+                message = result['message']
+                if isinstance(message, bytes):
+                    message = message.decode('utf-8', errors='replace')
+                info['success'] = bool(result['success'])
+                info['status'] = int(result['status'])
+                info['message'] = message
+                if 'nit' in result:
+                    info['nit'] = int(result['nit'])  # [-]
+                if not info['success']:
+                    warnings.warn(
+                        f"IPOPT terminated unsuccessfully (status "
+                        f"{info['status']}: {message}); the returned "
+                        "parameters, covariance and statistics describe its "
+                        "last iterate, not a converged estimate",
+                        RuntimeWarning, stacklevel=2)
 
             else:  # 'scipy' or 'least_squares'
                 scipy_options = effective_options

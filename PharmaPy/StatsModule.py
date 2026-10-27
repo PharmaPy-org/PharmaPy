@@ -670,6 +670,8 @@ class StatisticsClass:
             at the accepted parameters; the sample's exception is still
             raised, also when warnings are turned into errors (the report is
             then dropped).
+            Also, from ``optimize_fn``, if an IPOPT sample refit terminates
+            unsuccessfully; see Notes.
 
         Raises
         ------
@@ -703,7 +705,12 @@ class StatisticsClass:
         ``ParameterEstimation.optimize_fn`` also accepts ``'IPOPT'``, whose
         numerical failures surface from cyipopt rather than as a
         ``LinAlgError``. Under that method a failed sample aborts the whole
-        bootstrap run instead of recording a NaN row.
+        bootstrap run instead of recording a NaN row. An unsuccessful IPOPT
+        termination of a sample refit, for example at ``max_iter``, does not
+        raise: ``optimize_fn`` emits its ``RuntimeWarning`` naming the Ipopt
+        status, and the sample's last iterate is stored as its row. When
+        that warning is turned into an error, it propagates like any other
+        sample exception and aborts the run.
         """
         y_samples = self.get_bootsamples(
             num_samples)  # [response-dependent units]
