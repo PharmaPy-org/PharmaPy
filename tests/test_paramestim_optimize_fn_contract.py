@@ -18,6 +18,9 @@ Scope, by issue:
   modifying or aliasing, also when the caller edits arrays or bounds in place,
   while a bound-method ``callback`` is kept as given (#476; IPOPT in
   ``test_paramestim_cyipopt``).
+- The parameter names and plot labels of fits with a fixed parameter before an
+  optimized one, also at full index 11 (#477), with two-parameter and
+  twelve-parameter models.
 
 Main fixture: a noise-free proportional model ``y = k * t``, time [s], rate
 constant ``k`` [mol/L/s] and concentration [mol/L], whose exact least-squares
@@ -662,3 +665,96 @@ def test_scipy_bound_method_callback_is_kept_as_given():
 
     assert len(recorder.rates) >= 1
     assert estimator.optim_options['callback'].__self__ is recorder
+
+
+# Two-parameter decay c = c0 * exp(-k t) with the amplitude fixed first.
+DECAY_PARAMS = [2.0, 0.5]  # [mol/L], [1/s], generating c0 and k
+DECAY_SEED = [2.0, 0.3]  # [mol/L], [1/s]; c0 fixed at its true value
+FIX_FIRST = [False, True]  # optimize k only
+
+
+def decay(params, time_s):
+    """Return the concentration of a first-order decay.
+
+    Parameters
+    ----------
+    params : array_like
+        ``[c0, k]``: initial concentration [mol/L] and rate constant [1/s].
+    time_s : numpy.ndarray
+        Sample times [s], shape ``(n_times,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Concentration ``c0 * exp(-k t)`` [mol/L], shape ``(n_times,)``.
+    """
+    return params[0] * np.exp(-params[1] * time_s)
+
+
+def test_default_names_keep_full_vector_numbering_with_fixed_parameter():
+    estimator = ParameterEstimation(decay, DECAY_SEED, TIME_S,
+                                    decay(DECAY_PARAMS, TIME_S),
+                                    optimize_flags=FIX_FIRST)
+
+    assert estimator.name_params_total == ['theta_1', 'theta_2']
+    assert estimator.name_params == ['theta_2']
+    assert estimator.name_params_plot == [r'$\theta_{2}$']
+
+    estimator.optimize_fn(verbose=False)
+
+    table = estimator.paramest_df
+    assert table.columns.tolist() == ['obj_fun', 'theta_2']
+    # The column holds the rate: its seed first, the estimate among them.
+    assert table['theta_2'].iloc[0] == DECAY_SEED[1]
+    assert estimator.params_convg[0] in table['theta_2'].to_numpy()
+
+
+# Twelve parameters, of which only the eleventh is optimized: its default
+# label needs a two-digit subscript.
+NUM_MANY_PARAMS = 12  # [-]
+ELEVENTH = 10  # [-], zero-based index of the optimized parameter
+
+
+def eleventh_rate(params, time_s):
+    """Return ``params[10] * t``; the other parameters are fixed and unused.
+
+    Parameters
+    ----------
+    params : array_like
+        Twelve parameters; ``params[10]`` is a rate [mol/L/s].
+    time_s : numpy.ndarray
+        Sample times [s].
+
+    Returns
+    -------
+    numpy.ndarray
+        Concentration [mol/L].
+    """
+    return params[ELEVENTH] * time_s
+
+
+def test_default_plot_label_keeps_two_digit_index_in_subscript():
+    flags = [ind == ELEVENTH for ind in range(NUM_MANY_PARAMS)]
+    estimator = ParameterEstimation(
+        eleventh_rate, [SEED_RATE] * NUM_MANY_PARAMS, TIME_S,
+        proportional([TRUE_RATE], TIME_S), optimize_flags=flags)
+
+    assert estimator.name_params == ['theta_11']
+    assert estimator.name_params_plot == [r'$\theta_{11}$']
+
+
+@pytest.mark.parametrize('names, optimized, total', [
+    (['c0', 'k'], ['k'], ['c0', 'k']),  # one name per parameter
+    (['k'], ['k'], ['k']),  # one name per optimized parameter
+])
+def test_given_names_keep_both_documented_forms(names, optimized, total):
+    estimator = ParameterEstimation(decay, DECAY_SEED, TIME_S,
+                                    decay(DECAY_PARAMS, TIME_S),
+                                    optimize_flags=FIX_FIRST,
+                                    name_params=names)
+
+    assert estimator.name_params == optimized
+    assert estimator.name_params_total == total
+    assert estimator.name_params_plot == ['$k$']
+    estimator.optimize_fn(verbose=False)
+    assert estimator.paramest_df.columns.tolist() == ['obj_fun', 'k']

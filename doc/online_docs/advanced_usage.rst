@@ -163,6 +163,15 @@ message; the returned parameters, covariance and statistics then describe the
 last iterate, not a converged estimate. Earlier releases discarded the outcome,
 so such fits were indistinguishable from converged ones.
 
+Default parameter labels (:code:`name_params` omitted) are numbered over the
+full parameter vector (issue #477): with :code:`optimize_flags=[False, True]`
+the optimized parameter is :code:`theta_2` in :code:`name_params`,
+:code:`name_params_plot`, the :code:`paramest_df` columns and
+:code:`name_params_total` alike. Earlier releases numbered the optimized
+parameters only, so that parameter was labelled :code:`theta_1`, the name of
+the fixed parameter in :code:`name_params_total`. Labels are unchanged when
+every parameter is optimized or :code:`name_params` is given.
+
 Liquid heat capacity
 ====================
 

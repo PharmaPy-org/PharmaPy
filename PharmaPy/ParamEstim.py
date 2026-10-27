@@ -2321,7 +2321,14 @@ class ParameterEstimation:
             It must be None when measurements declare an ``uncertainty``.
             The default is None, which uses the dimensionless identity.
         name_params : list of str, optional
-            list with parameter names. The default is None.
+            Parameter names, either one per parameter of ``param_seed`` (in
+            callback order; ``name_params`` then keeps the optimized ones)
+            or one per optimized parameter (``name_params_total`` then holds
+            only these). The default is None, which names parameter ``i``
+            of ``param_seed`` ``'theta_<i+1>'`` in ``name_params_total``
+            and keeps the same name for it in ``name_params``,
+            ``name_params_plot`` and the ``paramest_df`` columns when it is
+            optimized.
         name_states : list of str, optional
             list with state names. The default is None, which uses the
             measurement names for ``Experiment`` input.
@@ -2761,14 +2768,18 @@ class ParameterEstimation:
         # --------------- Names
         # Parameters
         if name_params is None:
-            self.name_params = ['theta_{}'.format(ind + 1)
-                                for ind in range(self.num_params)]
-
+            # Number over the full parameter vector, so an optimized
+            # parameter keeps its full-vector name when others are fixed.
+            optimized_ind = np.flatnonzero(self.map_variable)
             self.name_params_total = ['theta_{}'.format(ind + 1)
                                       for ind in range(self.num_params_total)]
 
-            self.name_params_plot = [r'$\theta_{}$'.format(ind + 1)
-                                     for ind in range(self.num_params)]
+            self.name_params = [self.name_params_total[ind]
+                                for ind in optimized_ind]
+
+            # Braces keep multi-digit indices in the subscript.
+            self.name_params_plot = [r'$\theta_{{{}}}$'.format(ind + 1)
+                                     for ind in optimized_ind]
         else:
             self.name_params_total = name_params
             if len(name_params) > sum(self.map_variable):
