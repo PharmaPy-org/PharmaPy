@@ -16,7 +16,7 @@ from scipy.optimize import least_squares
 from collections.abc import Mapping
 from itertools import cycle
 from types import MappingProxyType
-from typing import Callable, NamedTuple, Optional, Sequence
+from typing import Callable, NamedTuple, Optional, Sequence, Union
 
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
@@ -5063,7 +5063,7 @@ class MultipleCurveResolution(ParameterEstimation):
         return sens.reshape(num_params, -1).T
 
     def _evaluate_runs(self, params: np.ndarray
-                       ) -> tuple[list, np.ndarray | list]:
+                       ) -> tuple[list, Union[np.ndarray, list]]:
         """Evaluate the model for every experiment.
 
         Parameters
@@ -5154,7 +5154,7 @@ class MultipleCurveResolution(ParameterEstimation):
         return c_runs, resid_non
 
     def _assemble_residuals(self, spectra_pred: np.ndarray,
-                            resid_non: np.ndarray | list
+                            resid_non: Union[np.ndarray, list]
                             ) -> tuple[list, list, np.ndarray]:
         """Assemble raw and weighted residuals from predicted spectra.
 
@@ -5466,7 +5466,7 @@ class MultipleCurveResolution(ParameterEstimation):
     def get_objective(self, params: np.ndarray, out_array: bool = False,
                       set_self: Optional[bool] = None, *,
                       update_self: Optional[bool] = None
-                      ) -> float | np.ndarray:
+                      ) -> Union[float, np.ndarray]:
         """Evaluate the MCR residual vector or the scalar objective.
 
         Parameters
