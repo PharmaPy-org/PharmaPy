@@ -184,8 +184,9 @@ class SpeciesPresence:
         Parameters
         ----------
         fractions : array-like
-            Fractions [-], shape ``(num_species,)`` or
-            ``(num_rows, num_species)``, typically solver states.
+            Fractions [-] or concentrations ([kg/m**3], [mol/L]), shape
+            ``(num_species,)`` or ``(num_rows, num_species)``, typically
+            solver states.
         time : float or array-like, optional
             Absolute time [s] of the fractions, scalar or one per row: a
             species counts as absent before it was recorded (``mask_at``).
@@ -194,9 +195,9 @@ class SpeciesPresence:
         Returns
         -------
         numpy.ndarray
-            A copy with the entries of absent species replaced by 0.0 and
-            the others unchanged, not renormalized; the removed entries are
-            round-off of an exact zero.
+            A copy in the same units, with the entries of absent species
+            replaced by 0.0 and the others unchanged, not renormalized; the
+            removed entries are round-off of an exact zero.
         """
         present = self._present if time is None else self.mask_at(time)
         return np.where(present, np.asarray(fractions, dtype=float), 0.0)
@@ -209,18 +210,19 @@ def feed_weights(flow: Union[float, np.ndarray],
     Parameters
     ----------
     flow : float or array-like
-        Effective feed flow [mol/s] or [kg/s], or, for a batch inlet, its
-        amount [mol] or [kg], on the basis of ``fractions``, scalar or
-        shape ``(num_rows,)``, after any shut-off; only whether it is
-        exactly zero matters.
+        Effective feed flow on any basis ([mol/s], [kg/s], [m**3/s]) or,
+        for a batch inlet, its amount ([mol], [kg]), scalar or shape
+        ``(num_rows,)``, after any shut-off; only whether it is exactly
+        zero matters.
     fractions : array-like
-        Feed mole or mass fractions [-], shape ``(num_species,)`` or
-        ``(num_rows, num_species)``.
+        Feed composition as fractions [-] or concentrations ([kg/m**3],
+        [mol/L]), shape ``(num_species,)`` or ``(num_rows, num_species)``;
+        only whether an entry is exactly zero matters.
 
     Returns
     -------
     numpy.ndarray
-        1.0 where both the row's flow and the species' fraction are
+        1.0 where both the row's flow and the species' entry are
         exactly nonzero, 0.0 otherwise [-]: shape ``(num_species,)``
         for a scalar flow, ``(num_rows, num_species)`` for a flow
         profile, and ``(1, num_species)`` for one composition row paired
@@ -290,7 +292,8 @@ class StructuralPresenceMixin:
         num_species : int
             Number of species of the unit's states [-].
         *amounts : array-like
-            Charge or feed fractions [-] or amounts, shape
+            Charge or feed fractions [-], concentrations ([kg/m**3],
+            [mol/L]), amounts ([mol], [kg]) or 0/1 flags, shape
             ``(num_species,)`` or ``(num_rows, num_species)``; a species
             with a nonzero entry is present from the start.
         """
@@ -305,11 +308,11 @@ class StructuralPresenceMixin:
         Parameters
         ----------
         flow : float or array-like
-            Effective feed flow [mol/s] or [kg/s], scalar or shape
-            ``(num_rows,)``, after any shut-off.
+            Effective feed flow on any basis ([mol/s], [kg/s], [m**3/s]),
+            scalar or shape ``(num_rows,)``, after any shut-off.
         fractions : array-like
-            Feed mole or mass fractions [-], shape ``(num_species,)`` or
-            ``(num_rows, num_species)``.
+            Feed fractions [-] or concentrations ([kg/m**3], [mol/L]),
+            shape ``(num_species,)`` or ``(num_rows, num_species)``.
 
         Returns
         -------
@@ -327,11 +330,13 @@ class StructuralPresenceMixin:
         Parameters
         ----------
         flow : float or array-like
-            Effective feed flow [mol/s] or [kg/s], scalar or shape
-            ``(num_rows,)``, after any shut-off.
+            Effective feed flow on any basis ([mol/s], [kg/s], [m**3/s]),
+            scalar or shape ``(num_rows,)``, after any shut-off; only
+            whether it is exactly zero matters.
         fractions : array-like
-            Feed mole or mass fractions [-], shape ``(num_species,)`` or
-            ``(num_rows, num_species)``.
+            Feed fractions [-] or concentrations ([kg/m**3], [mol/L]),
+            shape ``(num_species,)`` or ``(num_rows, num_species)``; only
+            whether an entry is exactly zero matters.
         time : float or array-like, optional
             Absolute evaluation time [s] of the feed, scalar or one per row;
             it becomes the species' latch time if earlier than a recorded
@@ -482,8 +487,9 @@ class StructuralPresenceMixin:
         Parameters
         ----------
         fractions : array-like
-            Mole or mass fractions [-] from solver states, shape
-            ``(num_species,)`` or ``(num_rows, num_species)``.
+            Fractions [-] or concentrations ([kg/m**3], [mol/L]) from
+            solver states, shape ``(num_species,)`` or
+            ``(num_rows, num_species)``.
         time : float or array-like, optional
             Absolute time [s] of the fractions, scalar or one per row (see
             ``_presence_weights``).
@@ -491,12 +497,16 @@ class StructuralPresenceMixin:
         Returns
         -------
         numpy.ndarray
-            ``fractions`` with absent species at exactly zero, used to build
+            ``fractions`` in the same units, a new array, with absent
+            species at exactly zero, used to build
             the published phases, which would otherwise need data for those
-            species; unchanged (as a float array) without a presence record.
+            species; unchanged in value (a float copy) without a presence
+            record.
         """
         presence = getattr(self, '_presence', None)
         if presence is None:
-            return np.asarray(fractions, dtype=float)
+            # A copy, so that a caller may hand it to a phase update that
+            # completes a named solvent without touching the solver state.
+            return np.array(fractions, dtype=float)
 
         return presence.project(fractions, time=time)

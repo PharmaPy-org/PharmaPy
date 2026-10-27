@@ -6,6 +6,7 @@ from PharmaPy._assimulo import CVode, Explicit_Problem
 from PharmaPy.Phases import classify_phases
 from PharmaPy.Streams import LiquidStream, SolidStream
 from PharmaPy.MixedPhases import Slurry, SlurryStream
+from PharmaPy.Presence import StructuralPresenceMixin
 from PharmaPy.Commons import (reorder_sens, plot_sens, trapezoidal_rule,
                               upwind_fvm, high_resolution_fvm,
                               eval_state_events, handle_events,
@@ -173,7 +174,7 @@ def _same_phase_state(state: dict, other: dict) -> bool:
     return True
 
 
-class _BaseCryst:
+class _BaseCryst(StructuralPresenceMixin):
     """Store shared configuration for crystallizer balance models.
 
     Subclasses provide batch, semibatch, and continuous material and energy
@@ -181,7 +182,22 @@ class _BaseCryst:
     numerical discretization and configures sensitivity callbacks when a
     solver problem is built. Automatic-differentiation callbacks are not
     currently implemented, so requests for them use finite differences.
+
+    The liquid concentrations are solver states, which solver iterates,
+    difference-quotient Jacobians and round-off perturb, and the property
+    kernels read them through the liquid phase. The crystallizers therefore
+    decide species presence structurally (issue #425,
+    ``PharmaPy.Presence.StructuralPresenceMixin``): a species is present if
+    it has a nonzero concentration in the liquid as it is at the start of
+    the solve, if it is the crystallizing target (which dissolution can
+    return to the liquid), if it is the liquid's named solvent
+    (``name_solv``, which the liquid recomputes from its volume closure),
+    or, from the time of that evaluation on, if a feed that the unit
+    evaluates with a nonzero flow carries it. The liquid
+    phase that the property kernels read holds absent species at exactly
+    zero, so they need no property data other than ``mw``.
     """
+    _presence_phase_names = ('Liquid_1', 'Solid_1', 'Slurry')
     np = np
     # Support objects that bypass __init__.
     vol_ht: "float | None" = None  # [m**3], unspecified jacket inventory
@@ -365,6 +381,32 @@ class _BaseCryst:
 
     @Phases.setter
     def Phases(self, phases):
+        """Attach the liquid and solid charge of the crystallizer.
+
+        Parameters
+        ----------
+        phases : Slurry, list or tuple of phases, or one phase
+            A ``Slurry`` holding the liquid and the solid, a list or tuple
+            of ``PharmaPy.Phases`` objects, or a single phase appended to
+            those already held. The liquid carries concentrations
+            [kg/m**3], volume [m**3] and temperature [K]; the solid its
+            population (moments [m**n] or distribution [#/um]).
+
+        Raises
+        ------
+        RuntimeError
+            If ``phases`` is none of these.
+
+        Notes
+        -----
+        Once a slurry is formed, the setter classifies the phases
+        (``Liquid_1``, ``Solid_1``), keeps the charge snapshot that
+        ``reset`` restores, locates the target species, declares the state
+        names, and starts the structural presence record from the charge,
+        the target and the named solvent (issue #425,
+        ``_start_cryst_presence``); ``initialize_states`` rebuilds that
+        record at every initialization.
+        """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
         elif isinstance(phases, Slurry):
@@ -436,6 +478,81 @@ class _BaseCryst:
                 'Inlet': {'vol_flow': 1, 'temp': 1}}
 
             self.nomenclature()
+            self._start_cryst_presence()
+
+    def _start_cryst_presence(self) -> None:
+        """Start the structural presence record from the current charge.
+
+        Notes
+        -----
+        A species is present from the start if its liquid concentration
+        [kg/m**3] is nonzero, if it is the crystallizing target, whose
+        dissolution can bring it into a liquid that holds none, or if it is
+        the liquid's named solvent (``name_solv``), whose concentration the
+        liquid recomputes from its volume closure on every update, so that
+        it is part of the liquid by construction (issue #425). Feeds add
+        their species during the solve (``initialize_states`` and
+        ``unit_model``).
+        """
+        num_species = len(self.Liquid_1.name_species)  # [-]
+        solvent = np.zeros(num_species)  # [-], flag of the named solvent
+        ind_solv = getattr(self.Liquid_1, 'ind_solv', None)
+        if ind_solv is not None:
+            solvent[ind_solv] = 1.0
+        self._start_presence(num_species, self.Liquid_1.mass_conc,
+                             self.kron_jtg, solvent)
+
+    def _record_initial_feed(self) -> None:
+        """Add the species fed at the start to the presence record.
+
+        Notes
+        -----
+        Evaluates the feed at ``elapsed_time`` [s], as the first
+        derivatives do, so that ``_check_present_species_data`` covers the
+        species fed with a nonzero flow from the start. A batch unit, or a
+        unit initialized before its inlet is attached, has no feed to
+        record.
+        """
+        if getattr(self, 'Inlet', None) is None:
+            return
+        inputs = self.get_inputs(self.elapsed_time)
+        if inputs:
+            self._record_feed(inputs['Inlet']['vol_flow'],
+                              inputs['Liquid_1']['mass_conc'],
+                              time=self.elapsed_time)
+
+    def _check_present_species_data(self) -> None:
+        """Require the liquid data of every species present at the start.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at ``elapsed_time`` (charged, the target, the named
+            solvent, or fed with a nonzero flow) lacks ``rho_liq`` [kg/m**3]
+            or ``cp_liq`` [J/mol/K], whatever its concentration now.
+
+        Notes
+        -----
+        The derivatives evaluated before CVode starts check only the species
+        with a nonzero concentration at the initial state, so a present
+        species at zero concentration (a dissolving target, a species fed
+        from the start) would first need its data inside CVode, whose error
+        does not name it (issue #435). Every crystallizer evaluates the
+        liquid heat capacity or enthalpy: in its energy balance when the
+        temperature is integrated, in the heat-duty retrieval of
+        ``BatchCryst`` and ``MSMPR``, and in the slurry that every retrieval
+        rebuilds, so ``cp_liq`` is required also for isothermal units.
+        """
+        liquid = self.Liquid_1
+        fractions = np.asarray(liquid.mass_frac, dtype=float)  # [-]
+        weights = self._presence_weights(fractions,
+                                         time=self.elapsed_time)  # [-]
+        if weights is None:
+            return
+        liquid.getDensity(mass_frac=fractions, weights=weights)  # [kg/m**3]
+        liquid.getCp(temp=liquid.temp, mass_frac=fractions, basis='mass',
+                     weights=weights)  # [J/kg/K]
 
     @property
     def Kinetics(self):
@@ -1107,18 +1224,39 @@ class _BaseCryst:
         the Inlet stream's static phase compositions. A dynamic Liquid_1
         mass_conc from get_inputs therefore changes the species balances but
         not these properties or the Semibatch liquid-volume balance.
+
+        Structural presence (issue #425): the evaluated feed adds the species
+        it supplies with a nonzero flow to the presence record at ``time``,
+        and the liquid phase that the property kernels read holds the species
+        absent at ``time`` at exactly zero instead of their solver round-off;
+        the species balances keep the state concentrations.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a present
+            species lacks the liquid density or heat capacity that the
+            balances need; absent species need none.
         """
         di_states = unpack_states(states, self.dim_states, self.name_states)
 
         # Inputs
         u_input = self.get_inputs(time)
+        if u_input:
+            # Species fed with a nonzero flow are present from now on.
+            self._record_feed(u_input['Inlet']['vol_flow'],
+                              u_input['Liquid_1']['mass_conc'], time=time)
 
         di_states = complete_dict_states(time, di_states,
                                          ('temp', 'temp_ht', 'vol'),
                                          self.Slurry, self.controls)
 
         # ---------- Physical properties
-        self.Liquid_1.updatePhase(mass_conc=di_states['mass_conc'].copy())
+        # The property kernels read the liquid phase: absent species enter
+        # it at exactly zero, so they need no data (a new array, so the
+        # integrated state is not overwritten).
+        self.Liquid_1.updatePhase(mass_conc=self._project_absent(
+            di_states['mass_conc'], time=time))  # [kg/m**3]
         self.Liquid_1.temp = di_states['temp']
         self.Solid_1.temp = di_states['temp']
 
@@ -1143,6 +1281,13 @@ class _BaseCryst:
             phis_in = None
         elif name_unit == 'SemibatchCryst' or name_unit == 'MSMPR':
             inlet_temp = u_input['Inlet']['temp']
+            # A feed without flow adds no enthalpy, so its species need no
+            # heat-capacity data (issue #425); its density is known, since
+            # the stream needed it when it was built. SemibatchCryst floors
+            # its volume flow at machine epsilon in the balances, so a zero
+            # feed there carries no enthalpy at that floor.
+            feed_flows = bool(np.any(
+                np.asarray(u_input['Inlet']['vol_flow']) != 0))
 
             if self.Inlet.__module__ == 'PharmaPy.MixedPhases':
                 rhos_in = self.Inlet.getDensity(temp=di_states['temp'])
@@ -1164,14 +1309,22 @@ class _BaseCryst:
                 # [-], [liquid, solid] inlet volume fractions
                 phis_in = np.concatenate([phi_in, 1 - phi_in])
 
-                h_in = self.Inlet.getEnthalpy(inlet_temp, phis_in, rhos_in)
+                if feed_flows:
+                    h_in = self.Inlet.getEnthalpy(inlet_temp, phis_in,
+                                                  rhos_in)  # [J/m**3]
+                else:
+                    h_in = 0.0  # [J/m**3], a feed without flow adds nothing
             else:
                 rho_liq_in = self.Inlet.getDensity(temp=inlet_temp)
                 rho_sol_in = None
 
                 rhos_in = np.array([rho_liq_in, rho_sol_in])
-                h_in_mass = self.Inlet.getEnthalpy(temp=inlet_temp)  # [J/kg]
-                h_in = h_in_mass * rho_liq_in  # [J/kg]*[kg/m**3] -> [J/m**3]
+                if feed_flows:
+                    h_in_mass = self.Inlet.getEnthalpy(
+                        temp=inlet_temp)  # [J/kg]
+                    h_in = h_in_mass * rho_liq_in  # [J/kg]*[kg/m**3] -> [J/m**3]
+                else:
+                    h_in = 0.0  # [J/m**3], a feed without flow adds nothing
 
                 phis_in = [1, 0]  # [-], [liq, sol]; solid-free liquid inlet
 
@@ -1399,6 +1552,11 @@ class _BaseCryst:
         ------
         ValueError
             If neither runtime nor an output grid is supplied.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at the start lacks the liquid data the balances need,
+            whatever its concentration (see
+            ``_check_present_species_data``).
 
         Notes
         -----
@@ -1406,6 +1564,13 @@ class _BaseCryst:
         state dimensions and geometry, and infers an unset working volume.
         The returned population is in the solver's micrometer basis; reported
         result moments use meters. ``solve_unit`` uses this same preparation.
+
+        After any reset, the structural presence record is rebuilt from the
+        liquid as it is now, the target and the named solvent; the feed at
+        ``elapsed_time`` [s] adds the species it supplies with a nonzero
+        flow; and every present species must have the liquid data the
+        balances use (``_check_present_species_data``), whatever its
+        concentration (issue #425).
         """
         if runtime is None and time_grid is None:
             raise ValueError("Supply runtime [s] or time_grid [s] for initialization")
@@ -1418,6 +1583,9 @@ class _BaseCryst:
 
         if self.reset_states:
             self.reset()
+
+        # Presence follows the charge as it is now (issue #425).
+        self._start_cryst_presence()
 
         # ---------- Solid phase states
         if 'vol' in self.states_uo:
@@ -1497,6 +1665,11 @@ class _BaseCryst:
             states_init = np.append(states_init, self.Liquid_1.temp)
             self.len_states += [1]
 
+        # Species fed from the start join the record, and every present
+        # species must have the liquid data the balances use (issue #425).
+        self._record_initial_feed()
+        self._check_present_species_data()
+
         return states_init, final_time
 
     def solve_unit(self, runtime=None, time_grid=None,
@@ -1560,67 +1733,93 @@ class _BaseCryst:
         outside that model. Public states_di describes reported values.
         Result retrieval updates the attached phases and stores the profiles. Moment solves do
         not require a size grid or slurry grid-spacing metadata.
+
+        A solve that raises, in its initialization, the integration or the
+        publication of its results, keeps no results: the unit's attributes
+        (elapsed time, profiles, results, outlet, slurry), its structural
+        presence record and the complete state of ``Liquid_1``, ``Solid_1``
+        and ``Slurry`` are restored to their values before the call (issue
+        #425). The initialization reports, by name and before CVode starts,
+        a species present at the start without the data the balances need,
+        whatever its concentration.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``, from the
+            initialization: if a species present at the start (in the
+            liquid, the target, the named solvent, or fed with a nonzero
+            flow) lacks the liquid data the balances need, whatever its
+            concentration. Absent species need none. A species first fed
+            later without data is reported by CVode instead (issue #435).
         """
 
-        states_init, final_time = self.initialize_states(runtime, time_grid)
-        # Initial vector: mixed units documented by initialize_states; endpoint [s].
-
-        merged_params = self.Kinetics.concat_params()[self.mask_params]
-
-        # ---------- Create problem
-        problem = self.set_ode_problem(eval_sens, states_init,
-                                       merged_params, jac_v_prod)
-
-        self.derivatives = problem.rhs(self.elapsed_time, states_init,
-                                       merged_params)
-
-        if len(self.state_event_list) > 0:
-            def new_handle(solver, info):
-                return handle_events(solver, info, self.state_event_list,
-                                     any_event=any_event)
-
-            problem.state_events = self._eval_state_events
-            problem.handle_event = new_handle
-
-        # ---------- Set solver
-        # General
-        solver = CVode(problem)
-        solver.iter = 'Newton'
-        solver.discr = 'BDF'
-
-        if eval_sens:
-            solver.sensmethod = 'SIMULTANEOUS'
-            solver.suppress_sens = False
-
-        if sundials_opts is not None:
-            for name, val in sundials_opts.items():
-                setattr(solver, name, val)
-
-                if name == 'time_limit':
-                    solver.report_continuously = True
-
-        if eval_sens:
-            # Assimulo stores p_sol through continuous reporting. This is an
-            # output requirement, while method and error control stay tunable.
-            solver.report_continuously = True
-        self.sundials_opt = solver.get_options()
-
-        if self.method == '1D-FVM':
-            solver.linear_solver = 'SPGMR'  # large, sparse systems
-
-        if not verbose:
-            solver.verbosity = 50
-
-        # ---------- Solve model
-        nominal_params = self.Kinetics.concat_params().copy()  # [native parameter units]
+        # A failed solve keeps no results: the unit, its presence record and
+        # its phases are restored if anything below raises (issue #425).
+        before_solve = self._solve_snapshot()
         try:
-            time, states = solver.simulate(final_time, ncp_list=time_grid)
-        finally:
-            # CVODES sensitivity probes install perturbed values through the RHS.
-            self.Kinetics.set_params(nominal_params)
+            states_init, final_time = self.initialize_states(runtime, time_grid)
+            # Initial vector: mixed units documented by initialize_states; endpoint [s].
 
-        self.retrieve_results(time, states)
-        self._record_solved_states()
+            merged_params = self.Kinetics.concat_params()[self.mask_params]
+
+            # ---------- Create problem
+            problem = self.set_ode_problem(eval_sens, states_init,
+                                           merged_params, jac_v_prod)
+
+            self.derivatives = problem.rhs(self.elapsed_time, states_init,
+                                           merged_params)
+
+            if len(self.state_event_list) > 0:
+                def new_handle(solver, info):
+                    return handle_events(solver, info, self.state_event_list,
+                                         any_event=any_event)
+
+                problem.state_events = self._eval_state_events
+                problem.handle_event = new_handle
+
+            # ---------- Set solver
+            # General
+            solver = CVode(problem)
+            solver.iter = 'Newton'
+            solver.discr = 'BDF'
+
+            if eval_sens:
+                solver.sensmethod = 'SIMULTANEOUS'
+                solver.suppress_sens = False
+
+            if sundials_opts is not None:
+                for name, val in sundials_opts.items():
+                    setattr(solver, name, val)
+
+                    if name == 'time_limit':
+                        solver.report_continuously = True
+
+            if eval_sens:
+                # Assimulo stores p_sol through continuous reporting. This is an
+                # output requirement, while method and error control stay tunable.
+                solver.report_continuously = True
+            self.sundials_opt = solver.get_options()
+
+            if self.method == '1D-FVM':
+                solver.linear_solver = 'SPGMR'  # large, sparse systems
+
+            if not verbose:
+                solver.verbosity = 50
+
+            # ---------- Solve model
+            nominal_params = self.Kinetics.concat_params().copy()  # [native parameter units]
+            try:
+                time, states = solver.simulate(final_time, ncp_list=time_grid)
+            finally:
+                # CVODES sensitivity probes install perturbed values through the RHS.
+                self.Kinetics.set_params(nominal_params)
+
+            self.retrieve_results(time, states)
+            self._record_solved_states()
+        except BaseException:
+            self._restore_solve_snapshot(before_solve)
+            raise
 
         # ---------- Organize sensitivity
         if eval_sens:
@@ -2379,6 +2578,11 @@ class BatchCryst(_BaseCryst):
 
         Notes
         -----
+        The liquid phase that the property kernels read is updated with the
+        state concentrations, but with the species absent at ``time`` at
+        exactly zero (structural presence, issue #425); the balances use the
+        state concentrations.
+
         Batch states are declared on a *total* basis in
         :meth:`_BaseCryst.solve_unit` (``mu_n`` in [um**n], ``distrib`` in
         [#/um]), and the kinetics are evaluated with ``vol=vol_slurry``, so
@@ -2407,8 +2611,12 @@ class BatchCryst(_BaseCryst):
             ddistr_dt, transf = self.fvm_method(distrib, mu_n, mass_conc, temp,
                                                 params, rho_s, vol=vol_slurry)
 
-        # Phase completion owns its concentration buffer; the ODE state is read-only.
-        self.Liquid_1.updatePhase(mass_conc=mass_conc.copy(), vol=vol)
+        # Phase completion owns its concentration buffer; the ODE state is
+        # read-only. Absent species enter the phase at exactly zero
+        # (structural presence, issue #425).
+        self.Liquid_1.updatePhase(
+            mass_conc=self._project_absent(mass_conc, time=time),
+            vol=vol)  # [kg/m**3], [m**3]
 
         dvol_liq = -transf/rho_liq  # TODO: results not consistent with mu_3
         dcomp_dt = -transf/vol * (self.kron_jtg - mass_conc/rho_liq)  # [kg/m**3/s]
@@ -2553,7 +2761,11 @@ class BatchCryst(_BaseCryst):
         Raw solver moments are seeded in micrometer lengths by solve_unit.
         Retrieval converts them to total SI moments [m**n] for reported and
         phase values. Public states_di and result metadata both describe SI.
-        Integrated concentration profiles are retained unchanged. Owned liquid
+        Concentration profiles hold the species absent at each row's time
+        (structural presence, issue #425) at exactly zero instead of their
+        solver round-off, in ``outputs``, ``result``, the liquid and the
+        outlet; the states returned by ``solve_unit`` keep the raw values.
+        Present species keep their integrated values. Owned liquid
         phases and outlets retain LiquidPhase's named-solvent volume completion
         contract; their solvent concentration can differ from the ODE value.
         Copying makes this existing distinction explicit and prevents an
@@ -2571,6 +2783,9 @@ class BatchCryst(_BaseCryst):
 
         # ---------- Create result object
         dp = unpack_states(states, self.dim_states, self.name_states)
+        # Species absent at a row's time are published at exactly zero.
+        dp['mass_conc'] = self._project_absent(dp['mass_conc'],
+                                               time=time)  # [kg/m**3]
         dp['time'] = time
 
         if self.method == '1D-FVM':
@@ -3451,7 +3666,11 @@ class MSMPR(_BaseCryst):
         converts them to SI [m**n/m**3] for MSMPR profiles or total [m**n]
         for Semibatch profiles. Public states_di and result metadata describe
         these SI reported values; phase moments also retain SI lengths.
-        Integrated concentration profiles are retained unchanged. Owned liquid
+        Concentration profiles hold the species absent at each row's time
+        (structural presence, issue #425) at exactly zero instead of their
+        solver round-off, in ``outputs``, ``result``, the liquid and the
+        outlet; the states returned by ``solve_unit`` keep the raw values.
+        Present species keep their integrated values. Owned liquid
         phases and outlets retain LiquidPhase's named-solvent volume completion
         contract; their solvent concentration can differ from the ODE value.
         Copying makes this existing distinction explicit and prevents an
@@ -3471,6 +3690,9 @@ class MSMPR(_BaseCryst):
         volflow = inputs['Inlet']['vol_flow']
 
         dp = unpack_states(states, self.dim_states, self.name_states)
+        # Species absent at a row's time are published at exactly zero.
+        dp['mass_conc'] = self._project_absent(dp['mass_conc'],
+                                               time=time)  # [kg/m**3]
 
         dp['time'] = time
         dp['vol_flow'] = volflow
@@ -3765,6 +3987,11 @@ class SemibatchCryst(MSMPR):
 
         Notes
         -----
+        The liquid phase that the property kernels read is updated with the
+        state concentrations, but with the species absent at ``time`` at
+        exactly zero (structural presence, issue #425); the balances use the
+        state concentrations.
+
         Like :class:`BatchCryst` and unlike :class:`MSMPR`, the semibatch
         states are declared on a *total* basis in
         :meth:`_BaseCryst.solve_unit` (``mu_n`` in [um**n], ``distrib`` in
@@ -3791,8 +4018,11 @@ class SemibatchCryst(MSMPR):
         vol_solid = mu_n[3] * self.Solid_1.kv  # mu_3 is total, not by volume
         vol_slurry = vol + vol_solid
 
-        # Isolate the solver state from named-solvent completion.
-        self.Liquid_1.updatePhase(mass_conc=mass_conc.copy())
+        # Absent species enter the phase at exactly zero (structural
+        # presence, issue #425); a new array isolates the solver state from
+        # named-solvent completion.
+        self.Liquid_1.updatePhase(
+            mass_conc=self._project_absent(mass_conc, time=time))  # [kg/m**3]
 
         if self.method == 'moments':
             # [um**n/m**3], exact SI-to-micrometer inlet conversion
