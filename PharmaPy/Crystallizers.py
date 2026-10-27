@@ -1772,6 +1772,20 @@ class _BaseCryst(StructuralPresenceMixin):
 
             if len(self.state_event_list) > 0:
                 def new_handle(solver, info):
+                    """Handle a state event with the configured event list.
+
+                    Parameters
+                    ----------
+                    solver : assimulo solver
+                        The running CVode solver.
+                    info : list
+                        Assimulo event information.
+
+                    Returns
+                    -------
+                    object
+                        The result of ``Commons.handle_events``.
+                    """
                     return handle_events(solver, info, self.state_event_list,
                                          any_event=any_event)
 

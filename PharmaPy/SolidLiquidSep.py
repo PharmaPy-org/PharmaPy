@@ -2054,7 +2054,9 @@ class DisplacementWashing:
         vel : float
             Superficial liquid velocity [m/s].
         diff : ndarray
-            Effective axial diffusivities [m**2/s], shape (num_species,).
+            Effective axial diffusivities [m**2/s], shape (num_evaluated,):
+            one entry per evaluated species, the present species from
+            ``solve_unit`` (issue #425).
         lambd : float
             Adsorption correction [-].
 
@@ -2062,7 +2064,9 @@ class DisplacementWashing:
         -------
         ndarray
             Normalized concentration [-], shape (num_nodes, num_times,
-            num_species), with one representing the initial liquid.
+            num_evaluated), in the order of ``diff``, with one representing
+            the initial liquid. ``solve_unit`` scatters it back to
+            num_species columns, with absent species exactly zero.
 
         Notes
         -----
@@ -2097,15 +2101,19 @@ class DisplacementWashing:
         l_total : float
             Cake height [m].
         diff : ndarray
-            Effective axial diffusivities [m**2/s], shape (num_species,).
+            Effective axial diffusivities [m**2/s], shape (num_evaluated,):
+            one entry per evaluated species, the present species from
+            ``solve_unit`` (issue #425).
         lambd : float
             Adsorption correction [-].
 
         Returns
         -------
         ndarray
-            Normalized concentration [-], shape (num_nodes, num_species),
-            with one representing the initial liquid.
+            Normalized concentration [-], shape (num_nodes, num_evaluated),
+            in the order of ``diff``, with one representing the initial
+            liquid. ``solve_unit`` scatters it back to num_species columns,
+            with absent species exactly zero.
 
         Notes
         -----
