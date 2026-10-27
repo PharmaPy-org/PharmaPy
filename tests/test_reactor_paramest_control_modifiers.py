@@ -16,9 +16,10 @@ CVode), with a nonzero activation energy so that a prescribed temperature
 profile changes the concentrations. Expected profiles come from an
 independent SciPy LSODA integration of the same elementary rate law,
 k(T) = k_ref exp(-Ea/R (1/T - 1/T_ref)) c_A c_B, plus the CSTR or semibatch
-inflow terms. Validation errors are raised before any solve and run in the
-core lane; trajectory checks require the optional Assimulo stack and take
-a few dozen short reactor solves.
+inflow terms. Validation errors are raised before any solve, and the
+restore-on-error check fails at the ``solve_unit`` call itself; both run in
+the core lane. Trajectory checks require the optional Assimulo stack and
+take a few dozen short reactor solves.
 """
 
 import copy
@@ -451,23 +452,20 @@ def test_modifier_entries_merge_into_configured_record(case):
     assert modifier == modifier_before
 
 
-@pytest.mark.assimulo
-@pytest.mark.integration
+@pytest.mark.unit
 def test_configured_controls_are_restored_when_evaluation_raises():
-    pytest.importorskip('assimulo')
     record = {'fun': ramp_temperature, 'args': (), 'kwargs': {'slope': 0.0}}
     reactor = _reactor(Reactors.BatchReactor, record)
     configured = reactor.controls
     configured_before = copy.deepcopy(configured)
-    # A decreasing grid integrates to its last entry, 300 s, with the
-    # modified control and then misses the 600 s sample in the output.
-    with pytest.raises(ValueError, match=r'^Requested time 600\.0 s is absent'):
+    # solve_unit rejects the unknown keyword after the experiment's controls
+    # were installed, without needing the solver stack.
+    with pytest.raises(TypeError, match="unexpected keyword argument "
+                                        "'unsupported_option'"):
         reactor.paramest_wrapper(
-            reactor.Kinetics.concat_params(), np.array([0.0, 600.0, 300.0]),
+            reactor.Kinetics.concat_params(), TIMES,
             modify_controls={'temp': {'kwargs': {'slope': RAMP_SLOPE}}},
-            run_args={'sundials_opts': dict(SOLVER_OPTIONS)})
-    # 320 K + 0.05 K/s * 300 s: the modifier was active during the solve.
-    assert reactor.result.temp[-1] == pytest.approx(335.0, rel=PROFILE_RTOL)
+            run_args={'unsupported_option': True})
     assert reactor.controls is configured
     assert reactor.controls == configured_before
 

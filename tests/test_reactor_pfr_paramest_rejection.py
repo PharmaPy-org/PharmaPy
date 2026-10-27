@@ -142,8 +142,12 @@ def test_set_param_estimation_rejects_pfr_at_setup(lane, form, data_path):
     simulation.PFR = _pfr(data_path, return_sens=False)
     # k of A + B -> C [L/mol/s] and of B -> C [1/s], then Ea [J/mol].
     seed = simulation.PFR.Kinetics.concat_params().copy()
+    # An explicit seed differing from the configured kinetics (same units),
+    # which SetParamEstimation would write into them if setup went on.
+    explicit_seed = 2 * seed
     with pytest.raises(PharmaPyNonImplementedError, match=REJECTION):
-        simulation.SetParamEstimation(**_estimation_inputs(form))
+        simulation.SetParamEstimation(param_seed=explicit_seed,
+                                      **_estimation_inputs(form))
     # Setup stopped before building an estimator or seeding the kinetics.
     assert not hasattr(simulation, 'ParamInst')
     np.testing.assert_array_equal(simulation.PFR.Kinetics.concat_params(),

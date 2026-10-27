@@ -138,9 +138,13 @@ def _modifier_entries(modifiers, label: str, names: Optional[list],
     For one unnamed experiment a mapping holds that experiment's modifier
     fields, as in earlier releases; a one-element list or tuple is
     equivalent. A None entry is passed through and means no modification,
-    as in earlier releases. Other entries must be ``dict`` because the
-    unit-operation wrappers apply only ``dict`` modifiers and would
-    silently ignore other values.
+    as in earlier releases. Other entries must be ``dict``: the reactor
+    and crystallizer wrappers apply ``modify_phase`` only when it is a
+    ``dict`` and would silently ignore other values, and they reject a
+    non-dict ``modify_controls`` with ``TypeError``
+    (``ProcessControl.apply_control_modifier``) only when the objective
+    is first evaluated. Checking here reports both at setup and names the
+    offending experiment.
     """
     if modifiers is None:
         return None
@@ -1009,6 +1013,9 @@ class SimulationExec:
         PharmaPyValueError
             If ``pick_unit`` is not a unit of the flowsheet graph; the
             message lists the valid names. It is a ``ValueError``.
+        AttributeError
+            If the selected graph node has not been attached to this
+            ``SimulationExec`` as a unit operation.
         NotImplementedError
             If the selected unit does not support parameter estimation, as
             declared by its ``validate_param_estimation`` method; raised
@@ -1121,7 +1128,12 @@ class SimulationExec:
         isolation from its neighbours: its callback starts from the unit's
         current phases and inlets and does not re-solve upstream units or
         transfer material downstream. Run ``SolveFlowsheet`` first when a
-        downstream unit's inputs come from upstream units.
+        downstream unit's inputs come from upstream units. Earlier releases
+        counted only the units with an adjacency entry: in a graph such as
+        ``{'R01': ['R02']}``, whose successor-only unit has none, they
+        silently fitted ``R01`` without ``pick_unit`` and ignored
+        ``pick_unit='R02'``, and single-unit flowsheets ignored
+        ``pick_unit`` (issue #241).
         """
         target_unit = self._estimation_unit(pick_unit)
         # A unit without an estimation contract declares it through this

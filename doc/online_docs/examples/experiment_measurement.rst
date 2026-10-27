@@ -440,7 +440,13 @@ including a unit that appears only as a successor, can be selected, and the
 selected unit supplies the callback, the signature that binds experiment
 ``args``, the parameter seed and the parameter names. Omitting ``pick_unit``
 there raises ``RuntimeError``, and a name outside the graph raises
-``ValueError`` listing the valid names. The selected unit is fitted alone,
+``ValueError`` listing the valid names. Earlier releases counted only the
+units with an adjacency entry, so in a graph such as ``{'R01': ['R02']}``,
+whose successor-only unit ``R02`` has none, they silently fitted ``R01``
+without ``pick_unit`` and ignored ``pick_unit='R02'``; single-unit
+flowsheets ignored ``pick_unit`` altogether
+(`issue #241 <https://github.com/PharmaPy-org/PharmaPy/issues/241>`__).
+The selected unit is fitted alone,
 from its current phases and inlets; run ``SolveFlowsheet`` first when they
 come from upstream units. The experiment forms are:
 
