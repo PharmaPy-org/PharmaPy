@@ -520,6 +520,16 @@ reacting one in the phase, measurements were compared with the wrong
 species
 (`issue #497 <https://github.com/PharmaPy-org/PharmaPy/issues/497>`__).
 
+With ``return_sens=True``, the sensitivities a reactor callback returns
+cover exactly these participating-species columns, in [mol/L per parameter
+unit], and not the reactor and jacket temperatures that a non-isothermal
+``BatchReactor`` also integrates. Earlier releases returned the
+sensitivities of every integrated state, so the estimator paired
+temperature sensitivities with species measurements: non-isothermal batch
+fits with CVodes sensitivities used wrong Jacobians, Levenberg-Marquardt
+steps and parameter covariances, and such fits should be rerun
+(`issue #498 <https://github.com/PharmaPy-org/PharmaPy/issues/498>`__).
+
 Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request
 order with replicates repeated, so an experiment need not sample the initial

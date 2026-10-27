@@ -1618,10 +1618,19 @@ class _BaseReactor:
             grid of charge-time samples only returns the charged state in
             every row (see the Notes).
         sens : numpy.ndarray, optional
-            Returned with ``c_prof`` only when ``return_sens`` is True.
-            Sensitivities have units of each state per kinetic parameter unit,
-            with the same rows as ``c_prof``; their layout follows
-            ``reord_sens``.
+            Returned with ``c_prof`` only when ``return_sens`` is True:
+            derivatives of the ``c_prof`` entries with respect to every
+            kinetic parameter in ``Kinetics.concat_params()`` order, in
+            [mol/L per parameter unit]. They cover exactly the columns of
+            ``c_prof`` and its rows; sensitivities of other integrated
+            states, such as the reactor and jacket temperatures of a
+            non-isothermal reactor, are not returned (issue #498). With
+            ``reord_sens=True`` the shape is
+            ``(Kinetics.num_species * num_times, num_params)``, state-major:
+            the rows of the first ``c_prof`` column over the requested
+            times, then those of the next column. With ``reord_sens=False``
+            it is ``(num_params, num_times, Kinetics.num_species)``, with
+            ``num_params = len(Kinetics.concat_params())``.
 
         Raises
         ------
@@ -1707,16 +1716,17 @@ class _BaseReactor:
                                                        _charge_state_rows=True,
                                                        **run_args)
                 rows = _requested_rows(t_prof, t_vals)
-                states = states[rows]
-                sens = [block[rows] for block in sens]
+                species_columns = self._participating_state_columns()
+                c_prof = states[rows][:, species_columns]  # [mol/L]
+                # Per kinetic parameter, the sensitivities of the returned
+                # concentrations only, without the temperature states of a
+                # non-isothermal reactor [mol/L per parameter unit].
+                sens = [block[rows][:, species_columns] for block in sens]
 
                 if reord_sens:
                     sens = reorder_sens(sens)
                 else:
                     sens = np.stack(sens)
-
-                species_columns = self._participating_state_columns()
-                c_prof = states[:, species_columns]  # [mol/L]
 
                 return c_prof, sens
 

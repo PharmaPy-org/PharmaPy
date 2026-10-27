@@ -44,7 +44,8 @@ REACTOR_CLASSES = [BatchReactor, CSTR, SemibatchReactor]
 CHARGE_GRIDS = {'single': [0.0], 'replicates': [0.0, 0.0]}  # [s]
 # Charged concentrations of A and B [mol/L], written out from the fixture.
 CHARGE = np.array([0.1, 0.2])  # [mol/L]
-NUM_STATES = 2  # [-], integrated A and B concentrations (isothermal)
+# Returned A and B concentrations, all integrated states if isothermal.
+NUM_STATES = 2  # [-]
 NUM_PARAMS = 2  # [-], rate constant [1/s] and activation energy [J/mol]
 # Synthetic feed of A only, away from the charge, so that any inflow
 # changes the state: at the charge dc_A/dt = -k c_A0 + (FEED_A - c_A0) / tau
@@ -263,15 +264,16 @@ def test_batch_charge_rows_match_integrated_initial_rows(grid, isothermal):
     """Charge-only rows equal the integrated path's charge-time rows.
 
     A grid with one later time integrates; its leading charge-time rows
-    have the integrated path's layout, including the temperature states
-    of a non-isothermal reactor, and must equal the charge-only rows.
+    must equal the charge-only rows. Both cover the returned A and B
+    concentrations only, without the temperature states of a
+    non-isothermal reactor (issue #498).
     """
     times = CHARGE_GRIDS[grid]  # [s]
     reactor = _tank(BatchReactor, return_sens=True, isothermal=isothermal)
     params = reactor.Kinetics.concat_params()  # [1/s], [J/mol]
     run_args = {'sundials_opts': SOLVER_OPTIONS}
-    # Concentrations [mol/L] and stacked sensitivities [state units per
-    # parameter unit: mol/L*s and mol**2/(L*J); K*s and K*mol/J].
+    # Concentrations [mol/L] and stacked sensitivities [mol/L*s and
+    # mol**2/(L*J)].
     integrated = reactor.paramest_wrapper(
         params, np.array(times + [LATER_TIME]), reord_sens=False,
         run_args=run_args)
@@ -279,8 +281,8 @@ def test_batch_charge_rows_match_integrated_initial_rows(grid, isothermal):
         params, np.array(times), reord_sens=False, run_args=run_args)
     rows = len(times)
     np.testing.assert_array_equal(charge_only[0], integrated[0][:rows])
-    assert charge_only[1].shape == (NUM_PARAMS, rows,
-                                    integrated[1].shape[2])
+    assert integrated[1].shape == (NUM_PARAMS, rows + 1, NUM_STATES)
+    assert charge_only[1].shape == (NUM_PARAMS, rows, NUM_STATES)
     np.testing.assert_array_equal(charge_only[1], integrated[1][:, :rows])
     np.testing.assert_array_equal(charge_only[1], 0.0)
 
