@@ -14,6 +14,10 @@ Scope, by issue:
   failed ``MultipleCurveResolution`` refit (the fixture of
   ``test_paramestim_mcr_observation_masks``), as well as the iteration history
   of refits with and without ``store_iter``.
+- The caller's ``optim_options``, which LM and SciPy fits copy instead of
+  modifying or aliasing, also when the caller edits arrays or bounds in place,
+  while a bound-method ``callback`` is kept as given (#476; IPOPT in
+  ``test_paramestim_cyipopt``).
 
 Main fixture: a noise-free proportional model ``y = k * t``, time [s], rate
 constant ``k`` [mol/L/s] and concentration [mol/L], whose exact least-squares
@@ -26,6 +30,7 @@ import textwrap
 
 import numpy as np
 import pytest
+from scipy.optimize import least_squares
 
 from PharmaPy.LevMarq import levenberg_marquardt
 from PharmaPy.ParamEstim import ParameterEstimation
@@ -554,3 +559,106 @@ def test_ipopt_without_cyipopt_keeps_previous_lm_fit(tmp_path):
     result = _run_with_cyipopt_blocked(script, tmp_path)
 
     assert result.returncode == 0, result.stderr
+
+
+# A non-default LM budget [-], above the few evaluations these fits need,
+# so that it is a caller setting without effect on the estimate.
+LM_MAX_FUN_EVAL = 60  # [-]
+# A non-default SciPy evaluation budget [-] with the same role.
+SCIPY_MAX_NFEV = 60  # [-]
+# A synthetic admissible range of k containing TRUE_RATE in its interior.
+RATE_BOUNDS = ([0.0], [2.0])  # [mol/L/s], lower and upper
+
+
+def test_lm_leaves_caller_options_and_stores_effective_copy():
+    data = proportional([TRUE_RATE], TIME_S)  # [mol/L]
+    options = {'max_fun_eval': LM_MAX_FUN_EVAL}
+    fits = []
+    for _ in range(2):  # the caller reuses one dict for two fits
+        estimator = ParameterEstimation(proportional, [SEED_RATE], TIME_S,
+                                        data)
+        fits.append(estimator.optimize_fn(optim_options=options,
+                                          verbose=False))
+        assert options == {'max_fun_eval': LM_MAX_FUN_EVAL}
+        assert estimator.optim_options is not options
+        assert estimator.optim_options == {'max_fun_eval': LM_MAX_FUN_EVAL,
+                                           'full_output': True,
+                                           'verbose': False}
+
+    (first, first_cov, first_info), (second, second_cov, second_info) = fits
+    np.testing.assert_array_equal(second, first)  # [mol/L/s]
+    np.testing.assert_array_equal(second_cov, first_cov)  # [(mol/L/s)**2]
+    assert second_info['num_fun_eval'] == first_info['num_fun_eval']
+
+
+def test_scipy_leaves_caller_options_and_stores_effective_copy():
+    data = proportional([TRUE_RATE], TIME_S)  # [mol/L]
+    options = {'max_nfev': SCIPY_MAX_NFEV}
+    estimator = ParameterEstimation(proportional, [SEED_RATE], TIME_S, data)
+
+    estimator.optimize_fn(optim_options=options, method='scipy',
+                          bounds=RATE_BOUNDS, verbose=False)
+
+    assert options == {'max_nfev': SCIPY_MAX_NFEV}
+    assert estimator.optim_options == {'max_nfev': SCIPY_MAX_NFEV,
+                                       'bounds': RATE_BOUNDS, 'verbose': 0}
+
+
+# SciPy's characteristic variable scale x_scale [mol/L/s], in the rate's
+# units; 1 mol/L/s matches the O(1) rate, so the fit is unaffected.
+UNIT_X_SCALE = [1.0]  # [mol/L/s]
+# In-place edits after the fit: a much larger scale and a narrower upper
+# bound below the fitted rate, both arbitrary values for the next run.
+EDITED_X_SCALE = 1e6  # [mol/L/s]
+EDITED_UPPER_BOUND = 0.1  # [mol/L/s]
+
+
+def test_scipy_option_values_edited_in_place_are_not_stored():
+    data = proportional([TRUE_RATE], TIME_S)  # [mol/L]
+    estimator = ParameterEstimation(proportional, [SEED_RATE], TIME_S, data)
+    bounds = tuple(list(side) for side in RATE_BOUNDS)  # [mol/L/s]
+    x_scale = np.array(UNIT_X_SCALE)  # [mol/L/s]
+
+    estimator.optimize_fn(optim_options={'x_scale': x_scale},
+                          method='scipy', bounds=bounds, verbose=False)
+    x_scale[0] = EDITED_X_SCALE
+    bounds[1][0] = EDITED_UPPER_BOUND
+
+    stored = estimator.optim_options
+    assert stored['bounds'] is not bounds
+    assert stored['bounds'] == RATE_BOUNDS
+    assert stored['x_scale'] is not x_scale
+    np.testing.assert_array_equal(stored['x_scale'], UNIT_X_SCALE)
+
+
+class IterationRecorder:
+    """Caller-owned SciPy callback target that counts solver iterations."""
+
+    def __init__(self):
+        """Start with no recorded iterations."""
+        self.rates = []  # [mol/L/s], one entry per SciPy iteration
+
+    def record(self, intermediate_result):
+        """Record the rate of one SciPy iteration.
+
+        Parameters
+        ----------
+        intermediate_result : scipy.optimize.OptimizeResult
+            Current SciPy iterate; ``x`` is the rate [mol/L/s].
+        """
+        self.rates.append(float(intermediate_result.x[0]))
+
+
+@pytest.mark.skipif(
+    'callback' not in inspect.signature(least_squares).parameters,
+    reason='scipy.optimize.least_squares accepts callback from SciPy 1.16')
+def test_scipy_bound_method_callback_is_kept_as_given():
+    data = proportional([TRUE_RATE], TIME_S)  # [mol/L]
+    estimator = ParameterEstimation(proportional, [SEED_RATE], TIME_S, data)
+    recorder = IterationRecorder()
+
+    estimator.optimize_fn(optim_options={'callback': recorder.record},
+                          method='scipy', verbose=False)
+
+    assert len(recorder.rates) >= 1
+    assert estimator.optim_options['callback'].__self__ is recorder

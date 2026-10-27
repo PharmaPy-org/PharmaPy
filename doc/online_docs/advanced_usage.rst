@@ -141,6 +141,20 @@ histories: after a refit, :code:`params_iter`, :code:`objfun_iter` and
 first fit's history, and :code:`store_iter=False` stores no
 :code:`paramest_df`.
 
+:code:`optimize_fn` no longer modifies the :code:`optim_options` mapping it
+receives (issue #476). It passes the solver a private copy, with deep copies of
+the non-callable values, that also holds the entries it sets itself
+(:code:`full_output` and :code:`verbose` for LM, :code:`print_level` for IPOPT,
+:code:`verbose` and :code:`bounds` for SciPy). :code:`optim_options` of the
+estimator stores that copy as the solver left it, the effective options of the
+last fit; for IPOPT, cyipopt has converted its keys to bytes and added its own
+defaults. For LM and IPOPT, earlier releases wrote these entries, and
+cyipopt's rewrite, into the caller's dictionary and stored that same object, so
+later edits of the caller's dictionary changed the stored options and
+calibration records. SciPy fits already used a shallow copy, so only in-place
+edits of nested values, such as arrays or the bounds, reached their stored
+options.
+
 Liquid heat capacity
 ====================
 

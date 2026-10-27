@@ -6,6 +6,7 @@ Created on Mon Oct 28 15:35:48 2019
 @author: casas100
 """
 
+import copy
 import numbers
 import warnings
 
@@ -42,6 +43,11 @@ OPTIMIZATION_METHODS = ('LM', 'IPOPT', 'scipy', 'least_squares')
 #: Marks an estimator attribute that did not exist when ``optimize_fn``
 #: saved the previous fit.
 _ABSENT = object()
+#: Ipopt ``print_level`` [-] that ``optimize_fn`` requests when ``verbose``
+#: is True: Ipopt's own default output level (``print_level`` accepts 0 to
+#: 12, default 5; Ipopt options reference,
+#: https://coin-or.github.io/Ipopt/OPTIONS.html). ``verbose=False`` gives 0.
+IPOPT_VERBOSE_PRINT_LEVEL = 5
 
 linestyles = cycle(['-', '--', '-.', ':'])
 
@@ -3621,7 +3627,16 @@ class ParameterEstimation:
         Parameters
         ----------
         optim_options : dict, optional
-            Solver options passed to the selected optimization method.
+            Solver options passed to the selected optimization method. The
+            mapping and its values are not modified: ``optimize_fn`` passes
+            a copy, with deep copies of the non-callable values, to the
+            solver, with the entries it sets itself (``full_output`` and
+            ``verbose`` for LM, ``print_level`` for IPOPT, ``verbose`` and,
+            if given, ``bounds`` for ``'scipy'``/``'least_squares'``).
+            After a successful call that copy, as the solver left it, is
+            stored as ``optim_options``, the effective options of the last
+            fit; for IPOPT, cyipopt has converted its keys to bytes and
+            added its own defaults, such as ``mu_strategy``.
         simulate : bool, optional
             If True, evaluate residuals in simulation mode by disabling the
             optimization residual contribution.
@@ -3747,6 +3762,17 @@ class ParameterEstimation:
 
         params_var = self.param_seed[self.map_variable]  # [model parameter units]
 
+        # Effective options of this fit: a private deep copy, so the entries
+        # set below and cyipopt's in-place rewrite never reach the caller,
+        # and later in-place edits of the caller's values (e.g. a d_diag
+        # array) never reach the stored options or info_opt (#476).
+        # Callable values are kept as given: deepcopy would copy the object
+        # bound to a method.
+        given_options = {} if optim_options is None else dict(optim_options)
+        effective_options = {
+            key: value if callable(value) else copy.deepcopy(value)
+            for key, value in given_options.items()}
+
         previous_fit = self._fit_state()
         # This fit's iteration history (#479): get_objective appends to these
         # lists only, so arrays left by an earlier fit would keep its history.
@@ -3758,18 +3784,15 @@ class ParameterEstimation:
         self.optimize_flag = not simulate
         try:
             if method == 'LM':
-                if optim_options is None:
-                    optim_options = {'full_output': True, 'verbose': verbose}
-                else:
-                    optim_options['full_output'] = True
-                    optim_options['verbose'] = verbose
+                effective_options['full_output'] = True
+                effective_options['verbose'] = verbose
 
                 opt_par, inv_hessian, info = levenberg_marquardt(
                     params_var,
                     self.get_objective,
                     self.get_gradient,
                     args=(True,),
-                    **optim_options)
+                    **effective_options)
 
                 # Rejected trial callbacks overwrite model buffers. Refresh
                 # them at the accepted point while retaining native LM result
@@ -3777,15 +3800,14 @@ class ParameterEstimation:
                 self.get_objective(opt_par, out_array=True)
 
             elif method == 'IPOPT':
-                if optim_options is None:
-                    optim_options = {'print_level': int(verbose) * 5}
-                else:
-                    optim_options['print_level'] = int(verbose) * 5
+                effective_options['print_level'] = (
+                    int(verbose) * IPOPT_VERBOSE_PRINT_LEVEL)  # [-]
 
                 kwargs_fun = {'out_array': False}
                 result = minimize_ipopt(self.get_objective, params_var,
                                         jac=self.get_gradient,
-                                        bounds=bounds, options=optim_options,
+                                        bounds=bounds,
+                                        options=effective_options,
                                         kwargs=kwargs_fun)
 
                 opt_par = result['x']
@@ -3793,8 +3815,7 @@ class ParameterEstimation:
                 info = self.assemble_solver_info(opt_par)
 
             else:  # 'scipy' or 'least_squares'
-                scipy_options = ({} if optim_options is None
-                                 else dict(optim_options))
+                scipy_options = effective_options
                 if 'bounds' in scipy_options and bounds is not None:
                     raise ValueError(
                         "Pass bounds either through bounds= or optim_options, "
@@ -3805,12 +3826,11 @@ class ParameterEstimation:
                         "Only loss='linear' is supported for least-squares "
                         f"parameter estimation and covariance; got {loss!r}")
                 if bounds is not None:
-                    scipy_options['bounds'] = bounds
+                    scipy_options['bounds'] = copy.deepcopy(bounds)
                 if 'verbose' in scipy_options and verbose is True:
                     scipy_options['verbose'] = int(scipy_options['verbose'])
                 else:
                     scipy_options['verbose'] = int(verbose)
-                optim_options = scipy_options
 
                 def _scipy_jac(params_eval: np.ndarray,
                                *args_eval) -> np.ndarray:
@@ -3862,7 +3882,7 @@ class ParameterEstimation:
 
             # Store
             self.opt_method = method
-            self.optim_options = optim_options
+            self.optim_options = effective_options
             self.params_convg = opt_par  # [model parameter units]
             self.info_opt = info
 

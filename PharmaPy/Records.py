@@ -126,9 +126,10 @@ _NUMERIC_KINDS = 'biuf'
 #: exactly: JSON numbers are read as IEEE 754 binary64 (8-byte) values, so
 #: extended precision (``numpy.longdouble``) would be silently rounded.
 _MAX_FLOAT_ITEMSIZE = 8
-#: Options that ``ParameterEstimation.optimize_fn`` writes into the
-#: caller's ``optim_options`` itself (issue #476): they are not user
-#: settings and are overwritten on every call, so records omit them.
+#: Options that ``ParameterEstimation.optimize_fn`` sets itself in the
+#: effective options it passes to the solver and stores as
+#: ``optim_options`` (issue #476): they are not user settings and are set
+#: again on every call, so records omit them.
 _INJECTED_OPTIONS = {'LM': ('full_output', 'verbose'),
                      'IPOPT': ('print_level',)}
 #: Sentinel for "detect the installed PharmaPy version".
@@ -2210,11 +2211,11 @@ class SolverSettings(_ImmutableRecord):
     method : {'LM', 'IPOPT'}
         ``method`` of ``ParameterEstimation.optimize_fn``.
     options : Mapping[str, object], optional
-        ``optim_options`` passed to ``optimize_fn``. ``optimize_fn``
-        overwrites ``'full_output'`` and ``'verbose'`` (LM) or
-        ``'print_level'`` (IPOPT) in the caller's dict; such entries are
-        recorded as given and overwritten again on a rerun, without effect
-        on the fit.
+        ``optim_options`` passed to ``optimize_fn``. ``optimize_fn`` sets
+        ``'full_output'`` and ``'verbose'`` (LM) or ``'print_level'``
+        (IPOPT) in its own copy of the options; such entries given here are
+        recorded as given and replaced again on a rerun, without effect on
+        the fit.
     model_solver : Mapping[str, object], optional
         Settings of the model's own solver, e.g. CVode ``rtol``/``atol``
         passed through the model callback, for documentation.
@@ -2914,9 +2915,11 @@ def _effective_options(options: Mapping, method: str) -> dict:
     Parameters
     ----------
     options : Mapping
-        ``ParameterEstimation.optim_options`` after ``optimize_fn``. cyipopt
-        rewrites this dict in place for IPOPT fits, with bytes keys and
-        bytes string values and its own default entries added (issue #476).
+        ``ParameterEstimation.optim_options`` after ``optimize_fn``: the
+        effective options of the fit, i.e. the private copy that
+        ``optimize_fn`` passed to the solver (issue #476). For IPOPT fits
+        cyipopt has rewritten that copy in place, with bytes keys and its
+        own default entries, some with bytes string values, added.
     method : {'LM', 'IPOPT'}
         Optimization method of the fit.
 
@@ -3999,11 +4002,10 @@ covariance_include_mse
         Returns
         -------
         dict
-            ``method``, a new ``optim_options`` dict on every call (which
-            ``optimize_fn`` may mutate, issue #476), and ``bounds``: one
-            ``(lower, upper)`` pair per optimized parameter in parameter
-            units (None for an unbounded side), or None when no bound is
-            declared.
+            ``method``, a new ``optim_options`` dict on every call, and
+            ``bounds``: one ``(lower, upper)`` pair per optimized parameter
+            in parameter units (None for an unbounded side), or None when no
+            bound is declared.
 
         Raises
         ------
@@ -4227,9 +4229,10 @@ covariance_include_mse
             entries ``optimize_fn`` injects itself: ``full_output`` and
             ``verbose`` for LM, ``print_level`` for IPOPT; issue #476) and
             outcome. For IPOPT these are the effective options: cyipopt
-            rewrites the options dict in place (#476), so its bytes keys and
-            values are decoded to str and the defaults it adds, such as
-            ``mu_strategy``, are kept. The solver settings also record how
+            rewrites the copy of the options that ``optimize_fn`` passes to
+            it and stores (#476), so its bytes keys and values are decoded to
+            str and the defaults it adds, such as ``mu_strategy``, are
+            kept. The solver settings also record how
             the sensitivities were obtained (``derivatives``: the Jacobian
             source and ``dx_finitediff`` as ``'default'``, ``'callable'``
             or the numeric step). Also the covariance in the

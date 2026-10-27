@@ -1,6 +1,9 @@
 """Real IPOPT fits for GLS, observation masks and bootstrap state (#397).
 
 Reuse the independently derived linear-model expectations from the core tests.
+Also check that IPOPT fits leave the caller's ``optim_options`` unchanged
+(#476), with the proportional fixture of
+``test_paramestim_optimize_fn_contract``.
 These small fits require cyipopt, but not Assimulo. MCR IPOPT fits are
 covered by ``test_paramestim_mcr_cyipopt`` (#240).
 """
@@ -16,6 +19,7 @@ from PharmaPy.StatsModule import StatisticsClass
 import test_paramestim_gls_weighting as gls
 import test_paramestim_observation_masks as masks
 import test_statistics_bootstrap_state as bootstrap
+import test_paramestim_optimize_fn_contract as contract
 
 
 # Tight termination for the synthetic linear models, whose true gradient is
@@ -119,3 +123,30 @@ def test_ipopt_bootstrap_preserves_fit_and_matches_sample_optima():
     # The shared model is restored without a user evaluation after bootstrap.
     assert last_call['rate'] == pytest.approx(estimator.params_convg[0],
                                             rel=FIT_RTOL, abs=0.0)
+
+
+def test_ipopt_leaves_caller_options_unchanged():
+    """Reuse one options dict for two IPOPT fits of the same data (#476)."""
+    data = contract.proportional([contract.TRUE_RATE],
+                                 contract.TIME_S)  # [mol/L]
+    options = dict(IPOPT_OPTIONS)
+    fitted = []  # [mol/L/s]
+    for _ in range(2):
+        estimator = ParameterEstimation(
+            contract.proportional, [contract.SEED_RATE], contract.TIME_S,
+            data)
+        fitted.append(estimator.optimize_fn(
+            method='IPOPT', optim_options=options, verbose=False)[0])
+
+        assert options == IPOPT_OPTIONS
+        # optim_options is optimize_fn's private copy as cyipopt left it:
+        # bytes keys, print_level 0 for verbose=False.
+        stored = estimator.optim_options
+        assert stored is not options
+        assert {key: stored[key.encode()] for key in IPOPT_OPTIONS} == (
+            IPOPT_OPTIONS)
+        assert stored[b'print_level'] == 0
+
+    np.testing.assert_array_equal(fitted[1], fitted[0])
+    np.testing.assert_allclose(fitted[0], [contract.TRUE_RATE],
+                               rtol=FIT_RTOL, atol=FIT_ATOL)

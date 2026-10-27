@@ -68,11 +68,14 @@ python -m pytest tests/test_paramestim_cyipopt.py tests/test_simexec_cyipopt.py 
 ```
 
 NumPy 1.26.4 satisfies the Assimulo 3.4.3 binary's NumPy constraint. The first
-module needs only cyipopt; the second requires both cyipopt and Assimulo. The
-third, `tests/test_records_ipopt.py`, needs only cyipopt: it captures an IPOPT
-fit of the analytic two-experiment decay case in a `CalibrationRecord`
-(explicit bounds, the effective options cyipopt leaves in the caller's
-dictionary, a seed outside its bounds) and reruns it from the record. Each
+module needs only cyipopt; besides weighted, masked and bootstrap fits it checks
+that IPOPT fits leave the caller's `optim_options` unchanged
+([#476](https://github.com/PharmaPy-org/PharmaPy/issues/476)). The second
+requires both cyipopt and Assimulo. The third, `tests/test_records_ipopt.py`,
+needs only cyipopt: it captures an IPOPT fit of the analytic two-experiment
+decay case in a `CalibrationRecord` (explicit bounds, the effective options
+cyipopt leaves in the copy `optimize_fn` passes to it and stores, a seed
+outside its bounds) and reruns it from the record. Each
 module skips at collection when its backend is absent, preserving the core
 missing-dependency lane. Existing CI does not install cyipopt, so run this
 explicit command when changing the IPOPT estimation path. Headless machines can
