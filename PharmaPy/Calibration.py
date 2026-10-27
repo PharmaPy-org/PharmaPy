@@ -399,34 +399,54 @@ class PCR_calibration:
         return regression_coeff
 
     def predict(self, inputs, num_comp=None, regression_coeff=None,
-                full_output=False):
+                full_output=False, y_observed=None):
         """Predict responses for new predictor rows.
 
         Parameters
         ----------
         inputs : array-like
-            New predictor data in the same units as the calibration data.
+            New predictor spectra, shape ``(n_rows, n_wavelengths)`` or
+            ``(n_wavelengths,)`` for one spectrum, in the same units as the
+            calibration data (e.g. absorbance [AU]).
         num_comp : int, optional
-            Number of principal components used for prediction.
+            Number of principal components used for prediction [-].
         regression_coeff : numpy.ndarray, optional
             Regression coefficients with respect to principal-component
-            scores.
+            scores, shape ``(num_comp, n_responses)`` [response units per
+            score unit]: [response units] when the scores are
+            dimensionless (``standardize=True``, or ``snv=True``), and
+            [response units/AU] for ``snv=False, standardize=False``.
         full_output : bool, optional
-            If True, return projections, predictions, and MSE diagnostics.
+            If True, return projections, predictions, and the MSE
+            diagnostic.
+        y_observed : array-like, optional
+            Observed responses of the rows of ``inputs``, in the same order
+            and in the units of the calibration responses (e.g. [g/L]),
+            shape ``(n_rows, n_responses)`` or ``(n_rows,)`` for a single
+            response. Only used with ``full_output=True``, to compute
+            ``'MSE'``.
 
         Returns
         -------
         response : numpy.ndarray or dict
-            Predicted responses when ``full_output`` is False. If
-            ``full_output`` is True, return a dictionary containing
-            projections, predictions, and MSE. Prediction units match the
-            responses used to fit ``regression_coeff``.
+            Predicted responses, shape ``(n_rows, n_responses)``, in the
+            units of the responses used to fit ``regression_coeff``, when
+            ``full_output`` is False. If ``full_output`` is True, a
+            dictionary with ``'x_projected'`` (scores, shape
+            ``(n_rows, num_comp)``), ``'y_pred'`` (the predicted responses)
+            and ``'MSE'``: ``resid.T @ resid / resid.size`` with
+            ``resid = y_pred - y_observed``, shape
+            ``(n_responses, n_responses)`` [response units**2], whose trace
+            is the mean squared error over all entries; ``None`` when
+            ``y_observed`` is not given.
 
         Raises
         ------
         ValueError
             If ``snv=True`` and a row of ``inputs`` has zero standard
-            deviation across wavelengths.
+            deviation across wavelengths; if ``y_observed`` does not have
+            one row per input row and one column per fitted response; or if
+            ``y_observed`` is given without ``full_output=True``.
 
         Notes
         -----
@@ -462,26 +482,25 @@ class PCR_calibration:
         if num_comp is None:
             num_comp = self.num_comp
 
+        if y_observed is not None and not full_output:
+            raise ValueError("y_observed is only used with full_output=True")
+
         p_matrix = self.svd_dict['V'][:, :num_comp]
         new_projections = np.dot(inputs_centered, p_matrix)
 
-        resid_x = inputs_centered[0] - np.dot(new_projections[0],
-                                              p_matrix.T)
-
-        SPE_x = np.dot(resid_x, resid_x)
-        print(SPE_x)
-
-        # new_projections, _, di = self.__get_projections(inputs_centered,
-        #                                                 num_comp)
-
-
         response = np.dot(new_projections, coeff) + self.y_means
 
-        num_data = self.y_data.size
-
         if full_output:
-            resid = response - self.y_data
-            mse = 1 / num_data * np.dot(resid.T, resid)
+            if y_observed is None:
+                # No observations of the new rows: no prediction error can
+                # be computed (#253); the key is kept for compatibility.
+                mse = None
+            else:
+                y_obs = self.__check_observed(y_observed, response.shape)
+                resid = response - y_obs  # [response units]
+                # [response units**2]
+                mse = np.dot(resid.T, resid) / resid.size
+
             info_out = {'x_projected': new_projections, 'y_pred': response,
                         'MSE': mse}
 
@@ -489,6 +508,46 @@ class PCR_calibration:
         else:
 
             return response
+
+    @staticmethod
+    def __check_observed(y_observed, expected_shape):
+        """Validate observed responses against the predicted responses.
+
+        Parameters
+        ----------
+        y_observed : array-like
+            Observed responses, shape ``(n_rows,)`` or
+            ``(n_rows, n_responses)`` [response units].
+        expected_shape : tuple of int
+            Shape ``(n_rows, n_responses)`` of the predicted responses.
+
+        Returns
+        -------
+        numpy.ndarray
+            Observed responses as a float array of ``expected_shape``
+            [response units].
+
+        Raises
+        ------
+        ValueError
+            If the observed and expected shapes are incompatible.
+        """
+        y_obs = np.asarray(y_observed, dtype=float)
+        num_rows, num_responses = expected_shape
+
+        if y_obs.ndim == 1 and num_responses == 1:
+            y_obs = y_obs[:, np.newaxis]
+
+        if y_obs.shape != tuple(expected_shape):
+            accepted = f"{tuple(expected_shape)}"
+            if num_responses == 1:
+                accepted += f" or ({num_rows},)"
+            raise ValueError(
+                f"y_observed has shape {np.shape(y_observed)}; expected "
+                f"{accepted}: one row per input spectrum and one column per "
+                f"fitted response")
+
+        return y_obs
 
     def evaluate_mse(self, num_comp=None):
 
