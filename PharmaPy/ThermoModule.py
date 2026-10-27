@@ -2370,9 +2370,15 @@ class ThermoPhysicalManager:
         units index such ratios out or give an absent species a unit ratio.
         Nonzero is bitwise: a round-off-level fraction counts as present. A
         fraction integrated by a solver can carry round-off where it should
-        be zero, so the reactors, evaporators and flash units pass a
-        structural presence mask as ``weights``; other unit operations need
-        data for every species they carry as a state.
+        be zero, so the unit operations that decide presence structurally
+        (``PharmaPy.Presence``; among them the reactors, the evaporators and
+        flash units, and the dynamic distillation column for its plates)
+        pass a presence mask as ``weights`` and give an absent species a
+        unit ratio, and the shortcut design and the steady distillation
+        column pass the presence of the exact compositions they evaluate.
+        The user guide (``advanced_usage.rst``, "Missing property data")
+        lists the units and their rules; other unit operations need data
+        for every species they carry as a state.
         """
         return self._vle_ratios(temp, pres, x_liq, gamma_model, check=True,
                                 weights=weights)
@@ -2555,10 +2561,14 @@ class ThermoPhysicalManager:
         liquid: their fractions are left out (not renormalized) and their
         parameters, including UNIQUAC interaction rows and columns or
         UNIFAC group counts, are not used, so they need none (issue #425).
-        Their neutral coefficient of 1 is a placeholder that callers do not
-        use. Callers give zero weight only to species whose fraction is
-        zero or solver round-off of zero, so the present species'
-        coefficients equal those of the mixture without the absent ones.
+        Their neutral coefficient of exactly 1 is part of this contract:
+        the VLE ratios do not use it (callers give absent species a unit
+        ratio), but the extractors' default distribution ratios
+        ``gamma_light / gamma_heavy`` rely on it, so that an absent species
+        gets the ratio 1 whatever its data. Callers give zero weight only to
+        species whose fraction is zero or solver round-off of zero, so the
+        present species' coefficients equal those of the mixture without
+        the absent ones.
         """
         if gamma_model == 'ideal':
             return np.ones_like(x_liq)

@@ -215,49 +215,12 @@ class _StructuralPresenceMixin(StructuralPresenceMixin):
     from the charge (or flash feed) and from the feed rows that flow, never
     from states: an absent species needs no property data (issue #425). An
     absent species also gets a unit VLE ratio in place of its data-dependent
-    one, so its closures reduce to exactly zero fractions whatever its
-    data. A failed solve restores the unit, ``Liquid_1`` and ``Vapor_1``.
+    one (the shared ``_absent_unit_ratios``), so its closures reduce to
+    exactly zero fractions whatever its data. A failed solve restores the
+    unit, ``Liquid_1`` and ``Vapor_1``.
     """
 
     _presence_phase_names = ('Liquid_1', 'Vapor_1')
-
-    def _absent_unit_ratios(self, k_vals: np.ndarray,
-                            time: Optional[float] = None) -> np.ndarray:
-        """Replace the VLE ratios of absent species with one.
-
-        Parameters
-        ----------
-        k_vals : numpy.ndarray
-            VLE ratios ``y_i/x_i`` [-], shape ``(num_species,)``; those of
-            absent species may be NaN (no Henry data) or data-dependent.
-        time : float, optional
-            Absolute evaluation time [s]: a species recorded only later
-            counts as absent. None counts every recorded species.
-
-        Returns
-        -------
-        numpy.ndarray
-            ``k_vals`` with absent species at exactly 1 [-]; unchanged
-            without a presence record.
-
-        Notes
-        -----
-        An absent species has zero feed and zero holdup, so its component
-        balance and its equilibrium ``y_i - K_i x_i = 0`` must give
-        ``x_i = y_i = 0``. Any finite positive ratio does: with
-        ``L + V = 1`` the flash pair ``-L x_i - V y_i = 0``,
-        ``y_i - K_i x_i = 0`` has determinant ``-(L + V K_i)``, never
-        zero. The unit ratio, the identity ``y_i = x_i``, makes that
-        determinant -1 for every phase split and the result independent of
-        the species' data, which an absent species may lack.
-        """
-        presence = getattr(self, '_presence', None)
-        if presence is None:
-            return k_vals
-
-        present = (presence.mask if time is None
-                   else presence.mask_at(time))  # [-]
-        return np.where(present, k_vals, 1.0)  # [-]
 
 
 class IsothermalFlash(_StructuralPresenceMixin):

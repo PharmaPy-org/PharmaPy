@@ -16,6 +16,7 @@ from PharmaPy.ThermoModule import (
     VALID_ACTIVITY_MODELS as VALID_GAMMA_METHODS, validate_activity_model)
 from PharmaPy.Streams import LiquidStream
 from PharmaPy.Connections import get_inputs_new
+from PharmaPy.Presence import SpeciesPresence
 
 from PharmaPy.Results import DynamicResult
 
@@ -80,6 +81,23 @@ def validate_gamma_method(gamma_method: str,
 
 
 class ContinuousExtractor:
+    """Steady liquid-liquid split of a feed into two liquid phases.
+
+    The feed is split by successive substitution: each pass evaluates the
+    distribution ratios ``K_i`` (from ``k_fun`` or, by default, the ratio of
+    the activity coefficients of the two liquids), solves the
+    Rachford-Rice equation for the phase fraction and updates both
+    compositions, until they change by less than the tolerance.
+
+    Species presence (issue #425): a species with zero feed fraction stays
+    at exactly zero in every iterate, because both compositions are
+    multiples of the feed fraction. The default ratio therefore evaluates
+    the activity model on the species of the composition being split only
+    (``PharmaPy.Presence.SpeciesPresence`` of the feed fractions), so an
+    absent species gets the unit ratio and needs no property data other
+    than ``mw``.
+    """
+
     def __init__(self, k_fun=None, gamma_method='UNIQUAC'):
         """Create a continuous extractor.
 
@@ -200,18 +218,71 @@ class ContinuousExtractor:
     def material_balance(self, phi_seed, x_1_seed, x_2_seed, z_i, temp):
         """Solve dimensionless liquid split and equilibrium relations.
 
-        ``phi_seed`` is a phase fraction [-], ``x_1_seed``, ``x_2_seed``,
-        and ``z_i`` are mole fractions [-], and ``temp`` is temperature [K].
+        Parameters
+        ----------
+        phi_seed : float
+            Seed of the fraction of the feed in the second liquid [-].
+        x_1_seed, x_2_seed : numpy.ndarray
+            Seed mole fractions of the two liquids [-], shape
+            ``(num_comp,)``.
+        z_i : numpy.ndarray
+            Feed mole fractions [-], shape ``(num_comp,)``.
+        temp : float
+            Temperature [K]; not used: every ratio, the default one or a
+            user ``k_fun``, is evaluated at the extractor's ``temp``, the
+            temperature [K] of its inlet or charge.
+
+        Returns
+        -------
+        tuple
+            Converged phase fraction [-], mole fractions of the two liquids
+            [-], and a dict with the final change ``'error'`` [-] and the
+            number of passes ``'num_iter'`` [-].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. With the
+            default ratio and UNIQUAC, if a species with a nonzero fraction
+            in ``z_i`` lacks ``ri``, ``qi`` or (when the database has the
+            key) ``qip``; species without feed need none (issue #425).
+
+        Notes
+        -----
+        The default ratio weights the activity model with the presence of
+        ``z_i``, the composition being split, so it follows the arguments
+        of each call rather than an earlier solve.
         """
+        # The species of the composition being split are present (#425).
+        presence = SpeciesPresence(len(z_i))
+        presence.record(z_i)
 
-        def get_ki(x1, x2, temp):
-            gamma_1 = self.matter.getActivityCoeff(method=self.gamma_method,
-                                                   mole_frac=x1,
-                                                   temp=temp)  # [-]
+        def get_ki(x1: np.ndarray, x2: np.ndarray, temp: float
+                   ) -> np.ndarray:
+            """Return the default distribution ratios of the two liquids.
 
-            gamma_2 = self.matter.getActivityCoeff(method=self.gamma_method,
-                                                   mole_frac=x2,
-                                                   temp=temp)  # [-]
+            Parameters
+            ----------
+            x1, x2 : numpy.ndarray
+                Mole fractions of the two liquids [-], shape
+                ``(num_comp,)``.
+            temp : float
+                Temperature [K].
+
+            Returns
+            -------
+            numpy.ndarray
+                ``K_i = gamma_1 / gamma_2`` [-], with the activity model
+                evaluated on the species present in ``z_i`` only (issue
+                #425): an absent species gets 1.
+            """
+            gamma_1 = self.matter.getActivityCoeff(
+                method=self.gamma_method, mole_frac=x1, temp=temp,
+                weights=presence.weights(x1))  # [-]
+
+            gamma_2 = self.matter.getActivityCoeff(
+                method=self.gamma_method, mole_frac=x2, temp=temp,
+                weights=presence.weights(x2))  # [-]
 
             k_i = gamma_1 / gamma_2  # K_i [-]
 
@@ -324,6 +395,36 @@ class ContinuousExtractor:
         pass
 
     def solve_unit(self, solver_options=None):
+        """Split the feed into two liquid phases and publish them.
+
+        Parameters
+        ----------
+        solver_options : dict, optional
+            Successive-substitution options: ``'tol'``, the convergence
+            tolerance on the change of the stacked compositions [-]
+            (default 1e-4), and ``'max_iter'``, the maximum number of passes
+            [-] (default 100); see ``material_balance``.
+
+        Returns
+        -------
+        tuple
+            Phase fraction [-], mole fractions of the two liquids [-] and
+            the solver information of ``material_balance``.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            of the feed lacks the activity parameters of the default ratio
+            or the liquid density of the products; species without feed
+            need none (issue #425).
+
+        Notes
+        -----
+        The default ratio evaluates the activity model on the species with
+        a nonzero feed mole fraction [-] only (``material_balance``, issue
+        #425).
+        """
 
         if solver_options is None:
             solver_options = {}
@@ -346,9 +447,6 @@ class ContinuousExtractor:
 
         # Solve material balance
         solution = self.unit_model(phi_seed, x1_seed, x2_seed, self.temp)
-
-        # # Energy balance
-        # heat_bce = self.unit_model(solution, material=False)
 
         self.retrieve_results(solution)
 

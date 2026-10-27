@@ -9,8 +9,9 @@ instantaneous fractions would require data for species that can never be
 present. ``SpeciesPresence`` instead decides presence structurally, from
 the unit's inputs, never from its states (issue #425).
 ``StructuralPresenceMixin`` gives unit operations the shared wiring: the
-record's lifecycle, the kernel weights, the feed latches, the projection
-of published fractions and the rollback of a failed solve.
+record's lifecycle, the kernel weights, the feed latches, the unit
+equilibrium ratios of absent species, the projection of published
+fractions and the rollback of a failed solve.
 """
 
 import copy
@@ -478,6 +479,55 @@ class StructuralPresenceMixin:
             return None if used is None else fractions * used
 
         return presence.weights(fractions, used, time=time)
+
+    def _absent_unit_ratios(self, k_vals: np.ndarray,
+                            time: Optional[float] = None,
+                            present: Optional[np.ndarray] = None
+                            ) -> np.ndarray:
+        """Replace the equilibrium ratios of absent species with one.
+
+        Parameters
+        ----------
+        k_vals : numpy.ndarray
+            Phase-equilibrium ratios [-] (VLE ``y_i/x_i``, or a liquid-liquid
+            distribution ratio), shape ``(num_species,)`` or ``(num_rows,
+            num_species)``; those of absent species may be NaN (no Henry
+            data) or data-dependent placeholders.
+        time : float, optional
+            Absolute evaluation time [s]: a species recorded only later
+            counts as absent. None counts every recorded species.
+        present : numpy.ndarray of bool, optional
+            Presence to apply instead of the record's, shape
+            ``(num_species,)``, for a calculation on an exact composition
+            that keeps no record (``time`` is then not used).
+
+        Returns
+        -------
+        numpy.ndarray
+            ``k_vals`` with absent species at exactly 1 [-]; unchanged
+            without a presence record and without ``present``.
+
+        Notes
+        -----
+        An absent species has no charge and no feed, so its component
+        balances are linear and homogeneous in its fractions, and any finite
+        positive ratio keeps them at exactly zero; in a flash, for example,
+        with ``L + V = 1`` the pair ``-L x_i - V y_i = 0``,
+        ``y_i - K_i x_i = 0`` has determinant ``-(L + V K_i)``, never zero.
+        The unit ratio, the identity ``y_i = x_i``, makes those balances and
+        the result independent of the species' data, which an absent
+        species may lack, and keeps a NaN placeholder out of sums such as a
+        bubble-point residual, where ``0 * NaN`` would be NaN.
+        """
+        if present is None:
+            presence = getattr(self, '_presence', None)
+            if presence is None:
+                return k_vals
+
+            present = (presence.mask if time is None
+                       else presence.mask_at(time))  # [-]
+
+        return np.where(present, k_vals, 1.0)  # [-]
 
     def _project_absent(self, fractions: np.ndarray,
                         time: Optional[Union[float, np.ndarray]] = None

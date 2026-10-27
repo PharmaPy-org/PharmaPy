@@ -1366,8 +1366,11 @@ class LiquidPhase(ThermoPhysicalManager):
             mole fractions. When given, the model is evaluated on the
             species with a nonzero weight only, as if the others were
             absent; those others need no activity parameters and get the
-            neutral coefficient 1. Solver-based units pass a structural
-            presence mask here (through ``getKeqVLE``). See
+            neutral coefficient of exactly 1, so that a ratio of the
+            coefficients of two liquids (the extractors' default
+            distribution ratio) is exactly 1 for them. Solver-based units
+            pass a structural presence mask here (through ``getKeqVLE``,
+            or directly for the extractors). See
             ``ThermoPhysicalManager._activity_coefficients``.
 
         Returns
@@ -2362,7 +2365,9 @@ class VaporPhase(ThermoPhysicalManager):
                     mass_frac: Optional[np.ndarray] = None,
                     mole_frac: Optional[np.ndarray] = None,
                     thermo_method: str = 'ideal',
-                    x_liq: bool = False) -> Union[float, tuple]:
+                    x_liq: bool = False,
+                    weights: Optional[np.ndarray] = None
+                    ) -> Union[float, tuple]:
         """Solve for the vapor dew-point temperature.
 
         Parameters
@@ -2377,6 +2382,15 @@ class VaporPhase(ThermoPhysicalManager):
             Liquid activity model passed to ``getKeqVLE``.
         x_liq : bool, optional
             Also return the incipient liquid composition.
+        weights : ndarray, optional
+            Presence weights [-] with the shape of the mole fractions, as in
+            ``LiquidPhase.getBubblePoint``. When given, only species with a
+            nonzero weight enter the dew-point sum, its Antoine seed, the
+            incipient liquid and a non-ideal activity model, and only they
+            need VLE and activity data (see ``getKeqVLE``); the others count
+            as absent, with exactly zero liquid fraction and the neutral
+            activity coefficient 1. Unit operations pass the presence of
+            the species they carry, so that an absent species needs no data.
 
         Returns
         -------
@@ -2388,26 +2402,36 @@ class VaporPhase(ThermoPhysicalManager):
 
         Raises
         ------
+        ValueError
+            If ``weights`` does not have exactly the shape of the mole
+            fractions, before any evaluation.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``.
             From ``getKeqVLE`` at the converged root, if a species with a
-            nonzero fraction has no ``p_vap`` coefficients at or below its
-            critical temperature. Already from the Newton iterates, which
-            evaluate the same ratios, if a species with a nonzero fraction is
-            above its critical temperature at an iterate without
+            nonzero fraction (or weight) has no ``p_vap`` coefficients at or
+            below its critical temperature. Already from the Newton
+            iterates, which evaluate the same ratios, if a species with a
+            nonzero fraction (or weight) is above its critical temperature
+            at an iterate without
             ``henry_constant`` [Pa], if no species supplies ``t_crit``, if no
-            species supplies ``henry_constant`` while some species is
-            supercritical at an iterate, or if ``p_vap`` is stored as one
-            scalar per species (from the Antoine seed).
+            species supplies ``henry_constant`` while some species (with
+            ``weights``, some weighted species) is supercritical at an
+            iterate, or if ``p_vap`` is stored as one scalar per species
+            (from the Antoine seed). With ``weights`` and
+            ``thermo_method='UNIQUAC'``, also if a weighted species lacks
+            ``ri``, ``qi`` or (when the database has the key) ``qip``; UNIFAC
+            group counts are taken as given (see ``getKeqVLE``).
         RuntimeError
             If the Newton iteration does not converge.
 
         Notes
         -----
-        The Newton seed is ``sum_i y_i * Tsat_i(pres)`` [K]. Seed and
+        The Newton seed is ``sum_i y_i * Tsat_i(pres)`` [K], with
+        ``weights`` over the species with a nonzero weight only. Seed and
         iterates treat missing Antoine data as in
         ``LiquidPhase.getBubblePoint``, and the converged root is checked
-        with ``getKeqVLE`` weighted by the vapor composition.
+        with ``getKeqVLE`` weighted by the vapor composition (or by
+        ``weights``).
         """
         if mass_frac is None and mole_frac is None:
             mole_frac = self.mole_frac
@@ -2415,25 +2439,61 @@ class VaporPhase(ThermoPhysicalManager):
         elif mole_frac is None:
             mole_frac = self.frac_to_frac(mass_frac=mass_frac)
 
+        mole_frac = np.asarray(mole_frac, dtype=float)  # [-], also from a list
+
         if pres is None:
             pres = self.pres
 
-        def dew_fn(temp):
-            k_vals = self._vle_ratios(temp, pres, mole_frac, thermo_method,
-                                      check=False)  # [-], iterate only
+        # Absent (zero-weight) species leave the sum and the liquid exactly;
+        # their ratios may be NaN placeholders (see getKeqVLE).
+        if weights is not None:
+            weights = self._validate_weights_shape(weights, mole_frac,
+                                                   'mole_frac')
+            used = weights != 0  # [-]
 
-            obj = np.dot(mole_frac, 1/k_vals) - 1
+        def dew_fn(temp: float) -> float:
+            """Evaluate the dew-point residual at a Newton iterate.
+
+            Parameters
+            ----------
+            temp : float
+                Temperature iterate [K].
+
+            Returns
+            -------
+            float
+                ``sum_i y_i / K_i - 1`` over the used species [-]; zero at
+                the dew point.
+            """
+            k_vals = self._vle_ratios(temp, pres, mole_frac, thermo_method,
+                                      check=False,
+                                      weights=weights)  # [-], iterate only
+
+            if weights is None:
+                obj = np.dot(mole_frac, 1/k_vals) - 1
+            else:
+                obj = np.dot(mole_frac[used], 1/k_vals[used]) - 1
 
             return obj
-        temp_seed = self._antoine_seed(mole_frac, pres=pres)  # [K]
+
+        # Absent species are left out of the seed too: their saturation
+        # temperature may be infinite, and 0 * inf is NaN.
+        temp_seed = self._antoine_seed(
+            mole_frac, pres=pres,
+            used=None if weights is None else used)  # [K]
         temp_dew = newton(dew_fn, temp_seed, full_output=False)
 
         # Check the data the converged root needs.
         k_vals = self.getKeqVLE(temp_dew, pres, mole_frac,
-                                gamma_model=thermo_method)  # [-]
+                                gamma_model=thermo_method,
+                                weights=weights)  # [-]
 
         if x_liq:
-            x_frac = mole_frac/k_vals
+            if weights is None:
+                x_frac = mole_frac/k_vals  # [-]
+            else:
+                x_frac = np.where(
+                    used, mole_frac / np.where(used, k_vals, 1.0), 0.0)  # [-]
 
             return temp_dew, x_frac
         else:
