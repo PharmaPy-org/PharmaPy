@@ -765,6 +765,50 @@ class ThermoPhysicalManager:
 
         return np.atleast_2d(np.asarray(weights) != 0).any(axis=0)
 
+    def _validate_weights_shape(self, weights: np.ndarray,
+                                fractions: np.ndarray,
+                                fraction_name: str) -> np.ndarray:
+        """Require presence weights with exactly the shape of the fractions.
+
+        Parameters
+        ----------
+        weights : array-like
+            Weights [any basis, e.g. 0/1] that decide which species need
+            data in place of ``fractions``.
+        fractions : array-like
+            Fractions [-] that the weights stand in for, shape
+            ``(num_species,)`` or ``(num_rows, num_species)``.
+        fraction_name : str
+            Name of ``fractions`` in the caller's signature, for the message.
+
+        Returns
+        -------
+        ndarray
+            ``weights`` as an array.
+
+        Raises
+        ------
+        ValueError
+            If ``weights`` is not one- or two-dimensional, does not have one
+            entry per species on its last axis, or does not have the shape
+            of ``fractions``. A scalar or a short array would otherwise
+            broadcast and silently switch the missing-data checks off.
+        """
+        weights = np.asarray(weights)
+        weight_shape = weights.shape
+        num_species = len(self.name_species)  # [-]
+        if (len(weight_shape) not in (1, 2)
+                or weight_shape[-1] != num_species
+                or weight_shape != np.shape(fractions)):
+            raise ValueError(
+                f"weights must have the shape of {fraction_name}, "
+                f"{np.shape(fractions)}, one entry per species "
+                f"({num_species} species) and, for a "
+                f"composition profile, one row per row of {fraction_name}; "
+                f"got shape {weight_shape}")
+
+        return weights
+
     def _cp_rows(self, phase: str) -> tuple:
         """Return the heat-capacity property of a phase and its rows.
 
@@ -1007,12 +1051,17 @@ class ThermoPhysicalManager:
             If ``True`` (default), return the fraction-weighted sum over the
             selected species. If ``False``, return the species enthalpies.
         weights : ndarray, optional
-            Used only with ``total_h=False``: amounts by which the caller
-            weights the returned species enthalpies [any basis, e.g. mol/L],
-            shape ``(num_species,)`` or ``(num_rows, num_species)`` in
-            database order. When given, only selected species with a nonzero
-            weight in some row need coefficients, and the others are returned
-            as exactly 0 if they have none.
+            Amounts or presence flags by which the caller weights the
+            species enthalpies [any basis, e.g. mol/L, or 0/1], shape
+            ``(num_species,)`` or ``(num_rows, num_species)`` in database
+            order. When given, only selected species with a nonzero weight
+            in some row need coefficients, and the others are returned (or,
+            with ``total_h=True``, weighted) as exactly 0 if they have none.
+            With ``total_h=True`` they must have exactly the shape of the
+            weighting fractions and replace them in this rule only; the
+            fractions still weight the sum. Solver-based units pass
+            a structural presence mask here, so that round-off fractions of
+            absent species need no data.
 
         Returns
         -------
@@ -1039,7 +1088,10 @@ class ThermoPhysicalManager:
             ``num_rows`` differ and neither is one. Also raised, before any
             computation, for a ``phase`` other than ``'liquid'``,
             ``'solid'`` or ``'vapor'``, and for ``total_h=True`` when
-            neither ``mass_frac`` nor ``mole_frac`` is given.
+            neither ``mass_frac`` nor ``mole_frac`` is given or when
+            ``weights`` does not have exactly the shape of the weighting
+            fractions (one- or two-dimensional, one entry per database
+            species on the last axis).
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``.
             If a selected species that the result needs has no
@@ -1047,11 +1099,12 @@ class ThermoPhysicalManager:
             With ``total_h=False`` every selected species is needed, or,
             with ``weights``, every one with a nonzero weight. With
             ``total_h=True`` only species with a nonzero fraction in some
-            composition row are; the others contribute exactly zero.
-            Nonzero is bitwise: a round-off-level fraction or weight counts
-            as present, including round-off that a solver leaves in a
-            fraction that should be zero; reactors therefore pass a
-            structural presence mask as ``weights``.
+            composition row are, or, with ``weights``, a nonzero weight; the
+            others contribute exactly zero. Nonzero is bitwise: a
+            round-off-level fraction or weight counts as present, including
+            round-off that a solver leaves in a fraction that should be
+            zero; reactors and evaporators therefore pass a structural
+            presence mask as ``weights``.
             Also raised, whatever the fractions or weights, if the property is
             stored as one scalar per species instead of a coefficient list (see
             ``_property_rows``).
@@ -1127,12 +1180,22 @@ class ThermoPhysicalManager:
 
                 h_selected = integral  # [J/mol]
 
-            # Only species present in some composition row need coefficients;
-            # absent species without them contribute exactly zero.
-            needed = np.atleast_2d(frac_selected != 0).any(axis=0)
+            # Only species present in some composition row (or with a
+            # nonzero weight) need coefficients; absent species without them
+            # contribute exactly zero.
+            if weights is None:
+                needed = np.atleast_2d(frac_selected != 0).any(axis=0)
+                reason = 'carry a nonzero fraction, so the mixture enthalpy'
+            else:
+                frac_name = 'mass_frac' if basis == 'mass' else 'mole_frac'
+                weights = self._validate_weights_shape(
+                    weights, mass_frac if basis == 'mass' else mole_frac,
+                    frac_name)
+                needed = self._needed_by_weights(
+                    weights[..., species_idx], len(cp_cts))
+                reason = 'carry a nonzero weight, so the mixture enthalpy'
             missing = self._check_species_rows(
-                prop_name, cp_cts, species_idx, needed,
-                'carry a nonzero fraction, so the mixture enthalpy')
+                prop_name, cp_cts, species_idx, needed, reason)
             h_selected = np.where(missing, 0.0, h_selected)  # [J/kg] or [J/mol]
 
             enthalpyOut = (h_selected * frac_selected).sum(axis=1)  # [J/kg] or [J/mol]
@@ -1348,7 +1411,9 @@ class ThermoPhysicalManager:
     def getDensityMix(self, mass_frac: Optional[np.ndarray] = None,
                       mole_frac: Optional[np.ndarray] = None,
                       phase: str = 'liquid', temp: Optional[float] = None,
-                      basis: str = 'mass') -> Union[float, np.ndarray]:
+                      basis: str = 'mass',
+                      weights: Optional[np.ndarray] = None
+                      ) -> Union[float, np.ndarray]:
         """Mix pure-component densities assuming ideal (additive) volumes.
 
         Parameters
@@ -1367,6 +1432,16 @@ class ThermoPhysicalManager:
             so neither ``temp`` nor a ``temp`` attribute is required.
         basis : {'mass', 'mole'}, optional
             Physical basis of the returned density; default mass.
+        weights : ndarray, optional
+            Presence weights [any basis, e.g. 0/1], with exactly the shape
+            of the fractions, ``(num_species,)`` or ``(num_points,
+            num_species)``. When given, they replace the
+            fractions in deciding which species need a density: a species
+            with zero weight in every row needs none and, without data,
+            adds exactly zero volume. The fractions still weight the
+            volumes. Solver-based units pass a structural presence mask
+            here, so that round-off fractions of absent species need no
+            data.
 
         Returns
         -------
@@ -1380,13 +1455,18 @@ class ThermoPhysicalManager:
         ValueError
             If ``basis`` is neither 'mass' nor 'mole', or ``phase`` is not
             one of ``'liquid'`` or ``'solid'``. Both checks precede any
-            computation.
+            computation. Also raised if ``weights`` does not have exactly
+            the shape of the fractions on the requested basis (one- or
+            two-dimensional, one entry per species on the last axis), as a
+            scalar or short array would otherwise switch the check off.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If a species
-            with a nonzero fraction in some composition row has no density
-            for the phase. A species whose fraction is zero in every row
-            needs none and contributes exactly zero volume. Nonzero is
-            bitwise: a round-off-level fraction counts as present.
+            with a nonzero fraction (or, with ``weights``, a nonzero
+            weight) in some composition row has no density for the phase.
+            A species whose fraction (weight) is zero in every row needs
+            none and contributes exactly zero volume. Nonzero is bitwise: a
+            round-off-level fraction counts as present unless ``weights``
+            says otherwise.
 
         Notes
         -----
@@ -1409,9 +1489,16 @@ class ThermoPhysicalManager:
 
             frac = mole_frac  # [-]
 
+        if weights is None:
+            needed = self._needed_by_weights(frac, self.num_species)
+            reason = 'carry a nonzero fraction, so the mixture density'
+        else:
+            weights = self._validate_weights_shape(
+                weights, frac, 'mass_frac' if basis == 'mass' else 'mole_frac')
+            needed = self._needed_by_weights(weights, self.num_species)
+            reason = 'carry a nonzero weight, so the mixture density'
         inv_mass, inv_mole = self._inverse_densities(
-            phase, self._needed_by_weights(frac, self.num_species),
-            'carry a nonzero fraction, so the mixture density')  # [m**3/kg], [m**3/kmol]
+            phase, needed, reason)  # [m**3/kg], [m**3/kmol]
 
         if basis == 'mass':
             rhoMix = 1 / np.dot(mass_frac, inv_mass)  # [kg/m**3]
@@ -2092,7 +2179,8 @@ class ThermoPhysicalManager:
 
     def _antoine_seed(self, mole_frac: np.ndarray,
                       temp: Optional[float] = None,
-                      pres: Optional[float] = None) -> float:
+                      pres: Optional[float] = None,
+                      used: Optional[np.ndarray] = None) -> float:
         """Weight Antoine saturation values into a bubble or dew-point seed.
 
         Parameters
@@ -2103,11 +2191,15 @@ class ThermoPhysicalManager:
             Temperature [K]; seeds a bubble pressure when ``pres`` is None.
         pres : float, optional
             Pressure [Pa]; seeds a bubble or dew temperature.
+        used : ndarray of bool, optional
+            Species that enter the seed, shape ``(num_species,)``; every
+            species when None. The others are not evaluated at all.
 
         Returns
         -------
         float
-            ``sum_i x_i * psat_i`` [Pa] or ``sum_i x_i * Tsat_i`` [K].
+            ``sum_i x_i * psat_i`` [Pa] or ``sum_i x_i * Tsat_i`` [K], over
+            the used species.
 
         Notes
         -----
@@ -2115,9 +2207,15 @@ class ThermoPhysicalManager:
         paths are unchanged. A species without ``p_vap`` data is evaluated
         with zero Antoine coefficients, exactly as the zero rows of earlier
         releases were: ``Tsat = -0`` K and ``psat = 1`` Pa. A seed is not a
-        result; the converged root is checked with ``getKeqVLE``.
+        result; the converged root is checked with ``getKeqVLE``. An unused
+        species is left out before evaluation, because its saturation value
+        can be infinite (``log10(pres) = A`` makes ``Tsat`` divide by zero)
+        and zero times infinity would make the seed NaN.
         """
         p_vap_cts = self._legacy_antoine_rows()  # [-], [K], [K]
+        if used is not None:
+            mole_frac = np.asarray(mole_frac)[used]  # [-]
+            p_vap_cts = p_vap_cts[used]  # [-], [K], [K]
         saturation = self._evaluate_antoine(p_vap_cts, temp, pres)  # [Pa] or [K]
 
         return np.dot(mole_frac, saturation)
@@ -2167,9 +2265,11 @@ class ThermoPhysicalManager:
             ratios [any basis], with exactly the shape of ``x_liq``
             (``(num_species,)`` or ``(num_points, num_species)``); they
             decide which species need data (see Raises) in place of
-            ``x_liq``, which still sets the activity coefficients. For example, the batch
-            ``Evaporator`` passes ``x_liq`` with its excluded supercritical
-            species set to zero, because it never uses their ratios.
+            ``x_liq``, which still sets the activity coefficients. For
+            example, the evaporators pass their structural presence mask
+            (``PharmaPy.Presence.SpeciesPresence``), with the batch
+            ``Evaporator``'s excluded supercritical species set to zero,
+            because they never use those ratios.
 
         Returns
         -------
@@ -2202,9 +2302,10 @@ class ThermoPhysicalManager:
             no species supplies ``henry_constant`` while some species is
             above its critical temperature in some row, whatever its
             fraction (naming those species), as earlier releases raised
-            ``AttributeError`` there. Also raised, whatever the fractions,
-            if ``p_vap`` is stored as one scalar per species instead of
-            Antoine coefficients (see ``_property_rows``).
+            ``AttributeError`` there; with ``weights``, only species with a
+            nonzero weight in such a row count. Also raised, whatever the
+            fractions, if ``p_vap`` is stored as one scalar per species
+            instead of Antoine coefficients (see ``_property_rows``).
 
         Notes
         -----
@@ -2226,12 +2327,13 @@ class ThermoPhysicalManager:
         finite placeholder keeps zero-weight terms, including ``y / K``,
         exactly zero; it is not a vapor pressure. A zero-weight species
         above its critical temperature whose ``henry_constant`` is NaN keeps
-        a NaN ratio there, as in earlier releases: the evaporators index such
-        ratios out or report them. Nonzero is bitwise: a
-        round-off-level fraction counts as present. A fraction integrated by
-        a solver can carry round-off where it should be zero, so a unit
-        operation other than a reactor needs data for every species it
-        carries as a state.
+        a NaN ratio there, as in earlier releases: the evaporators and flash
+        units index such ratios out or give an absent species a unit ratio.
+        Nonzero is bitwise: a round-off-level fraction counts as present. A
+        fraction integrated by a solver can carry round-off where it should
+        be zero, so the reactors, evaporators and flash units pass a
+        structural presence mask as ``weights``; other unit operations need
+        data for every species they carry as a state.
         """
         return self._vle_ratios(temp, pres, x_liq, gamma_model, check=True,
                                 weights=weights)
@@ -2273,7 +2375,8 @@ class ThermoPhysicalManager:
             A subclass of ``AttributeError`` and ``ValueError``.
             With ``check``, as in ``getKeqVLE``. Also without ``check`` if
             no species supplies ``t_crit``, if no species supplies
-            ``henry_constant`` while some species is supercritical, if a
+            ``henry_constant`` while some species (with ``weights``, some
+            weighted species) is supercritical, if a
             weighted supercritical species has no ``henry_constant``, or if
             ``p_vap`` is stored as scalars (see ``_property_rows``).
         """
@@ -2291,17 +2394,7 @@ class ThermoPhysicalManager:
         if weights is not None:
             # weights decide which species need data, so a scalar or
             # mis-shaped array must not silently switch the checks off.
-            weight_shape = np.shape(weights)
-            num_species = len(self.name_species)  # [-]
-            if (len(weight_shape) not in (1, 2)
-                    or weight_shape[-1] != num_species
-                    or weight_shape != np.shape(x_liq)):
-                raise ValueError(
-                    "weights must have the shape of x_liq, "
-                    f"{np.shape(x_liq)}, one entry per species "
-                    f"({num_species} species) and, for a "
-                    f"composition profile, one row per row of x_liq; got "
-                    f"shape {weight_shape}")
+            weights = self._validate_weights_shape(weights, x_liq, 'x_liq')
 
         # Rows pair temperature i with composition row i.
         num_temps = np.size(temp) if np.ndim(temp) == 1 else 1  # [-]
@@ -2324,11 +2417,23 @@ class ThermoPhysicalManager:
         else:
             supercrit = temp > t_crit
 
+        # Rows pair as in the returned ratios; a species needs data only in
+        # a row whose weighting entry is nonzero.
+        weighted = np.atleast_2d(np.asarray(
+            x_liq if weights is None else weights) != 0)  # [-]
+
         henry = self._scalar_values('henry_constant')  # [Pa], NaN if missing
         if not hasattr(self, 'henry_constant') and np.any(supercrit):
+            # Without weights every supercritical species needs the absent
+            # Henry data, whatever its fraction, as in earlier releases; with
+            # weights only a weighted one does, so a species that the caller
+            # marks absent needs none.
+            lacking_henry = np.atleast_2d(supercrit)  # [-]
+            if weights is not None:
+                lacking_henry = lacking_henry & weighted  # [-]
             self._check_species_rows(
                 'henry_constant', henry, np.arange(num_sp),
-                np.atleast_2d(supercrit).any(axis=0),
+                lacking_henry.any(axis=0),
                 'are above t_crit at a requested temperature, so their VLE '
                 'ratio', remedy=' or evaluate at or below t_crit')
 
@@ -2341,27 +2446,26 @@ class ThermoPhysicalManager:
                 p_vap[supercrit] = henry[supercrit]  # [Pa]
 
         # Antoine data are needed where a species is at or below t_crit,
-        # and a Henry constant where it is above, in a row whose weighting
-        # entry is nonzero; rows pair as in the returned ratios.
-        weighted = np.atleast_2d(np.asarray(
-            x_liq if weights is None else weights) != 0)  # [-]
+        # and a Henry constant where it is above, in a weighted row. The
+        # message names what made the species needed.
+        carry = ('carry a nonzero fraction' if weights is None
+                 else 'carry a nonzero weight')
         if check:
             uses_antoine = np.atleast_2d(~supercrit)  # [-]
             needed = (uses_antoine & weighted).any(axis=0)
             self._check_species_rows(
                 'p_vap', self._property_rows('p_vap'), np.arange(num_sp),
                 needed,
-                'carry a nonzero fraction and are at or below t_crit (or '
-                'have no t_crit) at a requested temperature, so their VLE '
-                'ratio')
+                f'{carry} and are at or below t_crit (or have no t_crit) '
+                'at a requested temperature, so their VLE ratio')
         # Unlike the Antoine placeholder, a NaN Henry ratio of a weighted
         # species makes the result NaN, so it is no valid solver iterate
         # either; the rule therefore applies with and without check.
         needs_henry = (np.atleast_2d(supercrit) & weighted).any(axis=0)
         self._check_species_rows(
             'henry_constant', henry, np.arange(num_sp), needs_henry,
-            'carry a nonzero fraction and are above t_crit at a '
-            'requested temperature, so their VLE ratio',
+            f'{carry} and are above t_crit at a requested temperature, so '
+            'their VLE ratio',
             remedy=' or evaluate at or below t_crit')
 
         if gamma_model == 'ideal':
