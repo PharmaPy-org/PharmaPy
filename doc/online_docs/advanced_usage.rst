@@ -100,7 +100,11 @@ raised :code:`AttributeError`. The state-update keyword of
 that emits :code:`DeprecationWarning`. The MCR-specific :code:`func_aux`
 override, which always raised :code:`AttributeError`, was removed, so
 :code:`MultipleCurveResolution.func_aux` is the inherited
-:code:`ParameterEstimation.func_aux`.
+:code:`ParameterEstimation.func_aux`. After a fit, :code:`y_model` holds the
+curve-resolved spectra and the model values of non-spectral states (NaN where
+unobserved), and :code:`StatisticsClass.get_bootsamples` adds drawn spectral
+residuals to them; earlier releases reported :code:`2 * data - prediction` for
+every spectral channel (issue #500).
 
 :code:`StatisticsClass.bootstrap_params` returns the bootstrap estimates, one row
 per generated dataset, and stores them in :code:`boot_params`. Each dataset is

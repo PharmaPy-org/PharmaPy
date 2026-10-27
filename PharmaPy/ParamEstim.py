@@ -3506,6 +3506,55 @@ class ParameterEstimation:
         """
         return info
 
+    def _model_predictions(self) -> list:
+        """Return the model predictions of the last stored evaluation.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            One array per experiment in ``x_data`` order, shape
+            ``(n_times, n_measured)``: model-grid rows and measured-state
+            columns in the model state units, ``resid_runs + y_data`` because
+            the residuals are model minus data. Entries without an
+            observation are NaN, as in ``y_data``.
+
+        Notes
+        -----
+        ``optimize_fn`` stores the result as ``y_model``, the nominal
+        response of ``StatisticsClass``. Subclasses whose residuals are not
+        model minus data, such as ``MultipleCurveResolution``, override this.
+        """
+        predictions = []  # [model state units], one array per experiment
+        for ind in range(self.num_datasets):
+            # [model state units], NaN where unobserved
+            y_data = self.y_data[ind]
+            if isinstance(y_data, dict):
+                y_data = np.hstack(list(y_data.values()))
+
+            y_model = self.resid_runs[ind] + y_data  # [model state units]
+            predictions.append(y_model)
+
+        return predictions
+
+    def _residual_signs(self, ind: int) -> Optional[np.ndarray]:
+        """Return the sign convention of one experiment's residual columns.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``x_data`` order.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            None: every column of ``resid_runs[ind]`` is model minus data.
+            Subclasses return one sign per column [-], +1 for model minus
+            data and -1 for data minus model; ``StatisticsClass``
+            multiplies the residuals by it to pool model-minus-data
+            residuals.
+        """
+        return None
+
     def optimize_fn(self, optim_options: Optional[dict] = None,
                     simulate: bool = False, verbose: int | bool = True,
                     store_iter: bool = True, method: str = 'LM',
@@ -3592,10 +3641,11 @@ class ParameterEstimation:
         After LM or ``scipy.optimize.least_squares`` finishes, the model is
         evaluated once per experiment at the accepted parameters to refresh
         ``y_runs``, ``resid_runs``, ``residuals``, and ``weighted_residuals``
-        before assembling ``y_model``. This includes termination after a
-        rejected trial; it does not imply convergence. Predictions and raw
-        residuals retain the model state units and measured-state order.
-        Repeated calls replace the previous ``y_model`` list.
+        before assembling ``y_model`` (``_model_predictions``). This
+        includes termination after a rejected trial; it does not imply
+        convergence. Predictions and raw residuals retain the model state
+        units and measured-state order. Repeated calls replace the previous
+        ``y_model`` list.
 
         The reporting evaluation does not change the solver's returned ``x``,
         ``fun``, ``jac``, or solver counters. It uses the usual objective
@@ -3737,15 +3787,9 @@ class ParameterEstimation:
                 np.column_stack((self.objfun_iter, self.params_iter)),
                 columns=col_names)
 
-        # Model prediction with final parameters
-        self.y_model = []  # [model state units], one array per experiment
-        for ind in range(self.num_datasets):
-            y_data = self.y_data[ind]
-            if isinstance(y_data, dict):
-                y_data = np.hstack(list(y_data.values()))
-
-            y_model = self.resid_runs[ind] + y_data  # [model state units]
-            self.y_model.append(y_model)
+        # Model prediction with final parameters, [model state units], one
+        # array per experiment; see _model_predictions.
+        self.y_model = self._model_predictions()
 
         covar_params = self.get_covariance()
 
@@ -5362,3 +5406,64 @@ class MultipleCurveResolution(ParameterEstimation):
         reported['fun_penalty'] = fun[num_data:]
         reported['jac_penalty'] = jac[:, num_data:]
         return reported
+
+    def _model_predictions(self) -> list:
+        """Return the curve-resolved predictions of the last evaluation.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            One array per experiment in ``x_data`` order, shape ``(n_times,
+            n_lambda + n_non)``, in the column layout of ``resid_runs``: the
+            predicted absorbance ``C eps`` [-] of every spectral channel
+            (``y_runs``), then the model value of every non-spectral state
+            in its model unit. Entries without an observation are NaN, as
+            in ``ParameterEstimation``.
+
+        Notes
+        -----
+        Spectral residuals are data minus prediction, so ``resid_runs +
+        y_data`` would give ``2 data - prediction`` for them. Non-spectral
+        residuals are model minus data, so their predictions are
+        ``resid_runs + y_data`` as in ``ParameterEstimation``.
+        """
+        # [-] spectral, [model state units] non-spectral; one array per
+        # experiment
+        predictions = []
+        for ind in range(self.num_datasets):
+            # [-], (n_times, n_lambda), unobserved rows set to NaN below
+            spectra_pred = np.array(self.y_runs[ind], dtype=float)
+            x_mask = self.x_masks[ind]
+            if isinstance(x_mask, dict):
+                spectra_pred[~np.asarray(x_mask['spectra'], dtype=bool)] = (
+                    np.nan)
+            # Blocks: spectral [-], then non-spectral [model state units]
+            columns = [spectra_pred]
+            if self.has_non:
+                num_lambda = spectra_pred.shape[1]  # [-]
+                # [model units], model minus data plus data; NaN where the
+                # observation is NaN-padded (unobserved).
+                columns.append(self.resid_runs[ind][:, num_lambda:]
+                               + self.y_data[ind]['non_spectra'])
+            predictions.append(np.hstack(columns))
+
+        return predictions
+
+    def _residual_signs(self, ind: int) -> np.ndarray:
+        """Return the sign convention of one experiment's residual columns.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``x_data`` order.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(n_lambda + n_non,)`` [-]: -1 for every spectral channel
+            (data minus prediction), +1 for every non-spectral state (model
+            minus data), in the column order of ``resid_runs``.
+        """
+        num_lambda = self.spectra_tot.shape[1]  # [-]
+        num_non = len(self.measured_ind.get('non_spectra', []))  # [-]
+        return np.concatenate((-np.ones(num_lambda), np.ones(num_non)))

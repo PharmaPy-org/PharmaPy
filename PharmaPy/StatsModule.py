@@ -446,7 +446,11 @@ class StatisticsClass:
         Notes
         -----
         Each state's resampling pool holds only its observed residuals
-        (model minus data, in that state's unit) of one experiment.
+        (model minus data, in that state's unit) of one experiment. Columns
+        stored as data minus model, such as the spectral channels of
+        ``MultipleCurveResolution``, are negated first (the estimator's
+        ``_residual_signs``), so every generated entry is the fitted value
+        minus a drawn model-minus-data residual.
         Unobserved entries have zero residual by construction; drawing them
         would add phantom zero errors and shrink the bootstrap spread. Each
         state is resampled independently, so correlations between
@@ -482,8 +486,10 @@ class StatisticsClass:
 
         y_boot = []
         for ind in range(self.inst.num_datasets):  # datasets
-            # (n_measured, n_times) [measured-state units]
-            residual = self.residuals[ind].T
+            # (n_measured, n_times) [measured-state units], model minus data
+            signs = self.inst._residual_signs(ind)  # [-] or None
+            residual = (self.residuals[ind] if signs is None
+                        else self.residuals[ind] * signs).T
             y_nominal = self.y_nominal[ind].T
             observed_by_state = self._observed_columns(ind).T
             # (n_measured, n_times) [measured-state units] or None per state
