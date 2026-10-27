@@ -61,6 +61,9 @@ _SCALAR_PROPERTY_DESCRIPTIONS = {
     'henry_constant': 'Henry constant',
     'surf_tension': 'surface tension',
     'visc_gas': 'vapor viscosity',
+    'ri': 'UNIQUAC volume parameter',
+    'qi': 'UNIQUAC surface-area parameter',
+    'qip': 'UNIQUAC residual surface-area parameter',
 }
 _SCALAR_PROPERTY_UNITS = {
     'rho_liq': '[kg/m**3]',
@@ -69,6 +72,9 @@ _SCALAR_PROPERTY_UNITS = {
     'henry_constant': '([Pa], liquid mole-fraction basis)',
     'surf_tension': '[N/m]',
     'visc_gas': '[Pa*s]',
+    'ri': '[-]',
+    'qi': '[-]',
+    'qip': '[-]',
 }
 
 # Species-record keys of a property database that PharmaPy reads, with the
@@ -2265,7 +2271,11 @@ class ThermoPhysicalManager:
             ratios [any basis], with exactly the shape of ``x_liq``
             (``(num_species,)`` or ``(num_points, num_species)``); they
             decide which species need data (see Raises) in place of
-            ``x_liq``, which still sets the activity coefficients. For
+            ``x_liq``. A non-ideal activity model is then evaluated on the
+            species with a nonzero weight in some row only, with their
+            ``x_liq`` entries, as if the others were absent from the
+            liquid; the others get the neutral coefficient 1 and need no
+            activity parameters (see ``_activity_coefficients``). For
             example, the evaporators pass their structural presence mask
             (``PharmaPy.Presence.SpeciesPresence``), with the batch
             ``Evaporator``'s excluded supercritical species set to zero,
@@ -2305,7 +2315,12 @@ class ThermoPhysicalManager:
             ``AttributeError`` there; with ``weights``, only species with a
             nonzero weight in such a row count. Also raised, whatever the
             fractions, if ``p_vap`` is stored as one scalar per species
-            instead of Antoine coefficients (see ``_property_rows``).
+            instead of Antoine coefficients (see ``_property_rows``). With
+            ``weights`` and ``gamma_model='UNIQUAC'``, also if a weighted
+            species lacks ``ri``, ``qi`` or (when the database has the key)
+            ``qip``. UNIFAC group counts are taken as given: no
+            species-named check applies to them, and invalid counts of a
+            weighted species give non-finite ratios.
 
         Notes
         -----
@@ -2468,29 +2483,110 @@ class ThermoPhysicalManager:
             'their VLE ratio',
             remedy=' or evaluate at or below t_crit')
 
-        if gamma_model == 'ideal':
-            gamma = np.ones_like(x_liq)
-        elif gamma_model == 'UNIFAC':
-            gamma = self.UNIFAC_DMD(x_liq, temp)
-        elif gamma_model == 'UNIQUAC':
-            gamma = self.UNIQUAC(x_liq, temp)
+        # With weights, the activity model sees only the weighted species.
+        gamma = self._activity_coefficients(gamma_model, x_liq, temp,
+                                            weights)  # [-]
 
         k_vals = p_vap * gamma / pres
 
         return k_vals
 
+    def _activity_coefficients(self, gamma_model: str, x_liq: np.ndarray,
+                               temp: Union[float, np.ndarray],
+                               weights: Optional[np.ndarray] = None
+                               ) -> np.ndarray:
+        """Evaluate liquid activity coefficients, on weighted species only.
+
+        Parameters
+        ----------
+        gamma_model : {'ideal', 'UNIFAC', 'UNIQUAC'}
+            Validated activity model.
+        x_liq : ndarray
+            Liquid mole fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
+        temp : float or ndarray
+            Temperature [K], scalar or paired ``(num_points,)`` profile.
+        weights : ndarray, optional
+            Presence weights [-] with the shape of ``x_liq`` (validated by
+            the caller). Without them every species enters the model.
+
+        Returns
+        -------
+        ndarray
+            Activity coefficients [-] with the shape of ``x_liq``; with
+            ``weights``, exactly 1 for a species whose weight is zero in
+            every row.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. With
+            ``weights`` and UNIQUAC, if a weighted species lacks ``ri``,
+            ``qi`` or, when the database has the key, ``qip``.
+
+        Notes
+        -----
+        With ``weights``, the model is evaluated on the species with a
+        nonzero weight in some row, as if the others were absent from the
+        liquid: their fractions are left out (not renormalized) and their
+        parameters, including UNIQUAC interaction rows and columns or
+        UNIFAC group counts, are not used, so they need none (issue #425).
+        Their neutral coefficient of 1 is a placeholder that callers do not
+        use. Callers give zero weight only to species whose fraction is
+        zero or solver round-off of zero, so the present species'
+        coefficients equal those of the mixture without the absent ones.
+        """
+        if gamma_model == 'ideal':
+            return np.ones_like(x_liq)
+
+        if weights is None:
+            if gamma_model == 'UNIFAC':
+                return self.UNIFAC_DMD(x_liq, temp)
+
+            return self.UNIQUAC(x_liq, temp)
+
+        x_liq = np.asarray(x_liq, dtype=float)  # [-]
+        idx = np.flatnonzero(self._needed_by_weights(
+            weights, len(self.name_species)))  # weighted species
+        gamma = np.ones(x_liq.shape)  # [-], neutral for absent species
+        if idx.size == 0:
+            return gamma
+
+        if gamma_model == 'UNIQUAC':
+            parameters = ('ri', 'qi') + (('qip',) if hasattr(self, 'qip')
+                                         else ())
+            for prop_name in parameters:
+                self._check_species_rows(
+                    prop_name, self._scalar_values(prop_name)[idx], idx,
+                    np.ones(idx.size, dtype=bool),
+                    'carry a nonzero weight, so their UNIQUAC activity '
+                    'coefficient')
+            gamma[..., idx] = self.UNIQUAC(x_liq[..., idx], temp,
+                                           idx=idx)  # [-]
+        else:
+            gamma[..., idx] = self.UNIFAC_DMD(x_liq[..., idx], temp,
+                                              idx=idx)  # [-]
+
+        return gamma
+
     def UNIQUAC(self, mole_frac: Optional[np.ndarray] = None,
-                temp: Optional[Union[float, np.ndarray]] = None) -> np.ndarray:
+                temp: Optional[Union[float, np.ndarray]] = None,
+                idx: Optional[Sequence[int]] = None) -> np.ndarray:
         r""" Calculate activity coefficients :math:`\gamma_i` using UNIQUAC model.
 
         Parameters
         ------------
         mole_frac : ndarray
             Liquid mole fractions [-], shape (num_species,) or
-            (num_points, num_species). Required by the model.
+            (num_points, num_species). Required by the model. With ``idx``,
+            the fractions of the selected species only.
         temp : float or ndarray
             Temperature [K], scalar for one composition or a paired
             (num_points,) profile. Required by the model.
+        idx : sequence of int, optional
+            Database indices of the species that form the mixture, in
+            order; the others are left out as if absent, and their
+            parameters are not used. Every species when None.
         amk : ndarray
             n x n array containing interaction parameters [J/mol]:
                 component m (row) respect to component k (column):
@@ -2578,6 +2674,14 @@ class ThermoPhysicalManager:
         qi = self.qi
         qip = getattr(self, 'qip', self.qi)  # [-], local fallback leaves database fields unchanged
         amk = self.amk
+
+        if idx is not None:
+            # Only the selected species form the mixture (see idx).
+            idx = np.asarray(idx, dtype=int)
+            ri = np.asarray(ri, dtype=float).ravel()[idx]  # [-]
+            qi = np.asarray(qi, dtype=float).ravel()[idx]  # [-]
+            qip = np.asarray(qip, dtype=float).ravel()[idx]  # [-]
+            amk = np.asarray(amk, dtype=float)[np.ix_(idx, idx)]  # [J/mol]
 
         x_liq = mole_frac
 
@@ -2728,44 +2832,52 @@ class ThermoPhysicalManager:
 
         return [r_k, q_k, a_matrix, b_matrix, c_matrix]
 
-    def UNIFAC_DMD(self, x_i=None, temp=None):
-
-        """ Calculate activity coefficients of a liquid mixture using the UNIFAC
-        group-contribution method
+    def UNIFAC_DMD(self, x_i: Optional[np.ndarray] = None,
+                   temp: Optional[Union[float, np.ndarray]] = None,
+                   idx: Optional[Sequence[int]] = None) -> np.ndarray:
+        """Calculate liquid activity coefficients with UNIFAC-Dortmund.
 
         Parameters
         ----------
-        x_i : array
-            liquid molar fractions
-        temp : float or array
-            temperature (K)
-        r_k : array
-            surface area parameter for constituent groups 1,..., k,..., K
-        q_k : array
-            volume parameters for constituent groups 1,..., k,..., K
-        a_inter : array
-            K x K array with the interaction parameter between gropus m and n
-            at the (m, n) position. Note that a_inter[k, k] = 0
-        v_matrix : array
-            N x K array. Each row contains the number of occurrences of the group k
-            in the molecule i (i = 1,...,N)
-        dmd : bool (default: False)
-            if True, use the Dortmund variation of UNIFAC [1], which implies that
-            b_inter and c_inter cannot be None (N x K arrays like a_inter)
+        x_i : ndarray, optional
+            Liquid mole fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``; with ``idx``, of the selected
+            species only, in ``idx`` order. The phase composition when None.
+        temp : float or ndarray, optional
+            Temperature [K]: a scalar for one composition, or shape
+            ``(num_points,)`` paired row by row with a two-dimensional
+            ``x_i``. The phase temperature when None.
+        idx : sequence of int, optional
+            Database indices of the species that form the mixture, in
+            order; the group counts of the others are not used, as if they
+            were absent. Every species when None.
 
         Returns
         -------
+        ndarray
+            Activity coefficients [-] with the shape of ``x_i`` (squeezed
+            to ``(num_selected,)`` for a one-dimensional ``x_i``).
 
-        gamma : array
-            activity coefficients for the mixture(s). It has the same size as x_i
+        Raises
+        ------
+        AttributeError
+            If the database has no UNIFAC groups (``unifac_groups`` and
+            ``vk`` in its ``interaction`` record), so the group parameters
+            below were never set.
 
         Notes
         -----
-        * This implementation is based on [2] for pure UNIFAC (dmd=False). The
-          implemented thermodynamic models (pure UNIFAC and UNIFAC-Dortmund)
-          are described in detail in [1] and [2]
-        * If x_i is multi-dimensional with shape P x N, then temp must be a
-          P-sized, 1-D array
+        The model uses instance attributes set from the database at
+        construction (``get_UNIFACParams``): group volume and surface
+        parameters ``Rk`` and ``Qk`` [-], shape ``(num_groups,)``; group
+        interaction coefficients ``a_unifac`` [K], ``b_unifac`` [-] and
+        ``c_unifac`` [1/K], shape ``(num_groups, num_groups)``, with
+        ``psi_mn = exp(-(a_mn + b_mn T + c_mn T**2) / T)``; and the group
+        counts ``vk`` [-], shape ``(num_species, num_groups)``, one row per
+        species. ``ln gamma_i`` is the sum of the Dortmund combinatorial
+        term (with ``r_i**(3/4)``) and the residual group term [1], [2].
+        Group counts are taken as given; invalid counts of a selected
+        species give non-finite coefficients.
 
         References
         ----------
@@ -2784,6 +2896,24 @@ class ThermoPhysicalManager:
             temp = self.temp
 
         def get_gamma_log(psi_matrix, theta_vec, q_vec):
+            """Return the group residual log-activity coefficients.
+
+            Parameters
+            ----------
+            psi_matrix : ndarray
+                Group interaction factors ``psi_mn`` [-], shape
+                ``(num_groups, num_groups)``.
+            theta_vec : ndarray
+                Group surface-area fractions [-], shape ``(num_groups,)``.
+            q_vec : ndarray
+                Group surface parameters ``Qk`` [-], shape
+                ``(num_groups,)``.
+
+            Returns
+            -------
+            ndarray
+                ``ln Gamma_k`` [-], shape ``(num_groups,)``.
+            """
             psi_divided = psi_matrix / np.dot(psi_matrix.T, theta_vec)
 
             log_gamma = q_vec * (1 - np.log(np.dot(psi_matrix.T, theta_vec)) -
@@ -2798,6 +2928,9 @@ class ThermoPhysicalManager:
         q_k = self.Qk
 
         v_matrix = self.vk
+        if idx is not None:
+            # Only the selected species form the mixture (see idx).
+            v_matrix = np.asarray(v_matrix)[np.asarray(idx, dtype=int)]  # [-]
 
         num_groups = len(a_inter)
 

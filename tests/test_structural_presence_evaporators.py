@@ -95,6 +95,21 @@ LIQUID_VOLUME = 0.2  # [m**3], partly filled drum
 UTILITY_TEMP = 450.0  # [K], heating utility above both bubble points
 FEED_FLOW = 2.0  # [mol/s]
 REFLUX_RATIO = 0.3  # [-], a partial reflux exercising the bubble-point path
+FEED_WINDOW = (1.0, 2.5)  # [s], a feed of api that starts and stops
+FLOW_START = 10.0  # [s], a controller's feed starts after the tests' times
+# Replay fixture: api with t_crit between the initial and a cooler drum
+# temperature, no Henry constant; data in the units of API_FULL.
+API_REPLAY = {"mw": 300.0, "rho_liq": 1300.0, "t_crit": 375.0,
+              "cp_liq": [100.0], "p_vap": [8.0, 1700.0, -40.0],
+              "delta_hvap": 2.0e4, "tref_hvap": 300.0}
+REPLAY_TEMP = 380.0  # [K], initial bubble point, above api's t_crit
+COOL_TEMP = 355.0  # [K], below api's t_crit
+LATE_FEED_TIME = 10.0  # [s], api enters the feed
+REPLAY_LATE_FEED = np.array([0.5, 0.4, 0.1])  # [-], light, heavy, api
+# A cold, large feed that cools the drum below api's t_crit by
+# LATE_FEED_TIME (about 370 K there in this fixture).
+REPLAY_FEED_TEMP = 300.0  # [K]
+REPLAY_FEED_FLOW = 20.0  # [mol/s]
 # Flash: at 400 K the light species' Antoine pressure is about 6.8 kPa and
 # the heavy one's 1.0 kPa, so a 3 kPa drum splits the feed into two phases.
 FLASH_TEMP = 400.0  # [K]
@@ -218,6 +233,39 @@ def test_presence_record_latches_and_shapes_weights():
         [0.0, 0.0, 0.0])
     with pytest.raises(ValueError, match=r"one entry per species \(3\)"):
         presence.record(np.ones(2))
+
+
+@pytest.mark.unit
+def test_presence_record_keeps_the_time_each_species_entered():
+    """The presence that applied at a time excludes later entries.
+
+    The charge counts from the start; api enters with the second of two
+    feed rows, at 2 s, and keeps its earliest time when recorded again.
+    """
+    presence = SpeciesPresence(3)
+    presence.record(np.array([0.4, 0.6, 0.0]))  # [-], charge
+    presence.record(np.array([[0.4, 0.6, 0.0], [0.4, 0.5, 0.1]]),
+                    time=np.array([1.0, 2.0]))  # [s], one per row
+    presence.record(np.array([0.0, 0.0, 1.0]), time=5.0)  # [s], later
+    late = SpeciesPresence(2)
+    late.record(np.array([0.0, 1.0]), time=5.0)  # [s], recorded first
+    late.record(np.array([0.0, 1.0]), time=2.0)  # [s], earlier feed
+    assert late.mask_at(3.0)[1] and not late.mask_at(1.0)[1]
+
+    np.testing.assert_array_equal(presence.mask_at(1.5), [True, True, False])
+    np.testing.assert_array_equal(presence.mask_at(2.0), [True, True, True])
+    np.testing.assert_array_equal(presence.mask_at(np.array([0.0, 3.0])),
+                                  [[True, True, False], [True, True, True]])
+    np.testing.assert_array_equal(
+        presence.weights(np.zeros((2, 3)), used=[True, False, True],
+                         time=np.array([1.0, 3.0])),
+        [[1.0, 0.0, 0.0], [1.0, 0.0, 1.0]])
+    np.testing.assert_array_equal(
+        presence.project(np.full((2, 3), 0.5), time=np.array([1.0, 3.0])),
+        [[0.5, 0.5, 0.0], [0.5, 0.5, 0.5]])
+    np.testing.assert_array_equal(presence.mask, [True, True, True])
+    with pytest.raises(ValueError, match="one entry per row"):
+        presence.record(np.ones((2, 3)), time=np.ones(3))
 
 
 # ------------------------------------------------------------- flash units
@@ -703,27 +751,34 @@ def test_evaporator_still_requires_data_of_a_charged_species(paths, cls,
 @pytest.mark.unit
 @pytest.mark.parametrize("cls", [Evaporator, ContinuousEvaporator])
 def test_species_fed_later_is_present_from_its_first_feed(paths, cls):
-    """A feed that adds ``api`` at 1 s makes it present from then on.
+    """A feed of api from 1 s to 2.5 s makes it present from its feed on.
 
-    Before the feed changes, residuals with round-off ``api`` fractions
-    evaluate; once a feed evaluation has supplied ``api``, the same
-    residual needs its data, also back at time zero (presence is latched).
+    Before the feed adds api, residuals with round-off ``api`` fractions
+    evaluate. Once a feed evaluation at 2 s has supplied api, residuals at
+    and after that time need its data, also at 3 s, after its feed stopped
+    (presence is latched); a residual at 0.5 s, before api was fed, still
+    needs none, so that a replay of earlier rows uses the presence of their
+    time.
     """
     feed = LiquidStream(paths["bare"], temp=DRUM_TEMP, pres=DRUM_PRESSURE,
                         mole_flow=FEED_FLOW, mole_frac=CHARGE)
     control = DynamicInput()
     control.add_variable(
-        "mole_frac", lambda time: CHARGE if time < 1.0 else WITH_API)
+        "mole_frac",
+        lambda time: WITH_API if FEED_WINDOW[0] <= time < FEED_WINDOW[1]
+        else CHARGE)
     feed.DynamicInlet = control
     unit = _evaporator(cls, paths["bare"], inlet=feed)
     states, sdot = _initialize(unit)
     perturbed = _with_round_off(unit, states)
 
     unit.unit_model(0.5, perturbed, sdot, None)
-    with pytest.raises(MissingPropertyError, match=r"\['api'\]"):
-        unit.unit_model(2.0, perturbed, sdot, None)
-    with pytest.raises(MissingPropertyError, match=r"\['api'\]"):
-        unit.unit_model(0.5, perturbed, sdot, None)
+    for time in (2.0, 3.0):  # [s], fed, then latched after the feed
+        with pytest.raises(MissingPropertyError, match=r"\['api'\]"):
+            unit.unit_model(time, perturbed, sdot, None)
+    residual = unit.unit_model(0.5, perturbed, sdot, None)
+
+    assert np.all(np.isfinite(residual))
 
 
 @pytest.mark.unit
@@ -771,6 +826,214 @@ def test_initial_feed_uses_the_evaluated_composition(paths, cls):
 
     _assert_same_evaluation(results["constructible"], results["full"])
     assert results["constructible"]["published"][2] == 0.0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cls", [Evaporator, ContinuousEvaporator])
+def test_controller_without_flow_adds_no_species(paths, cls):
+    """A controller's zero flow given as a NumPy array feeds nothing.
+
+    The controller returns ``np.where(time < 10, 0, FEED_FLOW)``, a 0-d
+    array at a scalar time, for an inlet that carries 10 % api. The
+    evaluation equals that of the full database; earlier the batch
+    evaporator took a 0-d flow for a profile and evaluated the inlet
+    enthalpy of the non-flowing api, needing its ``cp_liq``.
+    """
+    results = {}
+    for kind in ("full", "constructible"):
+        inlet = LiquidStream(paths[kind], temp=DRUM_TEMP, pres=DRUM_PRESSURE,
+                             mole_flow=FEED_FLOW, mole_frac=WITH_API)
+        control = DynamicInput()
+        control.add_variable(
+            "mole_flow",
+            lambda time: np.where(np.asarray(time) < FLOW_START, 0.0,
+                                  FEED_FLOW))
+        inlet.DynamicInlet = control
+        unit = _evaporator(cls, paths[kind], inlet=inlet)
+        assert isinstance(unit.get_inputs(0.0)["Inlet"]["mole_flow"],
+                          np.ndarray)
+        results[kind] = _evaluate(unit, 0.0)
+
+    _assert_same_evaluation(results["constructible"], results["full"])
+    assert results["constructible"]["published"][2] == 0.0
+
+
+def _replay_charge():
+    """Return the charge whose ideal bubble point is ``REPLAY_TEMP``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Light, heavy and api mole fractions [-], from Raoult's law with the
+        conftest Antoine coefficients at ``DRUM_PRESSURE``:
+        ``x_light = (P - p_heavy) / (p_light - p_heavy)``.
+    """
+    p_sat = [10 ** (record["p_vap"][0]
+                    - record["p_vap"][1] / (REPLAY_TEMP + record["p_vap"][2]))
+             for record in (THERMO_TWO_SPECIES["light"],
+                            THERMO_TWO_SPECIES["heavy"])]  # [Pa]
+    x_light = (DRUM_PRESSURE - p_sat[1]) / (p_sat[0] - p_sat[1])  # [-]
+    return np.array([x_light, 1.0 - x_light, 0.0])
+
+
+def _replay_evaporator(cls, path, feed_temp=DRUM_TEMP, feed_flow=FEED_FLOW):
+    """Build a unit charged at ``REPLAY_TEMP`` that is fed api later.
+
+    Parameters
+    ----------
+    cls : type
+        ``Evaporator`` or ``ContinuousEvaporator``.
+    path : str
+        Database with ``API_REPLAY``.
+    feed_temp : float, optional
+        Feed temperature [K].
+    feed_flow : float, optional
+        Feed flow [mol/s].
+
+    Returns
+    -------
+    Evaporator or ContinuousEvaporator
+        Unit fed the charge composition before ``LATE_FEED_TIME`` [s] and
+        ``REPLAY_LATE_FEED`` from then on.
+    """
+    charge = _replay_charge()  # [-]
+    feed = LiquidStream(path, temp=feed_temp, pres=DRUM_PRESSURE,
+                        mole_flow=feed_flow, mole_frac=charge)
+    control = DynamicInput()
+    control.add_variable(
+        "mole_frac",
+        lambda time: np.where(
+            np.asarray(time)[..., np.newaxis] < LATE_FEED_TIME, charge,
+            REPLAY_LATE_FEED))
+    feed.DynamicInlet = control
+    return _evaporator(cls, path, charge=charge, inlet=feed)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cls", [Evaporator, ContinuousEvaporator])
+@pytest.mark.parametrize("controller", [False, True],
+                         ids=["static", "controller"])
+def test_size_one_flow_is_a_scalar_flow(paths, cls, controller):
+    """A feed flow of shape (1,) gives the flows and heat of a scalar one.
+
+    The flow comes from a stream built with ``mole_flow=np.array([...])``
+    or a controller returning such an array. The outlet flows, liquid
+    volume and heat terms of ``unit_model`` (the path of the heat-duty
+    replay) equal those of the scalar flow, as on master; the presence
+    rules then took the flow for a one-row profile, and the continuous
+    evaporator rejected its feed weights.
+
+    Provisional scope: the units' initialization and full residual still
+    fail on (1,)-shaped flows, on master too, so this test takes the states
+    from the scalar twin and checks only the flows and heat terms. Blocked
+    by issue #520; once it is fixed, extend it to ``init_unit`` and
+    ``solve_unit`` compared with the scalar flow.
+    """
+    def build(flow, with_controller):
+        """Return a unit fed ``flow`` [mol/s] of the charge composition."""
+        inlet = LiquidStream(paths["full"], temp=DRUM_TEMP,
+                             pres=DRUM_PRESSURE,
+                             mole_flow=FEED_FLOW if with_controller else flow,
+                             mole_frac=CHARGE)
+        if with_controller:
+            control = DynamicInput()
+            control.add_variable("mole_flow", lambda time: flow)
+            inlet.DynamicInlet = control
+        return _evaporator(cls, paths["full"], inlet=inlet)
+
+    def terms(unit, states):
+        """Return flows [mol/s], volume [m**3] and heat [J/s] as floats."""
+        if cls is Evaporator:
+            (flow_vap, vol_liq), heat = unit.unit_model(0.0, states, None,
+                                                        None)
+            values = (flow_vap, vol_liq, heat)
+        else:
+            flows, energy = unit.unit_model(0.0, states, None, None,
+                                            enrgy_bce=True)
+            values = flows + energy
+        return np.array([np.ravel(value)[0] for value in values])
+
+    scalar = build(FEED_FLOW, False)
+    states, _ = _initialize(scalar)
+    array_unit = build(np.array([FEED_FLOW]), controller)
+    if cls is Evaporator:
+        array_unit.is_supercritic = scalar.is_supercritic
+    assert np.shape(array_unit.get_inputs(0.0)["Inlet"]["mole_flow"]) == (1,)
+
+    _assert_allclose(terms(array_unit, states), terms(scalar, states),
+                     rtol=ROUNDING, atol=0)
+
+
+def _constant_control_evaporator(cls, path):
+    """Build a unit whose feed controls ignore the time.
+
+    Parameters
+    ----------
+    cls : type
+        ``Evaporator`` or ``ContinuousEvaporator``.
+    path : str
+        Database path.
+
+    Returns
+    -------
+    Evaporator or ContinuousEvaporator
+        Unit fed ``FEED_FLOW`` [mol/s] of ``CHARGE`` [-] through controls
+        that return constants, so a time profile evaluates to one row.
+    """
+    feed = LiquidStream(path, temp=DRUM_TEMP, pres=DRUM_PRESSURE,
+                        mole_flow=FEED_FLOW, mole_frac=CHARGE)
+    control = DynamicInput()
+    control.add_variable("mole_flow", lambda time: FEED_FLOW)
+    control.add_variable("mole_frac", lambda time: CHARGE)
+    feed.DynamicInlet = control
+    return _evaporator(cls, path, inlet=feed)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cls", [Evaporator, ContinuousEvaporator])
+def test_constant_controls_publish_a_multi_row_segment(paths, cls):
+    """A segment fed by time-independent controls is published.
+
+    For a time profile such controls give one feed row; the presence
+    record latches it at the earliest time. Earlier the continuous
+    evaporator rejected one row for several times and lost the segment.
+    """
+    unit = _constant_control_evaporator(cls, paths["full"])
+    states, _ = _initialize(unit)
+    times = np.array([0.0, 0.5, 1.0])  # [s]
+
+    unit.retrieve_results(times, np.tile(states, (times.size, 1)))
+
+    assert unit.profiles_runs[-1]["time"].size == times.size
+    assert np.all(np.isfinite(unit.heat_profile))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("cls", [Evaporator, ContinuousEvaporator])
+def test_heat_duty_replay_uses_the_presence_of_each_row(tmp_path, cls):
+    """Rows before a species was fed are replayed without it.
+
+    The early rows are at ``REPLAY_TEMP``, above api's t_crit, where it
+    would need a Henry constant. A later feed evaluation, in a drum cooled
+    to ``COOL_TEMP`` where api's data suffice, latches api. Replaying the
+    early rows then gives the same heat profile as before; earlier they
+    were weighted with the final presence and raised for api's
+    ``henry_constant``.
+    """
+    unit = _replay_evaporator(cls, _database(tmp_path, API_REPLAY,
+                                             "replay.json"))
+    states, sdot = _initialize(unit)
+    times = np.array([0.0, 1.0])  # [s], before api is fed
+    rows = np.tile(states, (2, 1))  # units in states_di
+    unit.get_heat_duty(times, rows)
+    before = unit.heat_profile.copy()  # [J/s]
+    cool = states.copy()
+    cool[-1] = COOL_TEMP  # [K]
+    unit.unit_model(LATE_FEED_TIME, cool, sdot, None)
+
+    unit.get_heat_duty(times, rows)
+
+    _assert_allclose(unit.heat_profile, before, rtol=ROUNDING, atol=0)
 
 
 @pytest.mark.unit
@@ -1134,6 +1397,149 @@ def test_bubble_point_accepts_lists(kernel_phases):
     _assert_allclose(result[1], expected[1], rtol=ROUNDING, atol=0)
 
 
+# Synthetic UNIQUAC parameters [-] of light and heavy, and interaction
+# energies amk [J/mol] in the order light, api, heavy; asymmetric so that
+# the activity coefficients differ from one and from each other.
+UNIQUAC_PARAMETERS = {"light": {"ri": 0.92, "qi": 1.40, "qip": 1.00},
+                      "heavy": {"ri": 3.45, "qi": 3.10, "qip": 2.80}}
+UNIQUAC_AMK = np.array([[0.0, -150.0, 400.0],
+                        [600.0, 0.0, 250.0],
+                        [-200.0, 350.0, 0.0]])  # [J/mol]
+# UNIFAC-Dortmund groups (main, secondary) CH3, CH2 and H2O of the shipped
+# tables, and group counts per species in the order light, api, heavy.
+UNIFAC_GROUPS = [[1, 1], [1, 2], [7, 16]]
+# api's row is NaN, counts that no mixture containing it can evaluate.
+UNIFAC_COUNTS = [[0, 0, 1], [np.nan] * 3, [2, 3, 0]]
+KERNEL_PRESENT = [0, 2]  # light and heavy in the kernel order
+
+
+def _activity_database(tmp_path, model, with_api, name, api=None):
+    """Write a light/heavy (and api) database with activity parameters.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Directory for the JSON file.
+    model : {'UNIQUAC', 'UNIFAC'}
+        Activity model whose parameters are written.
+    with_api : bool
+        Include api, in the kernel order light, api, heavy.
+    name : str
+        File name.
+    api : dict, optional
+        Record of api; ``API_CONSTRUCTIBLE``, without activity parameters,
+        when None.
+
+    Returns
+    -------
+    str
+        Database path; without api, the interaction data are restricted to
+        light and heavy.
+    """
+    records = {"light": dict(THERMO_TWO_SPECIES["light"]),
+               "heavy": dict(THERMO_TWO_SPECIES["heavy"])}
+    species = KERNEL_ORDER if with_api else ("light", "heavy")
+    keep = [0, 1, 2] if with_api else KERNEL_PRESENT
+    if model == "UNIQUAC":
+        for key in ("light", "heavy"):
+            records[key].update(UNIQUAC_PARAMETERS[key])
+        interaction = {"amk": UNIQUAC_AMK[np.ix_(keep, keep)].tolist()}
+    else:
+        interaction = {"unifac_groups": UNIFAC_GROUPS,
+                       "vk": [UNIFAC_COUNTS[ind] for ind in keep]}
+    records["api"] = dict(API_CONSTRUCTIBLE if api is None else api)
+    database = {key: records[key] for key in species}
+    database["interaction"] = interaction
+    path = tmp_path / name
+    path.write_text(json.dumps(database))
+    return str(path)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("model", ["UNIQUAC", "UNIFAC"])
+def test_activity_model_leaves_out_zero_weight_species(tmp_path, model):
+    """Weighted activity coefficients equal those without the species.
+
+    api has no activity parameters (UNIQUAC) or NaN group counts
+    (UNIFAC) and a round-off fraction; with zero weight it gets the
+    neutral 1, and light and heavy get exactly the coefficients of the
+    database without api. Unweighted, the earlier rule stays: every
+    species enters, and the coefficients turn non-finite, so a full-mixture
+    evaluation indexed afterwards could not give the reference.
+    """
+    liquid = LiquidPhase(
+        _activity_database(tmp_path, model, True, "with.json"),
+        temp=KERNEL_TEMP, pres=DRUM_PRESSURE, moles=1.0, mole_frac=KERNEL_X)
+    reference = LiquidPhase(
+        _activity_database(tmp_path, model, False, "without.json"),
+        temp=KERNEL_TEMP, pres=DRUM_PRESSURE, moles=1.0,
+        mole_frac=KERNEL_X[KERNEL_PRESENT])
+
+    gamma = liquid.getActivityCoeff(model, mole_frac=KERNEL_X_ROUND_OFF,
+                                    temp=KERNEL_TEMP,
+                                    weights=KERNEL_WEIGHTS)  # [-]
+    expected = reference.getActivityCoeff(model)  # [-]
+
+    _assert_allclose(gamma[KERNEL_PRESENT], expected, rtol=ROUNDING, atol=0)
+    assert gamma[1] == 1.0
+    assert np.all(np.abs(expected - 1.0) > FLASH_TOL)  # non-ideal fixture
+    ratios = liquid.getKeqVLE(KERNEL_TEMP, DRUM_PRESSURE, KERNEL_X_ROUND_OFF,
+                              gamma_model=model,
+                              weights=KERNEL_WEIGHTS)  # [-]
+    _assert_allclose(ratios[KERNEL_PRESENT],
+                     reference.getKeqVLE(KERNEL_TEMP, DRUM_PRESSURE,
+                                         gamma_model=model),
+                     rtol=ROUNDING, atol=0)
+    assert not np.all(np.isfinite(liquid.getActivityCoeff(
+        model, mole_frac=KERNEL_X_ROUND_OFF, temp=KERNEL_TEMP)))
+
+
+@pytest.mark.unit
+def test_weighted_species_needs_its_uniquac_parameters(tmp_path):
+    """A weighted species without UNIQUAC data is reported by name."""
+    liquid = LiquidPhase(
+        _activity_database(tmp_path, "UNIQUAC", True, "with.json"),
+        temp=KERNEL_TEMP, pres=DRUM_PRESSURE, moles=1.0, mole_frac=KERNEL_X)
+
+    with pytest.raises(MissingPropertyError,
+                       match=r"^Species \['api'\] carry a nonzero weight, "
+                             r"so their UNIQUAC activity coefficient.*'ri'"):
+        liquid.getActivityCoeff("UNIQUAC", mole_frac=KERNEL_X,
+                                temp=KERNEL_TEMP, weights=np.ones(3))
+    with pytest.raises(ValueError, match="weights must have"):
+        liquid.getActivityCoeff("UNIQUAC", weights=np.ones(2))
+
+
+@pytest.mark.unit
+def test_uniquac_flash_needs_no_activity_data_for_an_absent_species(
+        tmp_path):
+    """An absent api without UNIQUAC data leaves the flash unchanged.
+
+    The reference is the same feed in the database without api. Earlier
+    api's NaN parameters made every activity coefficient NaN and the
+    flash failed to converge.
+    """
+    products = []
+    for with_api, fractions in ((True, np.array([0.4, 0.0, 0.6])),
+                                (False, np.array([0.4, 0.6]))):
+        path = _activity_database(tmp_path, "UNIQUAC", with_api,
+                                  f"flash_{with_api}.json")
+        flash = IsothermalFlash(temp_drum=FLASH_TEMP,
+                                pres_drum=FLASH_PRESSURE,
+                                gamma_method="UNIQUAC")
+        flash.Inlet = LiquidStream(path, temp=FLASH_TEMP, pres=101325.0,
+                                   mole_flow=1.0, mole_frac=fractions)
+        _, heat = flash.solve_unit()  # [W]
+        present = [0, 2] if with_api else [0, 1]
+        products.append(np.concatenate((
+            [flash.LiquidOut.mole_flow, flash.VaporOut.mole_flow, heat],
+            flash.LiquidOut.mole_frac[present],
+            flash.VaporOut.mole_frac[present])))
+
+    _assert_allclose(products[0], products[1], rtol=FLASH_TOL,
+                     atol=FLASH_TOL)
+
+
 # Two function evaluations cannot converge the steady solve.
 TOO_FEW_EVALUATIONS = {"maxfev": 2}
 
@@ -1441,5 +1847,143 @@ def test_failed_continuation_initialization_is_undone(paths):
     _, states = unit.solve_unit(SHORT_SEGMENT, verbose=False)
     _, fresh_states = fresh.solve_unit(SHORT_SEGMENT, verbose=False)
 
+    _assert_allclose(np.asarray(states)[-1], np.asarray(fresh_states)[-1],
+                     rtol=IDA_RTOL, atol=IDA_ATOL)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_continuous_solve_replays_rows_before_a_later_feed(tmp_path):
+    """Results of a solve whose feed adds api later are retrieved.
+
+    A cold feed (``REPLAY_FEED_TEMP``, ``REPLAY_FEED_FLOW``) cools the drum
+    from ``REPLAY_TEMP`` below api's t_crit before api enters at
+    ``LATE_FEED_TIME``, where its data suffice. The heat-duty replay of the
+    earlier, hotter rows does not need api's Henry constant; earlier the
+    rows were weighted with the final presence and retrieval raised after a
+    successful integration.
+    """
+    pytest.importorskip("assimulo")
+    unit = _replay_evaporator(
+        ContinuousEvaporator, _database(tmp_path, API_REPLAY, "replay.json"),
+        feed_temp=REPLAY_FEED_TEMP, feed_flow=REPLAY_FEED_FLOW)
+
+    time, states = unit.solve_unit(2 * LATE_FEED_TIME, verbose=False)
+
+    temps = np.asarray(states)[:, -1]  # [K]
+    assert temps[0] > API_REPLAY["t_crit"]
+    assert np.interp(LATE_FEED_TIME, time, temps) < API_REPLAY["t_crit"]
+    assert np.all(np.isfinite(unit.heat_profile))
+    assert unit.Liquid_1.mole_frac[2] > 0.0
+    # The published composition holds api at exactly zero before its feed,
+    # where the solver states carry its round-off, and keeps it after.
+    profile = unit.profiles_runs[-1]
+    early = np.asarray(time) < LATE_FEED_TIME
+    np.testing.assert_array_equal(profile["mole_frac"][early, 2], 0.0)
+    assert np.any(profile["x_liq"][early, 2] != 0.0)
+    assert np.all(profile["mole_frac"][~early, 2] > 0.0)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_failed_result_retrieval_publishes_nothing(tmp_path):
+    """A solve whose result retrieval raises keeps no results.
+
+    The integration of the replay fixture succeeds, but publishing it
+    raises: the condensation duty evaluates the bubble point of the
+    liquid, which holds api after ``LATE_FEED_TIME``, and its Newton
+    iterates pass api's t_crit without a Henry constant. Afterwards the
+    unit is as before the call (time, profiles, results, duties, phases),
+    and a shorter segment equals a fresh unit's; earlier the time, a
+    profile entry and the results of the failed segment stayed.
+    """
+    pytest.importorskip("assimulo")
+    path = _database(tmp_path, API_REPLAY, "replay.json")
+    unit, fresh = (_replay_evaporator(Evaporator, path,
+                                      feed_temp=REPLAY_FEED_TEMP,
+                                      feed_flow=REPLAY_FEED_FLOW)
+                   for _ in range(2))
+    before = [_phase_fingerprint(phase)
+              for phase in (unit.Liquid_1, unit.Vapor_1)]
+
+    with pytest.raises(MissingPropertyError,
+                       match=r"\['api'\].*'henry_constant'"):
+        unit.solve_unit(2 * LATE_FEED_TIME, verbose=False)
+
+    assert unit.elapsed_time == 0 and unit.profiles_runs == []
+    assert unit.outputs is None and not hasattr(unit, "result")
+    _assert_allclose(unit.heat_duty, np.zeros(2), rtol=0, atol=0)
+    for phase, fingerprint in zip((unit.Liquid_1, unit.Vapor_1), before):
+        _assert_allclose(_phase_fingerprint(phase), fingerprint,
+                         rtol=ROUNDING, atol=0)
+    _, states = unit.solve_unit(LATE_FEED_TIME / 2, verbose=False)
+    _, fresh_states = fresh.solve_unit(LATE_FEED_TIME / 2, verbose=False)
+    _assert_allclose(np.asarray(states)[-1], np.asarray(fresh_states)[-1],
+                     rtol=IDA_RTOL, atol=IDA_ATOL)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+@pytest.mark.parametrize("cls", [Evaporator, ContinuousEvaporator])
+def test_constant_controls_solve(paths, cls):
+    """Time-independent feed controls integrate and publish.
+
+    The result equals that of the static stream with the same feed.
+    Earlier the continuous evaporator lost the segment in retrieval.
+    """
+    pytest.importorskip("assimulo")
+    unit = _constant_control_evaporator(cls, paths["full"])
+    static = _evaporator(cls, paths["full"], inlet=LiquidStream(
+        paths["full"], temp=DRUM_TEMP, pres=DRUM_PRESSURE,
+        mole_flow=FEED_FLOW, mole_frac=CHARGE))
+
+    _, states = unit.solve_unit(SHORT_SEGMENT, verbose=False)
+    _, static_states = static.solve_unit(SHORT_SEGMENT, verbose=False)
+
+    _assert_allclose(np.asarray(states)[-1], np.asarray(static_states)[-1],
+                     rtol=IDA_RTOL, atol=IDA_ATOL)
+
+
+# api with a Henry constant but no Antoine data, its t_crit between the
+# drum temperature (about 361 K, where the balances use the Henry ratio)
+# and the bubble point of the vapor composition, which the heat duty
+# evaluates and where api would need p_vap; units as in API_FULL.
+API_HENRY_ONLY = {"mw": 300.0, "rho_liq": 1300.0, "t_crit": 355.0,
+                  "henry_constant": 5.0e5, "cp_liq": [500.0],
+                  "cp_vapor": [400.0]}
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_failed_continuous_publication_publishes_nothing(tmp_path):
+    """A continuous solve whose result retrieval raises keeps no results.
+
+    api, fed from ``LATE_API_TIME``, integrates with its Henry constant,
+    but the heat duty's bubble point of the vapor composition needs its
+    missing ``p_vap``. Afterwards profiles, results, duty, presence record
+    and phases are as before the call, and a short retry equals a fresh
+    unit's; earlier the failed segment's results stayed.
+    """
+    pytest.importorskip("assimulo")
+    path = _database(tmp_path, API_HENRY_ONLY, "henry_only.json")
+    unit = _late_api_evaporator(ContinuousEvaporator, path)
+    fresh = _late_api_evaporator(ContinuousEvaporator, path)
+    phases = (unit.Liquid_1, unit.Vapor_1)
+    before = [_phase_fingerprint(phase) for phase in phases]
+    presence = unit._presence.mask  # read only
+
+    with pytest.raises(MissingPropertyError, match=r"\['api'\].*'p_vap'"):
+        unit.solve_unit(LONG_SEGMENT, verbose=False)
+
+    assert unit.profiles_runs == [] and unit.outputs is None
+    assert not hasattr(unit, "result") and not hasattr(unit, "Outlet")
+    _assert_allclose(unit.heat_duty, np.zeros(2), rtol=0, atol=0)
+    np.testing.assert_array_equal(unit._presence.mask, presence)
+    assert unit.Liquid_1 is phases[0] and unit.Vapor_1 is phases[1]
+    for phase, fingerprint in zip(phases, before):
+        _assert_allclose(_phase_fingerprint(phase), fingerprint,
+                         rtol=ROUNDING, atol=0)
+    _, states = unit.solve_unit(SHORT_SEGMENT, verbose=False)
+    _, fresh_states = fresh.solve_unit(SHORT_SEGMENT, verbose=False)
     _assert_allclose(np.asarray(states)[-1], np.asarray(fresh_states)[-1],
                      rtol=IDA_RTOL, atol=IDA_ATOL)

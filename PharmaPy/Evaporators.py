@@ -257,16 +257,29 @@ class _StructuralPresenceMixin:
             exactly nonzero, 0.0 otherwise [-]: shape ``(num_species,)``
             for a scalar flow, ``(num_rows, num_species)`` for a flow
             profile. A species in a row without flow is not fed.
+
+        Notes
+        -----
+        For this presence bookkeeping, a flow with one entry (a 0-d or
+        ``(1,)`` array) paired with one composition, shape
+        ``(num_species,)``, is a scalar flow; only a flow with one entry per
+        composition row is a profile. The evaporators do not support
+        ``(1,)``-shaped feed flows yet: their initialization and energy
+        balances fail on them (issue #520).
         """
         mole_frac = np.asarray(mole_frac, dtype=float)  # [-]
         flowing = np.asarray(mole_flow) != 0  # [-], per row
-        if flowing.ndim > 0:
+        if flowing.size == 1 and mole_frac.ndim == 1:
+            flowing = flowing.reshape(())  # [-], a scalar flow
+        elif flowing.ndim > 0:
             flowing = flowing[:, np.newaxis]  # [-], one flag per row
 
         return ((mole_frac != 0) & flowing).astype(float)
 
     def _record_feed(self, mole_flow: Union[float, np.ndarray],
-                     mole_frac: np.ndarray) -> np.ndarray:
+                     mole_frac: np.ndarray,
+                     time: Optional[Union[float, np.ndarray]] = None
+                     ) -> np.ndarray:
         """Add the species of the flowing feed rows to the record.
 
         Parameters
@@ -277,6 +290,12 @@ class _StructuralPresenceMixin:
         mole_frac : array-like
             Feed mole fractions [-], shape ``(num_species,)`` or
             ``(num_rows, num_species)``.
+        time : float or array-like, optional
+            Absolute evaluation time [s] of the feed, scalar or one per row;
+            it becomes the species' latch time if earlier than a recorded
+            one. A single feed row evaluated for several times (controls
+            that ignore the time) latches at the earliest of them. None
+            records the species from the start.
 
         Returns
         -------
@@ -288,18 +307,23 @@ class _StructuralPresenceMixin:
         fed = self._feed_weights(mole_flow, mole_frac)  # [-]
         presence = getattr(self, '_presence', None)
         if presence is not None:
-            presence.record(fed)
+            row_time = time
+            if np.ndim(time) > 0 and np.ndim(fed) == 1:
+                # One feed row for a time profile (controls that ignore the
+                # time): it applies at every time, so it latches at the first.
+                row_time = float(np.min(time))  # [s]
+            presence.record(fed, time=row_time)
 
         return fed
 
     @staticmethod
     def _phase_state(phase) -> dict:
-        """Copy the complete state of a phase or stream object.
+        """Copy the complete state of a phase, stream or unit object.
 
         Parameters
         ----------
-        phase : LiquidPhase, VaporPhase or a stream
-            Attached phase whose attributes a solve may change.
+        phase : LiquidPhase, VaporPhase, a stream, or an evaporator
+            Object whose attributes a solve may change.
 
         Returns
         -------
@@ -313,7 +337,9 @@ class _StructuralPresenceMixin:
         -----
         Phases hold their property data, composition, amounts and derived
         fields (mass fractions, mean molar mass, flows) as plain
-        attributes, so restoring them restores a consistent phase.
+        attributes, so restoring them restores a consistent phase. A unit's
+        results are replaced or appended to (``profiles_runs``), never
+        changed inside, so one level of copying suffices for it too.
         """
         return {name: (value.copy()
                        if isinstance(value, (np.ndarray, list, dict))
@@ -326,20 +352,23 @@ class _StructuralPresenceMixin:
         Returns
         -------
         dict
-            A copy of the presence record (``'presence'``, None without
-            one), the attached phase objects (``'phases'``) and the
+            The unit's own attributes (``'unit'``, as ``_phase_state``
+            copies them: elapsed time, terminal states, profiles, results,
+            duties, outlet, inlet mode, phase references), a copy of the
+            presence record (``'presence'``, None without one), and the
             complete state of ``Liquid_1`` and ``Vapor_1`` (``'states'``),
-            which ``unit_model`` and ``init_unit`` overwrite.
+            which ``unit_model``, ``init_unit`` and ``retrieve_results``
+            overwrite.
         """
         presence = getattr(self, '_presence', None)
         phases = (self.Liquid_1, self.Vapor_1)
         return {
+            'unit': self._phase_state(self),
             'presence': None if presence is None else copy.deepcopy(presence),
-            'phases': phases + (list(self._Phases),),
             'states': [(phase, self._phase_state(phase)) for phase in phases]}
 
     def _restore_solve_snapshot(self, snapshot: dict) -> None:
-        """Undo what a failed solve changed in the presence and phases.
+        """Undo what a failed solve changed in the unit and its phases.
 
         Parameters
         ----------
@@ -348,7 +377,11 @@ class _StructuralPresenceMixin:
 
         Notes
         -----
-        A failed solve keeps no results. The species that only its
+        A failed solve keeps no results: whether the initialization, the
+        integration or the publication of the results raised, the unit's
+        attributes are restored in place, so a partly published segment
+        (elapsed time, terminal states, profiles, results, duties, outlet)
+        is withdrawn. The species that only its
         attempted integration latched (a feed evaluated past the failure,
         for example) must not stay present, while species latched by
         earlier, successful solves are in the snapshot and remain. The
@@ -361,15 +394,16 @@ class _StructuralPresenceMixin:
         would be inconsistent (fractions of one state, mass fractions of
         another).
         """
+        vars(self).clear()
+        vars(self).update(snapshot['unit'])
         self._presence = snapshot['presence']
-        self.Liquid_1, self.Vapor_1, phases = snapshot['phases']
-        self._Phases = list(phases)
         for phase, state in snapshot['states']:
             # In place, so that every reference to the phase sees it.
             vars(phase).clear()
             vars(phase).update(state)
 
-    def _absent_unit_ratios(self, k_vals: np.ndarray) -> np.ndarray:
+    def _absent_unit_ratios(self, k_vals: np.ndarray,
+                            time: Optional[float] = None) -> np.ndarray:
         """Replace the VLE ratios of absent species with one.
 
         Parameters
@@ -377,6 +411,9 @@ class _StructuralPresenceMixin:
         k_vals : numpy.ndarray
             VLE ratios ``y_i/x_i`` [-], shape ``(num_species,)``; those of
             absent species may be NaN (no Henry data) or data-dependent.
+        time : float, optional
+            Absolute evaluation time [s]: a species recorded only later
+            counts as absent. None counts every recorded species.
 
         Returns
         -------
@@ -399,10 +436,13 @@ class _StructuralPresenceMixin:
         if presence is None:
             return k_vals
 
-        return np.where(presence.mask, k_vals, 1.0)  # [-]
+        present = (presence.mask if time is None
+                   else presence.mask_at(time))  # [-]
+        return np.where(present, k_vals, 1.0)  # [-]
 
     def _presence_weights(self, fractions: np.ndarray,
-                          used: Optional[np.ndarray] = None
+                          used: Optional[np.ndarray] = None,
+                          time: Optional[Union[float, np.ndarray]] = None
                           ) -> Optional[np.ndarray]:
         """Return the kernel weights for some fractions.
 
@@ -414,6 +454,11 @@ class _StructuralPresenceMixin:
         used : array-like of bool, optional
             Species whose results the caller uses, shape
             ``(num_species,)``.
+        time : float or array-like, optional
+            Absolute time [s] of the fractions, scalar or one per row: only
+            species recorded at or before it count, so that a replay of
+            earlier rows uses the presence of their time. None counts every
+            recorded species.
 
         Returns
         -------
@@ -426,9 +471,11 @@ class _StructuralPresenceMixin:
         if presence is None:
             return None if used is None else fractions * used
 
-        return presence.weights(fractions, used)
+        return presence.weights(fractions, used, time=time)
 
-    def _project_absent(self, fractions: np.ndarray) -> np.ndarray:
+    def _project_absent(self, fractions: np.ndarray,
+                        time: Optional[Union[float, np.ndarray]] = None
+                        ) -> np.ndarray:
         """Zero the round-off fractions of absent species.
 
         Parameters
@@ -436,6 +483,9 @@ class _StructuralPresenceMixin:
         fractions : array-like
             Mole fractions [-] from solver states, shape ``(num_species,)``
             or ``(num_rows, num_species)``.
+        time : float or array-like, optional
+            Absolute time [s] of the fractions, scalar or one per row (see
+            ``_presence_weights``).
 
         Returns
         -------
@@ -448,7 +498,7 @@ class _StructuralPresenceMixin:
         if presence is None:
             return np.asarray(fractions, dtype=float)
 
-        return presence.project(fractions)
+        return presence.project(fractions, time=time)
 
 
 class IsothermalFlash(_StructuralPresenceMixin):
@@ -1767,7 +1817,7 @@ class Evaporator(_StructuralPresenceMixin):
 
         rho_liq = self.Liquid_1.getDensity(
             mole_frac=x_liq, temp=temp, basis='mole',
-            weights=self._presence_weights(x_liq))  # [mol/L]
+            weights=self._presence_weights(x_liq, time=time))  # [mol/L]
 
         vol_liq = mol_liq / rho_liq / 1000  # m**3
         vol_vap = mol_vap * gas_ct * temp / pres
@@ -1792,10 +1842,11 @@ class Evaporator(_StructuralPresenceMixin):
             condensable = ~self.is_supercritic
             k_i = self.Liquid_1.getKeqVLE(
                 temp, pres, x_liq, gamma_model=self.activity_model,
-                weights=self._presence_weights(x_liq, condensable))  # [-]
+                weights=self._presence_weights(
+                    x_liq, condensable, time=time))  # [-]
             # Absent species: unit ratio, so x_i = y_i = 0 whatever their
             # data, also once they become supercritical mid-run.
-            k_i = self._absent_unit_ratios(k_i)  # [-]
+            k_i = self._absent_unit_ratios(k_i, time=time)  # [-]
             equilibria = x_liq.copy()  # [-], x_i = 0 for excluded species
             equilibria[condensable] = (y_vap[condensable]
                                       - k_i[condensable] * x_liq[condensable])
@@ -1874,11 +1925,15 @@ class Evaporator(_StructuralPresenceMixin):
         input_fracs = np.asarray(u_inputs['mole_frac'])[..., :self.num_species]  # [-]
         input_temp = u_inputs['temp']  # [K]
 
-        # Enthalpies
-        if isinstance(input_flow, np.ndarray):
-            h_in = self.Inlet.getEnthalpy(temp=input_temp,
-                                          mole_frac=input_fracs,
-                                          basis='mole')
+        # Enthalpies. A 0-d array flow (for example a controller's np.where
+        # at a scalar time) is a scalar flow; in a flow profile, a row
+        # without flow needs no feed data.
+        if np.ndim(input_flow) > 0:
+            fed = self._feed_weights(input_flow, input_fracs)  # [-]
+            h_in = self.Inlet.getEnthalpy(
+                temp=input_temp,
+                mole_frac=np.broadcast_to(input_fracs, fed.shape),
+                basis='mole', weights=fed)  # [J/mol]
         else:
             if input_flow > 0:
                 h_in = self.Inlet.getEnthalpy(temp=input_temp,
@@ -1889,10 +1944,10 @@ class Evaporator(_StructuralPresenceMixin):
 
         h_liq = self.Liquid_1.getEnthalpy(
             temp, mole_frac=x_liq, basis='mole',
-            weights=self._presence_weights(x_liq))  # [J/mol]
+            weights=self._presence_weights(x_liq, time=time))  # [J/mol]
         h_vap = self.Vapor_1.getEnthalpy(
             temp, mole_frac=y_vap, basis='mole',
-            weights=self._presence_weights(y_vap))  # [J/mol]
+            weights=self._presence_weights(y_vap, time=time))  # [J/mol]
 
         # Heat transfer
         area_ht = 4 / self.diam_tank * vol_liq + self.area_base  # m**2
@@ -1968,7 +2023,8 @@ class Evaporator(_StructuralPresenceMixin):
 
         u_inputs['mole_flow'] *= self.allow_flow
         # Species fed with a nonzero effective flow are present from now on.
-        self._record_feed(u_inputs['mole_flow'], u_inputs['mole_frac'])
+        self._record_feed(u_inputs['mole_flow'], u_inputs['mole_frac'],
+                          time=time)
 
         if states_dot is None:
             material_bces = self.material_balances(time, **di_states,
@@ -2051,6 +2107,15 @@ class Evaporator(_StructuralPresenceMixin):
             times drum volume [m**3]. This root-surface allowance covers
             roundoff on both sides of the event. Reset or drain before
             continuing; no state is advanced on rejection.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            present species (charged, fed at the start with a nonzero flow,
+            or nitrogen; on a continuation, also species latched earlier or
+            fed at the current time) lacks data the initialization needs:
+            ``p_vap`` or ``henry_constant`` [Pa] for the bubble-point seed,
+            ``cp_liq`` and Watson data (``delta_hvap``, ``tref_hvap``) for
+            the enthalpies, ``rho_liq`` for the volume, or the activity
+            parameters of a non-ideal model. Absent species need none.
 
         Notes
         -----
@@ -2194,7 +2259,8 @@ class Evaporator(_StructuralPresenceMixin):
             inlet_inputs = self.get_inputs(0)['Inlet']
             inlet_flow = inlet_inputs['mole_flow']  # [mol/s]
             fed = self._record_feed(inlet_flow,
-                                    inlet_inputs['mole_frac'])  # [-]
+                                    inlet_inputs['mole_frac'],
+                                    time=self.elapsed_time)  # [-]
             dm_init = inlet_flow * inlet_inputs['mole_frac']  # [mol/s]
             # A species in a feed without flow needs no data.
             hin_init = self.Inlet.getEnthalpy(
@@ -2294,7 +2360,8 @@ class Evaporator(_StructuralPresenceMixin):
                 mole_frac=dict_states['x_liq'],
                 temp=dict_states['temp'][0],
                 basis='mole',
-                weights=self._presence_weights(dict_states['x_liq'])
+                weights=self._presence_weights(dict_states['x_liq'],
+                                               time=time)
             )  # [mol/L]
 
             vol_liq = dict_states['mol_liq'][0] / rho_liq / 1000  # m**3
@@ -2371,13 +2438,9 @@ class Evaporator(_StructuralPresenceMixin):
             the previous terminal state and advance absolute time by runtime.
             With ``stop_at_maxvol=False``, an inlet stopped by the liquid
             volume event remains stopped on continuation, and the absolute
-            stop time [s] is kept in ``inlet_stop_time``. If the
-            initialization or the solver raises, both are restored to their
-            values before this call, as the failed segment's results are not
-            retained; so are the structural presence record and the
-            complete state of the attached phases (temperature [K],
-            fractions [-], amounts and derived fields), which the attempt
-            overwrote (issue #425). ``reset()`` or a
+            stop time [s] is kept in ``inlet_stop_time``. If the call
+            raises, both are restored to their values before it (see
+            Notes). ``reset()`` or a
             new public ``Phases`` assignment re-enables the inlet and clears
             that time.
         verbose : bool, optional
@@ -2405,11 +2468,13 @@ class Evaporator(_StructuralPresenceMixin):
             If time_grid is empty, not one-dimensional, nonfinite, unordered,
             or outside the absolute simulation interval.
         MissingPropertyError
-            A subclass of ``AttributeError`` and ``ValueError``, raised by
-            the initialization only: if a present species (structural
-            presence: charged, fed with a nonzero effective flow at the
-            start, or nitrogen) lacks data that the initialization needs;
-            absent species need none.
+            A subclass of ``AttributeError`` and ``ValueError``. Raised by
+            the initialization if a present species (structural presence:
+            charged, fed with a nonzero effective flow at the start, or
+            nitrogen) lacks data that it needs, and by the publication of
+            the results (the heat-duty replay with its bubble points and
+            enthalpies, and the published phases) if a species present in a
+            row lacks data that they need; absent species need none.
         IDAError
             From Assimulo, if the balances fail during the integration, for
             example because a species fed only after the start lacks data.
@@ -2418,8 +2483,13 @@ class Evaporator(_StructuralPresenceMixin):
 
         Notes
         -----
-        Whatever the exception, the failed attempt is undone as described
-        for ``runtime``.
+        A call that raises keeps no results, whatever the exception and
+        whether the initialization, the integration or the publication of
+        the results raised: the unit's attributes (elapsed time, terminal
+        states, inlet mode, profiles, results, duties, outlet), the
+        structural presence record and the complete state of the attached
+        phases (temperature [K], fractions [-], amounts and derived
+        fields) are restored to their values before the call (issue #425).
         """
 
         final_time = self.elapsed_time + runtime  # [s], absolute segment endpoint
@@ -2436,21 +2506,19 @@ class Evaporator(_StructuralPresenceMixin):
 
         self.args_inputs = (self, self.num_species)
 
-        # Only retrieve_results keeps results. Everything before it, from
-        # the initialization (which evaluates the feed on a continuation)
+        # A solve that raises keeps no results: everything from the
+        # initialization (which evaluates the feed on a continuation)
         # through the integration (events may shut the inlet, and feed
-        # evaluations latch species), is undone if it raises.
-        inlet_mode = (self.allow_flow, self.inlet_stop_time)  # (bool, [s])
+        # evaluations latch species) and the publication of the results is
+        # undone, including the inlet mode.
         before_solve = self._solve_snapshot()
         try:
             time, states = self._integrate_segment(final_time, verbose,
                                                    sundials_opts, time_grid)
+            self.retrieve_results(time, states)
         except BaseException:
-            self.allow_flow, self.inlet_stop_time = inlet_mode
             self._restore_solve_snapshot(before_solve)
             raise
-
-        self.retrieve_results(time, states)
 
         return time, states
 
@@ -2651,7 +2719,7 @@ class Evaporator(_StructuralPresenceMixin):
             x_liq = dp['x_liq'][ind]  # [-]
             y_vap = dp['y_vap'][ind]  # [-]
 
-            weights = self._presence_weights(x_liq)  # [-]
+            weights = self._presence_weights(x_liq, time=time[ind])  # [-]
             temp_bubble = self.Liquid_1.getBubblePoint(
                 pres=dp['pres'][ind], mole_frac=x_liq,
                 thermo_method=self.activity_model, weights=weights)  # [K]
@@ -3037,7 +3105,7 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
         """
         inputs = get_inputs_new(time, self.Inlet, self.states_in_dict)
         self._record_feed(inputs['Inlet']['mole_flow'],
-                          inputs['Inlet']['mole_frac'])
+                          inputs['Inlet']['mole_frac'], time=time)
 
         return inputs
 
@@ -3080,7 +3148,9 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
                        pres: Union[float, np.ndarray], x_i: np.ndarray,
                        y_i: np.ndarray, mol_liq: Union[float, np.ndarray],
                        mol_vap: Union[float, np.ndarray],
-                       input_flow: Union[float, np.ndarray]) -> tuple:
+                       input_flow: Union[float, np.ndarray],
+                       time: Optional[Union[float, np.ndarray]] = None
+                       ) -> tuple:
         """Compute outlet flows with net vapor removal in the level control.
 
         Parameters
@@ -3094,6 +3164,10 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
             Liquid and vapor holdups [mol], scalar or time profile.
         input_flow : float or ndarray
             Feed molar flow [mol/s], scalar or time profile.
+        time : float or ndarray, optional
+            Absolute time [s] of the states, scalar or one per row; the
+            liquid density then needs data only for the species present at
+            that time (see ``_presence_weights``).
 
         Returns
         -------
@@ -3112,7 +3186,7 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
         # Volumes
         rho_liq = self.Liquid_1.getDensity(
             mole_frac=x_i, temp=temp, basis='mole',
-            weights=self._presence_weights(x_i))  # [mol/L]
+            weights=self._presence_weights(x_i, time=time))  # [mol/L]
 
         vol_liq = mol_liq / rho_liq / 1000  # m**3
         vol_vap = mol_vap * gas_ct * temp / pres
@@ -3200,7 +3274,7 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
         input_fracs = u_inputs['mole_frac']
 
         vol_liq, vol_vap, flow_liq, flow_vap = self.get_mole_flows(
-            temp, pres, x_liq, y_vap, mol_liq, mol_vap, input_flow)
+            temp, pres, x_liq, y_vap, mol_liq, mol_vap, input_flow, time=time)
 
         vol_eqn = vol_liq + vol_vap - self.vol_tot
 
@@ -3217,9 +3291,9 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
 
             k_i = self.Liquid_1.getKeqVLE(
                 temp, pres, x_liq, gamma_model=self.activity_model,
-                weights=self._presence_weights(x_liq))  # [-]
+                weights=self._presence_weights(x_liq, time=time))  # [-]
             # Absent species: unit ratio, so x_i = y_i = 0 whatever their data.
-            k_i = self._absent_unit_ratios(k_i)  # [-]
+            k_i = self._absent_unit_ratios(k_i, time=time)  # [-]
             invalid_k = ~np.isfinite(k_i)
             if np.any(invalid_k):
                 species = [name for name, invalid in
@@ -3315,15 +3389,15 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
 
         h_liq = self.Liquid_1.getEnthalpy(
             temp, mole_frac=x_liq, basis='mole',
-            weights=self._presence_weights(x_liq))  # [J/mol]
+            weights=self._presence_weights(x_liq, time=time))  # [J/mol]
 
         if self.reflux_ratio == 0:
             h_top = self.Vapor_1.getEnthalpy(
                 temp, mole_frac=y_vap, basis='mole',
-                weights=self._presence_weights(y_vap))  # [J/mol]
+                weights=self._presence_weights(y_vap, time=time))  # [J/mol]
             h_vap = h_top  # [J/mol]
         else:
-            weights = self._presence_weights(y_vap)  # [-]
+            weights = self._presence_weights(y_vap, time=time)  # [-]
             temp_bubble = self.Liquid_1.getBubblePoint(
                 pres, mole_frac=y_vap, thermo_method=self.activity_model,
                 weights=weights)  # [K]
@@ -3483,6 +3557,14 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
         ------
         ValueError
             If the liquid volume exceeds the drum volume [m**3].
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            present species (in the liquid, or fed at time zero with a
+            nonzero flow) lacks data the initialization needs: ``p_vap`` or
+            ``henry_constant`` [Pa] for the bubble-point seed, ``cp_liq``
+            and Watson data (``delta_hvap``, ``tref_hvap``) for the
+            enthalpies, ``rho_liq`` for the volume, or the activity
+            parameters of a non-ideal model. Absent species need none.
 
         Notes
         -----
@@ -3658,10 +3740,13 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
             original exception as their cause and identify solver scaling
             and initial trust-region settings as diagnostic inputs.
         MissingPropertyError
-            A subclass of ``AttributeError`` and ``ValueError``, raised by
-            the initialization only: if a species in the liquid at the start
-            or fed with a nonzero flow at the start lacks data that the
-            initialization needs; absent species need none.
+            A subclass of ``AttributeError`` and ``ValueError``. Raised by
+            the initialization if a species in the liquid at the start or
+            fed with a nonzero flow at the start lacks data that it needs,
+            and, in dynamic mode, by the publication of the results (the
+            heat-duty replay with its bubble points of the vapor
+            composition, and the published phases) if a species present in
+            a row lacks data that they need; absent species need none.
         IDAError
             From Assimulo, in dynamic mode, if the balances fail during the
             integration, for example because a species fed only after the
@@ -3670,33 +3755,32 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
 
         Notes
         -----
-        After any failed solve, whatever the exception and whether the
-        initialization or the solver raised, the structural presence record
-        and the complete state of the attached phases (temperature [K],
-        fractions [-], amounts and derived fields) are restored to their
-        values before the call (issue #425).
+        A call that raises keeps no results, whatever the exception and
+        whether the initialization, the solver or the publication of the
+        results raised: the unit's attributes (profiles, results, duties,
+        outlet), the structural presence record and the complete state of
+        the attached phases (temperature [K], fractions [-], amounts and
+        derived fields) are restored to their values before the call
+        (issue #425).
         """
 
         self.args_inputs = (self, self.num_species)
 
-        # A failed solve keeps no results: everything from the
-        # initialization through the solver is undone if it raises.
+        # A solve that raises keeps no results: everything from the
+        # initialization through the solver and the publication of the
+        # results is undone.
         before_solve = self._solve_snapshot()
         try:
             result = self._solve_attempt(runtime, steady_state, verbose,
                                          sundials_opts, any_event,
                                          fsolve_opts)
+            if not steady_state:
+                self.retrieve_results(*result)
         except BaseException:
             self._restore_solve_snapshot(before_solve)
             raise
 
-        if steady_state:
-            return result
-
-        time, states = result
-        self.retrieve_results(time, states)
-
-        return time, states
+        return result
 
     def _solve_attempt(self, runtime: float, steady_state: bool,
                        verbose: bool, sundials_opts: Optional[dict],
@@ -3865,7 +3949,7 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
 
         vol_liq, vol_vap, flow_liq, flow_vap = self.get_mole_flows(
             dp['temp'], dp['pres'], dp['x_liq'], dp['y_vap'], dp['mol_liq'],
-            dp['mol_vap'], inputs_all['mole_flow'])
+            dp['mol_vap'], inputs_all['mole_flow'], time=time)
 
         dp['vol_liq'] = vol_liq
         dp['vol_vap'] = vol_vap
@@ -3875,7 +3959,7 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
 
         # The liquid outlet is the stream that connections read; absent
         # species are published at exactly zero, as in the Outlet.
-        dp['mole_frac'] = self._project_absent(dp['x_liq'])  # [-]
+        dp['mole_frac'] = self._project_absent(dp['x_liq'], time=time)  # [-]
         dp['mole_flow'] = dp['flow_liq']
 
         self.profiles_runs.append(dp)
@@ -3947,7 +4031,8 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
                                           enrgy_bce=True)
             heat_bce[ind] = energy[1]
 
-            weights = self._presence_weights(dp['y_vap'][ind])  # [-]
+            weights = self._presence_weights(dp['y_vap'][ind],
+                                             time=time[ind])  # [-]
             temp_bubble = self.Liquid_1.getBubblePoint(
                 pres=dp['pres'][ind],
                 mole_frac=dp['y_vap'][ind],

@@ -1108,11 +1108,12 @@ class LiquidPhase(ThermoPhysicalManager):
         weights : ndarray, optional
             Presence weights [-] with the shape of the mole fractions. When
             given, only species with a nonzero weight enter the bubble-point
-            sum and the incipient vapor, and only they need VLE data (see
+            sum, its Antoine seed, the incipient vapor and a non-ideal
+            activity model, and only they need VLE and activity data (see
             ``getKeqVLE``); the others count as absent, with exactly zero
-            vapor fraction. Solver-based units pass a structural presence
-            mask here, so that round-off fractions of absent species need no
-            data.
+            vapor fraction and the neutral activity coefficient 1.
+            Solver-based units pass a structural presence mask here, so that
+            round-off fractions of absent species need no data.
 
         Returns
         -------
@@ -1139,7 +1140,10 @@ class LiquidPhase(ThermoPhysicalManager):
             species supplies ``henry_constant`` while some species (with
             ``weights``, some weighted species) is supercritical at an
             iterate, or if ``p_vap`` is stored as one scalar per species
-            (from the Antoine seed).
+            (from the Antoine seed). With ``weights`` and
+            ``thermo_method='UNIQUAC'``, also if a weighted species lacks
+            ``ri``, ``qi`` or (when the database has the key) ``qip``; UNIFAC
+            group counts are taken as given (see ``getKeqVLE``).
         RuntimeError
             If the Newton iteration does not converge.
 
@@ -1324,7 +1328,8 @@ class LiquidPhase(ThermoPhysicalManager):
 
     def getActivityCoeff(self, method: str = 'ideal',
                          mole_frac: Optional[np.ndarray] = None,
-                         temp: Optional[Union[float, np.ndarray]] = None
+                         temp: Optional[Union[float, np.ndarray]] = None,
+                         *, weights: Optional[np.ndarray] = None
                          ) -> np.ndarray:
         """Return liquid activity coefficients for the selected model.
 
@@ -1339,6 +1344,14 @@ class LiquidPhase(ThermoPhysicalManager):
         temp : float or ndarray, optional
             Temperature [K], scalar or paired profile (num_points,);
             defaults to the phase temperature.
+        weights : ndarray, optional
+            Keyword only. Presence weights [-] with exactly the shape of the
+            mole fractions. When given, the model is evaluated on the
+            species with a nonzero weight only, as if the others were
+            absent; those others need no activity parameters and get the
+            neutral coefficient 1. Solver-based units pass a structural
+            presence mask here (through ``getKeqVLE``). See
+            ``ThermoPhysicalManager._activity_coefficients``.
 
         Returns
         -------
@@ -1351,6 +1364,12 @@ class LiquidPhase(ThermoPhysicalManager):
         ValueError
             If ``method`` is not a supported selector. Public parameter names
             and defaults are unchanged; unknown names no longer select UNIFAC.
+            Also if ``weights`` does not have the shape of the mole
+            fractions.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. With
+            ``weights`` and UNIQUAC, if a weighted species lacks ``ri``,
+            ``qi`` or (when the database has the key) ``qip``.
         """
         validate_activity_model(method, param_name='method')
 
@@ -1360,15 +1379,12 @@ class LiquidPhase(ThermoPhysicalManager):
         if temp is None:
             temp = self.temp
 
-        if method == 'ideal':
-            gamma = np.ones_like(mole_frac)
-        elif method == 'UNIQUAC':
-            gamma = self.UNIQUAC(mole_frac, temp)
+        if weights is not None:
+            weights = self._validate_weights_shape(weights, mole_frac,
+                                                   'mole_frac')
 
-        else:
-            gamma = self.UNIFAC_DMD(mole_frac, temp)
-
-        return gamma
+        return self._activity_coefficients(method, mole_frac, temp,
+                                           weights)  # [-]
 
     def getViscosity(self, temp: Optional[ArrayLike] = None,
                      mass_frac: Optional[np.ndarray] = None,
