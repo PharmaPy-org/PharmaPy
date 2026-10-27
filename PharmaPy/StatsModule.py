@@ -18,6 +18,118 @@ import time
 import warnings
 
 
+# Opacity [-] of each sampled prediction line in
+# StatisticsClass.bootstrap_confid; the value of the original
+# implementation, low enough that many overlapping draws build a visible
+# density band. Display choice only.
+_ENSEMBLE_LINE_ALPHA = 0.02  # [-]
+# Subplot columns per row in StatisticsClass.plot_boots; layout of the
+# original implementation. Display choice only.
+_BOOT_PLOT_COLUMNS = 2  # [-]
+
+
+def _validated_count(value, name: str) -> int:
+    """Return a positive integer count or raise an actionable error.
+
+    Parameters
+    ----------
+    value : int
+        Candidate count [-].
+    name : str
+        Argument name for the error message.
+
+    Returns
+    -------
+    int
+        ``value`` as a Python ``int`` [-].
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not an integer (booleans excluded) of at least 1.
+    """
+    if (isinstance(value, bool) or not isinstance(value, (int, np.integer))
+            or value < 1):
+        raise ValueError(f"{name} must be a positive integer; got {value!r}")
+
+    return int(value)
+
+
+def _covariance_factor(covar_params, num_params: int,
+                       check_symmetry: bool = True) -> np.ndarray:
+    """Validate a parameter covariance and return its Cholesky factor.
+
+    Parameters
+    ----------
+    covar_params : array-like
+        Parameter covariance, shape ``(num_params, num_params)``; entry
+        ``(i, j)`` in the product of the units of parameters ``i`` and
+        ``j``.
+    num_params : int
+        Number of optimized parameters [-].
+    check_symmetry : bool, optional
+        If True (user-supplied matrices), reject a matrix that is not
+        symmetric on the correlation scale. If False (the estimator's own
+        covariance, symmetric in exact arithmetic), only symmetrize it.
+        The default is True.
+
+    Returns
+    -------
+    numpy.ndarray
+        Lower-triangular ``L`` with ``L @ L.T`` equal to the symmetric part
+        of ``covar_params``, shape ``(num_params, num_params)``; row ``i``
+        in the units of parameter ``i``.
+
+    Raises
+    ------
+    ValueError
+        If the matrix has the wrong shape, non-finite entries, a
+        non-positive variance, is not symmetric (``check_symmetry``), or is
+        not positive definite.
+
+    Notes
+    -----
+    The symmetry check compares each pair on the correlation scale,
+    ``|C_ij - C_ji| / sqrt(C_ii C_jj) <= sqrt(eps)``, so it does not depend
+    on the parameter units. The ``sqrt(eps)`` tolerance is a design
+    assumption: far above the round-off of a symmetric matrix written out
+    by a user, far below any meaningful correlation. It is not applied to
+    the estimator's ``s2 * inv(J J^T)``, whose LU inversion leaves an
+    asymmetry growing with ``cond(J J^T)``. In both cases the symmetric part
+    ``(C + C^T) / 2`` is factorized.
+    """
+    covar = np.asarray(covar_params, dtype=float)  # [param_i*param_j units]
+    expected_shape = (num_params, num_params)
+    if covar.shape != expected_shape:
+        raise ValueError(
+            f"covar_params has shape {covar.shape}; expected "
+            f"{expected_shape}, one row and column per optimized parameter")
+    if not np.all(np.isfinite(covar)):
+        raise ValueError("covar_params must contain only finite values")
+
+    variances = np.diag(covar)  # [param_i**2 units]
+    if np.any(variances <= 0):
+        raise ValueError(
+            "covar_params must be positive definite to draw parameter "
+            f"samples; its diagonal (variances) is {variances.tolist()}")
+
+    if check_symmetry:
+        # [-], pairwise asymmetry on the correlation scale
+        std = np.sqrt(variances)  # [param units]
+        asymmetry = np.abs(covar - covar.T) / np.outer(std, std)
+        if asymmetry.max() > np.sqrt(np.finfo(float).eps):
+            raise ValueError(
+                "covar_params must be symmetric; largest asymmetry on the "
+                f"correlation scale is {asymmetry.max():.3g}")
+
+    try:
+        return np.linalg.cholesky((covar + covar.T) / 2)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "covar_params must be positive definite to draw parameter "
+            f"samples: {exc}") from exc
+
+
 def _isolated_estimator(estimator):
     """Return a shallow copy of an estimator safe to evaluate and fit.
 
@@ -354,6 +466,26 @@ def _validated_sample(estimator, sample) -> list:
 class StatisticsClass:
 
     def __init__(self, estimation_instance, alpha=0.95):
+        """Collect the fitted quantities used by the statistics methods.
+
+        Parameters
+        ----------
+        estimation_instance : ParameterEstimation
+            Fitted estimator (``optimize_fn`` already run): its
+            ``info_opt`` (``'jac'``, ``'fun'``), ``params_convg``,
+            ``param_seed``, ``map_fixed``, ``y_model``, ``resid_runs``,
+            ``name_params``, ``num_data_total``, ``num_params`` and
+            ``x_data`` are read.
+            It is referenced as ``inst`` and not modified.
+        alpha : float, optional
+            Confidence level in (0, 1) [-] of the intervals and regions,
+            e.g. 0.95 for 95 % Student-t intervals. The default is 0.95.
+
+        Notes
+        -----
+        The attribute ``sigma_t`` (always None, never assigned) was removed
+        together with the ``bootstrap_confid`` repair (#400).
+        """
 
         # Values from the instance
         inst = estimation_instance
@@ -398,7 +530,6 @@ class StatisticsClass:
 
         # --------------- Output vals
         self.confid_intervals = None
-        self.sigma_t = None
         self.boot_params = None
 
     def get_intervals(self, covar_params=None, verbose=True, set_self=True):
@@ -632,36 +763,140 @@ class StatisticsClass:
 
         return axes
 
-    def bootstrap_confid(self, num_samples, plot=True):
-        std_samples = np.random.randn(num_samples, self.num_par)
+    def bootstrap_confid(self, num_samples, plot=True, covar_params=None):
+        """Propagate parameter uncertainty into model predictions.
 
-        stdev_params = np.array(list(self.sigma_t.values()))
-        samples = std_samples * stdev_params**2 + self.params
+        Monte-Carlo propagation of the linearized parameter covariance:
+        parameter vectors are drawn from the multivariate normal
+        ``N(params_convg, covar_params)`` and the model is evaluated at
+        each of them.
 
-        # Concentration profiles with the optimum params
-        conc_nominal = self.inst.conc_profile.copy()
+        Parameters
+        ----------
+        num_samples : int
+            Number of parameter draws [-]; at least 1.
+        plot : bool, optional
+            If True, plot the nominal predictions and the sampled
+            predictions of each experiment. The default is True.
+        covar_params : numpy.ndarray, optional
+            Covariance of the optimized parameters, shape
+            ``(num_params, num_params)``, entry ``(i, j)`` in the product of
+            the units of parameters ``i`` and ``j``; symmetric positive
+            definite. The default is the estimator's ``covar_params``, the
+            linearized covariance that ``get_intervals`` uses.
 
-        conc_bootstrap = []
-        for sample in samples:
-            self.inst.assign_params(sample)
-            self.inst.solve_model(self.c_init, time_eval=self.xgrid,
-                                  print_summary=False)
+        Returns
+        -------
+        samples : numpy.ndarray
+            Drawn parameters, shape ``(num_samples, num_params)``, in
+            optimized-parameter (``name_params``) order and units.
+        predictions : list of lists of numpy.ndarray
+            One entry per sample, in ``samples`` order, holding one array
+            per experiment (``x_data`` order) of the model predictions at
+            the measured states, shape ``(n_times, n_measured)`` on that
+            experiment's model grid (``x_model``), in the measured states'
+            units. Unlike ``y_model``, entries are model values also where
+            a state is not observed.
+        fig : matplotlib.figure.Figure or None
+            Figure, or None when ``plot`` is False.
+        axis : numpy.ndarray of matplotlib.axes.Axes or None
+            One axis per experiment, shape ``(num_datasets,)``, or None when
+            ``plot`` is False.
 
-            conc_bootstrap.append(self.inst.conc_profile)
+        Raises
+        ------
+        ValueError
+            If ``num_samples`` is not a positive integer, or the covariance
+            is not a finite, positive-definite ``(num_params, num_params)``
+            matrix; a given ``covar_params`` must also be symmetric on the
+            correlation scale (see ``_covariance_factor``).
+        Exception
+            Whatever the model raises at a drawn parameter vector.
 
-        if plot:
-            fig, axis = plt.subplots()
-            axis.plot(self.xgrid, conc_nominal[:, self.inst.measured_ind])
+        Warns
+        -----
+        RuntimeWarning
+            If a model evaluation raises and the model then also fails at
+            the accepted parameters; the evaluation's exception is still
+            raised.
 
-            lines = axis.lines
-            colors = [line.get_color() for line in lines]
+        Notes
+        -----
+        Each draw is ``theta_s = params_convg + L z_s``, where ``L`` is the
+        lower Cholesky factor of ``covar_params`` (``L L^T = covar_params``)
+        and ``z_s`` holds ``num_params`` independent standard normal draws
+        from NumPy's global generator (``numpy.random.standard_normal``,
+        one ``(num_samples, num_params)`` call), so ``numpy.random.seed``
+        reproduces the samples, as for ``get_bootsamples``. ``L`` factorizes
+        the symmetric part of the covariance; a given ``covar_params`` is
+        rejected unless symmetric to ``sqrt(eps)`` on the correlation scale,
+        while the estimator's own covariance, symmetric in exact arithmetic,
+        is symmetrized without that check. Earlier releases scaled the
+        standard normals by the parameter variances instead of the standard
+        deviations and never ran (#400); they read the attribute
+        ``StatisticsClass.sigma_t``, which was never assigned (always None)
+        and has been removed.
 
-            for array in conc_bootstrap:
-                for ind in range(self.inst.num_measured):
-                    axis.plot(self.xgrid, array[:, ind], color=colors[ind],
-                              alpha=0.02)
+        The model is evaluated with ``get_objective`` on an isolated copy
+        of the estimator, so the estimator keeps its observations, accepted
+        parameters, residuals and predictions. A stateful model callable is
+        returned to the accepted parameters afterwards, also when an
+        evaluation raises. The covariance is a linearization around
+        ``params_convg``; the sampled predictions inherit that
+        approximation.
+        """
+        num_samples = _validated_count(num_samples, 'num_samples')
+        # Lower Cholesky factor [param units]. The estimator's own
+        # covariance is only symmetrized; a user matrix is also checked.
+        if covar_params is None:
+            chol_lower = _covariance_factor(self.inst.covar_params,
+                                            self.num_par,
+                                            check_symmetry=False)
+        else:
+            chol_lower = _covariance_factor(covar_params, self.num_par)
 
-        return samples, conc_bootstrap, fig, axis
+        # [-], independent standard normal draws
+        std_normal = np.random.standard_normal((num_samples, self.num_par))
+        samples = self.params + std_normal @ chol_lower.T  # [param units]
+
+        estimator = _isolated_estimator(self.inst)
+        try:
+            estimator.get_objective(self.params, True)
+            # [measured-state units], per experiment (n_times, n_measured)
+            nominal = [np.array(y_run, dtype=float)
+                       for y_run in estimator.y_runs]
+
+            predictions = []
+            for sample in samples:
+                estimator.get_objective(sample, True)
+                predictions.append([np.array(y_run, dtype=float)
+                                    for y_run in estimator.y_runs])
+        except Exception:
+            _restore_model_state_after_error(self.inst,
+                                             'a sampled model evaluation')
+            raise
+
+        _restore_model_state(self.inst)
+
+        if not plot:
+            return samples, predictions, None, None
+
+        fig, axes = plt.subplots(1, self.inst.num_datasets, squeeze=False)
+        axes = axes[0]
+        for ind, axis in enumerate(axes):
+            grid = self.inst.x_model[ind]  # [x units]
+            nominal_lines = axis.plot(grid, nominal[ind])
+            colors = [line.get_color() for line in nominal_lines]
+            for prediction in predictions:
+                for col, color in enumerate(colors):
+                    axis.plot(grid, prediction[ind][:, col], color=color,
+                              alpha=_ENSEMBLE_LINE_ALPHA)
+
+            axis.set_title(self.inst.experim_names[ind])
+            axis.spines['right'].set_visible(False)
+            axis.spines['top'].set_visible(False)
+
+        return samples, predictions, fig, axes
 
     def _observed_columns(self, ind):
         """Return the observation mask of one experiment's residual columns.
@@ -1027,22 +1262,75 @@ class StatisticsClass:
         return sigma_y, sens_ord
 
     def plot_boots(self, num_samples, ind, fig_size=None):
-        bootsamples = self.get_bootsamples(num_samples)
-        num_div = bootsamples[ind].shape[1] // self.inst.num_xs[ind]
-        y_data = np.split(bootsamples[ind], num_div, axis=1)
+        """Plot residual-bootstrap datasets of one experiment.
 
-        nplot = len(y_data)
-        ncol = 2
-        nrow = nplot // ncol + nplot % ncol
+        Parameters
+        ----------
+        num_samples : int
+            Number of bootstrap datasets drawn with ``get_bootsamples`` [-];
+            at least 1.
+        ind : int
+            Experiment index in ``x_data`` order.
+        fig_size : tuple of float, optional
+            Figure size (width, height) [in].
 
-        fig, axes = plt.subplots(nrow, ncol, figsize=fig_size)
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            Figure with one subplot per measured column of experiment
+            ``ind``; unused grid cells are removed.
+        axes : numpy.ndarray of matplotlib.axes.Axes
+            The subplots, shape ``(n_measured,)``, in measured-column
+            order. Subplot ``col`` holds one line per dataset, in
+            ``samples`` order: the observed entries of column ``col``
+            against the experiment's model grid (``x_model[ind]``).
+        samples : list of numpy.ndarray
+            The plotted datasets: ``get_bootsamples(num_samples)[ind]``,
+            ``num_samples`` arrays of shape ``(n_times, n_measured)`` in the
+            measured states' units, NaN where unobserved.
 
-        axes = np.atleast_1d(axes)
+        Raises
+        ------
+        ValueError
+            If ``num_samples`` is not a positive integer or ``ind`` is not
+            an experiment index.
 
-        for ind, data in enumerate(y_data):
-            axes.flatten()[ind].plot(self.inst.x_data[0], data.T, '-o',
-                                     mfc='None')
+        Notes
+        -----
+        Datasets are drawn from NumPy's global generator, as in
+        ``get_bootsamples``; nothing on the estimator changes. Unobserved
+        entries (staggered grids, missing values, measurements absent from
+        the experiment) are omitted from the lines, so a column without
+        observations shows an empty subplot.
+        """
+        num_samples = _validated_count(num_samples, 'num_samples')
+        num_datasets = self.inst.num_datasets
+        if (isinstance(ind, bool) or not isinstance(ind, (int, np.integer))
+                or not 0 <= ind < num_datasets):
+            raise ValueError(
+                f"ind must be an experiment index from 0 to "
+                f"{num_datasets - 1}; got {ind!r}")
 
-        if nplot < len(axes.flatten()):
-            fig.delaxes(axes.flatten()[-1])
-        return fig, axes
+        samples = self.get_bootsamples(num_samples)[ind]
+        grid = self.inst.x_model[ind]  # [x units], model grid of the rows
+        observed = self._observed_columns(ind)  # (n_times, n_measured)
+
+        num_plots = samples[0].shape[1]
+        num_cols = min(_BOOT_PLOT_COLUMNS, num_plots)
+        num_rows = -(-num_plots // num_cols)  # ceiling division
+
+        fig, axes = plt.subplots(num_rows, num_cols, figsize=fig_size,
+                                 squeeze=False)
+        axes_flat = axes.flatten()
+        for col in range(num_plots):
+            rows = observed[:, col]
+            # (n_observed, num_samples) [measured-state unit]
+            data = np.column_stack([sample[rows, col] for sample in samples])
+            axes_flat[col].plot(grid[rows], data, '-o', mfc='None')
+            axes_flat[col].set_title(
+                f'{self.inst.experim_names[ind]}, column {col}')
+
+        for axis in axes_flat[num_plots:]:
+            fig.delaxes(axis)
+
+        return fig, axes_flat[:num_plots], samples
