@@ -1545,6 +1545,34 @@ class _BaseReactor:
         di_out = flatten_states(self.profiles_runs)
         return di_out
 
+    def _participating_state_columns(self) -> np.ndarray:
+        """Locate the participating-species concentrations in the states.
+
+        Returns
+        -------
+        numpy.ndarray
+            Integer column indices into a state profile in ``name_states``
+            order, as returned by ``solve_unit``, shape
+            ``(Kinetics.num_species,)`` and in ``Kinetics.partic_species``
+            order. Every indexed column holds a molar concentration [mol/L].
+
+        Notes
+        -----
+        The map follows the state layout recorded by ``set_names``: the
+        offset of the ``mole_conc`` block comes from ``name_states`` and
+        ``dim_states``, and each participating species is found by name in
+        the block's ``index``. ``BatchReactor`` integrates only the
+        participating species, so its map is ``0, ..., num_species - 1``.
+        ``CSTR`` and ``SemibatchReactor`` integrate every phase species, so
+        their map holds the positions of the participating species among
+        the phase species (issue #497).
+        """
+        block = self.name_states.index('mole_conc')
+        offset = int(sum(self.dim_states[:block]))  # columns before the block
+        names = list(self.states_di['mole_conc']['index'])
+        return np.array([offset + names.index(name)
+                         for name in self.Kinetics.partic_species], dtype=int)
+
     def paramest_wrapper(self, params, t_vals, modify_phase=None,
                          modify_controls=None, reord_sens=True, run_args={}):
         """Reset and evaluate a reactor for parameter estimation.
@@ -1579,8 +1607,12 @@ class _BaseReactor:
         Returns
         -------
         c_prof : numpy.ndarray
-            Species molar concentrations [mol/L], shape
-            ``(num_times, kinetics.num_species)``: exactly one row per
+            Molar concentrations of the participating species [mol/L],
+            shape ``(num_times, Kinetics.num_species)``, with one column per
+            species in ``Kinetics.partic_species`` order for every tank
+            reactor, whether it integrates only those species (batch) or
+            all phase species (CSTR, semibatch; see
+            ``_participating_state_columns``). Exactly one row per
             requested time in ``t_vals`` order, with replicate times
             repeated. The initial state is included only if requested; a
             grid of charge-time samples only returns the charged state in
@@ -1683,7 +1715,8 @@ class _BaseReactor:
                 else:
                     sens = np.stack(sens)
 
-                c_prof = states[:, :self.Kinetics.num_species]
+                species_columns = self._participating_state_columns()
+                c_prof = states[:, species_columns]  # [mol/L]
 
                 return c_prof, sens
 
@@ -1695,7 +1728,8 @@ class _BaseReactor:
                                                  **run_args)
                 states = states[_requested_rows(t_prof, t_vals)]
 
-                c_prof = states[:, :self.Kinetics.num_species]
+                species_columns = self._participating_state_columns()
+                c_prof = states[:, species_columns]  # [mol/L]
 
                 return c_prof
         finally:

@@ -509,6 +509,17 @@ Estimate the kinetics with a ``BatchReactor`` model of the kinetic experiments
 instead. Earlier releases accepted the unit and failed at the first objective
 evaluation with ``TypeError``.
 
+The columns of a reactor callback are the molar concentrations [mol/L] of
+the participating species, in ``Kinetics.partic_species`` order (the order
+of the species in the property database), for the batch, CSTR and
+semibatch reactors alike, so field ``0`` observes the first participating
+species. The CSTR and semibatch reactors integrate every phase species but
+return only the participating ones. Earlier releases returned their leading
+phase species instead, so whenever a nonreacting species preceded a
+reacting one in the phase, measurements were compared with the wrong
+species
+(`issue #497 <https://github.com/PharmaPy-org/PharmaPy/issues/497>`__).
+
 Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request
 order with replicates repeated, so an experiment need not sample the initial
