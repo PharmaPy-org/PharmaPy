@@ -8,6 +8,7 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   TransferResult,StateEvent
 )
 from PharmaPy.Phases_Refactored import BasePhase
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from time import perf_counter
 
 eps = np.finfo(float).eps
@@ -1851,7 +1852,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
             ``(num_mom,)``.
         kinetics : CrystKinetics, optional
             Crystallization kinetics, usually set later through the vessel's
-            ``CrystKinetics`` property.
+            ``CrystKinetics`` property. Growth must be size independent.
         density : float, optional
             Crystal density [kg/m3]. None uses the owning phase's density.
         kv : float, optional
@@ -1867,6 +1868,11 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
             scalar or one value per moment. None, the default, keeps the
             integrator's own tolerance.
 
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If ``kinetics`` has size-dependent growth.
+
         Notes
         -----
         Unlike ``OneDFVMMechanism``, the moments declare no tolerance of
@@ -1875,6 +1881,10 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         to the final moments let CVode hold the third moment just below zero
         on a leaner case-study feed, and that batch never crystallized.
         """
+        # The base class stores kinetics without going through the setter.
+        if kinetics is not None:
+            self._reject_size_dependent_growth(kinetics)
+
         super().__init__(
             owning_phase=owning_phase,
             target_components=target_components,
@@ -1918,6 +1928,61 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         )
 
         self._update_exposed_attributes()
+
+    @PopulationBalanceMechanism.mechanism_kinetics.setter
+    def mechanism_kinetics(self, value):
+        """Attach crystallization kinetics the moment closure can carry.
+
+        Parameters
+        ----------
+        value : CrystKinetics or None
+            Kinetics to attach; None leaves the current ones.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If ``value`` has size-dependent growth.
+        """
+        if value is not None:
+            self._reject_size_dependent_growth(value)
+            self._mechanism_kinetics = value
+
+    @staticmethod
+    def _reject_size_dependent_growth(kinetics):
+        """Refuse kinetics whose growth rate depends on crystal size.
+
+        Parameters
+        ----------
+        kinetics : CrystKinetics
+            Kinetics to check. Growth entries past the first three are the
+            size factor ``(1 + beta*L)**alpha`` that ``OneDFVMMechanism``
+            applies: alpha [-], then beta [1/um].
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If those entries are all nonzero, so the size factor is not
+            identically one.
+
+        Notes
+        -----
+        ``dmu_k/dt = k*G*mu_(k-1) + B*rad**k`` closes only for a growth rate G
+        that does not depend on size; a size-dependent G brings in the
+        integral of L**(k-1)*G(L)*n(L), which the moments do not carry. The
+        moment form used to ignore alpha and beta without a warning. With
+        either of them zero the factor is exactly one, so that growth is
+        still size independent.
+        """
+        growth = getattr(kinetics, 'params', {}).get('growth', ())
+        size_factor = np.atleast_1d(np.asarray(growth, dtype=float))[3:5]  # alpha [-], beta [1/um]
+
+        if size_factor.size and np.all(size_factor != 0):
+            raise PharmaPyNonImplementedError(
+                'MomentsPopulationBalance cannot carry size-dependent growth '
+                '(alpha, beta = %s): the moment equations close only for a '
+                'size-independent growth rate. Use OneDFVMMechanism for '
+                'size-dependent growth, or give growth only its first three '
+                'parameters.' % size_factor.tolist())
 
     # ---------------- legacy conversion ----------------
 

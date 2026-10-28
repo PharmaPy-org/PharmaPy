@@ -22,6 +22,7 @@ import pytest
 from PharmaPy.Connections import Connection
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.DataClasses import PhaseRef
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics
 from PharmaPy.Mechanisms import MomentsPopulationBalance, OneDFVMMechanism
@@ -774,13 +775,17 @@ def _seed_moments():
                      for order in range(4)])
 
 
-def _build_moments_crystallizer(moments):
+def _build_moments_crystallizer(moments, growth=GROWTH[:3]):
     """Build a batch crystallizer that carries its crystals as moments.
 
     Parameters
     ----------
     moments : numpy.ndarray
         Initial moments per m**3 of slurry [um**k/m**3], shape ``(4,)``.
+    growth : tuple of float, optional
+        Growth parameters. The default is the module's growth law without
+        its size factor, since the moment closure holds only for
+        size-independent growth.
 
     Returns
     -------
@@ -809,7 +814,7 @@ def _build_moments_crystallizer(moments):
     ]
     vessel.CrystKinetics = CrystKinetics(
         APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=NUCL_SEC,
-        growth=GROWTH, solubility_type="apelblat",
+        growth=growth, solubility_type="apelblat",
         solubility_basis="mass_per_volume_solvent",
     )
     return vessel, solid
@@ -865,6 +870,46 @@ def test_moments_without_a_slurry_volume_cannot_reach_the_old_stack():
 
     with pytest.raises(ValueError, match="slurry volume is unknown"):
         solid.to_legacy()
+
+
+def test_moments_refuse_size_dependent_growth_from_the_vessel():
+    """The vessel cannot hand the moments a growth law they would ignore."""
+    with pytest.raises(PharmaPyNonImplementedError, match="OneDFVMMechanism"):
+        _build_moments_crystallizer(_seed_moments(), growth=GROWTH)
+
+
+def test_moments_refuse_size_dependent_growth_at_construction():
+    """Kinetics given to the constructor are checked the same way."""
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=OLD_SOLID_MASS_FRAC, temp=WARM_TEMP
+    )
+    kinetics = CrystKinetics(
+        APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=NUCL_SEC,
+        growth=GROWTH, solubility_type="apelblat",
+        solubility_basis="mass_per_volume_solvent",
+    )
+
+    with pytest.raises(PharmaPyNonImplementedError, match="OneDFVMMechanism"):
+        MomentsPopulationBalance(
+            owning_phase=solid, target_components=TARGET,
+            solvent_name="solvent", moments_init=_seed_moments(),
+            kinetics=kinetics,
+        )
+
+
+@pytest.mark.parametrize(
+    "size_factor", [(0.0, GROWTH[4]), (GROWTH[3], 0.0)],
+    ids=["alpha_zero", "beta_zero"],
+)
+def test_moments_accept_a_size_factor_of_one(size_factor):
+    """With alpha or beta zero, (1 + beta*L)**alpha is one at every size."""
+    growth = GROWTH[:3] + size_factor
+    _, solid = _build_moments_crystallizer(_seed_moments(), growth=growth)
+
+    mechanism = solid.get_mechanism(MomentsPopulationBalance)
+    np.testing.assert_array_equal(
+        mechanism.mechanism_kinetics.params["growth"], growth
+    )
 
 
 def test_old_slurry_arrives_as_a_density_per_slurry_volume():
@@ -1093,7 +1138,7 @@ def test_zero_crystal_mass_empties_moments_left_with_noise():
     ]
     vessel.CrystKinetics = CrystKinetics(
         APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=NUCL_SEC,
-        growth=GROWTH, solubility_type="apelblat",
+        growth=GROWTH[:3], solubility_type="apelblat",  # moments: size independent
         solubility_basis="mass_per_volume_solvent",
     )
 
