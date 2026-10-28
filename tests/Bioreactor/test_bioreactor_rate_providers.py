@@ -108,24 +108,58 @@ def test_untargeted_exchanges_reject_invalid_or_empty_target_sets(reactions):
 
 
 def test_untargeted_rates_do_not_change_penalties_bounds_or_normalization():
+    """Verify real reconciliation bounds, target identity and objective terms.
+
+    Notes
+    -----
+    R046 and R050 are deliberately untargeted. Only R067 has a unit target in
+    the fixture's network coordinates. The relative-regularized policy therefore
+    uses scale one for both its residual and intracellular penalty, and restricts
+    only R067 to [0.5, 1.5] intersected with native bounds. These independently
+    derived quantities expose accidental contributions from omitted predictions.
+    Network coordinates use reaction-specific nmol or nmol-C per million cells
+    per day; a numeric scale of one denotes one native unit in each coordinate.
+    The solver tolerance is the existing closure tolerance, not a new allowance.
+    """
     folder = Path(__file__).parents[2] / "tests/Bioreactor/fixtures/fed_batch_cho"
-    case = read_input_json((folder / "inputs/case.json"))
-    declaration = read_input_json((folder / "inputs/mechanism.json"))
+    case = read_input_json(folder / "inputs/case.json")
+    declaration = read_input_json(folder / "inputs/mechanism.json")
     declaration["model"]["reconciliation"]["untargeted_exchanges"] = ["R046", "R050"]
     mechanism = build_bioreactor(case, declaration, folder / "inputs/thermo.json").mechanism
-    calls = []
-
-    def capture(environment, previous, **kwargs):
-        calls.append((environment, kwargs))
-        return object()
-
-    mechanism.closure.solve = capture
-    mechanism._solve({"R046": -10., "R050": 20., "R067": 1.})
-    mechanism._solve({"R046": 1000., "R050": -2000., "R067": 1.})
-    assert calls[0][1] == calls[1][1]
-    assert calls[0][1]["internal_scale"] == 1.0
-    assert [target.reaction_id for target in calls[0][1]["targets"]] == ["R067"]
-    assert set(calls[0][0].bound_overrides) == {"R067"}
+    native_lower, native_upper = mechanism.network.bounds({})  # [network flux coordinates]
+    positions = {name: index for index, name in enumerate(mechanism.network.reaction_ids)}
+    target_position = positions["R067"]
+    expected_lower = native_lower.copy()  # [network flux coordinates]
+    expected_upper = native_upper.copy()  # [network flux coordinates]
+    # The policy's initial relative half-width is exactly 0.5 [-].
+    target_value = 1.0  # [nmol-C/(10^6 cell day)], isolated growth-target fixture
+    internal_scale = 1.0  # [reaction-specific native flux unit], one per coordinate
+    expected_lower[target_position] = max(native_lower[target_position], 0.5 * target_value)
+    expected_upper[target_position] = min(native_upper[target_position], 1.5 * target_value)
+    internal_positions = [positions[name] for name in mechanism.definition.internal_reactions]
+    solutions = []
+    # Unequal omitted predictions straddle sign and span two orders of magnitude.
+    # They are arbitrary stress inputs in network coordinates, not biological data.
+    for omitted_uptake, omitted_exchange in ((-10., 20.), (1000., -2000.)):
+        solution = mechanism._solve({"R046": omitted_uptake,
+                                     "R050": omitted_exchange, "R067": target_value})
+        diagnostics = mechanism.closure.last_diagnostics
+        assert set(diagnostics.target_residuals) == {"R067"}
+        np.testing.assert_array_equal(solution.lower_bounds, expected_lower)
+        np.testing.assert_array_equal(solution.upper_bounds, expected_upper)
+        target_residual = (solution.fluxes[target_position] - target_value) / target_value  # [-]
+        internal_penalty = np.sum((solution.fluxes[internal_positions] / internal_scale)**2)  # [-]
+        expected_objective = target_residual**2 + internal_penalty  # [-], declared quadratic objective
+        np.testing.assert_allclose(diagnostics.target_residuals["R067"], target_residual,
+                                   rtol=0., atol=mechanism.closure.tolerance)
+        np.testing.assert_allclose(diagnostics.objective_value, expected_objective,
+                                   rtol=mechanism.closure.tolerance, atol=mechanism.closure.tolerance)
+        assert solution.mass_balance_residual_inf <= mechanism.closure.tolerance
+        solutions.append(solution)
+    np.testing.assert_allclose(solutions[0].fluxes, solutions[1].fluxes,
+                               rtol=0., atol=mechanism.closure.tolerance)
+    np.testing.assert_allclose(solutions[0].primary_objective, solutions[1].primary_objective,
+                               rtol=0., atol=mechanism.closure.tolerance)
 
 
 def test_native_untargeted_exchange_run_is_independent_of_omitted_target_values():

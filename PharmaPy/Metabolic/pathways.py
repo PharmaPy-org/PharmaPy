@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from numbers import Real
 from types import MappingProxyType
+from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -73,7 +74,7 @@ class PathwayModelDefinition:
     pathway_bound_rules: tuple = ()
     depletion_tolerance: float = 1.0e-8
     problem_name: str = "configured pathway optimization"
-    secondary_optimization: Mapping | None = None
+    secondary_optimization: Optional[Mapping] = None
 
     def __post_init__(self):
         """Validate and freeze the declaration.

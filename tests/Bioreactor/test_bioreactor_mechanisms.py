@@ -277,3 +277,13 @@ def test_closed_uptake_audit_does_not_pass_an_infeasible_closed_model():
         ReactionDefinition('export', {'A': -1.}, 0., 10.)],
         {'export': 1.}, ('feed', 'export'))
     assert n.audit_closed_uptake()['status'] == 'NOT_ASSESSED'
+
+
+def test_pathway_policy_annotation_resolves_on_supported_python():
+    """Resolve the optional policy on real supported interpreters, including 3.9."""
+    from collections.abc import Mapping
+    from typing import get_args, get_type_hints
+    from PharmaPy.Metabolic.pathways import PathwayModelDefinition
+
+    annotation = get_type_hints(PathwayModelDefinition)["secondary_optimization"]
+    assert set(get_args(annotation)) == {Mapping, type(None)}

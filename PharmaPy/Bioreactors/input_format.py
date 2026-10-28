@@ -328,6 +328,8 @@ def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> t
     -------
     tuple of dict
         ``(case, definition)`` deep copies in the internal schema-1 layout.
+        Normalized pathway inputs retain parameters inside ``model``; this
+        layout can be passed back through the same public construction API.
         Relationship families are expanded; units are converted only where the
         internal layout fixes them (see ``_version_two``).
 
@@ -360,7 +362,9 @@ def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> t
     if definition.get("schema_version") == 2:
         _version_two(case, definition)
     if definition['model'].get('rule_graph') is not None:
-        definition['model'] = expand_relationships(definition['model'], definition['parameters'])
+        parameters = (definition['parameters'] if 'parameters' in definition
+                      else definition['model']['parameters'])  # [declared parameter units]
+        definition['model'] = expand_relationships(definition['model'], parameters)
     if "schema_version" not in definition:
         return case, definition
     _keys(definition, MECHANISM_FIELDS, "mechanism")

@@ -297,3 +297,36 @@ def test_rate_basis_normalization_and_growth_content():
     assert _rate_basis(declaration, growth=True)[0] == .5
     assert _rate_basis(dict(amount_unit='1', normalization='none', time_unit='h'), growth=True)[0] == 24.
     assert _rate_basis(dict(amount_unit='mol', normalization='cell', time_unit='s'))[0] == 86400e6
+
+
+def test_normalized_pathway_provider_reenters_public_construction():
+    """Preserve uncorrected provider rates, parameter units and native histories."""
+    case, definition, _ = _load("generic_batch")
+    thermo = EXAMPLES / "generic_batch/inputs/thermo.json"
+    pathways = definition["model"]["pathways"]
+    # Constant capacity 2 mol/(kgDW h) is the existing synthetic batch bound.
+    pathways["rule_graph"] = [{"identifier": "capacity", "expression": {
+        "parameter": "rates.maximum_uptake"}}]
+    definition["parameters"]["rates"]["maximum_uptake"] = 2.0  # [mol/(kgDW h)]
+    pathways["uptake_constraints"] = [{
+        "identifier": "nutrient_uptake", "type": "provider",
+        "species": "nutrient", "output": "capacity"}]
+    definition["rate_provider"] = {
+        "type": "rule-graph", "identifier": "constant-capacity",
+        "output_units": {"capacity": "mol/(kgDW h)"}}
+    original = deepcopy((case, definition))
+    baseline = build_bioreactor(case, definition, thermo)
+    normalized_case, normalized_definition = normalize_forward_inputs(case, definition)
+    assert "parameters" not in normalized_definition
+    assert normalized_definition["model"]["parameters"]["rates.maximum_uptake"] == 2.0
+    normalized_original = deepcopy((normalized_case, normalized_definition))
+    rebuilt = build_bioreactor(normalized_case, normalized_definition, thermo)
+    expected = baseline.solve(verbose=False)
+    actual = rebuilt.solve(verbose=False)
+    assert expected and len(actual) == len(expected)
+    # Identical declarations must yield identical native coordinates and values.
+    for reference, replay in zip(expected, actual):
+        np.testing.assert_array_equal(replay.time, reference.time)
+        np.testing.assert_array_equal(replay.mass_j_liquid0, reference.mass_j_liquid0)
+    assert (case, definition) == original
+    assert (normalized_case, normalized_definition) == normalized_original
