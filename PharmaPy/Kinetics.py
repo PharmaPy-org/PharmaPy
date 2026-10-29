@@ -1357,16 +1357,56 @@ class CrystKinetics:
             self.alpha_fn = alpha_fn
 
     def set_params(self, params_in):
+        """Replace the kinetic parameters from a mapping or a flat vector.
+
+        Parameters
+        ----------
+        params_in : dict or array-like
+            Either a mapping from mechanism name (``nucl_prim``, ``nucl_sec``,
+            ``growth``, ``dissolution``) to its physical parameters, in the
+            units of the class docstring, or the flat vector
+            ``concat_params`` returns: the four parameter sets concatenated
+            in that order, each with the length it currently has, so a
+            five-entry growth law stays five entries wide.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a flat vector is not one-dimensional or its length differs
+            from the current parameter count. The layout is taken from the
+            stored parameters, so a vector for a three-entry growth law
+            cannot be applied to kinetics carrying size-dependent growth,
+            and vice versa.
+
+        Notes
+        -----
+        A mapping passes through ``transform_params``, which fills omitted
+        mechanisms with their inactive defaults and applies the logarithmic
+        reformulation when configured. A flat vector is stored as given and
+        must already be in the stored formulation.
+        """
         if isinstance(params_in, dict):
             params_complete = self.transform_params(params_in,
                                                     self.reformulate_kin)
         else:
-            param_lens = np.array([3, 4, 3, 3])
+            # Split by the lengths the stored sets have, not a fixed
+            # [3, 4, 3, 3]: a fixed layout silently moved the alpha and beta
+            # of a five-entry growth law into the dissolution set.
+            param_lens = np.array([len(self.params[name])
+                                   for name in self.names_mechanisms])  # [-]
+            params_in = np.asarray(params_in, dtype=float)
+
+            if params_in.ndim != 1 or params_in.size != param_lens.sum():
+                raise PharmaPyValueError(
+                    'The parameter vector must be one-dimensional with '
+                    f'{param_lens.sum()} entries, split as '
+                    f'{dict(zip(self.names_mechanisms, param_lens.tolist()))}; '
+                    f'got shape {params_in.shape}.')
+
             split_idx = param_lens.cumsum()[:-1]
 
-            params_in = np.split(params_in, split_idx)
-
-            params_complete = dict(zip(self.names_mechanisms, params_in))
+            params_complete = dict(zip(self.names_mechanisms,
+                                       np.split(params_in, split_idx)))
 
         self.params = params_complete
 
