@@ -19,7 +19,8 @@ from PharmaPy.Errors import (PharmaPyNonImplementedError, PharmaPyTypeError,
                              PharmaPyValueError)
 from PharmaPy.Results import SimulationResult, flatten_dict_fields, get_name_object
 
-from PharmaPy.Commons import trapezoidal_rule, check_steady_state
+from PharmaPy.Commons import (_real_float_array, check_steady_state,
+                              trapezoidal_rule)
 from PharmaPy.CheckModule import check_modeling_objects
 
 import inspect
@@ -137,9 +138,13 @@ def _modifier_entries(modifiers, label: str, names: Optional[list],
     For one unnamed experiment a mapping holds that experiment's modifier
     fields, as in earlier releases; a one-element list or tuple is
     equivalent. A None entry is passed through and means no modification,
-    as in earlier releases. Other entries must be ``dict`` because the
-    unit-operation wrappers apply only ``dict`` modifiers and would
-    silently ignore other values.
+    as in earlier releases. Other entries must be ``dict``: the reactor
+    and crystallizer wrappers apply ``modify_phase`` only when it is a
+    ``dict`` and would silently ignore other values, and they reject a
+    non-dict ``modify_controls`` with ``TypeError``
+    (``ProcessControl.apply_control_modifier``) only when the objective
+    is first evaluated. Checking here reports both at setup and names the
+    offending experiment.
     """
     if modifiers is None:
         return None
@@ -268,6 +273,59 @@ def _experiment_with_wrapper(experiment: Experiment, name: str,
                       author=experiment.author, date=experiment.date)
 
 
+def _explicit_param_seed(unit, param_seed) -> np.ndarray:
+    """Return a validated copy of a seed supplied for a unit without kinetics.
+
+    Parameters
+    ----------
+    unit : object
+        Unit operation fitted by ``SimulationExec.SetParamEstimation``
+        without a ``Kinetics`` object, such as a ``Filter``. If it declares
+        ``name_params``, those are all of its parameter names. If it has a
+        ``validate_param_seed`` method, that method applies the unit's own
+        seed rules, such as ``Filter.validate_param_seed``.
+    param_seed : array_like
+        Real parameter seed in the unit's estimation basis and parameter
+        order, as its ``paramest_wrapper`` receives it, for example a
+        ``Filter``'s (alpha [m/kg], medium resistance [1/m]), or their
+        natural logarithms [-] when ``log_params`` is True. A scalar is
+        one parameter.
+
+    Returns
+    -------
+    numpy.ndarray
+        New float array of shape (num_params,), equal to ``param_seed``
+        in the same basis and order, without a unit conversion. The
+        caller's array is neither modified nor shared.
+
+    Raises
+    ------
+    ValueError
+        If the seed is not an array of real (integer or floating-point)
+        numbers, for example a dictionary, string or complex seed, is not
+        one-dimensional, has a number of entries other than the length of
+        the unit's ``name_params`` (when declared), or has a non-finite
+        entry; the message names the expected parameters. Also the
+        ``ValueError`` of the unit's ``validate_param_seed``, for example
+        for a ``Filter`` with callable resistances or a nonpositive
+        physical resistance.
+    """
+    names = getattr(unit, 'name_params', None)
+    expected = ('' if names is None
+                else f" with one entry per parameter {list(names)!r}")
+    message = (f"param_seed for a {type(unit).__name__} must be a finite "
+               f"one-dimensional array of real numbers{expected}, in the "
+               f"unit's estimation basis; got {param_seed!r}")
+    seed = np.atleast_1d(_real_float_array(param_seed, message))  # copy; [unit's parameter units]
+    if (seed.ndim != 1 or (names is not None and len(seed) != len(names))
+            or not np.all(np.isfinite(seed))):
+        raise ValueError(message)
+    validate = getattr(unit, 'validate_param_seed', None)
+    if validate is not None:
+        validate(seed.copy())
+    return seed
+
+
 class SimulationExec:
     def __init__(self, pure_path, flowsheet):
         """Set up a flowsheet and its deterministic execution order.
@@ -309,6 +367,8 @@ class SimulationExec:
 
         self.uos_instances = {}
         self.oper_mode = []
+        # Wall-clock duration of the latest EstimateParams optimization.
+        self.optimization_time = None  # [s]
 
         if isinstance(flowsheet, dict):
             graph = flowsheet
@@ -783,6 +843,55 @@ class SimulationExec:
                     'charge through Phases or the feed through Inlet.')
         return None
 
+    def _estimation_unit(self, pick_unit: Optional[str] = None):
+        """Return the unit operation fitted by ``SetParamEstimation``.
+
+        Parameters
+        ----------
+        pick_unit : str, optional
+            Name of the flowsheet unit to fit. The default is None, which
+            selects the only unit of a single-unit flowsheet.
+
+        Returns
+        -------
+        object
+            The unit operation attached to this ``SimulationExec`` under
+            the resolved name.
+
+        Raises
+        ------
+        RuntimeError
+            If the flowsheet holds two or more units and ``pick_unit`` is
+            None.
+        PharmaPyValueError
+            If ``pick_unit`` is not a unit of the flowsheet graph. The
+            message lists the valid unit names in execution order. It is a
+            ``ValueError``.
+        AttributeError
+            If the resolved unit has not been attached to this
+            ``SimulationExec``.
+
+        Notes
+        -----
+        Units are the nodes of the flowsheet graph in ``execution_names``
+        order, including units that appear only as successors and so have
+        no adjacency entry, such as ``'R02'`` in ``{'R01': ['R02']}``. On a
+        single-unit flowsheet ``pick_unit`` may be omitted or must name that
+        unit.
+        """
+        unit_names = self.execution_names
+        if pick_unit is None:
+            if len(unit_names) > 1:
+                raise RuntimeError(
+                    "Two or more unit operations detected. Select one using "
+                    f"the 'pick_unit' argument; valid names: {unit_names!r}")
+            pick_unit = unit_names[0]
+        elif pick_unit not in unit_names:
+            raise PharmaPyValueError(
+                f"pick_unit {pick_unit!r} is not a unit of the flowsheet; "
+                f"valid names: {unit_names!r}")
+        return getattr(self, pick_unit)
+
     def SetParamEstimation(self, x_data, y_data=None, y_spectra=None,
                            fit_spectra=False,
                            wrapper_kwargs=None,
@@ -860,21 +969,33 @@ class SimulationExec:
         control_modifiers : dict, list or tuple, optional
             Per-experiment control-parameter updates passed to the unit's
             ``paramest_wrapper`` as ``modify_controls``, aligned with the
-            experiments exactly like ``phase_modifiers``. Each entry is a
-            dictionary in the units of the controlled state and its control
-            function arguments; for a crystallizer temperature control
-            ``my_control(time, temp_init, ramp)`` an entry is
-            ``{'temp': {'args': (320.0, -0.2)}}``. The default is None, which
+            experiments exactly like ``phase_modifiers``. Each entry maps
+            configured control names to partial control records in the
+            units of the control function's arguments; for a temperature
+            control ``my_control(time, temp_init, ramp)`` returning [K], an
+            entry is ``{'temp': {'args': (320.0, -0.2)}}`` with the initial
+            temperature [K] and ramp [K/s]. Batch, CSTR and semibatch
+            reactors and batch, MSMPR and semibatch crystallizers evaluate
+            each experiment with a copy of their configured controls in
+            which ``fun`` and ``args`` are replaced and ``kwargs`` is merged
+            key by key, so an experiment without a modifier (an empty or
+            None entry) uses the configured controls, never another
+            experiment's modifier. See the Notes. The default is None, which
             passes an empty dictionary to every experiment.
         pick_unit : str, optional
-            Unit operation to fit when the flowsheet holds more than one.
-            The default is None.
+            Name of the flowsheet unit to fit; any graph node is valid,
+            including a unit that appears only as a successor. Required
+            when the flowsheet holds more than one unit. On a single-unit
+            flowsheet it may be omitted or must name that unit. The
+            selected unit supplies the callback, its signature for binding
+            ``Experiment`` arguments, the parameter seed and the names. The
+            default is None.
         **inputs_paramest
             Further keyword arguments of ``ParameterEstimation`` (or
             ``MultipleCurveResolution``), for example ``measured_ind``,
             ``optimize_flags``, ``weight_matrix``, ``name_params`` or
-            ``output_names``. ``param_seed``, if given, is set on the unit's
-            kinetics before the seed is read back. For legacy input
+            ``output_names``. ``param_seed``, if given, takes precedence
+            over the unit's default seed; see the Notes. For legacy input
             ``name_states`` is replaced by the unit's ``states_uo``; for
             ``Experiment`` input a supplied ``name_states`` is passed
             through, and otherwise the estimator names the states after
@@ -887,8 +1008,19 @@ class SimulationExec:
         Raises
         ------
         RuntimeError
-            If the flowsheet holds two or more unit operations and
-            ``pick_unit`` is None.
+            If the flowsheet holds two or more unit operations, counting
+            successor-only units, and ``pick_unit`` is None.
+        PharmaPyValueError
+            If ``pick_unit`` is not a unit of the flowsheet graph; the
+            message lists the valid names. It is a ``ValueError``.
+        AttributeError
+            If the selected graph node has not been attached to this
+            ``SimulationExec`` as a unit operation.
+        NotImplementedError
+            If the selected unit does not support parameter estimation, as
+            declared by its ``validate_param_estimation`` method; raised
+            before any other input is processed. ``PlugFlowReactor`` raises
+            ``PharmaPyNonImplementedError`` (issue #401).
         ValueError
             If ``phase_modifiers`` or ``control_modifiers``
 
@@ -905,6 +1037,14 @@ class SimulationExec:
             (``phase_modifiers``, ``control_modifiers`` or
             ``wrapper_kwargs``) is given, and for the input errors of
             ``ParameterEstimation``.
+
+            Also if ``param_seed`` is given for a unit without ``Kinetics``
+            and is not a finite one-dimensional array of real numbers (a
+            dictionary, string or complex seed is rejected) with one entry
+            per name in the unit's ``name_params`` (when declared), or
+            violates the unit's ``validate_param_seed`` rules, for example
+            a ``Filter`` with callable resistances or a nonpositive
+            physical alpha or medium resistance.
         TypeError
             If a modifier argument for named experiments is not a mapping,
             an unnamed modifier argument is not a mapping, list or tuple, a
@@ -932,33 +1072,76 @@ class SimulationExec:
         binds ``modify_phase`` of the reactor wrappers. The caller's
         experiments are not modified.
 
+        The parameter seed is read from the selected unit. For a unit with
+        ``Kinetics``, a given ``param_seed`` is first set on the kinetics
+        with ``Kinetics.set_params``, and the seed is then read back with
+        ``Kinetics.concat_params``. For a unit without kinetics, such as a
+        ``Filter``, a given ``param_seed`` is passed to the estimator as a
+        float copy, in the unit's estimation basis and parameter order
+        without conversion (natural logarithms of alpha [m/kg] and medium
+        resistance [1/m] for a ``Filter`` with ``log_params=True``,
+        physical values otherwise). The unit's default ``param_seed`` is
+        not evaluated, and its configured parameters are never changed or
+        converted; a ``Filter`` reads its configured alpha and r_medium
+        only to check that they are not callable. A unit that defines
+        ``validate_param_seed`` checks the seed with its own rules, so a
+        ``Filter`` applies the estimability and domain rules of
+        ``Filter.param_seed`` to the supplied seed. Without ``param_seed``
+        the unit's ``param_seed`` attribute (or ``params``) is used, with
+        its validation, for example ``Filter.param_seed`` rejecting
+        callable resistances.
+
         Caller data (``x_data``, ``y_data``, the modifier dictionaries and
         ``wrapper_kwargs``) are not modified; the modifier dictionaries are
         passed to the callback without copying.
 
-        Only modifier keys and entry types are validated here. Applying
-        control modifiers inside the reactor callbacks is tracked by
-        issue #271.
+        Only modifier keys and entry types are validated here; the unit's
+        ``paramest_wrapper`` applies the modifier fields when the objective
+        is evaluated. The batch, CSTR and semibatch reactor callbacks and
+        the batch, MSMPR and semibatch crystallizer callbacks raise
+        ``ValueError`` for a control name that the unit does not configure
+        or a record entry other than ``fun``, ``args`` and ``kwargs``, and
+        ``TypeError`` for a non-dictionary entry or ``kwargs``, before the
+        unit is reset or integrated. They never modify the configured
+        controls or the modifier dictionaries.
+
+        A unit that defines ``validate_param_estimation`` is checked with it
+        first, before any input is processed; the hook raises when the
+        unit has no estimation contract. ``PlugFlowReactor`` estimation is
+        not supported, since no output contract (axial positions, states,
+        units and sensitivities) is defined for the distributed model;
+        estimate the kinetics with a ``BatchReactor`` model instead
+        (issue #401).
 
         Reactor callbacks return exactly one row per requested sample time
         (replicates repeated), so experiments need not sample the initial
-        time. Each reactor experiment must still request at least one time
-        after the charge time: an all-charge-time grid such as ``[0.0]`` has
-        zero integration duration and currently fails inside CVode with
-        ``IndexError`` when the objective is evaluated (issue #418).
+        time. An experiment sampled only at the charge time, such as
+        ``[0.0]`` or ``[0.0, 0.0]``, is not integrated: its rows are the
+        charged state, with exactly zero sensitivities, since the charged
+        state does not depend on the kinetic parameters (issue #418).
         Crystallizer callbacks still return the solver rows, which
         include the charge time, until issue #328 is fixed: their grids
         must start at the charge time (0 s) without replicates there; add
         0 s to one measurement with a NaN value as a workaround.
+
+        In a multi-unit flowsheet only the ``pick_unit`` unit is fitted, in
+        isolation from its neighbours: its callback starts from the unit's
+        current phases and inlets and does not re-solve upstream units or
+        transfer material downstream. Run ``SolveFlowsheet`` first when a
+        downstream unit's inputs come from upstream units. Earlier releases
+        counted only the units with an adjacency entry: in a graph such as
+        ``{'R01': ['R02']}``, whose successor-only unit has none, they
+        silently fitted ``R01`` without ``pick_unit`` and ignored
+        ``pick_unit='R02'``, and single-unit flowsheets ignored
+        ``pick_unit`` (issue #241).
         """
-        if len(self.graph) == 1:
-            target_unit = getattr(self, list(self.graph.keys())[0])
-        else:
-            if pick_unit is None:
-                raise RuntimeError("Two or more unit operations detected. "
-                                   "Select one using the 'pick_unit' argument")
-            else:
-                pass  # remember setting reset_states to True!!
+        target_unit = self._estimation_unit(pick_unit)
+        # A unit without an estimation contract declares it through this
+        # optional hook, so setup fails before any input is processed.
+        validate_estimation = getattr(target_unit, 'validate_param_estimation',
+                                      None)
+        if validate_estimation is not None:
+            validate_estimation()
 
         experiments = _experiment_collection(x_data)
         if experiments is not None:
@@ -1022,13 +1205,14 @@ class SimulationExec:
             kwargs_wrapper = (dict(zip(names, wrappers)) if names is not None
                               else wrappers)
 
-        # Get 1D array of parameters from the UO class
+        # 1D parameter seed in the unit's estimation basis.
         param_seed = inputs_paramest.pop('param_seed', None)
-        if param_seed is not None:
-            target_unit.Kinetics.set_params(param_seed)
-
         if hasattr(target_unit, 'Kinetics'):
+            if param_seed is not None:
+                target_unit.Kinetics.set_params(param_seed)
             param_seed = target_unit.Kinetics.concat_params()
+        elif param_seed is not None:
+            param_seed = _explicit_param_seed(target_unit, param_seed)
         else:
             param_seed = getattr(target_unit, 'param_seed', target_unit.params)
 
@@ -1065,15 +1249,54 @@ class SimulationExec:
 
     def EstimateParams(self, optim_options=None, method='LM', bounds=None,
                        verbose=True):
-        tic = time.time()
+        """Fit the estimator built by ``SetParamEstimation``.
+
+        Parameters
+        ----------
+        optim_options : dict, optional
+            Solver options of the selected method, passed to
+            ``ParameterEstimation.optimize_fn``. The default is None.
+        method : {'LM', 'IPOPT', 'scipy', 'least_squares'}, optional
+            Optimization method; see ``ParameterEstimation.optimize_fn``.
+            The default is ``'LM'``.
+        bounds : sequence, optional
+            Parameter bounds in the model parameter units, for IPOPT or
+            ``scipy.optimize.least_squares``. The default is None.
+        verbose : int or bool, optional
+            If truthy, request verbose solver output and print the
+            optimization time; if falsy, print nothing here. The default is
+            True.
+
+        Returns
+        -------
+        tuple
+            ``(opt_par, covar_params, info)`` of
+            ``ParameterEstimation.optimize_fn``: the accepted variable
+            parameters in the model callback's parameter units, their
+            covariance and the solver information.
+
+        Raises
+        ------
+        AttributeError
+            If ``SetParamEstimation`` has not been called, so that
+            ``ParamInst`` does not exist.
+
+        Notes
+        -----
+        The wall-clock duration of the optimization [s] is stored as
+        ``optimization_time``, whether or not it is printed. Errors of
+        ``ParameterEstimation.optimize_fn`` propagate and leave
+        ``optimization_time`` unchanged.
+        """
+        tic = time.time()  # [s], wall clock
         results = self.ParamInst.optimize_fn(optim_options=optim_options,
                                              method=method,
                                              bounds=bounds, verbose=verbose)
-        toc = time.time()
+        self.optimization_time = time.time() - tic  # [s]
 
-        elapsed = toc - tic
-
-        print('Optimization time: {:.2e} s.'.format(elapsed))
+        if verbose:
+            print('Optimization time: {:.2e} s.'.format(
+                self.optimization_time))
 
         return results
 

@@ -12,6 +12,7 @@ from PharmaPy.Streams import LiquidStream
 from PharmaPy.Results import DynamicResult
 from PharmaPy.Plotting import plot_distrib
 from PharmaPy.CheckModule import check_modeling_objects
+from PharmaPy.Presence import SpeciesPresence, StructuralPresenceMixin
 
 import scipy.optimize
 import scipy.sparse
@@ -25,8 +26,23 @@ from matplotlib.ticker import AutoMinorLocator, MaxNLocator
 DEFAULT_REFLUX_TO_MINIMUM_RATIO = 1.5  # [-]
 
 
-class _BaseDistillation:
-    """Shared shortcut-design utilities for steady and dynamic columns."""
+class _BaseDistillation(StructuralPresenceMixin):
+    """Shared shortcut-design utilities for steady and dynamic columns.
+
+    Species presence (issue #425): a species that the column neither
+    receives nor holds needs no property data other than ``mw``. The
+    shortcut design and the steady plate-to-plate calculation work on exact
+    compositions (the feed, the products and the operating-line vapors),
+    whose entries are exactly zero for a species without feed; each such
+    composition defines its own presence (``_exact_presence``), with the
+    light and heavy keys present by construction, because the design uses
+    their equilibrium ratios whatever their fractions. The dynamic column
+    integrates plate compositions, which the solver perturbs, and keeps a
+    structural presence record instead (``DynamicDistillation``). Absent
+    species get a unit equilibrium ratio (``_absent_unit_ratios``), so they
+    stay at exactly zero, and they rank after the present species in the
+    volatility order.
+    """
 
     def __init__(self, pres, q_feed, LK, HK,
                  perc_LK, perc_HK, reflux=None, num_plates=None,
@@ -183,6 +199,50 @@ class _BaseDistillation:
 
         return inputs
 
+    def _key_flags(self) -> np.ndarray:
+        """Flag the light and heavy keys.
+
+        Returns
+        -------
+        numpy.ndarray
+            1.0 for the light and heavy keys and 0.0 for the other species
+            [-], shape ``(num_species,)``, in ``name_species`` order.
+        """
+        keys = np.zeros(self.num_species)  # [-]
+        keys[[self.LK_index, self.HK_index]] = 1.0
+        return keys
+
+    def _exact_presence(self, fractions: np.ndarray) -> SpeciesPresence:
+        """Return the presence of an exact composition, keys included.
+
+        Parameters
+        ----------
+        fractions : array-like
+            Mole fractions [-], shape ``(num_species,)``, that are exact
+            inputs or exact algebraic functions of them (the feed, the
+            shortcut products, the operating-line vapors), never solver
+            states.
+
+        Returns
+        -------
+        SpeciesPresence
+            Record in which a species is present if its fraction is
+            nonzero or if it is the light or heavy key (issue #425).
+
+        Notes
+        -----
+        A species without feed has exactly zero fraction in every
+        composition that the shortcut design and the steady plate-to-plate
+        calculation derive from the feed: the product split multiplies the
+        feed fraction, and the operating lines and the weighted dew point
+        combine zero fractions into zero. The keys are present by
+        construction, because Fenske, Underwood and the volatility order
+        use their equilibrium ratios whatever their fractions.
+        """
+        presence = SpeciesPresence(self.num_species)
+        presence.record(fractions, self._key_flags())
+        return presence
+
     def get_alpha(self, pres, x_frac):
         """Calculate relative volatility at a liquid composition.
 
@@ -191,19 +251,43 @@ class _BaseDistillation:
         pres : float
             Column pressure [Pa].
         x_frac : ndarray
-            Liquid mole fractions [-].
+            Liquid mole fractions [-], an exact composition such as the
+            feed or a shortcut product.
 
         Returns
         -------
         ndarray
             Component relative volatilities normalized to the heavy key [-].
+            A species with zero fraction other than the keys is absent and
+            gets the unit ratio, so its value is ``1 / K_HK``, independent
+            of its data.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero fraction, or a key, lacks the VLE data (or, with
+            UNIQUAC, the activity parameters) of the bubble point; absent
+            species need none (issue #425).
+
+        Notes
+        -----
+        The bubble point and the ratios are weighted with the presence of
+        ``x_frac`` (``_exact_presence``), so a non-ideal activity model is
+        evaluated on the present species only.
         """
+        presence = self._exact_presence(x_frac)
+        weights = presence.weights(x_frac)  # [-]
         temp_bubble = self.Inlet.getBubblePoint(
-            pres, mole_frac=x_frac, thermo_method=self.gamma_model)  # [K]
+            pres, mole_frac=x_frac, thermo_method=self.gamma_model,
+            weights=weights)  # [K]
 
         k_vals = self.Inlet.getKeqVLE(temp=temp_bubble,
                                       pres=pres, x_liq=x_frac,
-                                      gamma_model=self.gamma_model)  # [-]
+                                      gamma_model=self.gamma_model,
+                                      weights=weights)  # [-]
+        k_vals = self._absent_unit_ratios(k_vals,
+                                          present=presence.mask)  # [-]
 
         alpha = k_vals/k_vals[self.HK_index]  # [-]
 
@@ -227,6 +311,23 @@ class _BaseDistillation:
             Distillate molar flow rate [mol/s].
         bot_flow : float
             Bottoms molar flow rate [mol/s].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero feed fraction, or a key, lacks the VLE data (or,
+            with UNIQUAC, the activity parameters) of the feed bubble point;
+            species without feed need none (issue #425).
+
+        Notes
+        -----
+        ``sorted_by_volatility`` lists the species present in the feed
+        (``_exact_presence``: nonzero fraction, or a key) from the most to
+        the least volatile at the feed bubble point, followed by the absent
+        species in database order, whose ratios are not evaluated from
+        their data. The absent species belong to the heavier non-keys and
+        carry no flow.
         """
         if z_feed is None:
             z_feed = self.z_feed  # [-]
@@ -237,14 +338,23 @@ class _BaseDistillation:
         feed_flow = self.feed_flowrate  # [mol/s]
 
         # ---------- Determine Light Key and Heavy Key component numbers
+        # Species without feed are absent and need no data (issue #425).
+        presence = self._exact_presence(z_feed)
+        weights = presence.weights(z_feed)  # [-]
         temp_bubble_feed = self.Inlet.getBubblePoint(
             pres=self.pres, mole_frac=z_feed,
-            thermo_method=self.gamma_model)  # [K]
+            thermo_method=self.gamma_model, weights=weights)  # [K]
 
         k_feed = self.Inlet.getKeqVLE(temp=temp_bubble_feed,
                                       pres=self.pres, x_liq=z_feed,
-                                      gamma_model=self.gamma_model)  # [-]
-        volatility_order = np.argsort(k_feed)[::-1]  # [-]
+                                      gamma_model=self.gamma_model,
+                                      weights=weights)  # [-]
+        # Present species from the most to the least volatile, then the
+        # absent ones in database order, so that their data cannot move them.
+        present_idx = np.flatnonzero(presence.mask)  # [-]
+        volatility_order = np.concatenate((
+            present_idx[np.argsort(k_feed[present_idx])[::-1]],
+            np.flatnonzero(~presence.mask)))  # [-]
         self.sorted_by_volatility = [self.name_species[ind]
                                      for ind in volatility_order]
 
@@ -434,6 +544,13 @@ class _BaseDistillation:
         ``reflux_to_minimum_ratio`` shortcut-design default chooses an actual
         operating reflux above this minimum.
 
+        Both Underwood sums run over the species present in the feed
+        (``_exact_presence``: nonzero fraction, or a key) only (issue
+        #425). A species without feed adds an exact zero to each sum, but
+        its relative volatility is the placeholder ``1 / K_HK`` of its unit
+        ratio, which can coincide with the root ``phi`` and turn its term
+        into ``0 / 0``; leaving it out of the sums keeps them finite.
+
         """
         if z_feed is None:
             z_feed = self.z_feed
@@ -443,6 +560,10 @@ class _BaseDistillation:
 
         alpha = self.get_alpha(self.pres, z_feed)  # [-]
         underwood_target = 1 - self.q_feed  # [-], q_feed is liquid fraction.
+        # Species without feed carry no term in either sum (issue #425).
+        present = self._exact_presence(z_feed).mask  # [-]
+        alpha_present = alpha[present]  # [-]
+        z_present = np.asarray(z_feed)[present]  # [-]
 
         def f(phi):
             """Evaluate the squared residual of the first Underwood equation.
@@ -460,7 +581,8 @@ class _BaseDistillation:
             """
             # First Underwood equation; all terms are dimensionless.
             underwood_sum = np.sum(
-                alpha * z_feed / (alpha - phi + np.finfo(float).eps))  # [-]
+                alpha_present * z_present /
+                (alpha_present - phi + np.finfo(float).eps))  # [-]
             fun = (underwood_sum - underwood_target)**2  # [-]
 
             return fun
@@ -472,7 +594,9 @@ class _BaseDistillation:
         phi = phi.x[0]  # [-]
 
         # Second Underwood equation gives V_min and L_min [mol/s].
-        V_min = np.sum(alpha * dist_flowrate * x_dist / (alpha - phi))  # [mol/s]
+        V_min = np.sum(alpha_present * dist_flowrate *
+                       np.asarray(x_dist)[present] /
+                       (alpha_present - phi))  # [mol/s]
         L_min = V_min - dist_flowrate  # [mol/s]
 
         min_reflux = L_min/dist_flowrate  # [-]
@@ -512,7 +636,22 @@ class _BaseDistillation:
         dict
             Material balances [mol/s, -], minimum reflux ratio [-], minimum
             and actual stage counts [-], actual reflux ratio [-], and feed tray
-            number [-].
+            number [-]. The minimum stage count is the Fenske value (a
+            float); an estimated actual stage count (``num_plates`` None,
+            zero or negative) is rounded up to an int, and a feed tray
+            estimated with Kirkbride is an int (issue #523); a given
+            ``num_plates`` or ``num_feed`` is returned as given.
+
+        Raises
+        ------
+        ValueError
+            If the inlet evaluated at ``time`` has no flow and the column
+            has no liquid holdup (``Liquid_1``) to design on.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            of the design composition, or a key, lacks the VLE data (or,
+            with UNIQUAC, the activity parameters) of the design; species
+            without feed need none (issue #425).
 
         Notes
         -----
@@ -520,6 +659,15 @@ class _BaseDistillation:
         Kirkbride shortcut-design equations/correlations. The
         ``reflux_to_minimum_ratio`` multiplier is an operating-reflux default,
         not part of Underwood's equations.
+
+        With ``time``, the design composition is the inlet's mole fractions
+        at that time if the inlet flows there. A feed without flow supplies
+        nothing (issue #425), so its composition is not a design feed: the
+        design then uses the composition of the liquid holdup
+        (``Liquid_1``), the column's own content, so that a species only in
+        that feed needs no data and cannot change the operating point. The
+        design flows keep using the inlet's stored molar flow
+        (``feed_flowrate`` [mol/s]), as before.
 
         """
 
@@ -529,6 +677,17 @@ class _BaseDistillation:
         else:
             inputs = self.get_inputs(time)
             z_feed = inputs['Inlet']['mole_frac']  # [-]
+            if not np.any(np.asarray(inputs['Inlet']['mole_flow']) != 0):
+                # A feed without flow supplies nothing (issue #425): design
+                # on the holdup instead.
+                holdup = getattr(self, 'Liquid_1', None)
+                if holdup is None:
+                    raise ValueError(
+                        "The inlet has no flow at the design time "
+                        f"{time} [s] and the column has no liquid holdup "
+                        "(Liquid_1) to design on; give the inlet a nonzero "
+                        "flow at that time")
+                z_feed = np.asarray(holdup.mole_frac, dtype=float)  # [-]
 
         x_dist, x_bot, dist_flowrate, bot_flowrate = self.global_material_bce(
             z_feed)  # [-], [-], [mol/s], [mol/s]
@@ -559,13 +718,15 @@ class _BaseDistillation:
         else:
             reflux = self.reflux  # [-]
 
-        # Actual number of stages
+        # Actual number of stages: an estimate is rounded up to a whole
+        # number of equilibrium stages, an int that calc_plates can use as
+        # an array dimension and a range bound (issue #523).
         if self.num_plates == 0 or self.num_plates is None:
             print('Using Gilliland correlation for number of stages')
             num_plates = self.molokanov_equation(reflux, min_reflux, num_min)  # [-]
-            num_plates = np.ceil(num_plates)  # [-]
+            num_plates = int(np.ceil(num_plates))  # [-]
         elif self.num_plates < 0:
-            num_plates = np.ceil(num_min * abs(self.num_plates))  # [-]
+            num_plates = int(np.ceil(num_min * abs(self.num_plates)))  # [-]
         elif self.num_plates > 0:
             if self.num_plates < np.ceil(num_min):
                 print('Warning: Specified number of plates (%i) is lower than '
@@ -579,12 +740,12 @@ class _BaseDistillation:
             num_rect, num_strip = self.kirkbride_correlation(
                 mat_bce, num_plates, z_feed)  # [-]
 
+            # Kirkbride rounds the section sizes; the feed stage is a
+            # whole stage number (issue #523).
             if num_rect > num_strip:
-                num_feed = num_rect  # [-]
-                num_rect -= 1
+                num_feed = int(num_rect)  # [-]
             else:
-                num_feed = num_rect + 1  # [-]
-                num_strip -= 1
+                num_feed = int(num_rect) + 1  # [-]
 
         elif self.num_feed > num_plates:
             raise ValueError(
@@ -695,15 +856,29 @@ class DistillationColumn(_BaseDistillation):
         tuple
             Liquid mole fractions [-] and equilibrium temperature [K].
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero vapor fraction, or a key, lacks the VLE data (or,
+            with UNIQUAC, the activity parameters) of the dew point; absent
+            species need none (issue #425).
+
         Notes
         -----
         A temporary vapor stream is required because the VLE implementation is
-        exposed through ``VaporStream.getDewPoint``.
+        exposed through ``VaporStream.getDewPoint``. The dew point is weighted
+        with the presence of ``y_oneplate`` (``_exact_presence``), so a
+        species without feed, whose vapor fraction is exactly zero, has
+        exactly zero liquid fraction whatever its data.
         """
         temporary_vapor = VaporStream(path_thermo=self._Inlet.path_data,
                                       pres=self.pres, mole_flow=self.feed_flowrate, mole_frac=y_oneplate)
-        res = temporary_vapor.getDewPoint(pres=self.pres, mass_frac=None,
-                                          mole_frac=y_oneplate, thermo_method=self.gamma_model, x_liq=need_x_vap)
+        weights = self._exact_presence(y_oneplate).weights(y_oneplate)  # [-]
+        res = temporary_vapor.getDewPoint(
+            pres=self.pres, mass_frac=None, mole_frac=y_oneplate,
+            thermo_method=self.gamma_model, x_liq=need_x_vap,
+            weights=weights)
         return res[::-1]
 
 
@@ -860,6 +1035,15 @@ class DistillationColumn(_BaseDistillation):
         dict
             Shortcut-design result. Mole fractions are [-], molar flows are
             [mol/s], reflux values are [-], and stage counts are [-].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            in the feed, or a key, lacks the VLE data (or, with UNIQUAC, the
+            activity parameters) that the shortcut design or the plates need,
+            or the liquid density of a published product. A species without
+            feed needs no property data other than ``mw`` (issue #425).
         """
         result = self.calculate_shortcut_design()
 
@@ -942,7 +1126,20 @@ class DistillationColumn(_BaseDistillation):
 
 
 class DynamicDistillation(_BaseDistillation):
-    """Dynamic distillation column initialized from shortcut design."""
+    """Dynamic distillation column initialized from shortcut design.
+
+    The plate liquid mole fractions are IDA states, which difference-quotient
+    Jacobians and round-off perturb, so the column decides species presence
+    structurally (issue #425, ``PharmaPy.Presence.StructuralPresenceMixin``):
+    a species is present if it has a nonzero fraction in the liquid holdup
+    (``Liquid_1``) as it is at the start of the solve, or, from the time of
+    that evaluation on, in a feed that the column evaluates with a nonzero
+    molar flow. The VLE ratios of the plates are weighted by that record,
+    an absent species gets the unit ratio, and the published compositions
+    hold it at exactly zero, so it needs no property data other than
+    ``mw``. The shortcut design that sets the operating point works on the
+    exact feed composition instead (see ``_BaseDistillation``).
+    """
 
     def __init__(self, pres, q_feed, LK, HK,
                  perc_LK, perc_HK, reflux=None, num_plates=None,
@@ -1063,6 +1260,12 @@ class DynamicDistillation(_BaseDistillation):
         None
             The setter stores phase, holdup, component-index, and state
             metadata on the column.
+
+        Notes
+        -----
+        The structural presence record starts from the holdup's nonzero
+        mole fractions (issue #425); ``solve_unit`` rebuilds it from the
+        holdup as it is at the start of each solve.
         """
         if not isinstance(phases, (list, tuple)):
             phases = [phases]
@@ -1081,6 +1284,7 @@ class DynamicDistillation(_BaseDistillation):
         self.name_species = name_species
 
         self.nomenclature()
+        self._start_presence(self.num_species, self.Liquid_1.mole_frac)
 
     def column_startup(self, time_shortcut_design=None, **kwargs):
         """Initialize dynamic-column shortcut design values.
@@ -1219,11 +1423,29 @@ class DynamicDistillation(_BaseDistillation):
         ndarray
             Residuals with temperature algebraic constraints [-] in the first
             column and mole-fraction derivatives [1/s] in remaining columns.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at ``time`` lacks the VLE data (or, with UNIQUAC, the
+            activity parameters) of its ratio; absent species need none.
+
+        Notes
+        -----
+        Side effect: the evaluated feed adds every species it supplies with
+        a nonzero molar flow to the structural presence record at ``time``
+        (issue #425). The VLE ratios are weighted with the presence at
+        ``time`` instead of the state fractions, and an absent species gets
+        the unit ratio, so its balances keep it at zero and it adds nothing
+        to the bubble-point residual, whatever its data.
         """
         x = x_liq
         inputs = self.get_inputs(time)['Inlet']
         z_feed = inputs['mole_frac']  # [-]
         feed_flow = inputs['mole_flow']  # [mol/s]
+        # Species fed with a nonzero molar flow are present from now on.
+        self._record_feed(feed_flow, z_feed, time=time)
 
         (bot_flowrate, dist_flowrate,
          reflux, num_feed, M_const) = (self.bot_flowrate, self.dist_flowrate,
@@ -1237,8 +1459,10 @@ class DynamicDistillation(_BaseDistillation):
 
         dx_dt = np.zeros_like(x)  # [1/s]
 
-        k_vals = self._Inlet.getKeqVLE(pres=self.pres, temp=temp, x_liq=x,
-                                       gamma_model=self.gamma_model)  # [-]
+        k_vals = self._Inlet.getKeqVLE(
+            pres=self.pres, temp=temp, x_liq=x, gamma_model=self.gamma_model,
+            weights=self._presence_weights(x, time=time))  # [-]
+        k_vals = self._absent_unit_ratios(k_vals, time=time)  # [-]
 
         residuals_temp = (x * (k_vals - 1)).sum(axis=1)  # [-]
         y = k_vals * x  # [-]
@@ -1301,6 +1525,14 @@ class DynamicDistillation(_BaseDistillation):
             zero to bubble-point accuracy; other columns are composition rates
             [1/s]. ``solve_unit`` supplies these as IDA derivative seeds.
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at ``elapsed_time`` [s] lacks the VLE data (or, with
+            UNIQUAC, the activity parameters) of the bubble point or of the
+            plate ratios; absent species need none.
+
         Notes
         -----
         Requires attached liquid/feed phases and configured stage count, feed
@@ -1309,13 +1541,21 @@ class DynamicDistillation(_BaseDistillation):
         the attached liquid composition and its configured-model bubble point.
         The method updates the state-vector width but does not integrate or
         publish a result.
+
+        The bubble point is weighted with the structural presence at
+        ``elapsed_time`` (issue #425), and the initial material balances
+        add the feed evaluated there, so a species in the holdup, or fed
+        with a nonzero flow at the start, without the VLE data it needs
+        raises the species-named error before the integrator starts.
         """
         self.len_states = len(self.name_species) + 1
 
         x_init = self.Liquid_1.mole_frac.copy()  # [-]
         temp_init = self.Liquid_1.getBubblePoint(
             pres=self.pres, mole_frac=x_init,
-            thermo_method=self.gamma_model)  # [K]
+            thermo_method=self.gamma_model,
+            weights=self._presence_weights(
+                x_init, time=self.elapsed_time))  # [K]
 
         init_states = np.tile(np.hstack((temp_init, x_init)),
                               (self.num_plates + 1, 1))  # [K], [-]
@@ -1353,6 +1593,31 @@ class DynamicDistillation(_BaseDistillation):
         d_states : ndarray
             Flattened state derivatives; temperature derivatives are [K/s] and
             mole-fraction derivatives are [1/s].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. Before IDA
+            starts, if a species in the feed (or a key) lacks the data of the
+            shortcut design, or a species in the holdup, or fed with a
+            nonzero flow at the start, lacks the VLE data of the plates;
+            during the publication of the results, if a species present in a
+            row lacks the data of its vapor composition or of the outlets'
+            density. A species first fed later in the run without data is
+            reported by IDA instead, whose error does not name it (issue
+            #435). Absent species need no property data other than ``mw``
+            (issue #425).
+
+        Notes
+        -----
+        The structural presence record is rebuilt from the holdup
+        (``Liquid_1``) as it is at the start of the call; feeds add their
+        species while they are evaluated (see ``material_balances``). A
+        solve that raises, in the shortcut design, the initialization, the
+        integration or the publication of the results, keeps no results:
+        the column's attributes (operating point, ``elapsed_time``,
+        ``result``, ``outputs`` and the outlets) and its presence record are
+        restored to their values before the call.
         """
 
         check_modeling_objects(self)
@@ -1366,55 +1631,79 @@ class DynamicDistillation(_BaseDistillation):
         elif time_grid is not None:
             final_time = time_grid[-1] + self.elapsed_time  # [s]
 
-        # Use inputs coming from the upstream UO in the future for shortcut
-        # design estimates, i.e. as close to steady-state as possible.
-        self.column_startup(final_time)
+        # A failed solve keeps no results: the column and its presence record
+        # are restored if anything below raises (issue #425).
+        before_solve = self._solve_snapshot()
+        try:
+            # Presence follows the holdup as it is now (issue #425).
+            self._start_presence(self.num_species, self.Liquid_1.mole_frac)
 
-        init_states, init_derivative = self.init_unit()
-        # State rows [K], [-]; balance rows [-], [1/s].
+            # Use inputs coming from the upstream UO in the future for shortcut
+            # design estimates, i.e. as close to steady-state as possible.
+            self.column_startup(final_time)
 
-        if len(self.state_event_list) > 0:
-            def new_handle(solver, info):
-                """Handle dynamic state events from the IDA solver."""
-                return handle_events(solver, info, self.state_event_list,
-                                     any_event=any_event)
+            init_states, init_derivative = self.init_unit()
+            # State rows [K], [-]; balance rows [-], [1/s].
 
-            switches = [True] * len(self.state_event_list)
-            problem = Implicit_Problem(
-                self.unit_model, init_states.ravel(), init_derivative.ravel(),
-                t0=self.elapsed_time, sw0=switches)
+            if len(self.state_event_list) > 0:
+                def new_handle(solver, info):
+                    """Handle a state event with the configured event list.
 
-            problem.state_events = self._eval_state_events
-            problem.handle_event = new_handle
+                    Parameters
+                    ----------
+                    solver : assimulo solver
+                        The running IDA solver.
+                    info : list
+                        Assimulo event information.
 
-        else:
-            problem = Implicit_Problem(
-                self.unit_model, init_states.ravel(), init_derivative.ravel(),
-                t0=self.elapsed_time)
+                    Returns
+                    -------
+                    object
+                        The result of ``Commons.handle_events``.
+                    """
+                    return handle_events(solver, info, self.state_event_list,
+                                         any_event=any_event)
 
-        solver = IDA(problem)
-        solver.make_consistent('IDA_YA_YDP_INIT')
-        # solver.suppress_alg = True
+                switches = [True] * len(self.state_event_list)
+                problem = Implicit_Problem(
+                    self.unit_model, init_states.ravel(),
+                    init_derivative.ravel(), t0=self.elapsed_time,
+                    sw0=switches)
 
-        alg_map = np.zeros_like(init_states)  # [-]
-        alg_map[:, 0] = 1  # [-]
+                problem.state_events = self._eval_state_events
+                problem.handle_event = new_handle
 
-        solver.algvar = alg_map.ravel()
+            else:
+                problem = Implicit_Problem(
+                    self.unit_model, init_states.ravel(),
+                    init_derivative.ravel(), t0=self.elapsed_time)
 
-        if not verbose:
-            solver.verbosity = 50
+            solver = IDA(problem)
+            solver.make_consistent('IDA_YA_YDP_INIT')
 
-        if sundials_opts is not None:
-            for name, val in sundials_opts.items():
-                setattr(solver, name, val)
+            alg_map = np.zeros_like(init_states)  # [-]
+            alg_map[:, 0] = 1  # [-]
 
-                if name == 'time_limit':
-                    solver.report_continuously = True
+            solver.algvar = alg_map.ravel()
 
-        time, states, d_states = solver.simulate(final_time,
-                                                 ncp_list=time_grid)
+            if not verbose:
+                solver.verbosity = 50
 
-        self.retrieve_results(time, states)
+            if sundials_opts is not None:
+                for name, val in sundials_opts.items():
+                    setattr(solver, name, val)
+
+                    if name == 'time_limit':
+                        solver.report_continuously = True
+
+            time, states, d_states = solver.simulate(final_time,
+                                                     ncp_list=time_grid)
+
+            self.retrieve_results(time, states)
+        except BaseException:
+            self._restore_solve_snapshot(before_solve)
+            raise
+
         return time, states, d_states
 
     def retrieve_results(self, time, states):
@@ -1433,6 +1722,24 @@ class DynamicDistillation(_BaseDistillation):
         None
             The method stores ``self.result``, ``self.outputs``, and outlet
             stream objects.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at a row's time lacks the VLE data of its vapor
+            composition, or a species present at the final time lacks the
+            liquid density of the outlets; absent species need none.
+
+        Notes
+        -----
+        The published liquid compositions (``result``, ``outputs`` and the
+        outlets) hold the species absent at each row's time (structural
+        presence, issue #425) at exactly zero instead of the solver's
+        round-off, and the vapor compositions ``y = K x`` are evaluated
+        from them with the ratios weighted by that presence (absent
+        species: unit ratio), so they are exactly zero there too. The
+        ``states`` returned by ``solve_unit`` keep the solver values.
         """
         time = np.asarray(time)
         self.elapsed_time = time[-1]  # [s]
@@ -1446,19 +1753,29 @@ class DynamicDistillation(_BaseDistillation):
         dp['time'] = time  # [s]
         dp['plate'] = np.arange(self.num_plates + 1)  # [-]
 
+        x_published = {key: [] for key in dp['x_liq']}  # [-]
         y_vap = {key: [] for key in dp['x_liq']}
         for ind, row in enumerate(dp['temp']):
-            x_liquid = np.column_stack(
-                [val[ind] for val in dp['x_liq'].values()])  # [-]
+            # Species absent at this row's time are published at exactly
+            # zero (issue #425).
+            x_liquid = self._project_absent(np.column_stack(
+                [val[ind] for val in dp['x_liq'].values()]),
+                time=time[ind])  # [-], (num_plates + 1, num_species)
 
             k_vals = self.Liquid_1.getKeqVLE(
                 pres=self.pres, temp=row, x_liq=x_liquid,
-                gamma_model=self.gamma_model)  # [-]
+                gamma_model=self.gamma_model,
+                weights=self._presence_weights(x_liquid,
+                                               time=time[ind]))  # [-]
+            k_vals = self._absent_unit_ratios(k_vals, time=time[ind])  # [-]
             y_vals = k_vals * x_liquid  # [-]
 
             for idx, key in enumerate(y_vap):
+                x_published[key].append(x_liquid[:, idx])
                 y_vap[key].append(y_vals[:, idx])
 
+        dp['x_liq'] = {key: np.vstack(val)
+                       for key, val in x_published.items()}  # [-]
         y_vap = {key: np.vstack(val) for key, val in y_vap.items()}  # [-]
         dp['y_vap'] = y_vap
 

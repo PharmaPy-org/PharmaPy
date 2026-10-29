@@ -4,7 +4,7 @@ Created on Tue Jul 28 00:24:18 2020
 
 @author: huri
 """
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import numpy.matlib
@@ -15,6 +15,7 @@ from scipy.interpolate import CubicSpline
 
 from PharmaPy.Phases import classify_phases
 from PharmaPy.MixedPhases import Cake
+from PharmaPy.Presence import SpeciesPresence, StructuralPresenceMixin
 from PharmaPy.SolidLiquidSep import (
     _validate_irreducible_saturation,
     get_sat_inf,
@@ -35,7 +36,31 @@ eps = np.finfo(float).eps  # [-]
 gas_ct = 8.314  # [J/mol/K]
 
 
-class Drying:
+class Drying(StructuralPresenceMixin):
+    """Convective drying of a packed, partly saturated cake by a gas stream.
+
+    The cake is discretized along its height. The states of each node are
+    the liquid saturation, the gas mass fractions of every species, the
+    liquid mass fractions of the volatile species (every species except the
+    non-condensable carriers named in ``supercrit_names``), and the gas and
+    condensed-phase temperatures. Volatiles evaporate at a rate driven by
+    the difference between their equilibrium and gas mole fractions;
+    negative rates are clipped, so nothing condenses. The gas flows through
+    the cake by Darcy's law and enters with the inlet composition.
+
+    Species presence (issue #425): the gas and liquid fractions are CVode
+    states, whose difference-quotient Jacobian perturbs those of species
+    that are never charged, fed or evaporated, so the property kernels are
+    weighted by structural presence records
+    (``PharmaPy.Presence.StructuralPresenceMixin``) instead of by those
+    fractions. A volatile is present in the liquid if its initial liquid
+    fraction is nonzero at some node; nothing else enters the liquid. A
+    species is present in the gas if its initial gas fraction is nonzero
+    at some node or it is present in the liquid (it evaporates from the
+    start), or, from the time of that evaluation on, if the inlet gas that
+    the unit evaluates carries it. An absent species needs no property
+    data other than ``mw`` and is published at exactly zero.
+    """
 
     def __init__(self, number_nodes, supercrit_names, diam_unit=0.01,
                  resist_medium=2.22e9, eta_fun=None, mass_eta=False,
@@ -228,21 +253,80 @@ class Drying:
         ------
         MissingPropertyError
             A subclass of ``AttributeError``.
-            If a volatile species has no ``p_vap`` coefficients. The
-            supercritical carrier gas needs none.
+            If a volatile species present in the liquid has no ``p_vap``
+            coefficients. The supercritical carrier gas needs none, and
+            neither does a volatile absent from the liquid (issue #425).
+
+        Notes
+        -----
+        A volatile absent from the liquid (see the class docstring) has no
+        liquid to evaporate from, so its equilibrium partial pressure is
+        exactly zero and its Antoine equation is not evaluated. Without a
+        presence record (``initialize_states`` not called), every volatile
+        is evaluated.
         """
         mw_liq = self.Liquid_1.mw[self.idx_volatiles]  # [g/mol]
         x_liq_mole_frac = (x_liq / mw_liq).T / np.dot(1/mw_liq, x_liq.T)
         x_liq_mole_frac = x_liq_mole_frac.T  # [-]
 
-        p_sat = self.Liquid_1.AntoineEquation(
-            temp=temp_cond, idx=self.idx_volatiles)  # [Pa], volatiles only
+        volatiles = np.asarray(self.idx_volatiles, dtype=int)  # [-], species indices
+        evaporating = self._liquid_species_mask()[volatiles]  # [-], bool per volatile
 
         gamma = self.Liquid_1.getActivityCoeff(mole_frac=x_liq_mole_frac)  # [-]
-        p_partial = (gamma * x_liq_mole_frac * p_sat).T  # [Pa]
+        p_partial = np.zeros(np.broadcast(gamma, x_liq_mole_frac).shape)  # [Pa]
+        if evaporating.any():
+            p_sat = self.Liquid_1.AntoineEquation(
+                temp=temp_cond, idx=volatiles[evaporating])  # [Pa]
+            p_partial[..., evaporating] = (
+                gamma[..., evaporating] * x_liq_mole_frac[..., evaporating]
+                * p_sat)  # [Pa]
+        p_partial = p_partial.T  # [Pa], volatiles by node
         y_equil = p_partial  / p_gas  # [-]
 
         return y_equil
+
+    def _liquid_species_mask(self) -> np.ndarray:
+        """Return the species that the liquid can hold.
+
+        Returns
+        -------
+        numpy.ndarray of bool
+            True for a species present in the liquid, shape
+            ``(num_species,)``: a volatile with a nonzero initial liquid
+            fraction (``initialize_states``). Without that record, every
+            volatile, the fraction-based rule of earlier releases.
+        """
+        record = getattr(self, '_liquid_presence', None)
+        if record is not None:
+            return record.mask
+
+        mask = np.zeros(self.Liquid_1.num_species, dtype=bool)
+        mask[np.asarray(self.idx_volatiles, dtype=int)] = True
+        return mask
+
+    def _liquid_weights(self, liquid_fractions: np.ndarray
+                        ) -> Optional[np.ndarray]:
+        """Return the liquid presence weights for some liquid fractions.
+
+        Parameters
+        ----------
+        liquid_fractions : numpy.ndarray
+            Liquid mass fractions [-] over every species, shape
+            ``(num_species,)`` or ``(num_nodes, num_species)``.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            1.0 for a species present in the liquid and 0.0 otherwise [-],
+            with the shape of ``liquid_fractions``; None without a liquid
+            presence record, so that the kernels keep the fraction-based
+            rule.
+        """
+        record = getattr(self, '_liquid_presence', None)
+        if record is None:
+            return None
+
+        return record.weights(liquid_fractions)
 
     def get_drying_rate(self, x_liq, temp_cond, y_gas, p_gas):
         """Calculate component drying rates on a molar basis.
@@ -343,6 +427,16 @@ class Drying:
             and mass-fraction derivatives are [1/s]; temperature derivatives
             are [K/s].
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at ``time`` (see the class docstring), whatever its
+            instantaneous fractions, lacks the data that the gas viscosity
+            (``visc_gas``), the heat capacities (``cp_vapor``, ``cp_liq``),
+            the liquid density (``rho_liq``), the vapor pressure (``p_vap``)
+            or the latent heat (Watson data) needs; absent species need none.
+
         Notes
         -----
         The Darcy gas velocity is a superficial velocity [m/s] throttled by
@@ -358,6 +452,16 @@ class Drying:
         the most recent ``unit_model`` evaluation. They are not time profiles
         and, after ``solve_unit``, need not correspond to a reported output
         time.
+
+        Side effect: the species of the evaluated inlet gas become present
+        in the gas from ``time`` on (issue #425); the inlet gas enters with
+        the Darcy flow, a state, so its composition counts whenever it is
+        evaluated. The gas viscosity, the liquid density and, in
+        ``energy_balance``, the heat capacities and latent heats are
+        evaluated on the state fractions with absent species set to exactly
+        zero and weighted by the presence records, so an absent species
+        needs no data; the balances and ``eta_fun`` receive the state
+        fractions unchanged.
         """
 
         num_comp = self.Liquid_1.num_species  # [-]
@@ -372,9 +476,16 @@ class Drying:
         temp_gas = states_reord[:, -2]  # [K]
         temp_sol = states_reord[:, -1]  # [K]
 
+        inputs = self.get_inputs(time)['Inlet']  # inlet states: [-] and [K]
+        presence = getattr(self, '_presence', None)
+        if presence is not None:
+            # The inlet gas species are present from now on (latched).
+            presence.record(inputs['mass_frac'], time=time)
+
         # ---------- Darcy's equation
-        visc_gas = self.Vapor_1.getViscosity(temp=temp_gas,
-                                             mass_frac=y_gas)  # [Pa*s]
+        visc_gas = self.Vapor_1.getViscosity(
+            temp=temp_gas, mass_frac=self._project_absent(y_gas, time=time),
+            weights=self._presence_weights(y_gas, time=time))  # [Pa*s]
 
         sat_red = (satur - self.s_inf) / (1 - self.s_inf)  # [-]
         sat_red = np.clip(sat_red, 0, 1)  # [-]
@@ -386,8 +497,10 @@ class Drying:
         mw_avg_gas = self._gas_mixture_molar_mass(y_gas)  # [g/mol]
         rho_gas = self.pres_gas / gas_ct / temp_gas * mw_avg_gas / 1000  # [kg/m**3]
         self.rho_gas = rho_gas  # [kg/m**3]
-        rho_liq_ = self.Liquid_1.rho_liq[self.idx_volatiles]  # [kg/m**3]
-        self.rho_liq =  1 / np.sum((x_liq/ rho_liq_), axis=1)  # [kg/m**3]
+        liquid_fractions = self._liquid_fractions(x_liq)  # [-], every species
+        self.rho_liq = self.Liquid_1.getDensity(
+            mass_frac=liquid_fractions, basis='mass',
+            weights=self._liquid_weights(liquid_fractions))  # [kg/m**3]
         # Dry correction
         if self.mass_eta:
             rho_liq = self.rho_liq  # [kg/m**3]
@@ -410,8 +523,6 @@ class Drying:
         self.dry_rate *= limiter_factor[..., np.newaxis]  # [kg/m**3/s]
 
         # ---------- Model equations
-        inputs = self.get_inputs(time)['Inlet']  # inlet states: [-] and [K]
-
         material_eqns = self.material_balance(
             time, satur, temp_gas, temp_sol, y_gas, x_liq,
             vel_gas, rho_gas, self.dry_rate, inputs)  # [1/s]
@@ -425,6 +536,29 @@ class Drying:
         self.derivatives = model_eqns.ravel()  # [1/s, K/s]
 
         return model_eqns.ravel()
+
+    def _liquid_fractions(self, x_liq: np.ndarray) -> np.ndarray:
+        """Spread volatile liquid fractions over every species for kernels.
+
+        Parameters
+        ----------
+        x_liq : numpy.ndarray
+            Liquid mass fractions of the volatile species [-], shape
+            ``(num_nodes, num_volatiles)``, solver states.
+
+        Returns
+        -------
+        numpy.ndarray
+            Liquid mass fractions [-] over every species, shape
+            ``(num_nodes, num_species)``: the carriers and the species
+            absent from the liquid (``_liquid_species_mask``) at exactly
+            zero, the others as given.
+        """
+        liquid_fractions = np.zeros(
+            (len(x_liq), self.Liquid_1.num_species))  # [-]
+        liquid_fractions[:, self.idx_volatiles] = x_liq
+        return np.where(self._liquid_species_mask(), liquid_fractions,
+                        0.0)  # [-]
 
     def material_balance(self, time: float, satur: np.ndarray,
                          temp_gas: np.ndarray, temp_sol: np.ndarray,
@@ -576,6 +710,22 @@ class Drying:
             contribution [K/s]; ``heat_cond`` and ``heat_loss_emp`` are
             gas-temperature-rate contributions [K/s].
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at ``time`` (see the class docstring) lacks
+            ``cp_vapor``, ``cp_liq`` or, if it can condense, valid Watson
+            data (``delta_hvap``, ``tref_hvap``), also when its fraction is
+            zero. Without presence records (``initialize_states`` not
+            called), the heat capacities need the data of every species
+            with a nonzero fraction and the latent heat the Watson data of
+            every species at or below its critical temperature.
+        ValueError
+            If ``y_gas`` does not have one column per species, or ``x_liq``
+            one per volatile, so that the presence weights cannot take the
+            shape of the fractions.
+
         Notes
         -----
         ``latent_heat`` is requested on a mass basis [J/kg] and spans every
@@ -593,6 +743,19 @@ class Drying:
         constant-pressure vent closure. A constant-pressure gas energy holdup
         would use cp instead of cv. That closure requires a maintainer decision
         and is unchanged here.
+
+        The liquid heat capacity reads the volatile fractions at their
+        database species indices (``idx_volatiles``), with the carriers at
+        zero, whatever the species order. Earlier releases appended the
+        carriers after the volatile columns, which paired the fractions with
+        other species' ``cp_liq`` unless the carriers were the last species
+        (issue #527).
+
+        The gas and liquid heat capacities and the latent heats use the
+        presence records at ``time`` (issue #425; see the class docstring):
+        absent species are evaluated at exactly zero fraction and weight, so
+        they need no ``cp_vapor``, ``cp_liq`` or Watson data, and the latent
+        heat of a species absent from the liquid is exactly zero.
         """
 
         mw_avg_gas = self._gas_mixture_molar_mass(y_gas)  # [g/mol]
@@ -600,21 +763,26 @@ class Drying:
         temp_gas_inputs = inputs['temp']  # [K]
 
         # ----- Gas phase equations
-        cpg_mix = self.Vapor_1.getCp(temp=temp_gas, mass_frac=y_gas,
-                                     basis='mass')  # [J/kg/K]
+        cpg_mix = self.Vapor_1.getCp(
+            temp=temp_gas, mass_frac=self._project_absent(y_gas, time=time),
+            basis='mass',
+            weights=self._presence_weights(y_gas, time=time))  # [J/kg/K]
         cvg_mix = cpg_mix - gas_ct / mw_avg_gas * 1000  # [J/kg/K]
 
         epsilon_gas = self.porosity * (1 - satur)  # [-]
         denom_gas = cvg_mix * epsilon_gas * rho_gas  # [J/m**3/K]
 
-        latent_heat = self.Vapor_1.getHeatVaporization(temp_sol,
-                                                       basis='mass')  # [J/kg]
+        liquid_mask = self._liquid_species_mask()  # [-], bool per species
+        latent_weights = (None if getattr(self, '_liquid_presence', None) is None
+                          else liquid_mask.astype(float))  # [-]
+        latent_heat = self.Vapor_1.getHeatVaporization(
+            temp_sol, basis='mass', weights=latent_weights)  # [J/kg]
 
-        xliq_extended = np.column_stack((x_liq, np.zeros((x_liq.shape[0],
-                                                          len(self.idx_supercrit)))))  # [-]
-
-        cpl_mix = self.Liquid_1.getCp(temp=temp_sol, mass_frac=xliq_extended,
-                                      basis='mass')  # [J/kg/K]
+        # Fractions and weights in database species order (issue #527).
+        liquid_fractions = self._liquid_fractions(x_liq)  # [-], every species
+        cpl_mix = self.Liquid_1.getCp(
+            temp=temp_sol, mass_frac=liquid_fractions, basis='mass',
+            weights=self._liquid_weights(liquid_fractions))  # [J/kg/K]
         temp_wb = 22 + 273  # [K]
         sensible_heat = (
             cpg_mix * (temp_gas - temp_wb) * dry_rate.sum(axis=1)
@@ -684,6 +852,12 @@ class Drying:
         pressure, phase, and transfer attributes required by ``unit_model``.
         ``Solid_1.x_distrib`` is stored in micrometers [um] and converted to
         meters [m] before the irreducible-saturation correlation.
+
+        It also starts the structural presence records (issue #425; see the
+        class docstring) from the initial liquid and gas fractions of every
+        node: the liquid record from the volatile liquid fractions, the gas
+        record from the gas fractions and the liquid record. The inlet gas
+        is added when ``unit_model`` evaluates it.
         """
         atmospheric_pressure = 101325  # [Pa], standard-atmosphere definition
         liquid_indexes = np.arange(0, self.Liquid_1.num_species)  # [-]
@@ -769,6 +943,14 @@ class Drying:
         full_liquid_fraction = np.zeros(
             (self.num_nodes, num_components))  # [-]
         full_liquid_fraction[:, self.idx_volatiles] = liquid_fraction
+
+        # Structural presence (issue #425): nothing condenses, so the liquid
+        # holds its initial volatiles only; they evaporate into the gas.
+        self._liquid_presence = SpeciesPresence(num_components)
+        self._liquid_presence.record(full_liquid_fraction)
+        self._start_presence(
+            num_components, initial_states[:, 1:1 + num_components],
+            full_liquid_fraction)
         liquid_density = self.Liquid_1.getDensity(
             temp=initial_condensed_temp,
             mass_frac=full_liquid_fraction,
@@ -852,12 +1034,42 @@ class Drying:
             Flattened state history. Saturation and mass-fraction columns are
             dimensionless [-]; temperature columns are [K].
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``, raised
+            before CVode starts by the evaluation of the derivatives at the
+            initial state: if a species present at the start (charged in the
+            liquid or the gas, evaporating, or in the inlet gas at the
+            start) lacks the data that ``unit_model`` needs for it, also
+            when its initial fraction is zero.
+        assimulo.solvers.sundials.CVodeError
+            If the integration fails, for example because a species first
+            carried by the inlet gas later in the run lacks its data: CVode
+            reports its own error, which does not name the species, or
+            stalls at the time the species enters until its step limit
+            (issue #435). With either error, and with any other that the
+            initialization, the integration or the publication of the
+            results raises, the unit keeps no results: its attributes and
+            presence records are restored to their values before the call.
+
         Notes
         -----
         The initial per-node state vector is assembled as
         ``S`` [-] | ``y_gas`` [-] | ``x_liq`` [-] | ``temp_gas`` [K] |
         ``temp_cond`` [K] for both
         distributed and uniform single-node cake initial conditions.
+
+        The derivatives are evaluated once at the initial state before CVode
+        starts, so that a species present at the start (see the class
+        docstring) without the data it needs raises the species-named
+        ``MissingPropertyError``; a species first fed later by the inlet gas
+        without it is reported by CVode, whose error does not name it
+        (issue #435). A solve that raises, in its initialization, the
+        integration or the publication of its results, keeps no results:
+        the unit's attributes (``elapsed_time``, ``result``, ``timeProf``,
+        the presence records and the model diagnostics) are restored to
+        their values before the call.
         Cake permeability is computed as
         ``1 / (alpha * rho_sol * (1 - porosity))`` [m**2].
         ``Solid_1.x_distrib`` is stored in micrometers [um] and is converted to
@@ -869,51 +1081,85 @@ class Drying:
         state before material and energy balances are evaluated.
         """
         
-        states_prev = self.initialize_states(deltaP)
+        # A failed solve keeps no results: the unit and its presence
+        # records are restored if anything below raises.
+        before_solve = self._solve_snapshot()
+        try:
+            states_prev = self.initialize_states(deltaP)
 
-        # ---------- Solve model
-        model = self.unit_model
-        if self.state_event_list is None:
-            def model(t, y): return self.unit_model(t, y)#, None)
-            problem = Explicit_Problem(self.unit_model, y0=states_prev.ravel(),
-                                       t0=0)
-        else:
-            switches = [True] * len(self.state_event_list)
-            problem = Explicit_Problem(self.unit_model, y0=states_prev.ravel(),
-                                 t0=0, sw0=switches)
+            # ---------- Solve model
+            model = self.unit_model
+            if self.state_event_list is None:
+                def model(t: float, y: np.ndarray) -> np.ndarray:
+                    """Evaluate ``unit_model`` without event switches.
 
-            def new_handle(solver, info):
-                return handle_events(solver, info, self.state_event_list,
-                                     any_event=any_event)
+                    Parameters
+                    ----------
+                    t : float
+                        Time [s].
+                    y : numpy.ndarray
+                        Flattened states, as in ``unit_model``.
 
-            problem.state_events = self._eval_state_events
-            problem.handle_event = new_handle
+                    Returns
+                    -------
+                    numpy.ndarray
+                        Flattened derivatives, as in ``unit_model``.
+                    """
+                    return self.unit_model(t, y)
+                problem = Explicit_Problem(self.unit_model, y0=states_prev.ravel(),
+                                           t0=0)
+            else:
+                switches = [True] * len(self.state_event_list)
+                problem = Explicit_Problem(self.unit_model, y0=states_prev.ravel(),
+                                     t0=0, sw0=switches)
 
-        self.derivatives = model(0, states_prev.ravel())
+                def new_handle(solver, info):
+                    """Handle a state event with the configured event list.
 
-        problem.name = 'Drying Model'
+                    Parameters
+                    ----------
+                    solver : assimulo solver
+                        The running CVode solver.
+                    info : list
+                        Assimulo event information.
 
-        sim = CVode(problem)
+                    Returns
+                    -------
+                    object
+                        The result of ``Commons.handle_events``.
+                    """
+                    return handle_events(solver, info, self.state_event_list,
+                                         any_event=any_event)
 
-        if sundials_opts is not None:
-            for key, val in sundials_opts.items():
-                setattr(sim, key, val)
+                problem.state_events = self._eval_state_events
+                problem.handle_event = new_handle
 
-        # sim.linear_solver = 'SPGMR'
-        
-        if runtime is not None:
-            final_time = runtime + self.elapsed_time
+            self.derivatives = model(0, states_prev.ravel())
 
-        if time_grid is not None:
-            final_time = time_grid[-1] + self.elapsed_time
-            self.elapsed_time = time_grid[0]
-        
-        if not verbose:
-          sim.verbosity = 50
-          
-        time, states = sim.simulate(final_time,  ncp_list=time_grid)
-        
-        self.retrieve_results(time, states)
+            problem.name = 'Drying Model'
+
+            sim = CVode(problem)
+
+            if sundials_opts is not None:
+                for key, val in sundials_opts.items():
+                    setattr(sim, key, val)
+
+            if runtime is not None:
+                final_time = runtime + self.elapsed_time
+
+            if time_grid is not None:
+                final_time = time_grid[-1] + self.elapsed_time
+                self.elapsed_time = time_grid[0]
+
+            if not verbose:
+                sim.verbosity = 50
+
+            time, states = sim.simulate(final_time,  ncp_list=time_grid)
+
+            self.retrieve_results(time, states)
+        except BaseException:
+            self._restore_solve_snapshot(before_solve)
+            raise
 
         return time, states
 
@@ -932,6 +1178,13 @@ class Drying:
         -------
         None
             The method updates ``result`` and cake-grid metadata in place.
+
+        Notes
+        -----
+        The published gas and liquid fractions (``result``) hold a species
+        that was absent at each row's time (issue #425; see the class
+        docstring) at exactly zero instead of any solver round-off, while
+        the ``states`` returned by ``solve_unit`` keep the solver values.
         """
         time = np.array(time)
         self.timeProf = time
@@ -944,6 +1197,17 @@ class Drying:
 
         dp = unpack_discretized(states, self.dim_states, self.name_states,
                                 indexes=indexes, inputs=inputs)
+
+        gas_present = self._presence_weights(
+            np.zeros((len(time), len(self.name_species))), time=time)  # [-]
+        liquid_present = self._liquid_species_mask()  # [-]
+        for column, name in enumerate(self.name_species):
+            if gas_present is not None:
+                dp['y_gas'][name] = np.where(
+                    gas_present[:, column, np.newaxis] != 0,
+                    dp['y_gas'][name], 0.0)  # [-], time rows by node
+            if name in dp['x_liq'] and not liquid_present[column]:
+                dp['x_liq'][name] = np.zeros_like(dp['x_liq'][name])  # [-]
 
         dp['time'] = time
         dp['z'] = self.z_centers

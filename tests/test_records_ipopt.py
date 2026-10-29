@@ -2,15 +2,16 @@
 
 Scope: ``CalibrationRecord.from_estimation`` for ``method='IPOPT'``, which
 requires explicit ``bounds`` because ``optimize_fn`` does not store them,
-records the effective options that cyipopt leaves in the caller's dict
-(bytes entries decoded, ``print_level`` injected by ``optimize_fn``
-omitted; issue #476), and records bounds that ``optimizer_inputs``
-passes back to IPOPT on a rerun, including a seed outside its bounds; a
-simulated (``simulate=True``) estimator is rejected. Fixture: the user
-guide's synthetic two-experiment decay
-(see ``test_records_calibration.py``). Requires the optional cyipopt
-backend (manual environment in TESTING.md); skipped at collection without
-it, like ``test_paramestim_cyipopt.py``.
+records the effective options that cyipopt leaves in the copy of the
+options that ``optimize_fn`` passes to it and stores (bytes entries
+decoded, ``print_level`` injected by ``optimize_fn`` omitted; issue #476)
+and no ``default_options`` (Ipopt's native defaults are not recorded; #483),
+and records bounds that ``optimizer_inputs`` passes back to IPOPT on a
+rerun, including a seed outside its bounds; a simulated
+(``simulate=True``) estimator is rejected. Fixture: the user guide's
+synthetic two-experiment decay (see ``test_records_calibration.py``).
+Requires the optional cyipopt backend (manual environment in TESTING.md);
+skipped at collection without it, like ``test_paramestim_cyipopt.py``.
 """
 
 import numpy as np
@@ -50,8 +51,9 @@ def test_ipopt_capture_requires_bounds_and_reruns():
     record = case.capture(estimator, experiments, bounds=[RATE_BOUNDS])
 
     assert record.solver.method == 'IPOPT'
-    # cyipopt rewrote the options dict in place with bytes entries (#476);
-    # the record holds the decoded effective options without print_level.
+    # cyipopt rewrote optimize_fn's copy of the options, stored as
+    # optim_options, with bytes entries (#476); the record holds the
+    # decoded effective options without print_level.
     assert any(isinstance(key, bytes) for key in estimator.optim_options)
     options = record.solver.options
     assert all(type(key) is str for key in options)
@@ -60,6 +62,10 @@ def test_ipopt_capture_requires_bounds_and_reruns():
     for key, value in IPOPT_OPTIONS.items():
         assert options[key] == value
     assert 'num_iter' not in record.solver.outcome  # IPOPT info lacks it
+    # Ipopt's native defaults are not recorded (#483): no default_options,
+    # and a rerun passes exactly the recorded options.
+    assert record.solver.default_options is None
+    assert record.optimizer_inputs()['optim_options'] == options
     assert record.optimizer_inputs()['bounds'] == [RATE_BOUNDS]
     rerun = record.rerun(case.decay, rtol=case.REPLAY_RTOL,
                          atol=case.REPLAY_ATOL)

@@ -288,7 +288,13 @@ def test_model_jacobian_is_derivative_of_weighted_residual(weight_key):
         jacobian, difference, rtol=0.0,
         atol=DERIVATIVE_RTOL * np.abs(difference).max())
 
+    # The data residuals precede the absorptivity-penalty rows, which are
+    # zero because every fitted absorptivity is positive (#240).
     unobserved = _unobserved_tracer_entries()
+    num_data = unobserved.size  # [-]
+    np.testing.assert_array_equal(weighted[num_data:], 0.0)
+    np.testing.assert_array_equal(jacobian[num_data:], 0.0)
+    weighted, jacobian = weighted[:num_data], jacobian[:num_data]
     np.testing.assert_array_equal(weighted[unobserved], 0.0)
     np.testing.assert_array_equal(jacobian[unobserved], 0.0)
     assert np.all(jacobian[~unobserved] != 0.0)
@@ -304,7 +310,9 @@ def test_finite_difference_jacobian_matches_model_jacobian(weight_key):
     numerical.get_objective(TRIAL_RATE)
     jacobian = numerical.get_gradient(TRIAL_RATE, out_array=True)
 
-    np.testing.assert_array_equal(jacobian[0][_unobserved_tracer_entries()],
+    unobserved = _unobserved_tracer_entries()
+    # Data residuals first, then the zero absorptivity-penalty rows (#240).
+    np.testing.assert_array_equal(jacobian[0][:unobserved.size][unobserved],
                                   0.0)
     np.testing.assert_allclose(
         jacobian, expected, rtol=0.0,

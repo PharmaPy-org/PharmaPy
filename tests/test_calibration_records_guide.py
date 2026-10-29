@@ -41,9 +41,11 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / 'doc/online_docs/examples/calibration_records.rst'
 ZIEGLER_TEST = ROOT / 'tests/test_records_ziegler_case.py'
 # Keys of the JSON objects that hold user-chosen keys (callback keywords,
-# optimizer options and outcome, model-solver settings and transformation
-# constants); their contents are not schema entries.
-USER_MAPPINGS = ('kwargs', 'options', 'outcome', 'model_solver')
+# optimizer options, defaulted optimizer options and outcome, model-solver
+# settings and transformation constants); their contents are not schema
+# entries.
+USER_MAPPINGS = ('kwargs', 'options', 'default_options', 'outcome',
+                 'model_solver')
 # Receiver-qualified calls (``<object>.<name>(...)``) of the SimulationExec
 # sketch that the Ziegler test must make too.
 SKETCH_CALLS = {'SetParamEstimation', 'EstimateParams', 'from_estimation',
@@ -227,8 +229,9 @@ def test_schema_section_documents_every_entry():
     # A weight matrix is not allowed with declared uncertainties, so the
     # documented examples cannot hold one; its keys are written out.
     keys |= {'index', 'columns', 'values'}
-    assert {'solver', 'derivatives', 'jacobian', 'dx_finitediff',
-            'include_mse', 'measurements', 'identity'} <= keys
+    assert {'solver', 'default_options', 'derivatives', 'jacobian',
+            'dx_finitediff', 'include_mse', 'measurements',
+            'identity'} <= keys
     schema = _section('Record schema')
     assert sorted(key for key in keys if f"``{key}``" not in schema) == []
     choices = (SOURCE_ORIGINS + FIELD_KINDS + OPTIMIZATION_METHODS
