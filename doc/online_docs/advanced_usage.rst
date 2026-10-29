@@ -152,6 +152,38 @@ the restore failure is reported as a :code:`RuntimeWarning`, which is dropped
 when warnings are turned into errors. A keyboard interrupt aborts without the
 extra evaluation.
 
+:code:`StatsModule.ParallelProblem(estimator).run_fit(sample)` fits one given
+dataset the same way: :code:`sample` holds one array per experiment in the
+layout of one :code:`get_bootsamples` dataset, shape
+:code:`(n_times, n_measured)` on the model grid (a 1-D array is accepted for a
+single measured state), and the method returns the parameters fitted to it.
+The fit runs on an isolated copy with the estimator's solver method and
+options, the estimator is unchanged, and the model is evaluated at
+:code:`params_convg` afterwards. Earlier versions set an unused :code:`y_fit`
+attribute and refitted the original observations, so the sample was ignored.
+NaN or infinite values are accepted only at unobserved entries, and
+:code:`MultipleCurveResolution` estimators are rejected (tracked in #505).
+
+:code:`StatisticsClass.bootstrap_confid` (arguments :code:`num_samples`,
+:code:`plot` and :code:`covar_params`) propagates the linearized parameter
+uncertainty into the model predictions. It draws
+:code:`theta_s = params_convg + L z_s`, with :code:`L` the lower Cholesky
+factor of the parameter covariance (:code:`covar_params` of the estimator by
+default, as used by :code:`get_intervals`) and :code:`z_s` standard normal
+draws from NumPy's global generator, so :code:`numpy.random.seed` reproduces
+them. A :code:`covar_params` given by the caller must be symmetric to
+:code:`sqrt(eps)` on the correlation scale; the estimator's own covariance is
+symmetrized without that check. It returns
+:code:`(samples, predictions, fig, axis)`: :code:`predictions` holds, for each
+draw, one :code:`(n_times, n_measured)` array of model predictions per
+experiment on its model grid, and :code:`fig, axis` are :code:`None` when
+:code:`plot=False`. :code:`StatisticsClass.plot_boots(num_samples, ind)` plots
+the :code:`get_bootsamples` datasets of experiment :code:`ind`, one subplot per
+measured column against that experiment's model grid, and returns
+:code:`(fig, axes, samples)` with the plotted datasets. Both methods leave the
+estimator unchanged; earlier versions failed for every input. The attribute
+:code:`StatisticsClass.sigma_t`, which was never assigned, has been removed.
+
 An explicit :code:`param_seed` given to :code:`SimulationExec.SetParamEstimation`
 takes precedence over the fitted unit's default seed. For a unit with kinetics
 it is set on the kinetics and read back, as before. For a unit without kinetics,
