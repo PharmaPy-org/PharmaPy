@@ -2726,8 +2726,11 @@ class MultiPhaseVessel():
         -----
         A population carried per m3 of slurry is diluted by every inflow,
         including a feed with no crystals, which never reaches the solid
-        phase's inlet hook. The rate of volume change is taken as the
-        volumetric inflow minus outflow; see
+        phase's inlet hook, and by the volume the cross-phase transfers
+        create or consume: crystallizing solute leaves the liquid at its
+        liquid density and arrives at the crystal density. The rate of volume
+        change is the volumetric inflow minus outflow plus that transfer
+        volume rate, accumulated by ``add_crossphase_terms``; see
         ``PopulationBalanceMechanism.get_dilution_contributions`` for what
         that leaves out.
         """
@@ -2737,7 +2740,7 @@ class MultiPhaseVessel():
         vol_out = sum(transfer.vol_flow or 0.0
                       for connection in resolved_outlets
                       for transfer in connection)
-        net_vol_flow = vol_in - vol_out
+        net_vol_flow = vol_in - vol_out + buffer.transfer_vol_rate  # [m**3/s]
 
         if not net_vol_flow:
             return
@@ -2898,8 +2901,19 @@ class MultiPhaseVessel():
             time:float,
             completed_state:dict[StateKey]
         ):
+        """Add every active phase connection's transfer to the balance.
 
-        # temp = completed_state["temp"]
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material rates being assembled; the transfers go into its
+            cross-phase bucket, and the volume they create or consume into
+            ``transfer_vol_rate`` [m**3/s] for ``add_dilution_terms``.
+        time : float
+            Simulation time [s].
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+        """
 
         for connection in self.phase_connections:
 
@@ -2947,6 +2961,8 @@ class MultiPhaseVessel():
                     material_writes.append((material_slice, rate))
 
             crossphase_result.aux["material_writes"] = material_writes
+
+            buffer.transfer_vol_rate += crossphase_result.net_vol_rate  # [m**3/s]
 
             buffer.aux[buffer.CROSSPHASE].append(crossphase_result.aux)
     

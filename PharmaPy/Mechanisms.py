@@ -777,6 +777,45 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         return rates
 
+    def transfer_volume_rate(self, crystal_mass_rate, species_rates, liquid):
+        """Rate at which the transfer changes the slurry volume.
+
+        Parameters
+        ----------
+        crystal_mass_rate : float
+            Mass rate into the crystals [kg/s], negative for dissolution.
+        species_rates : ndarray
+            Mass rates of the liquid species [kg/s], shape
+            ``(num_species,)``, as ``compute_species_transfer`` returns them.
+        liquid : BasePhase
+            Liquid the crystals are suspended in.
+
+        Returns
+        -------
+        float
+            Rate of change of the slurry volume [m**3/s]: the crystal volume
+            gained at the crystal density plus the liquid volume lost at the
+            pure-species liquid densities.
+
+        Notes
+        -----
+        Exact for the ideal-volume mixing rule of
+        ``ThermoModule.getDensityMix``, under which the liquid volume is
+        ``sum(mass_i / rho_i)``, at constant temperature. The population is
+        carried per m**3 of slurry, so this volume change dilutes or
+        concentrates it; see ``get_dilution_contributions``. With the crystal
+        density equal to the solute's liquid density the two terms cancel,
+        which is why an equal-density fixture never showed the missing term.
+        """
+        rho_liquid_pure, _ = liquid.getDensityPure(
+            'liquid', liquid.temp)  # [kg/m**3] per species
+
+        vol_rate_solid = crystal_mass_rate / self.density  # [m**3/s]
+        vol_rate_liquid = float(np.sum(
+            np.asarray(species_rates, dtype=float) / rho_liquid_pure))  # [m**3/s]
+
+        return vol_rate_solid + vol_rate_liquid
+
     # ------------------------------------------------------------------
     # API for child classes
     # ------------------------------------------------------------------
@@ -1216,8 +1255,9 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         Parameters
         ----------
         net_vol_flow : float
-            Rate of change of the slurry volume, taken as the volumetric
-            inflow minus outflow [m**3/s].
+            Rate of change of the slurry volume [m**3/s]: the volumetric
+            inflow minus outflow, plus the volume the cross-phase transfers
+            create or consume (``transfer_volume_rate``).
         completed_state : dict
             Solver and derived states keyed by ``StateKey``.
 
@@ -1235,15 +1275,21 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             dn/dt = (Q_in n_in - Q_out n) / V  -  n (dV/dt) / V
 
         The inlet and outlet hooks give the first term. This one is the
-        second, with dV/dt = Q_in - Q_out (``net_vol_flow``). It vanishes in
-        an MSMPR whose volume is held, but in a semibatch crystallizer fed
-        with liquid it is what keeps the growing volume from multiplying the
-        crystal mass.
+        second, with dV/dt = Q_in - Q_out + dV_transfer/dt (``net_vol_flow``).
+        It vanishes in an MSMPR whose volume is held, but in a semibatch
+        crystallizer fed with liquid it is what keeps the growing volume
+        from multiplying the crystal mass, and in a closed batch it is what
+        keeps the crystal mass equal to the liquid's loss: solute leaving the
+        liquid at its liquid density and arriving as crystals at the crystal
+        density changes the slurry volume, and without this term the solid
+        mass reconstructed from the per-volume population drifted from the
+        liquid loss by ``phi / (1 - phi) * (1 - rho_crystal / rho_solute)``
+        of the transfer rate.
 
-        dV/dt = Q_in - Q_out holds while the slurry density does not change,
-        so n V is conserved exactly for a feed of the vessel's own liquid. A
-        feed of another density, a temperature change and the volume change
-        of crystallization itself are not counted in dV/dt.
+        The flow part, Q_in - Q_out, holds while the slurry density does not
+        change, so n V is conserved exactly for a feed of the vessel's own
+        liquid. A feed of another density and a temperature change are not
+        counted in dV/dt.
         """
         if not net_vol_flow:
             return {}
@@ -1799,13 +1845,18 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         t0 = perf_counter()
         species_rates_out = self.compute_species_transfer(mass_transfer,liquid)
         self._timers['pop_balance_compute_species_transfer'] = self._timers.get('pop_balance_compute_species_transfer',0)+perf_counter()-t0
+        # The transfer changes the slurry volume, which dilutes the
+        # per-volume population; the vessel adds it to the flow terms.
+        vol_rate = self.transfer_volume_rate(
+            mass_transfer, species_rates_out, liquid)  # [m**3/s]
         t0 = perf_counter()
         state_rates = {StateKey(self.solver_states[0].name,self.owning_phase): dcsd_dt} #if phaseref is a phase instead of a PhaseRef, the vessel will determine the phaseref
         # Species leave or enter the LIQUID, which is the connection's source
         # for crystallization but its sink for dissolution. Keying off the
         # source unconditionally would return dissolved mass to the solid.
         state_rates.update({StateKey('mass_j',self._liquid_phaseref(connection)):species_rates_out})
-        result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer)
+        result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer,
+                                net_vol_rate=vol_rate)
         self._timers['pop_balance_format'] = self._timers.get('pop_balance_format',0)+perf_counter()-t0
         return result
 
@@ -2215,6 +2266,11 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         species_rates_out = self.compute_species_transfer(mass_transfer,
                                                           liquid)
 
+        # The transfer changes the slurry volume, which dilutes the
+        # per-volume moments; the vessel adds it to the flow terms.
+        vol_rate = self.transfer_volume_rate(
+            mass_transfer, species_rates_out, liquid)  # [m**3/s]
+
         aux = {
             'supersat': supersat,
             'solubility': solubility,
@@ -2230,4 +2286,5 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         }
 
         return TransferResult(state_rates=state_rates, aux=aux,
-                              net_mass_rate=mass_transfer)
+                              net_mass_rate=mass_transfer,
+                              net_vol_rate=vol_rate)

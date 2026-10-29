@@ -66,12 +66,20 @@ class IntraPhaseProcess:
     mechanism: "Mechanism"
 
 class MaterialContributionBuffer:
+    """Per-evaluation accumulator for the material balance contributions.
+
+    One row of ``contributions`` per source (inlet, outlet, intraphase,
+    cross-phase), each in the solver states' units per second, plus the
+    volume rate the cross-phase transfers cause, which the dilution of
+    per-volume states needs after the cross-phase pass.
+    """
 
     __slots__ = (
         "n_values",
         "contributions",
         "rates",
         "aux",
+        "transfer_vol_rate",
     )
 
     INLET = 0
@@ -80,6 +88,13 @@ class MaterialContributionBuffer:
     CROSSPHASE = 3
 
     def __init__(self, n_values):
+        """Allocate the buffer for ``n_values`` material states.
+
+        Parameters
+        ----------
+        n_values : int
+            Number of material solver states.
+        """
 
         self.n_values = n_values
 
@@ -95,9 +110,14 @@ class MaterialContributionBuffer:
 
         self.aux = [[], [], [], []]
 
+        # Summed over the cross-phase transfers of one evaluation.
+        self.transfer_vol_rate = 0.0  # [m**3/s]
+
     def reset(self):
+        """Zero every contribution, rate, diagnostic and the volume rate."""
         self.contributions.fill(0.0)
         self.rates.fill(0.0)
+        self.transfer_vol_rate = 0.0  # [m**3/s]
 
         for aux in self.aux:
             aux.clear()
@@ -236,9 +256,27 @@ class ResolvedStreamConnection:
 
 @dataclass
 class TransferResult:
+    """Rates one mechanism contributes to the vessel's solver states.
+
+    Attributes
+    ----------
+    state_rates : dict
+        Rates keyed by ``StateKey``, each in that state's units per second.
+    aux : dict
+        Diagnostics the mechanism reports alongside the rates.
+    net_mass_rate : float
+        Mass crossing into the sink phase [kg/s]; negative when it leaves.
+    net_vol_rate : float
+        Rate of change of the vessel's held volume caused by the transfer
+        [m**3/s]. Mass that leaves one phase at one density and arrives in
+        another at a different density changes the volume, which dilutes or
+        concentrates any state carried per unit volume. Zero by default, for
+        mechanisms that do not move volume.
+    """
     state_rates: dict[StateKey]
     aux: dict
     net_mass_rate:float
+    net_vol_rate: float = 0.0  # [m**3/s]
 @dataclass
 class StateCollection:
     states: dict[StateKey, StateVariable] = field(default_factory=dict)
