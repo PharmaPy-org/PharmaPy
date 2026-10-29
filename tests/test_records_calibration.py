@@ -5,8 +5,9 @@ Scope: ``PharmaPy.Records.CalibrationRecord`` and its component records
 ``SolverSettings``, ``FieldIdentity``/``FieldRecord``); exact JSON
 round trips of ``Experiment``/``Measurement`` observations, callback
 arguments and fitted results; capture of a fitted ``ParameterEstimation``
-with ``from_estimation`` and its consistency checks; the documented
-reload-and-rerun path; atomic saving; and validation messages.
+with ``from_estimation`` and its consistency checks, including the
+recorded Levenberg-Marquardt defaults (``default_options``, #483); the
+documented reload-and-rerun path; atomic saving; and validation messages.
 
 Fixture: the two-experiment first-order decay A -> B with an adiabatic
 temperature rise of ``doc/online_docs/examples/experiment_measurement.rst``
@@ -48,6 +49,22 @@ SEED_RATE = 0.3  # [1/s], the documented seed of k
 # recorded verbatim; it exceeds the nine evaluations this one-parameter fit
 # needs, so it does not change the fit.
 LM_MAX_FUN_EVAL = 60  # [-]
+# Keyword defaults of levenberg_marquardt (PharmaPy/LevMarq.py, signature
+# of levenberg_marquardt), written out by hand in signature order: the
+# options a fit without optim_options uses, which its record must state
+# (#483). max_fun_eval [-]. For this fixture's standardized residuals r
+# [-] and single parameter k [1/s], the gradient J @ r has units
+# [-]**2 / [1/s] = [s], so eps_1, its stopping norm, is in [s]; tol_fun
+# bounds the residual norm [-]; eps_2 bounds the step relative to the
+# parameter norm [-]; None selects the data-dependent initial damping mu
+# and the scaling diagonal d_diag.
+LM_DEFAULT_OPTIONS = {'fletcher_modif': False, 'max_fun_eval': 100,
+                      'eps_1': 1e-8, 'eps_2': 1e-8, 'tol_fun': 1e-12,
+                      'mu': None, 'd_diag': None}
+# Fewer evaluations than the nine the documented fit needs: LM stops early
+# at a rate distinct from the converged one, which identifies the
+# max_fun_eval a rerun used.
+TRUNCATED_MAX_FUN_EVAL = 2  # [-]
 # The rerun replays bit-identical inputs through the same deterministic LM
 # iterations, so the fitted rate is reproduced exactly; four ulps of
 # relative slack absorb any platform-dependent operation ordering.
@@ -820,14 +837,16 @@ def test_reload_and_rerun_reproduces_recorded_fit(tmp_path):
         rel=REPLAY_RTOL, abs=0)
 
     optimizer_inputs = loaded.optimizer_inputs()
-    assert optimizer_inputs == {'method': 'LM', 'optim_options': {},
+    # The fit set no option, so the rerun passes the recorded LM defaults.
+    assert optimizer_inputs == {'method': 'LM',
+                                'optim_options': LM_DEFAULT_OPTIONS,
                                 'bounds': None}
     rebuilt.optimize_fn(verbose=False, **optimizer_inputs)
     # optimize_fn wrote its own entries into the dict it received (#476);
     # the record hands out a fresh dict every time.
-    assert set(optimizer_inputs['optim_options']) == {'full_output',
-                                                      'verbose'}
-    assert loaded.optimizer_inputs()['optim_options'] == {}
+    assert set(optimizer_inputs['optim_options']) == set(
+        LM_DEFAULT_OPTIONS) | {'full_output', 'verbose'}
+    assert loaded.optimizer_inputs()['optim_options'] == LM_DEFAULT_OPTIONS
     difference = loaded.check_rerun(rebuilt, rtol=REPLAY_RTOL,
                                     atol=REPLAY_ATOL)
     assert difference.shape == (1,)
@@ -881,6 +900,150 @@ def test_fixed_parameter_before_optimized_one_round_trips_and_reruns():
     rerun = loaded.rerun(decay_rise_first, rtol=REPLAY_RTOL,
                          atol=REPLAY_ATOL)
     np.testing.assert_allclose(rerun.params_convg, estimator.params_convg,
+                               rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+
+
+def test_lm_defaults_are_recorded_when_no_option_is_given():
+    record, _, _ = fitted_record()  # optimize_fn without optim_options
+
+    assert record.solver.options == {}
+    default_options = record.solver.default_options
+    assert_same_value(default_options, LM_DEFAULT_OPTIONS)
+    assert list(default_options) == list(LM_DEFAULT_OPTIONS)
+    assert 'full_output' not in default_options  # injected by optimize_fn
+    assert 'verbose' not in default_options
+    assert_same_value(record.optimizer_inputs()['optim_options'],
+                      LM_DEFAULT_OPTIONS)
+    # Every access returns a new dict.
+    default_options['eps_1'] = 1.0
+    assert record.solver.default_options['eps_1'] == \
+        LM_DEFAULT_OPTIONS['eps_1']
+
+
+def test_given_lm_options_are_not_recorded_as_defaults():
+    experiments = make_experiments()
+    estimator = ParameterEstimation(decay, [SEED_RATE], experiments,
+                                    name_params=['k'])
+    estimator.optimize_fn(optim_options={'max_fun_eval': LM_MAX_FUN_EVAL},
+                          verbose=False)
+    record = capture(estimator, experiments)
+
+    assert record.solver.options == {'max_fun_eval': LM_MAX_FUN_EVAL}
+    defaulted = {key: value for key, value in LM_DEFAULT_OPTIONS.items()
+                 if key != 'max_fun_eval'}
+    assert_same_value(record.solver.default_options, defaulted)
+    optim_options = record.optimizer_inputs()['optim_options']
+    assert optim_options['max_fun_eval'] == LM_MAX_FUN_EVAL  # caller wins
+    assert optim_options == {**defaulted, 'max_fun_eval': LM_MAX_FUN_EVAL}
+
+    # Every LM option given: nothing is defaulted, which is not "unknown".
+    given = dict(LM_DEFAULT_OPTIONS, max_fun_eval=LM_MAX_FUN_EVAL)
+    estimator.optimize_fn(optim_options=dict(given), verbose=False)
+    complete = capture(estimator, experiments)
+    assert complete.solver.options == given
+    assert complete.solver.default_options == {}
+    assert complete.optimizer_inputs()['optim_options'] == given
+
+
+def test_default_options_round_trip_and_may_be_absent():
+    record, _, _ = fitted_record()
+    data = json.loads(record.to_json())
+    assert list(data['solver']) == ['method', 'options', 'default_options',
+                                    'model_solver', 'outcome', 'derivatives']
+    assert data['solver']['default_options'] == {
+        'fletcher_modif': False, 'max_fun_eval': 100, 'eps_1': 1e-8,
+        'eps_2': 1e-8, 'tol_fun': 1e-12, 'mu': None, 'd_diag': None}
+    loaded = CalibrationRecord.from_json(record.to_json())
+    assert loaded == record
+    assert_same_value(loaded.solver.default_options, LM_DEFAULT_OPTIONS)
+
+    # A version-1 record written before default_options existed (#483).
+    del data['solver']['default_options']
+    assert data['schema_version'] == RECORD_SCHEMA_VERSION
+    older = CalibrationRecord.from_dict(data)
+    assert older.solver.default_options is None
+    assert older.optimizer_inputs()['optim_options'] == {}
+    assert older.to_dict()['solver']['default_options'] is None
+    assert older != record
+
+    # A manually built record without default_options states that none
+    # were recorded (IPOPT capture: test_records_ipopt.py).
+    assert manual_record().solver.default_options is None
+
+
+def test_option_given_and_defaulted_is_rejected():
+    # Arbitrary LM option values; only the repeated keys matter.
+    with pytest.raises(ValueError, match=r"^SolverSettings default_options "
+                                         r"\['eps_1'\] are also given in "
+                                         r"options"):
+        SolverSettings('LM', options={'eps_1': 1e-6, 'max_fun_eval': 5},
+                       default_options={'tol_fun': 1e-12, 'eps_1': 1e-8})
+    record, _, _ = fitted_record()
+    data = record.to_dict()
+    data['solver']['options'] = {'tol_fun': 1e-10}  # also defaulted
+    with pytest.raises(ValueError, match=r"default_options \['tol_fun'\] "
+                                         r"are also given in options"):
+        CalibrationRecord.from_dict(data)
+    with pytest.raises(TypeError, match=r"SolverSettings default_options "
+                                        r"keys must be str"):
+        SolverSettings('LM', default_options={1: 1e-8})
+
+
+def test_rerun_uses_recorded_defaults_not_installed_ones():
+    # A record written by a PharmaPy whose LM default max_fun_eval was
+    # TRUNCATED_MAX_FUN_EVAL: the fit stopped early, and the option is a
+    # recorded default, not a caller option.
+    experiments = make_experiments()
+    estimator = ParameterEstimation(decay, [SEED_RATE], experiments,
+                                    name_params=['k'])
+    estimator.optimize_fn(
+        optim_options={'max_fun_eval': TRUNCATED_MAX_FUN_EVAL},
+        verbose=False)
+    truncated = capture(estimator, experiments)
+    assert truncated.solver.outcome['stop_criterion'] == \
+        'Maximum iterations exceeded'
+    converged = fitted_record()[0].fitted_values  # [1/s]
+    truncated_rate = truncated.fitted_values  # [1/s]
+    assert np.abs(truncated_rate - converged) > REPLAY_RTOL * np.abs(
+        converged)
+    data = truncated.to_dict()
+    data['solver']['options'] = {}
+    data['solver']['default_options']['max_fun_eval'] = \
+        TRUNCATED_MAX_FUN_EVAL
+    older_defaults = CalibrationRecord.from_dict(data)
+
+    rerun = older_defaults.rerun(decay, rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+    np.testing.assert_allclose(rerun.params_convg, truncated_rate,
+                               rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+    # The options as written, under the installed defaults, converge
+    # further and do not reproduce the record.
+    rebuilt = ParameterEstimation(decay,
+                                  **older_defaults.estimation_inputs())
+    rebuilt.optimize_fn(optim_options=older_defaults.solver.options,
+                        verbose=False)
+    with pytest.raises(RerunMismatchError, match="k: rerun"):
+        older_defaults.check_rerun(rebuilt, rtol=REPLAY_RTOL,
+                                   atol=REPLAY_ATOL)
+
+
+def test_record_captured_from_a_rerun_lists_replayed_defaults_as_given():
+    record, _, experiments = fitted_record()  # no option given
+    rerun = record.rerun(decay, rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+    again = capture(rerun, experiments)
+
+    # Documented split: the rerun passed the recorded defaults explicitly,
+    # so the new record lists them as given options and defaults nothing.
+    assert_same_value(again.solver.options, LM_DEFAULT_OPTIONS)
+    assert again.solver.default_options == {}
+    assert again != record
+    # The effective settings are those of the original fit.
+    original = {**record.solver.default_options, **record.solver.options}
+    effective = {**again.solver.default_options, **again.solver.options}
+    assert_same_value(effective, original)
+    assert_same_value(effective, LM_DEFAULT_OPTIONS)
+    assert_same_value(again.optimizer_inputs()['optim_options'],
+                      record.optimizer_inputs()['optim_options'])
+    np.testing.assert_allclose(again.fitted_values, record.fitted_values,
                                rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
 
 

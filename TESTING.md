@@ -71,8 +71,10 @@ NumPy 1.26.4 satisfies the Assimulo 3.4.3 binary's NumPy constraint. The first
 module needs only cyipopt; the second requires both cyipopt and Assimulo. The
 third, `tests/test_records_ipopt.py`, needs only cyipopt: it captures an IPOPT
 fit of the analytic two-experiment decay case in a `CalibrationRecord`
-(explicit bounds, the effective options cyipopt leaves in the caller's
-dictionary, a seed outside its bounds) and reruns it from the record. Each
+(explicit bounds; the caller's options plus the entries cyipopt writes into
+the dictionary, while Ipopt's native defaults are not recorded and the record's
+`default_options` is `None`; a seed outside its bounds) and reruns it from the
+record. Each
 module skips at collection when its backend is absent, preserving the core
 missing-dependency lane. Existing CI does not install cyipopt, so run this
 explicit command when changing the IPOPT estimation path. Headless machines can
