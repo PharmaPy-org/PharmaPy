@@ -969,7 +969,9 @@ class LiquidPhase(ThermoPhysicalManager):
     def getCp(self, temp: Optional[ArrayLike] = None,
               mass_frac: Optional[np.ndarray] = None,
               mole_frac: Optional[np.ndarray] = None,
-              basis: str = 'mass') -> Union[float, np.ndarray]:
+              basis: str = 'mass',
+              weights: Optional[np.ndarray] = None
+              ) -> Union[float, np.ndarray]:
         """Return liquid heat capacity on the requested mixture basis.
 
         Parameters
@@ -984,6 +986,10 @@ class LiquidPhase(ThermoPhysicalManager):
         basis : {'mass', 'mole'}, optional
             Mixture basis; defaults to mass, consistently with getEnthalpy.
             Callers requiring molar heat capacity must request 'mole'.
+        weights : numpy.ndarray, optional
+            Presence weights [-], with exactly the shape of the fractions on
+            the requested basis, that decide in their place which species
+            need ``cp_liq``; see ``ThermoPhysicalManager.getCpMix``.
 
         Returns
         -------
@@ -996,7 +1002,17 @@ class LiquidPhase(ThermoPhysicalManager):
         Raises
         ------
         ValueError
-            If basis is neither 'mass' nor 'mole'.
+            If basis is neither 'mass' nor 'mole', or if ``weights`` does
+            not have exactly the shape of the fractions on the requested
+            basis, raised by ``ThermoPhysicalManager.getCpMix``.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            with a nonzero fraction (or, with ``weights``, a nonzero weight)
+            in some row has no ``cp_liq``. A species whose fraction (weight)
+            is zero in every row needs none and, without it, contributes
+            exactly zero; with ``weights``, a zero-weight species that has
+            ``cp_liq`` still contributes its fraction times its heat
+            capacity.
         """
         if temp is None:
             temp = self.temp
@@ -1005,7 +1021,8 @@ class LiquidPhase(ThermoPhysicalManager):
             mass_frac = self.mass_frac
             mole_frac = self.mole_frac
 
-        cpLiq = super().getCpMix(temp, mass_frac, mole_frac, basis=basis)
+        cpLiq = super().getCpMix(temp, mass_frac, mole_frac, basis=basis,
+                                 weights=weights)
 
         return cpLiq
 
@@ -1349,8 +1366,11 @@ class LiquidPhase(ThermoPhysicalManager):
             mole fractions. When given, the model is evaluated on the
             species with a nonzero weight only, as if the others were
             absent; those others need no activity parameters and get the
-            neutral coefficient 1. Solver-based units pass a structural
-            presence mask here (through ``getKeqVLE``). See
+            neutral coefficient of exactly 1, so that a ratio of the
+            coefficients of two liquids (the extractors' default
+            distribution ratio) is exactly 1 for them. Solver-based units
+            pass a structural presence mask here (through ``getKeqVLE``,
+            or directly for the extractors). See
             ``ThermoPhysicalManager._activity_coefficients``.
 
         Returns
@@ -1787,7 +1807,9 @@ class VaporPhase(ThermoPhysicalManager):
     def getCp(self, temp: ArrayLike,
               mass_frac: Optional[np.ndarray] = None,
               mole_frac: Optional[np.ndarray] = None,
-              basis: str = 'mass') -> Union[float, np.ndarray]:
+              basis: str = 'mass',
+              weights: Optional[np.ndarray] = None
+              ) -> Union[float, np.ndarray]:
         """Return the vapor mixture heat capacity on the requested basis.
 
         Parameters
@@ -1800,6 +1822,10 @@ class VaporPhase(ThermoPhysicalManager):
             neither is given.
         basis : {'mass', 'mole'}, optional
             Basis of the result; default mass.
+        weights : numpy.ndarray, optional
+            Presence weights [-], with exactly the shape of the fractions on
+            the requested basis, that decide in their place which species
+            need ``cp_vapor``; see ``ThermoPhysicalManager.getCpMix``.
 
         Returns
         -------
@@ -1810,19 +1836,22 @@ class VaporPhase(ThermoPhysicalManager):
         Raises
         ------
         ValueError
-            If ``basis`` is neither 'mass' nor 'mole'.
+            If ``basis`` is neither 'mass' nor 'mole', or if ``weights``
+            does not have exactly the shape of the fractions on the
+            requested basis.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If a species
-            with a nonzero fraction in some row has no ``cp_vapor``
-            coefficients. Also raised, whatever the fractions, if
-            ``cp_vapor`` is stored as one scalar per species instead of a
-            coefficient list (see ``_property_rows``).
+            with a nonzero fraction (or, with ``weights``, a nonzero weight)
+            in some row has no ``cp_vapor`` coefficients. Also raised,
+            whatever the fractions, if ``cp_vapor`` is stored as one scalar
+            per species instead of a coefficient list (see
+            ``_property_rows``).
         """
         if mass_frac is None and mole_frac is None:
             mass_frac = self.mass_frac
 
         cpMix = self.getCpMix(temp, mass_frac, mole_frac, phase='vapor',
-                              basis=basis)
+                              basis=basis, weights=weights)
 
         return cpMix
 
@@ -1899,7 +1928,9 @@ class VaporPhase(ThermoPhysicalManager):
         return temp_values, is_supercritical
 
     def getHeatVaporization(self, temp: ArrayLike,
-                            basis: str = 'mass') -> np.ndarray:
+                            basis: str = 'mass',
+                            weights: Optional[np.ndarray] = None
+                            ) -> np.ndarray:
         """Calculate the latent heat of vaporization of each species.
 
         Every requested temperature classifies every species separately. A
@@ -1919,6 +1950,15 @@ class VaporPhase(ThermoPhysicalManager):
             paired with species, so any number of temperatures is accepted.
         basis : {'mass', 'mole'}, optional
             Basis of the returned latent heat. The default is 'mass'.
+        weights : numpy.ndarray, optional
+            Presence weights [any basis, e.g. 0/1], exactly of shape
+            ``(num_species,)``, applied at every requested temperature. When
+            given, only the species with a nonzero weight are evaluated: the
+            others need no Watson data and their columns are exactly zero,
+            whatever their data, as for a species that cannot condense.
+            Solver-based units pass a structural presence mask here, so
+            that a species absent from the condensed phase needs no data
+            (issue #425).
 
         Returns
         -------
@@ -1930,24 +1970,27 @@ class VaporPhase(ThermoPhysicalManager):
             otherwise. Entries whose temperature lies strictly above the
             species critical temperature are zero; at exactly ``t_crit`` the
             Watson value is itself zero. Columns of species without critical
-            data (``t_crit`` is NaN) are zero at every temperature.
+            data (``t_crit`` is NaN) are zero at every temperature, and so
+            are the columns of species with zero weight.
 
         Raises
         ------
         ValueError
             If ``basis`` is neither 'mass' nor 'mole'; if ``temp`` is empty,
-            non-finite, or has more than one dimension; or, defensively, if
-            an evaluated Watson ratio is not finite and non-negative.
+            non-finite, or has more than one dimension; if ``weights`` does
+            not have exactly the shape ``(num_species,)``; or, defensively,
+            if an evaluated Watson ratio is not finite and non-negative.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If a species
-            with critical data is evaluated at or below its critical
-            temperature while its ``t_crit``, ``tref_hvap`` or
-            ``delta_hvap`` is not finite or its ``tref_hvap`` is not
-            strictly below its ``t_crit``, which leaves the Watson reference
-            undefined; every species is returned, so every species
-            evaluated at or below its critical temperature needs valid
-            Watson data, whatever its fraction in a mixture. Also raised,
-            naming every species, if no species supplies ``t_crit``.
+            with critical data (and, with ``weights``, a nonzero weight) is
+            evaluated at or below its critical temperature while its
+            ``t_crit``, ``tref_hvap`` or ``delta_hvap`` is not finite or its
+            ``tref_hvap`` is not strictly below its ``t_crit``, which leaves
+            the Watson reference undefined; without ``weights`` every
+            species is returned, so every species evaluated at or below its
+            critical temperature needs valid Watson data, whatever its
+            fraction in a mixture. Also raised, naming every species, if no
+            species supplies ``t_crit``.
 
         Notes
         -----
@@ -1966,11 +2009,18 @@ class VaporPhase(ThermoPhysicalManager):
         """
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be 'mass' or 'mole'")
+        if weights is not None:
+            weights = self._validate_species_weights(weights)
         temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
 
+        if weights is None:
+            is_used = np.ones_like(is_supercritical)  # [-], every entry
+        else:
+            is_used = np.broadcast_to(weights != 0,
+                                      is_supercritical.shape)  # [-]
         deltahvap = self._latent_heat(
             temp_values, is_supercritical, basis,
-            np.ones_like(is_supercritical))  # [J/kg] or [J/mol], by basis
+            is_used)  # [J/kg] or [J/mol], by basis
 
         if len(temp_values) == 1:
             deltahvap = deltahvap[0]  # [J/kg] or [J/mol], by basis
@@ -1994,7 +2044,9 @@ class VaporPhase(ThermoPhysicalManager):
         is_used : ndarray of bool
             True for an entry whose latent heat the result uses, same shape
             as ``is_supercritical``. ``getHeatVaporization`` uses every
-            entry; a mixture enthalpy only those with a nonzero fraction.
+            entry, or with ``weights`` only the entries of species with a
+            nonzero weight; a mixture enthalpy only those with a nonzero
+            fraction.
 
         Returns
         -------
@@ -2233,7 +2285,8 @@ class VaporPhase(ThermoPhysicalManager):
         entry needs no ``delta_hvap`` or ``tref_hvap`` and adds exactly zero,
         so the mixture enthalpy equals the one computed without that species
         (issue #424). With ``total_h=False``, every entry is returned and
-        needs its data, as does the public ``getHeatVaporization``.
+        needs its data, as does the public ``getHeatVaporization`` without
+        ``weights``.
         The supercritical classification is strictly ``T > Tc``; see
         ``_classify_criticality`` for the equality rule. The mixture
         enthalpy is the row-wise species sum of species enthalpy times the
@@ -2345,7 +2398,9 @@ class VaporPhase(ThermoPhysicalManager):
                     mass_frac: Optional[np.ndarray] = None,
                     mole_frac: Optional[np.ndarray] = None,
                     thermo_method: str = 'ideal',
-                    x_liq: bool = False) -> Union[float, tuple]:
+                    x_liq: bool = False,
+                    weights: Optional[np.ndarray] = None
+                    ) -> Union[float, tuple]:
         """Solve for the vapor dew-point temperature.
 
         Parameters
@@ -2360,6 +2415,15 @@ class VaporPhase(ThermoPhysicalManager):
             Liquid activity model passed to ``getKeqVLE``.
         x_liq : bool, optional
             Also return the incipient liquid composition.
+        weights : ndarray, optional
+            Presence weights [-] with the shape of the mole fractions, as in
+            ``LiquidPhase.getBubblePoint``. When given, only species with a
+            nonzero weight enter the dew-point sum, its Antoine seed, the
+            incipient liquid and a non-ideal activity model, and only they
+            need VLE and activity data (see ``getKeqVLE``); the others count
+            as absent, with exactly zero liquid fraction and the neutral
+            activity coefficient 1. Unit operations pass the presence of
+            the species they carry, so that an absent species needs no data.
 
         Returns
         -------
@@ -2371,26 +2435,36 @@ class VaporPhase(ThermoPhysicalManager):
 
         Raises
         ------
+        ValueError
+            If ``weights`` does not have exactly the shape of the mole
+            fractions, before any evaluation.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``.
             From ``getKeqVLE`` at the converged root, if a species with a
-            nonzero fraction has no ``p_vap`` coefficients at or below its
-            critical temperature. Already from the Newton iterates, which
-            evaluate the same ratios, if a species with a nonzero fraction is
-            above its critical temperature at an iterate without
+            nonzero fraction (or weight) has no ``p_vap`` coefficients at or
+            below its critical temperature. Already from the Newton
+            iterates, which evaluate the same ratios, if a species with a
+            nonzero fraction (or weight) is above its critical temperature
+            at an iterate without
             ``henry_constant`` [Pa], if no species supplies ``t_crit``, if no
-            species supplies ``henry_constant`` while some species is
-            supercritical at an iterate, or if ``p_vap`` is stored as one
-            scalar per species (from the Antoine seed).
+            species supplies ``henry_constant`` while some species (with
+            ``weights``, some weighted species) is supercritical at an
+            iterate, or if ``p_vap`` is stored as one scalar per species
+            (from the Antoine seed). With ``weights`` and
+            ``thermo_method='UNIQUAC'``, also if a weighted species lacks
+            ``ri``, ``qi`` or (when the database has the key) ``qip``; UNIFAC
+            group counts are taken as given (see ``getKeqVLE``).
         RuntimeError
             If the Newton iteration does not converge.
 
         Notes
         -----
-        The Newton seed is ``sum_i y_i * Tsat_i(pres)`` [K]. Seed and
+        The Newton seed is ``sum_i y_i * Tsat_i(pres)`` [K], with
+        ``weights`` over the species with a nonzero weight only. Seed and
         iterates treat missing Antoine data as in
         ``LiquidPhase.getBubblePoint``, and the converged root is checked
-        with ``getKeqVLE`` weighted by the vapor composition.
+        with ``getKeqVLE`` weighted by the vapor composition (or by
+        ``weights``).
         """
         if mass_frac is None and mole_frac is None:
             mole_frac = self.mole_frac
@@ -2398,33 +2472,106 @@ class VaporPhase(ThermoPhysicalManager):
         elif mole_frac is None:
             mole_frac = self.frac_to_frac(mass_frac=mass_frac)
 
+        mole_frac = np.asarray(mole_frac, dtype=float)  # [-], also from a list
+
         if pres is None:
             pres = self.pres
 
-        def dew_fn(temp):
-            k_vals = self._vle_ratios(temp, pres, mole_frac, thermo_method,
-                                      check=False)  # [-], iterate only
+        # Absent (zero-weight) species leave the sum and the liquid exactly;
+        # their ratios may be NaN placeholders (see getKeqVLE).
+        if weights is not None:
+            weights = self._validate_weights_shape(weights, mole_frac,
+                                                   'mole_frac')
+            used = weights != 0  # [-]
 
-            obj = np.dot(mole_frac, 1/k_vals) - 1
+        def dew_fn(temp: float) -> float:
+            """Evaluate the dew-point residual at a Newton iterate.
+
+            Parameters
+            ----------
+            temp : float
+                Temperature iterate [K].
+
+            Returns
+            -------
+            float
+                ``sum_i y_i / K_i - 1`` over the used species [-]; zero at
+                the dew point.
+            """
+            k_vals = self._vle_ratios(temp, pres, mole_frac, thermo_method,
+                                      check=False,
+                                      weights=weights)  # [-], iterate only
+
+            if weights is None:
+                obj = np.dot(mole_frac, 1/k_vals) - 1
+            else:
+                obj = np.dot(mole_frac[used], 1/k_vals[used]) - 1
 
             return obj
-        temp_seed = self._antoine_seed(mole_frac, pres=pres)  # [K]
+
+        # Absent species are left out of the seed too: their saturation
+        # temperature may be infinite, and 0 * inf is NaN.
+        temp_seed = self._antoine_seed(
+            mole_frac, pres=pres,
+            used=None if weights is None else used)  # [K]
         temp_dew = newton(dew_fn, temp_seed, full_output=False)
 
         # Check the data the converged root needs.
         k_vals = self.getKeqVLE(temp_dew, pres, mole_frac,
-                                gamma_model=thermo_method)  # [-]
+                                gamma_model=thermo_method,
+                                weights=weights)  # [-]
 
         if x_liq:
-            x_frac = mole_frac/k_vals
+            if weights is None:
+                x_frac = mole_frac/k_vals  # [-]
+            else:
+                x_frac = np.where(
+                    used, mole_frac / np.where(used, k_vals, 1.0), 0.0)  # [-]
 
             return temp_dew, x_frac
         else:
             return temp_dew
 
-    def getViscosity(self, temp=None, mass_frac=None, mole_frac=None):
+    def getViscosity(self, temp: Optional[ArrayLike] = None,
+                     mass_frac: Optional[np.ndarray] = None,
+                     mole_frac: Optional[np.ndarray] = None,
+                     weights: Optional[np.ndarray] = None
+                     ) -> Union[float, np.ndarray]:
+        """Return the vapor mixture viscosity from the Wilke rule.
+
+        Parameters
+        ----------
+        temp : float or array-like, optional
+            Temperature [K]; not used, the stored ``visc_gas`` values are
+            constants.
+        mass_frac, mole_frac : numpy.ndarray, optional
+            Vapor fractions [-], shape ``(num_species,)`` or
+            ``(num_points, num_species)``; mole fractions take precedence,
+            and the phase mole fractions are used when neither is supplied.
+        weights : numpy.ndarray, optional
+            Presence weights [-], with exactly the shape of the fractions
+            used; the Wilke sums then run over the species with a nonzero
+            weight only, and the others need no ``visc_gas``. See
+            ``ThermoPhysicalManager.getViscosityMix``.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Viscosity [Pa*s]: a scalar for one composition, shape
+            ``(num_points,)`` for a composition profile.
+
+        Raises
+        ------
+        ValueError
+            If ``weights`` does not have exactly the shape of the fractions
+            used.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If any
+            species (with ``weights``, any species with a nonzero weight)
+            has no ``visc_gas`` value [Pa*s].
+        """
         viscosity = self.getViscosityMix(temp, mass_frac, mole_frac,
-                                         phase='vapor')
+                                         phase='vapor', weights=weights)
 
         return viscosity
 

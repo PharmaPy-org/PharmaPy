@@ -815,6 +815,37 @@ class ThermoPhysicalManager:
 
         return weights
 
+    def _validate_species_weights(self, weights: np.ndarray) -> np.ndarray:
+        """Require one presence weight per species for a pure-component kernel.
+
+        Parameters
+        ----------
+        weights : array-like
+            Weights [any basis, e.g. 0/1] that decide which species a
+            pure-component kernel evaluates, one per species in database
+            order.
+
+        Returns
+        -------
+        ndarray
+            ``weights`` as an array, shape ``(num_species,)``.
+
+        Raises
+        ------
+        ValueError
+            If ``weights`` does not have exactly the shape
+            ``(num_species,)``. A scalar or a short array would otherwise
+            broadcast and silently switch the missing-data checks off.
+        """
+        weights = np.asarray(weights)
+        num_species = len(self.name_species)  # [-]
+        if weights.shape != (num_species,):
+            raise ValueError(
+                "weights must have one entry per species, shape "
+                f"({num_species},); got shape {weights.shape}")
+
+        return weights
+
     def _cp_rows(self, phase: str) -> tuple:
         """Return the heat-capacity property of a phase and its rows.
 
@@ -947,7 +978,9 @@ class ThermoPhysicalManager:
         return cpMass, cpMole
 
     def getCpMix(self, temp, mass_frac=None, mole_frac=None, phase='liquid',
-                 basis: str = 'mass'):
+                 basis: str = 'mass',
+                 weights: Optional[np.ndarray] = None
+                 ) -> Union[float, np.ndarray]:
         """Mix pure heat capacities over the species axis.
 
         Parameters
@@ -963,6 +996,15 @@ class ThermoPhysicalManager:
             Pure-component Cp correlation; default liquid.
         basis : {'mass', 'mole'}, optional
             Cp basis, default mass.
+        weights : ndarray, optional
+            Presence weights [any basis, e.g. 0/1], with exactly the shape
+            of the fractions on the requested basis, ``(num_species,)`` or
+            ``(num_temperatures, num_species)``. When given, they replace
+            the fractions in deciding which species need coefficients: a
+            species with zero weight in every row needs none and, without
+            them, contributes exactly zero. The fractions still weight the
+            sum. Solver-based units pass a structural presence mask here,
+            so that round-off fractions of absent species need no data.
 
         Returns
         -------
@@ -976,12 +1018,18 @@ class ThermoPhysicalManager:
         ------
         ValueError
             If basis is neither 'mass' nor 'mole', or ``phase`` is unknown.
+            Also raised if ``weights`` does not have exactly the shape of
+            the fractions on the requested basis (one- or two-dimensional,
+            one entry per species on the last axis), as a scalar or short
+            array would otherwise switch the check off.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``.
-            If a species with a nonzero fraction in some composition row has
-            no coefficients for the phase. A species whose fraction is zero
-            in every row needs none and contributes exactly zero. Nonzero is
-            bitwise: a round-off-level fraction counts as present.
+            If a species with a nonzero fraction (or, with ``weights``, a
+            nonzero weight) in some composition row has no coefficients for
+            the phase. A species whose fraction (weight) is zero in every
+            row needs none and contributes exactly zero. Nonzero is
+            bitwise: a round-off-level fraction counts as present unless
+            ``weights`` says otherwise.
             Also raised, whatever the fractions or weights, if the property is
             stored as one scalar per species instead of a coefficient list (see
             ``_property_rows``).
@@ -1005,12 +1053,19 @@ class ThermoPhysicalManager:
             frac = mole_frac  # [-]
             cp_pure = cp_mole  # [J/mol/K]
 
-        # Only species present in some composition row need coefficients;
-        # absent species without them contribute exactly zero, not NaN * 0.
-        needed = np.atleast_2d(np.asarray(frac) != 0).any(axis=0)
+        # Only species present in some composition row (or with a nonzero
+        # weight) need coefficients; absent species without them contribute
+        # exactly zero, not NaN * 0.
+        if weights is None:
+            needed = np.atleast_2d(np.asarray(frac) != 0).any(axis=0)
+            reason = 'carry a nonzero fraction, so the mixture heat capacity'
+        else:
+            weights = self._validate_weights_shape(
+                weights, frac, 'mass_frac' if basis == 'mass' else 'mole_frac')
+            needed = self._needed_by_weights(weights, len(cp_cts))
+            reason = 'carry a nonzero weight, so the mixture heat capacity'
         missing = self._check_species_rows(
-            prop_name, cp_cts, np.arange(len(cp_cts)), needed,
-            'carry a nonzero fraction, so the mixture heat capacity')
+            prop_name, cp_cts, np.arange(len(cp_cts)), needed, reason)
         cp_pure = np.where(missing, 0.0, cp_pure)  # [J/kg/K] or [J/mol/K]
 
         if frac.ndim == 1:
@@ -1323,7 +1378,8 @@ class ThermoPhysicalManager:
         return _DENSITY_PROPERTY_BY_PHASE[phase]
 
     def getDensityPure(self, phase: str = 'liquid',
-                       temp: Optional[float] = None) -> tuple:
+                       temp: Optional[float] = None,
+                       weights: Optional[np.ndarray] = None) -> tuple:
         """Return pure-component densities on the mass and molar bases.
 
         Parameters
@@ -1335,6 +1391,14 @@ class ThermoPhysicalManager:
         temp : float, optional
             Temperature [K]. Accepted for interface compatibility and
             ignored: the stored pure densities are temperature independent.
+        weights : ndarray, optional
+            Presence weights [any basis, e.g. 0/1], exactly of shape
+            ``(num_species,)``. When given, only the species with a nonzero
+            weight are evaluated: the others need no density and get
+            exactly 0.0 in both returned arrays, a placeholder rather than a
+            density, whatever their data, so that nothing computed from the
+            weighted species depends on their data. Unit operations pass a
+            structural presence mask here (issue #425).
 
         Returns
         -------
@@ -1349,18 +1413,29 @@ class ThermoPhysicalManager:
         ------
         ValueError
             If ``phase`` is not one of ``'liquid'`` or ``'solid'``, checked
-            before any computation.
+            before any computation, or if ``weights`` does not have exactly
+            the shape ``(num_species,)``.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If any
-            species has no density for the phase; every species is
-            returned, so every species needs it.
+            species (with ``weights``, any species with a nonzero weight)
+            has no density for the phase; without ``weights`` every species
+            is returned, so every species needs it.
         """
         prop_name = self._validate_density_phase(phase)
         rhoMass = self._scalar_values(prop_name)  # [kg/m**3]
         num_sp = len(rhoMass)
-        self._check_species_rows(
-            prop_name, rhoMass, np.arange(num_sp), np.ones(num_sp, dtype=bool),
-            'are evaluated as pure components, so their density')
+        if weights is None:
+            self._check_species_rows(
+                prop_name, rhoMass, np.arange(num_sp),
+                np.ones(num_sp, dtype=bool),
+                'are evaluated as pure components, so their density')
+        else:
+            evaluated = self._validate_species_weights(weights) != 0  # [-]
+            self._check_species_rows(
+                prop_name, rhoMass, np.arange(num_sp), evaluated,
+                'carry a nonzero weight, so their pure density')
+            # Unweighted species are not evaluated: a 0.0 placeholder.
+            rhoMass = np.where(evaluated, rhoMass, 0.0)  # [kg/m**3]
 
         rhoMole = rhoMass / self.mw  # [kmol/m**3], equivalently [mol/L]
 
@@ -1633,7 +1708,9 @@ class ThermoPhysicalManager:
     def getViscosityMix(self, temp: Optional[Union[float, np.ndarray]] = None,
                         mass_frac: Optional[np.ndarray] = None,
                         mole_frac: Optional[np.ndarray] = None,
-                        phase: str = 'liquid') -> Union[float, np.ndarray]:
+                        phase: str = 'liquid',
+                        weights: Optional[np.ndarray] = None
+                        ) -> Union[float, np.ndarray]:
         """Mix dynamic viscosities on the mole-fraction basis.
 
         Parameters
@@ -1648,6 +1725,18 @@ class ThermoPhysicalManager:
             if neither is supplied, use the phase mole fractions.
         phase : {'liquid', 'vapor'}, optional
             Select logarithmic liquid mixing or the dilute-gas Wilke rule.
+        weights : ndarray, optional
+            Presence weights [any basis, e.g. 0/1], with exactly the shape
+            of the fractions used (``mole_frac`` when given, else
+            ``mass_frac``, else the phase mole fractions). When given, the
+            mixing rule is evaluated on the species with a nonzero weight
+            only, as if the others were absent: an entry with zero weight
+            contributes nothing, whatever its fraction, and a species whose
+            weight is zero in every row needs no viscosity data (for the
+            vapor, no ``visc_gas``, which the Wilke sums then do not use).
+            Solver-based units pass a structural presence mask here, so
+            that round-off fractions of absent species need no data (issue
+            #425).
 
         Returns
         -------
@@ -1662,16 +1751,19 @@ class ThermoPhysicalManager:
         Raises
         ------
         ValueError
-            If ``phase`` is unknown.
+            If ``phase`` is unknown, or if ``weights`` does not have exactly
+            the shape of the fractions used.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``.
-            For the vapor, if any species has no ``visc_gas`` value [Pa*s],
-            as in ``getViscosityPure``. For the liquid, if a species with a
-            nonzero mole fraction in some composition row has no
-            ``visc_liq`` coefficients. A species whose fraction is zero in
-            every row needs none and contributes exactly zero to the
-            logarithmic mixing rule. Nonzero is bitwise: a round-off-level
-            fraction counts as present.
+            For the vapor, if any species (with ``weights``, any species
+            with a nonzero weight) has no ``visc_gas`` value [Pa*s], as in
+            ``getViscosityPure``. For the liquid, if a species with a
+            nonzero mole fraction (with ``weights``, a nonzero weight) in
+            some composition row has no ``visc_liq`` coefficients. A
+            species whose fraction (weight) is zero in every row needs none
+            and contributes exactly zero to the logarithmic mixing rule.
+            Nonzero is bitwise: a round-off-level fraction counts as present
+            unless ``weights`` says otherwise.
             Also raised, whatever the fractions or weights, if the property is
             stored as one scalar per species instead of a coefficient list (see
             ``_property_rows``).
@@ -1686,24 +1778,51 @@ class ThermoPhysicalManager:
         / sqrt(8*(1 + M_i/M_j))``. The rule assumes a low-pressure gas;
         molar masses use the same units for every species.
         """
+        if phase not in ('liquid', 'vapor'):
+            raise ValueError(
+                f"phase must be one of ('liquid', 'vapor'), got {phase!r}")
+
+        mw_species = self.mw  # [g/mol]
         if phase == 'liquid':
             visc_cts = self._property_rows('visc_liq')  # [-], [K], [1/K], [1/K**2]
             visc_comp = self._evaluate_liquid_viscosity(temp, visc_cts)  # [Pa*s]
-        else:
+        elif weights is None:
             visc_comp = self.getViscosityPure(phase, temp)  # [Pa*s]
 
+        fraction_name = 'mole_frac'
         if mass_frac is None and mole_frac is None:
             mole_frac = self.mole_frac
         elif mole_frac is None:
             mole_frac = self.frac_to_frac(mass_frac=mass_frac)
+            fraction_name = 'mass_frac'
+
+        reason = 'carry a nonzero fraction, so the mixture viscosity'
+        if weights is None:
+            needed = self._needed_by_weights(mole_frac, len(self.name_species))
+        else:
+            weights = self._validate_weights_shape(weights, mole_frac,
+                                                   fraction_name)
+            needed = self._needed_by_weights(weights, len(self.name_species))
+            reason = 'carry a nonzero weight, so the mixture viscosity'
+            # Zero-weight entries are evaluated as absent.
+            mole_frac = np.where(weights != 0, mole_frac, 0.0)  # [-]
+            if phase == 'vapor':
+                visc_gas = self._scalar_values('visc_gas')  # [Pa*s]
+                self._check_species_rows(
+                    'visc_gas', visc_gas, np.arange(len(visc_gas)), needed,
+                    reason)
+                # The Wilke sums run over the weighted species only.
+                evaluated = np.flatnonzero(needed)
+                visc_comp = visc_gas[evaluated]  # [Pa*s]
+                mw_species = np.asarray(self.mw)[evaluated]  # [g/mol]
+                mole_frac = mole_frac[..., evaluated]  # [-]
 
         # Mixing rules
         if phase == 'liquid':
             # Absent species without coefficients contribute exactly zero.
-            needed = np.atleast_2d(np.asarray(mole_frac) != 0).any(axis=0)
             missing = self._check_species_rows(
                 'visc_liq', visc_cts, np.arange(len(visc_cts)), needed,
-                'carry a nonzero fraction, so the mixture viscosity')
+                reason)
             log_visc = np.where(missing, 0.0, np.log(visc_comp))  # [-], ln(mu/[Pa*s])
             if log_visc.ndim == 1:
                 viscMix = np.exp(
@@ -1715,7 +1834,7 @@ class ThermoPhysicalManager:
         elif phase == 'vapor':
             if visc_comp.ndim == 1:
                 visc_term = np.outer(visc_comp, 1/visc_comp)  # [-]
-                mw_term = np.outer(self.mw, 1/self.mw)  # [-], M_i/M_j
+                mw_term = np.outer(mw_species, 1/mw_species)  # [-], M_i/M_j
 
                 phi_mix = (1 + visc_term**0.5 * (1/mw_term)**0.25)**2 / \
                     np.sqrt(8*(1 + mw_term))  # [-]
@@ -1727,7 +1846,9 @@ class ThermoPhysicalManager:
         return viscMix
 
     def getDiffusivityPure(self, wrt: int,
-                           temp: Optional[float] = None) -> np.ndarray:
+                           temp: Optional[float] = None,
+                           weights: Optional[np.ndarray] = None
+                           ) -> np.ndarray:
         """Return species diffusivities with respect to one species.
 
         Parameters
@@ -1737,6 +1858,13 @@ class ThermoPhysicalManager:
             column of the ``diffusivity`` rows.
         temp : float, optional
             Temperature [K]; unused, the stored values are constants.
+        weights : ndarray, optional
+            Presence weights [any basis, e.g. 0/1], exactly of shape
+            ``(num_species,)``. When given, only the species with a nonzero
+            weight are evaluated: the others need no diffusivity and get
+            exactly 0.0, a placeholder rather than a diffusivity, whatever
+            their data. Unit operations pass a structural presence mask
+            here (issue #425).
 
         Returns
         -------
@@ -1746,10 +1874,15 @@ class ThermoPhysicalManager:
 
         Raises
         ------
+        ValueError
+            If ``weights`` does not have exactly the shape
+            ``(num_species,)``.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``.
-            If any species has no ``diffusivity`` data in column ``wrt``;
-            every species is returned, so every species needs it.
+            If any species (with ``weights``, any species with a nonzero
+            weight) has no ``diffusivity`` data in column ``wrt``; without
+            ``weights`` every species is returned, so every species needs
+            it.
             Also raised, whatever the fractions or weights, if the property is
             stored as one scalar per species instead of a coefficient list (see
             ``_property_rows``).
@@ -1759,13 +1892,21 @@ class ThermoPhysicalManager:
             rows = rows[:, [wrt]]  # [m**2/s], the values returned below
 
         num_sp = len(rows)
-        self._check_species_rows(
-            'diffusivity', rows, np.arange(num_sp),
-            np.ones(num_sp, dtype=bool),
-            'are evaluated as pure components, so their diffusivity')
+        if weights is None:
+            self._check_species_rows(
+                'diffusivity', rows, np.arange(num_sp),
+                np.ones(num_sp, dtype=bool),
+                'are evaluated as pure components, so their diffusivity')
 
-        diffusivity = self.diffusivity[:, wrt]  # [m**2/s]
-        return diffusivity
+            diffusivity = self.diffusivity[:, wrt]  # [m**2/s]
+            return diffusivity
+
+        evaluated = self._validate_species_weights(weights) != 0  # [-]
+        self._check_species_rows(
+            'diffusivity', rows, np.arange(num_sp), evaluated,
+            'carry a nonzero weight, so their diffusivity')
+        # Unweighted species are not evaluated: a 0.0 placeholder.
+        return np.where(evaluated, rows[:, 0], 0.0)  # [m**2/s]
 
     def frac_to_conc(self, mass_frac: Optional[np.ndarray] = None,
                      mole_frac: Optional[np.ndarray] = None,
@@ -2346,9 +2487,15 @@ class ThermoPhysicalManager:
         units index such ratios out or give an absent species a unit ratio.
         Nonzero is bitwise: a round-off-level fraction counts as present. A
         fraction integrated by a solver can carry round-off where it should
-        be zero, so the reactors, evaporators and flash units pass a
-        structural presence mask as ``weights``; other unit operations need
-        data for every species they carry as a state.
+        be zero, so the unit operations that decide presence structurally
+        (``PharmaPy.Presence``; among them the reactors, the evaporators and
+        flash units, and the dynamic distillation column for its plates)
+        pass a presence mask as ``weights`` and give an absent species a
+        unit ratio, and the shortcut design and the steady distillation
+        column pass the presence of the exact compositions they evaluate.
+        The user guide (``advanced_usage.rst``, "Missing property data")
+        lists the units and their rules; other unit operations need data
+        for every species they carry as a state.
         """
         return self._vle_ratios(temp, pres, x_liq, gamma_model, check=True,
                                 weights=weights)
@@ -2531,10 +2678,14 @@ class ThermoPhysicalManager:
         liquid: their fractions are left out (not renormalized) and their
         parameters, including UNIQUAC interaction rows and columns or
         UNIFAC group counts, are not used, so they need none (issue #425).
-        Their neutral coefficient of 1 is a placeholder that callers do not
-        use. Callers give zero weight only to species whose fraction is
-        zero or solver round-off of zero, so the present species'
-        coefficients equal those of the mixture without the absent ones.
+        Their neutral coefficient of exactly 1 is part of this contract:
+        the VLE ratios do not use it (callers give absent species a unit
+        ratio), but the extractors' default distribution ratios
+        ``gamma_light / gamma_heavy`` rely on it, so that an absent species
+        gets the ratio 1 whatever its data. Callers give zero weight only to
+        species whose fraction is zero or solver round-off of zero, so the
+        present species' coefficients equal those of the mixture without
+        the absent ones.
         """
         if gamma_model == 'ideal':
             return np.ones_like(x_liq)
