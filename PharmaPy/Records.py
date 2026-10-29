@@ -102,9 +102,10 @@ OPTIMIZATION_METHODS = ('LM', 'IPOPT')
 #: ``ParameterEstimation.get_gradient``: sensitivities returned by the model
 #: callback, a user ``jac_fun``, or finite differences.
 JACOBIAN_SOURCES = ('model_sensitivities', 'jac_fun', 'finite_difference')
-#: Non-numeric ``dx_finitediff`` descriptors: the default relative step
-#: that ``ParameterEstimation`` installs when ``dx_finitediff`` is None, or
-#: a user callable, which a record cannot hold.
+#: Non-numeric ``dx_finitediff`` descriptors: the default step of
+#: magnitude ``1e-3 * max(|p|, 1e-6)`` that ``ParameterEstimation``
+#: installs when ``dx_finitediff`` is None, or a user callable, which a
+#: record cannot hold.
 STEP_DESCRIPTORS = ('default', 'callable')
 
 #: Distribution name of PharmaPy (``[project].name`` in pyproject.toml).
@@ -132,9 +133,10 @@ _NUMERIC_KINDS = 'biuf'
 #: exactly: JSON numbers are read as IEEE 754 binary64 (8-byte) values, so
 #: extended precision (``numpy.longdouble``) would be silently rounded.
 _MAX_FLOAT_ITEMSIZE = 8
-#: Options that ``ParameterEstimation.optimize_fn`` writes into the
-#: caller's ``optim_options`` itself (issue #476): they are not user
-#: settings and are overwritten on every call, so records omit them.
+#: Options that ``ParameterEstimation.optimize_fn`` sets itself in the
+#: effective options it passes to the solver and stores as
+#: ``optim_options`` (issue #476): they are not user settings and are set
+#: again on every call, so records omit them.
 _INJECTED_OPTIONS = {'LM': ('full_output', 'verbose'),
                      'IPOPT': ('print_level',)}
 #: Parameters of ``levenberg_marquardt`` that are not tunable options: the
@@ -2222,11 +2224,13 @@ class SolverSettings(_ImmutableRecord):
     method : {'LM', 'IPOPT'}
         ``method`` of ``ParameterEstimation.optimize_fn``.
     options : Mapping[str, object], optional
-        ``optim_options`` passed to ``optimize_fn``. ``optimize_fn``
-        overwrites ``'full_output'`` and ``'verbose'`` (LM) or
-        ``'print_level'`` (IPOPT) in the caller's dict; such entries are
-        recorded as given and overwritten again on a rerun, without effect
-        on the fit.
+        Effective optimizer options of the fit: the ``optim_options`` given
+        to ``optimize_fn`` without the entries it sets itself, plus, for
+        IPOPT, the entries cyipopt writes into ``optimize_fn``'s private
+        copy (its defaults). ``optimize_fn`` sets ``'full_output'`` and
+        ``'verbose'`` (LM) or ``'print_level'`` (IPOPT) in that copy; such
+        entries given here are recorded as given and replaced again on a
+        rerun, without effect on the fit.
     default_options : Mapping[str, object], optional
         Optimizer defaults in force for the options that ``options`` does
         not set, e.g. the ``levenberg_marquardt`` keyword defaults
@@ -2234,11 +2238,11 @@ class SolverSettings(_ImmutableRecord):
         (issue #483). No key may also appear in ``options``. None (the
         default) states that they were not recorded: records written before
         this entry existed, and IPOPT fits. The ``options`` of an IPOPT fit
-        hold the caller's options plus the entries cyipopt writes into the
-        dict (``tol``, ``mu_strategy``, ``hessian_approximation``;
-        ``print_level`` is injected by ``optimize_fn`` and omitted); Ipopt's
-        native defaults, e.g. ``max_iter`` and ``acceptable_tol``, are not
-        recorded.
+        hold the caller's options plus the entries cyipopt writes into
+        ``optimize_fn``'s private copy (``tol``, ``mu_strategy``,
+        ``hessian_approximation``; ``print_level`` is injected by
+        ``optimize_fn`` and omitted); Ipopt's native defaults, e.g.
+        ``max_iter`` and ``acceptable_tol``, are not recorded.
     model_solver : Mapping[str, object], optional
         Settings of the model's own solver, e.g. CVode ``rtol``/``atol``
         passed through the model callback, for documentation.
@@ -2248,10 +2252,11 @@ class SolverSettings(_ImmutableRecord):
     derivatives : Mapping, optional
         How the parameter sensitivities were obtained: ``'jacobian'`` is
         one of ``JACOBIAN_SOURCES`` and ``'dx_finitediff'`` is
-        ``'default'`` (the relative step ``ParameterEstimation`` installs),
-        ``'callable'`` (a user function, not recordable) or the numeric
-        step in parameter units, replayed by
-        ``CalibrationRecord.estimation_inputs``. None if unknown.
+        ``'default'`` (the step of magnitude ``1e-3 * max(|p|, 1e-6)``
+        that ``ParameterEstimation`` installs), ``'callable'`` (a user
+        function, not recordable) or the numeric step in parameter units,
+        replayed by ``CalibrationRecord.estimation_inputs``. None if
+        unknown.
 
     Raises
     ------
@@ -2972,9 +2977,11 @@ def _effective_options(options: Mapping, method: str) -> dict:
     Parameters
     ----------
     options : Mapping
-        ``ParameterEstimation.optim_options`` after ``optimize_fn``. cyipopt
-        rewrites this dict in place for IPOPT fits, with bytes keys and
-        bytes string values and its own default entries added (issue #476).
+        ``ParameterEstimation.optim_options`` after ``optimize_fn``: the
+        effective options of the fit, i.e. the private copy that
+        ``optimize_fn`` passed to the solver (issue #476). For IPOPT fits
+        cyipopt has rewritten that copy in place, with bytes keys and its
+        own default entries, some with bytes string values, added.
     method : {'LM', 'IPOPT'}
         Optimization method of the fit.
 
@@ -4125,11 +4132,10 @@ covariance_include_mse
         Returns
         -------
         dict
-            ``method``, a new ``optim_options`` dict on every call (which
-            ``optimize_fn`` may mutate, issue #476), and ``bounds``: one
-            ``(lower, upper)`` pair per optimized parameter in parameter
-            units (None for an unbounded side), or None when no bound is
-            declared. ``optim_options`` holds the recorded
+            ``method``, a new ``optim_options`` dict on every call, and
+            ``bounds``: one ``(lower, upper)`` pair per optimized parameter
+            in parameter units (None for an unbounded side), or None when no
+            bound is declared. ``optim_options`` holds the recorded
             ``solver.default_options`` followed by ``solver.options``, so
             the rerun uses the settings of the original fit even if the
             installed optimizer defaults have changed.
@@ -4374,12 +4380,12 @@ covariance_include_mse
             outcome. For LM, ``default_options`` holds the
             ``levenberg_marquardt`` keyword defaults of every option the
             caller did not set (issue #483; see ``SolverSettings``). For
-            IPOPT, cyipopt rewrites the options dict in place (#476), so
-            its bytes keys and values are decoded to str and the entries it
-            writes (``tol``, ``mu_strategy``, ``hessian_approximation``)
-            are kept; Ipopt's native defaults are not recorded and
-            ``default_options`` is None. The solver settings also record
-            how
+            IPOPT, cyipopt rewrites the copy of the options that
+            ``optimize_fn`` passes to it and stores (#476), so its bytes
+            keys and values are decoded to str and the entries it writes
+            (``tol``, ``mu_strategy``, ``hessian_approximation``) are kept;
+            Ipopt's native defaults are not recorded and ``default_options``
+            is None. The solver settings also record how
             the sensitivities were obtained (``derivatives``: the Jacobian
             source and ``dx_finitediff`` as ``'default'``, ``'callable'``
             or the numeric step). Also the covariance in the

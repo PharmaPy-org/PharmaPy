@@ -101,24 +101,26 @@ back as ``NaN``. Infinite values are rejected.
    not allowed when the measurements declare uncertainties.
 ``solver``
    ``null`` before fitting, otherwise the optimizer settings: ``method``
-   (``'LM'`` or ``'IPOPT'``), ``options`` (the ``optim_options`` passed to
-   ``optimize_fn`` without the entries it writes itself),
-   ``default_options`` (the optimizer defaults in force for the options not
-   passed: for Levenberg-Marquardt the ``levenberg_marquardt`` keyword
-   defaults such as ``max_fun_eval``, ``eps_1``, ``eps_2`` and ``tol_fun``;
-   ``null`` when not recorded and for IPOPT, whose ``options`` hold the
-   options passed plus the entries cyipopt writes into the dict, ``tol``,
-   ``mu_strategy`` and ``hessian_approximation``, while Ipopt's native
-   defaults such as ``max_iter`` and ``acceptable_tol`` are not recorded),
-   ``model_solver``
+   (``'LM'`` or ``'IPOPT'``), ``options`` (the effective options of the
+   fit: the given ``optim_options`` without the entries ``optimize_fn`` sets
+   itself), ``default_options`` (the optimizer defaults in force for the
+   options not passed: for Levenberg-Marquardt the ``levenberg_marquardt``
+   keyword defaults such as ``max_fun_eval``, ``eps_1``, ``eps_2`` and
+   ``tol_fun``; ``null`` when not recorded and for IPOPT, whose ``options``
+   hold the options passed plus the entries cyipopt writes into
+   ``optimize_fn``'s private copy, ``tol``, ``mu_strategy`` and
+   ``hessian_approximation``, while Ipopt's native defaults such as
+   ``max_iter`` and ``acceptable_tol`` are not recorded), ``model_solver``
    (settings of the model's own integrator, for documentation),
    ``outcome`` (e.g. ``stop_criterion``, ``num_iter``, ``num_fun_eval`` and
    ``objective``, ``1/2 * r @ r`` of the weighted residuals) and
    ``derivatives``: ``jacobian`` is ``'model_sensitivities'``, ``'jac_fun'``
    or ``'finite_difference'`` and ``dx_finitediff`` is ``'default'`` (the
-   relative step ``ParameterEstimation`` installs), ``'callable'`` (a user
-   function, which a record cannot hold and must be passed again on a
-   rerun) or the numeric step in parameter units, which is replayed.
+   step of magnitude ``1e-3 * max(|p|, 1e-6)`` that ``ParameterEstimation``
+   installs),
+   ``'callable'`` (a user function, which a record cannot hold and must be
+   passed again on a rerun) or the numeric step in parameter units, which
+   is replayed.
 ``covariance``
    ``null``, or the parameter covariance of the optimized parameters:
    ``parameters`` (their names, in record order), ``include_mse`` and

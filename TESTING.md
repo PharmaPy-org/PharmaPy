@@ -64,15 +64,20 @@ conda activate pharmapy-ipopt
 python -m pip install -e . --no-deps
 python -c "import cyipopt, assimulo; print(cyipopt.__version__, cyipopt.IPOPT_VERSION, assimulo.__version__)"
 python -m pytest tests/test_paramestim_cyipopt.py tests/test_simexec_cyipopt.py \
-    tests/test_records_ipopt.py -v
+    tests/test_records_ipopt.py tests/test_paramestim_mcr_cyipopt.py -v
 ```
 
 NumPy 1.26.4 satisfies the Assimulo 3.4.3 binary's NumPy constraint. The first
-module needs only cyipopt; the second requires both cyipopt and Assimulo. The
-third, `tests/test_records_ipopt.py`, needs only cyipopt: it captures an IPOPT
-fit of the analytic two-experiment decay case in a `CalibrationRecord`
-(explicit bounds; the caller's options plus the entries cyipopt writes into
-the dictionary, while Ipopt's native defaults are not recorded and the record's
+module needs only cyipopt; besides weighted, masked and bootstrap fits it checks
+that IPOPT fits leave the caller's `optim_options` unchanged
+([#476](https://github.com/PharmaPy-org/PharmaPy/issues/476)) and that they
+report Ipopt's termination outcome in `info`, warning when it is unsuccessful
+([#475](https://github.com/PharmaPy-org/PharmaPy/issues/475)). The second
+requires both cyipopt and Assimulo. The third, `tests/test_records_ipopt.py`,
+needs only cyipopt: it captures an IPOPT fit of the analytic two-experiment
+decay case in a `CalibrationRecord` (explicit bounds; the caller's options plus
+the entries cyipopt writes into the copy `optimize_fn` passes to it and stores,
+while Ipopt's native defaults are not recorded and the record's
 `default_options` is `None`; a seed outside its bounds) and reruns it from the
 record. Each
 module skips at collection when its backend is absent, preserving the core
@@ -80,10 +85,13 @@ missing-dependency lane. Existing CI does not install cyipopt, so run this
 explicit command when changing the IPOPT estimation path. Headless machines can
 set `MPLBACKEND=Agg` and `QT_QPA_PLATFORM=offscreen` for these plotting imports.
 
-MCR's scalar-gradient and post-solve result-assembly defects remain tracked in
-[#240](https://github.com/PharmaPy-org/PharmaPy/issues/240#issuecomment-6040658764).
-These tests cover ordinary `ParameterEstimation`; they do not encode known MCR
-failures as expected success or certify MCR/IPOPT fitting.
+The fourth, `tests/test_paramestim_mcr_cyipopt.py`, needs only cyipopt: it fits
+`MultipleCurveResolution` with real IPOPT for model-returned and
+finite-difference sensitivities
+([#240](https://github.com/PharmaPy-org/PharmaPy/issues/240)) and checks the
+returned parameters, covariance, data-only `info`, residual ordering,
+information and an active absorptivity penalty against Levenberg-Marquardt
+and independent least-squares references.
 
 ## Parameter-estimation workshop regression
 

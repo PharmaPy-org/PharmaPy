@@ -2,7 +2,7 @@
 
 Requires both real optional backends. The first-order reaction's analytic
 solution supplies the GLS optimum, residuals and sensitivity information.
-MCR optimization remains a separate, unresolved contract under #240.
+MCR IPOPT fitting is covered by ``test_paramestim_mcr_cyipopt`` (#240).
 """
 
 import copy

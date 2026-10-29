@@ -78,6 +78,63 @@ Jacobian had that sign for non-spectral states; both now equal the derivative
 of the weighted residuals. Spectra must still be recorded at every model-grid
 time of an experiment.
 
+The pure-component absorptivities :code:`eps` are resolved by least squares at
+every evaluation and are not fitted parameters. :code:`MultipleCurveResolution`
+minimizes one objective, :code:`f = 1/2 r_data @ r_data + mult_penalty *
+sum(max(-eps, 0)**2)`, with every optimizer: :code:`get_objective(params,
+out_array=True)` returns the weighted data residuals :code:`r_data` followed
+by one penalty row :code:`sqrt(2 * mult_penalty) * max(-eps, 0)` per
+absorptivity, so that :code:`f = 1/2 r @ r` for this augmented vector
+:code:`r`, and the analytic IPOPT gradient includes the penalty derivative. Previously
+Levenberg-Marquardt ignored the penalty, the analytic scalar gradient returned
+a residual sensitivity instead of the objective gradient, and IPOPT fits
+failed after solving. The penalty rows are zero when every absorptivity is
+nonnegative, leaving such fits unchanged to roundoff. :code:`optimize_fn`
+reports the data residuals in :code:`info['fun']` and :code:`info['jac']`
+(covariance, statistics, degrees of freedom and, for SciPy fits,
+:code:`sens` use them only) and the penalty rows in
+:code:`info['fun_penalty']` and :code:`info['jac_penalty']`. The analytic
+derivatives assume concentration profiles of constant rank, including
+rank-deficient ones such as proportional species, and are undefined where
+the rank changes. With :code:`global_analysis=False` each experiment resolves
+its own absorptivities (:code:`epsilon_mcr` then has shape
+:code:`(n_experiments, n_species, n_wavelengths)`); this mode previously
+raised :code:`AttributeError`. The state-update keyword of
+:code:`get_objective` is now :code:`set_self`, as in
+:code:`ParameterEstimation`; :code:`update_self` remains a deprecated alias
+that emits :code:`DeprecationWarning`. The MCR-specific :code:`func_aux`
+override, which always raised :code:`AttributeError`, was removed, so
+:code:`MultipleCurveResolution.func_aux` is the inherited
+:code:`ParameterEstimation.func_aux`. After a fit, :code:`y_model` holds the
+curve-resolved spectra and the model values of non-spectral states (NaN where
+unobserved), and :code:`StatisticsClass.get_bootsamples` adds drawn spectral
+residuals to them; earlier releases reported :code:`2 * data - prediction` for
+every spectral channel (issue #500).
+
+Finite-difference Jacobians perturb a floating-point copy of the parameters,
+so integer seeds such as :code:`[1]` are no longer truncated to a zero
+perturbation (which gave :code:`MultipleCurveResolution` an all-zero Jacobian
+and a singular fit). The default :code:`dx_finitediff` step has magnitude
+:code:`1e-3 * max(|p|, 1e-6)` in parameter units. It was :code:`1e-3 * |p|`,
+so it is unchanged for :code:`|p| >= 1e-6`. For :code:`0 < |p| < 1e-6` it
+grows from :code:`1e-3 * |p|` to 1e-9 and points away from zero (negative for
+a negative parameter, so models such as :code:`log(-p)` stay defined), so
+derivatives, fits and covariances involving such parameters change; pass
+:code:`dx_finitediff` to keep a smaller step. Only a zero parameter
+previously had a zero step: its Jacobian column was NaN, and
+Levenberg-Marquardt returned the seed with a NaN covariance; it now fits.
+A user step that is zero or infinite for an estimated parameter raises
+:code:`ValueError` instead of producing NaN or zero derivatives (issue #239).
+Without a :code:`dx` argument, :code:`numerical_jac`,
+:code:`numerical_jac_data` and :code:`numerical_jac_central` in
+:code:`PharmaPy.jac_module` now use the step :code:`eps * max(|x|, 1)`
+(:code:`eps` about 1.49e-8) instead of a fixed :code:`eps`: unchanged for
+:code:`|x| <= 1`, and relative for larger coordinates, where the fixed step was
+lost to rounding (:code:`x = 1e9` gave a zero derivative).
+:code:`numerical_jacv` now perturbs the state by a relative step along
+:code:`v` rather than by a unit-length displacement, so it returns the local
+directional derivative (e.g. 2, not 3, for :code:`x**2` at 1 along 1).
+
 :code:`StatisticsClass.bootstrap_params` returns the bootstrap estimates, one row
 per generated dataset, and stores them in :code:`boot_params`. Each dataset is
 fitted on an isolated copy of the estimator. The estimator's observations,
@@ -108,6 +165,60 @@ rules of :code:`Filter.param_seed`: callable configured resistances are not
 estimable, and alpha and the medium resistance (after exponentiation when
 :code:`log_params=True`) must be finite and strictly positive. Earlier versions
 raised :code:`AttributeError` for such units.
+
+:code:`optimize_fn` validates :code:`method` against :code:`'LM'`,
+:code:`'IPOPT'`, :code:`'scipy'` and :code:`'least_squares'` and checks that
+cyipopt is installed for IPOPT before changing the estimator (issue #479). A
+call that raises, during the solve or afterwards (for example a singular
+covariance), keeps the previous fit: :code:`opt_method`, :code:`optim_options`,
+:code:`optimize_flag`, :code:`params_convg`, :code:`info_opt`, :code:`y_model`,
+:code:`covar_params`, :code:`correl_params`, :code:`paramest_df`, the
+iteration histories and the evaluation buffers (:code:`y_runs`,
+:code:`resid_runs`, :code:`residuals`, :code:`weighted_residuals`,
+:code:`sens`, and :code:`epsilon_mcr` for :code:`MultipleCurveResolution`)
+that :code:`StatisticsClass` resamples. Earlier releases relabelled the
+previous fit with the requested method before solving and left the buffers
+at the last trial evaluation. Every call now also starts new iteration
+histories: after a refit, :code:`params_iter`, :code:`objfun_iter` and
+:code:`paramest_df` describe that refit, whereas earlier releases kept the
+first fit's history, and :code:`store_iter=False` stores no
+:code:`paramest_df`.
+
+:code:`optimize_fn` no longer modifies the :code:`optim_options` mapping it
+receives (issue #476). It passes the solver a private copy, with deep copies of
+the non-callable values, that also holds the entries it sets itself
+(:code:`full_output` and :code:`verbose` for LM, :code:`print_level` for IPOPT,
+:code:`verbose` and :code:`bounds` for SciPy). :code:`optim_options` of the
+estimator stores that copy as the solver left it, the effective options of the
+last fit; for IPOPT, cyipopt has converted its keys to bytes and added its own
+defaults. For LM and IPOPT, earlier releases wrote these entries, and
+cyipopt's rewrite, into the caller's dictionary and stored that same object, so
+later edits of the caller's dictionary changed the stored options and
+calibration records. SciPy fits already used a shallow copy, so only in-place
+edits of nested values, such as arrays or the bounds, reached their stored
+options.
+
+IPOPT fits report Ipopt's termination outcome in :code:`info`:
+:code:`success`, :code:`status`, :code:`message` and the iteration count
+:code:`nit` (issue #475). An unsuccessful termination, for example at
+:code:`max_iter`, emits a :code:`RuntimeWarning` naming the status and
+message; the returned parameters, covariance and statistics then describe the
+last iterate, not a converged estimate. Earlier releases discarded the outcome,
+so such fits were indistinguishable from converged ones.
+
+Default parameter labels (:code:`name_params` omitted) are numbered over the
+full parameter vector (issue #477): with :code:`optimize_flags=[False, True]`
+the optimized parameter is :code:`theta_2` in :code:`name_params`,
+:code:`name_params_plot`, the :code:`paramest_df` columns and
+:code:`name_params_total` alike. Earlier releases numbered the optimized
+parameters only, so that parameter was labelled :code:`theta_1`, the name of
+the fixed parameter in :code:`name_params_total`. :code:`name_params`,
+:code:`name_params_total` and the :code:`paramest_df` columns are unchanged
+when every parameter is optimized or :code:`name_params` is given. Default
+plot labels (:code:`name_params_plot`) now brace the index, e.g.
+:code:`$\theta_{10}$`, so that multi-digit indices form one subscript
+(earlier :code:`$\theta_10$` rendered as theta_1 followed by 0); single-digit
+labels render as before.
 
 Liquid heat capacity
 ====================

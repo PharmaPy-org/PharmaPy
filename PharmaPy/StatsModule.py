@@ -446,7 +446,11 @@ class StatisticsClass:
         Notes
         -----
         Each state's resampling pool holds only its observed residuals
-        (model minus data, in that state's unit) of one experiment.
+        (model minus data, in that state's unit) of one experiment. Columns
+        stored as data minus model, such as the spectral channels of
+        ``MultipleCurveResolution``, are negated first (the estimator's
+        ``_residual_signs``), so every generated entry is the fitted value
+        minus a drawn model-minus-data residual.
         Unobserved entries have zero residual by construction; drawing them
         would add phantom zero errors and shrink the bootstrap spread. Each
         state is resampled independently, so correlations between
@@ -482,8 +486,10 @@ class StatisticsClass:
 
         y_boot = []
         for ind in range(self.inst.num_datasets):  # datasets
-            # (n_measured, n_times) [measured-state units]
-            residual = self.residuals[ind].T
+            # (n_measured, n_times) [measured-state units], model minus data
+            signs = self.inst._residual_signs(ind)  # [-] or None
+            residual = (self.residuals[ind] if signs is None
+                        else self.residuals[ind] * signs).T
             y_nominal = self.y_nominal[ind].T
             observed_by_state = self._observed_columns(ind).T
             # (n_measured, n_times) [measured-state units] or None per state
@@ -548,12 +554,12 @@ class StatisticsClass:
         copy leaves the original fit untouched. The exceptions, which are
         modified in place, are the iteration histories ``params_iter`` and
         ``objfun_iter`` (appended to while they are lists; ``objfun_iter``
-        stays a list after ``optimize_fn(store_iter=False)``), the cache
-        ``_observed_roots``, and the solver options, which ``optimize_fn``
-        writes into and which callers pass as a separate copy. The copy gets
-        its own lists and cache. Model callables and their arguments are
-        shared, not copied, so models that close over external objects keep
-        working.
+        stays a list after ``optimize_fn(store_iter=False)``) and the cache
+        ``_observed_roots``. The copy gets its own lists and cache. The
+        solver options need no isolation: ``optimize_fn`` passes the solver
+        a private copy and leaves the stored ``optim_options`` untouched
+        (issue #476). Model callables and their arguments are shared, not
+        copied, so models that close over external objects keep working.
         """
         estimator = copy.copy(self.inst)
         for name in ('params_iter', 'objfun_iter'):
@@ -590,8 +596,8 @@ class StatisticsClass:
 
         Notes
         -----
-        The fit runs on ``_isolated_estimator()``, and the solver receives a
-        copy of the options because ``optimize_fn`` writes keys into it.
+        The fit runs on ``_isolated_estimator()`` with a copy of the fitted
+        estimator's effective ``optim_options``.
         """
         estimator = self._isolated_estimator()
         estimator.y_data = y_sample  # [measured-state units]
@@ -664,6 +670,8 @@ class StatisticsClass:
             at the accepted parameters; the sample's exception is still
             raised, also when warnings are turned into errors (the report is
             then dropped).
+            Also, from ``optimize_fn``, if an IPOPT sample refit terminates
+            unsuccessfully; see Notes.
 
         Raises
         ------
@@ -697,7 +705,12 @@ class StatisticsClass:
         ``ParameterEstimation.optimize_fn`` also accepts ``'IPOPT'``, whose
         numerical failures surface from cyipopt rather than as a
         ``LinAlgError``. Under that method a failed sample aborts the whole
-        bootstrap run instead of recording a NaN row.
+        bootstrap run instead of recording a NaN row. An unsuccessful IPOPT
+        termination of a sample refit, for example at ``max_iter``, does not
+        raise: ``optimize_fn`` emits its ``RuntimeWarning`` naming the Ipopt
+        status, and the sample's last iterate is stored as its row. When
+        that warning is turned into an error, it propagates like any other
+        sample exception and aborts the run.
         """
         y_samples = self.get_bootsamples(
             num_samples)  # [response-dependent units]

@@ -791,6 +791,63 @@ def test_from_estimation_leaves_estimator_and_experiments_unchanged():
                                                 'temp0_k': 290.0}
 
 
+def test_options_edited_after_the_fit_are_not_recorded():
+    """A record states the options the fit used (#476).
+
+    The caller reuses its options dict and edits it between ``optimize_fn``
+    and ``from_estimation``: a zero evaluation budget and a misspelled
+    ``eps_2``. Neither reaches the record, which therefore reruns.
+    """
+    experiments = make_experiments()
+    estimator = ParameterEstimation(decay, [SEED_RATE], experiments,
+                                    name_params=['k'])
+    options = {'max_fun_eval': LM_MAX_FUN_EVAL}
+    estimator.optimize_fn(optim_options=options, verbose=False)
+    options['max_fun_eval'] = 0  # [-]
+    options['eps2'] = 1e-6  # [-], a typo of eps_2 for the next run
+
+    record = capture(estimator, experiments)
+
+    assert record.solver.options == {'max_fun_eval': LM_MAX_FUN_EVAL}
+    rerun = record.rerun(decay, rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+    np.testing.assert_allclose(rerun.params_convg, estimator.params_convg,
+                               rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+
+
+# LM scaling diagonal D = I [-], the default unit scaling given explicitly,
+# so the fit equals the documented one.
+UNIT_SCALING = [1.0]  # [-]
+# A scaling that, with the default initial damping, makes every LM step
+# negligible, so a rerun with it would stop at the seed.
+FREEZING_SCALING = 1e12  # [-]
+
+
+def test_option_values_edited_in_place_are_not_recorded():
+    """Option values are copied, not aliased, by ``optimize_fn`` (#476).
+
+    The caller edits its ``d_diag`` array in place after the fit; the
+    stored options, the LM output and the record keep the value the fit
+    used, so the record reruns.
+    """
+    experiments = make_experiments()
+    estimator = ParameterEstimation(decay, [SEED_RATE], experiments,
+                                    name_params=['k'])
+    scaling = np.array(UNIT_SCALING)  # [-]
+    estimator.optimize_fn(optim_options={'d_diag': scaling}, verbose=False)
+    scaling[0] = FREEZING_SCALING  # [-]
+
+    np.testing.assert_array_equal(estimator.optim_options['d_diag'],
+                                  UNIT_SCALING)
+    np.testing.assert_array_equal(
+        estimator.info_opt['lm_params']['d_diag'], UNIT_SCALING)
+    record = capture(estimator, experiments)
+    np.testing.assert_array_equal(record.solver.options['d_diag'],
+                                  UNIT_SCALING)
+    rerun = record.rerun(decay, rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+    np.testing.assert_allclose(rerun.params_convg, estimator.params_convg,
+                               rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+
+
 def test_covariance_form_is_recorded_as_requested():
     experiments = make_experiments()
     estimator = ParameterEstimation(decay, [SEED_RATE], experiments,
@@ -842,11 +899,11 @@ def test_reload_and_rerun_reproduces_recorded_fit(tmp_path):
                                 'optim_options': LM_DEFAULT_OPTIONS,
                                 'bounds': None}
     rebuilt.optimize_fn(verbose=False, **optimizer_inputs)
-    # optimize_fn wrote its own entries into the dict it received (#476);
-    # the record hands out a fresh dict every time.
-    assert set(optimizer_inputs['optim_options']) == set(
-        LM_DEFAULT_OPTIONS) | {'full_output', 'verbose'}
-    assert loaded.optimizer_inputs()['optim_options'] == LM_DEFAULT_OPTIONS
+    # optimize_fn leaves the dict it received unchanged (#476), and the
+    # record hands out a fresh dict every time.
+    assert optimizer_inputs['optim_options'] == LM_DEFAULT_OPTIONS
+    assert (loaded.optimizer_inputs()['optim_options']
+            is not optimizer_inputs['optim_options'])
     difference = loaded.check_rerun(rebuilt, rtol=REPLAY_RTOL,
                                     atol=REPLAY_ATOL)
     assert difference.shape == (1,)
