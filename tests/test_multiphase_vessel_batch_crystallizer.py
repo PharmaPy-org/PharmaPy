@@ -15,6 +15,7 @@ sits below saturation, COLD_TEMP and DEEP_COLD_TEMP above it.
 """
 
 import os
+import warnings
 
 import numpy as np
 import pytest
@@ -64,6 +65,10 @@ DEEP_COLD_TEMP = 273.15  # [K], strongly supersaturated
 APELBLAT_COEFFS = np.array([-28.13909202, 0.001, 5.900800253])  # [-, K, -]
 NUCL_PRIM = (6.26855218e18, 0.0, 8.30671806)  # k_b [#/m**3/s], E_b [J/mol], b [-]
 NUCL_SEC = (0.0, 0.0, 0.0, 0.0)  # disabled
+# Case-study secondary nucleation (tests/Flowsheet/flowsheet_tests.py):
+# k_s [#/m**3/s], E [J/mol], s_1 [-], s_2 [-]. Its s_2 = 1e-5 makes the moment
+# factor a switch at mu_3 = 0 (#529).
+SWITCHING_NUCL_SEC = (4.46e10, 0.0, 2.0, 1e-5)
 # k_g [um/s], E_g [J/mol], g [-], alpha [-], beta [1/um]. The five-element form
 # selects the size-dependent growth branch of the population balance.
 GROWTH = (1.45782420e6, 0.0, 4.52241037, 1.0, 3.93676056)
@@ -775,7 +780,8 @@ def _seed_moments():
                      for order in range(4)])
 
 
-def _build_moments_crystallizer(moments, growth=GROWTH[:3]):
+def _build_moments_crystallizer(moments, growth=GROWTH[:3], nucl_sec=NUCL_SEC,
+                                rad=0.0):
     """Build a batch crystallizer that carries its crystals as moments.
 
     Parameters
@@ -786,6 +792,10 @@ def _build_moments_crystallizer(moments, growth=GROWTH[:3]):
         Growth parameters. The default is the module's growth law without
         its size factor, since the moment closure holds only for
         size-independent growth.
+    nucl_sec : tuple of float, optional
+        Secondary nucleation parameters; disabled by default.
+    rad : float, optional
+        Nucleus size [um]. Defaults to 0.
 
     Returns
     -------
@@ -800,6 +810,7 @@ def _build_moments_crystallizer(moments, growth=GROWTH[:3]):
         target_components=TARGET,
         solvent_name="solvent",
         moments_init=moments,
+        rad=rad,
     )
     vessel = BatchCrystallizer(
         integrator=None,
@@ -813,7 +824,7 @@ def _build_moments_crystallizer(moments, growth=GROWTH[:3]):
         solid,
     ]
     vessel.CrystKinetics = CrystKinetics(
-        APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=NUCL_SEC,
+        APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=nucl_sec,
         growth=growth, solubility_type="apelblat",
         solubility_basis="mass_per_volume_solvent",
     )
@@ -910,6 +921,63 @@ def test_moments_accept_a_size_factor_of_one(size_factor):
     np.testing.assert_array_equal(
         mechanism.mechanism_kinetics.params["growth"], growth
     )
+
+
+def _onset_warnings(caught):
+    """Return the step-pattern (#529) warnings among those recorded."""
+    return [warning for warning in caught
+            if issubclass(warning.category, RuntimeWarning)
+            and "#529" in str(warning.message)]
+
+
+def test_moments_warn_when_secondary_nucleation_switches_at_onset():
+    """Zero-size nuclei and a near-zero s_2 let the count follow the steps."""
+    with pytest.warns(RuntimeWarning, match="#529"):
+        _build_moments_crystallizer(_seed_moments(), nucl_sec=SWITCHING_NUCL_SEC)
+
+
+def test_moments_warn_about_switching_kinetics_at_construction():
+    """Kinetics given to the constructor are checked the same way."""
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=OLD_SOLID_MASS_FRAC, temp=WARM_TEMP
+    )
+    kinetics = CrystKinetics(
+        APELBLAT_COEFFS, nucl_prim=NUCL_PRIM, nucl_sec=SWITCHING_NUCL_SEC,
+        growth=GROWTH[:3], solubility_type="apelblat",
+        solubility_basis="mass_per_volume_solvent",
+    )
+
+    with pytest.warns(RuntimeWarning, match="#529"):
+        MomentsPopulationBalance(
+            owning_phase=solid, target_components=TARGET,
+            solvent_name="solvent", moments_init=_seed_moments(),
+            kinetics=kinetics,
+        )
+
+
+@pytest.mark.parametrize(
+    "nucl_sec, rad",
+    [
+        (SWITCHING_NUCL_SEC[:3]
+         + (MomentsPopulationBalance.SWITCH_LIKE_SECONDARY_ORDER,), 0.0),
+        (SWITCHING_NUCL_SEC, 1.0),  # [um], nuclei of finite size
+        (NUCL_SEC, 0.0),
+        ((0.0,) + SWITCHING_NUCL_SEC[1:], 0.0),
+    ],
+    ids=["s2_at_threshold", "finite_nuclei", "disabled", "zero_prefactor"],
+)
+def test_moments_stay_quiet_when_secondary_nucleation_cannot_switch(nucl_sec, rad):
+    """No #529 warning where the onset cannot follow the step pattern."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _, solid = _build_moments_crystallizer(
+            _seed_moments(), nucl_sec=nucl_sec, rad=rad)
+
+    mechanism = solid.get_mechanism(MomentsPopulationBalance)
+    np.testing.assert_array_equal(
+        mechanism.mechanism_kinetics.params["nucl_sec"], nucl_sec
+    )
+    assert not _onset_warnings(caught)
 
 
 def test_old_slurry_arrives_as_a_density_per_slurry_volume():

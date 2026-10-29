@@ -1823,6 +1823,14 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
     mass basis, so the mass-basis path here is unproven.
     """
 
+    # Secondary nucleation scaling as (kv*mu_3)**s_2 with s_2 below this
+    # switches on and off at mu_3 = 0, and with nuclei born at zero size the
+    # crystal count then follows the integrator's step pattern (#529). This is
+    # what the case-study crystallizer showed over CVode step caps of 0.5 to
+    # 30 s, not a general bound: up to 17-25 % for s_2 <= 0.01, at most
+    # 0.001 % for s_2 >= 0.1 (29 Oct 2026).
+    SWITCH_LIKE_SECONDARY_ORDER = 0.1  # [-]
+
     def __init__(
         self,
         owning_phase,
@@ -1873,6 +1881,12 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         PharmaPyNonImplementedError
             If ``kinetics`` has size-dependent growth.
 
+        Warns
+        -----
+        RuntimeWarning
+            If ``kinetics`` can make the crystal count follow the integrator's
+            step pattern; see ``_warn_if_onset_follows_steps``.
+
         Notes
         -----
         Unlike ``OneDFVMMechanism``, the moments declare no tolerance of
@@ -1902,6 +1916,10 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         # rad is the nucleus size. It lived on the old unit operation as
         # rad_zero (default 0), never on the phase, so it must be supplied.
         self.rad = rad
+
+        if kinetics is not None:
+            self._warn_if_onset_follows_steps(kinetics)
+
         self._reject_scale(scale)
         self.scale = 1
 
@@ -1942,10 +1960,17 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         ------
         PharmaPyNonImplementedError
             If ``value`` has size-dependent growth.
+
+        Warns
+        -----
+        RuntimeWarning
+            If ``value`` can make the crystal count follow the integrator's
+            step pattern; see ``_warn_if_onset_follows_steps``.
         """
         if value is not None:
             self._reject_size_dependent_growth(value)
             self._mechanism_kinetics = value
+            self._warn_if_onset_follows_steps(value)
 
     @staticmethod
     def _reject_size_dependent_growth(kinetics):
@@ -1983,6 +2008,64 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
                 'size-independent growth rate. Use OneDFVMMechanism for '
                 'size-dependent growth, or give growth only its first three '
                 'parameters.' % size_factor.tolist())
+
+    def _warn_if_onset_follows_steps(self, kinetics):
+        """Warn when the crystal count can follow the integrator's steps.
+
+        Parameters
+        ----------
+        kinetics : CrystKinetics
+            Kinetics being attached.
+
+        Warns
+        -----
+        RuntimeWarning
+            If nuclei are born at zero size (``rad`` = 0) and built-in
+            secondary nucleation is active with an order ``s_2`` [-] on the
+            crystal moment below ``SWITCH_LIKE_SECONDARY_ORDER``.
+
+        Notes
+        -----
+        The factor ``(kv*max(0, mu_k))**s_2`` is then close to one for any
+        positive moment and zero otherwise. Just after onset the moment grows
+        from zero, far below the integrator's absolute tolerance, so
+        integration error decides when secondary nucleation is on (#529).
+        Nuclei of finite size made CVode fail outright at larger step caps
+        instead, which is not silent, so they do not warn. Secondary
+        nucleation counts as inactive with a zero prefactor or the default
+        parameters, as in ``CrystKinetics.get_kinetics``.
+        """
+        if self.rad != 0 or 'nucl_sec' in getattr(kinetics, 'custom_mechanisms', {}):
+            return
+
+        params = np.atleast_1d(np.asarray(
+            getattr(kinetics, 'params', {}).get('nucl_sec', ()), dtype=float))
+        if params.size < 4:
+            return
+
+        reformulated = getattr(kinetics, 'reformulate_kin', False)
+        default = np.zeros_like(params)
+        if reformulated:
+            default[0] = np.log(eps)  # log of a zero prefactor, as CrystKinetics stores it
+        if np.allclose(params, default) or (not reformulated and params[0] == 0):
+            return
+
+        order = params[3]  # s_2 [-]
+        if order < self.SWITCH_LIKE_SECONDARY_ORDER:
+            warnings.warn(
+                'Secondary nucleation scales as (kv*mu_%d)**s_2 with s_2 = %g, '
+                'below %g, so it switches on and off at mu_%d = 0. With nuclei '
+                'born at zero size (rad = 0), the crystal count of this moment '
+                'form can then follow the integrator\'s step pattern at '
+                'nucleation onset, by up to 25 %% on the case study (PharmaPy '
+                'issue #529). Prefer OneDFVMMechanism, or check the result '
+                'against a solve with another step cap.'
+                % (getattr(kinetics, 'mu_sec_nucl', 3), order,
+                   self.SWITCH_LIKE_SECONDARY_ORDER,
+                   getattr(kinetics, 'mu_sec_nucl', 3)),
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
     # ---------------- legacy conversion ----------------
 
