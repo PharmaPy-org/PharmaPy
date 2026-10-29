@@ -75,9 +75,11 @@ report Ipopt's termination outcome in `info`, warning when it is unsuccessful
 ([#475](https://github.com/PharmaPy-org/PharmaPy/issues/475)). The second
 requires both cyipopt and Assimulo. The third, `tests/test_records_ipopt.py`,
 needs only cyipopt: it captures an IPOPT fit of the analytic two-experiment
-decay case in a `CalibrationRecord` (explicit bounds, the effective options
-cyipopt leaves in the copy `optimize_fn` passes to it and stores, a seed
-outside its bounds) and reruns it from the record. Each
+decay case in a `CalibrationRecord` (explicit bounds; the caller's options plus
+the entries cyipopt writes into the copy `optimize_fn` passes to it and stores,
+while Ipopt's native defaults are not recorded and the record's
+`default_options` is `None`; a seed outside its bounds) and reruns it from the
+record. Each
 module skips at collection when its backend is absent, preserving the core
 missing-dependency lane. Existing CI does not install cyipopt, so run this
 explicit command when changing the IPOPT estimation path. Headless machines can
