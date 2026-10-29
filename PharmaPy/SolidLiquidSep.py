@@ -16,7 +16,8 @@ from typing import Callable, Optional, Union
 import numpy as np
 from numpy.typing import ArrayLike
 from PharmaPy._assimulo import CVode, Explicit_Problem
-from PharmaPy.Commons import high_resolution_fvm, trapezoidal_rule, series_erfc
+from PharmaPy.Commons import (_real_float_array, high_resolution_fvm,
+                              series_erfc, trapezoidal_rule)
 from PharmaPy.Phases import classify_phases
 from PharmaPy.MixedPhases import Slurry, Cake
 from PharmaPy.Presence import SpeciesPresence
@@ -1337,12 +1338,42 @@ class Filter:
         -----
         A prior solve may have resolved a callable into numeric params;
         the underlying callable still makes that resistance non-estimable.
+        The rules are those of ``validate_param_seed``.
+        """
+        # Reject callables before converting the configured values.
+        self._check_estimation_resistances(None)
+        physical_params = np.array((self.alpha, self.r_medium), dtype=float)  # [m/kg, 1/m]
+        self._check_estimation_resistances(physical_params)
+        return np.log(physical_params) if self.log_params else physical_params
+
+    def _check_estimation_resistances(self, physical_params: Optional[np.ndarray]) -> None:
+        """Apply the Filter's estimability and seed-domain rules.
+
+        Parameters
+        ----------
+        physical_params : ndarray or None
+            Seed resistances in physical units, shape (2,): alpha [m/kg]
+            and medium resistance [1/m]. None checks only estimability.
+
+        Raises
+        ------
+        ValueError
+            If a configured resistance (alpha or r_medium) is callable,
+            or a seed resistance is nonfinite or nonpositive.
+
+        Notes
+        -----
+        Callable resistances depend on the pressure drop and cannot be
+        represented by a constant estimation parameter. Positive medium
+        resistance is required for the zero-filtrate ODE startup in either
+        parameterization; positive alpha is a physical requirement.
         """
         if any(callable(value) for value in (self.alpha, self.r_medium)):
             raise ValueError(
                 "Callable resistances are not estimable; configure numeric "
                 "alpha [m/kg] and medium resistance [1/m] before estimation.")
-        physical_params = np.array((self.alpha, self.r_medium), dtype=float)  # [m/kg, 1/m]
+        if physical_params is None:
+            return
         if (not np.all(np.isfinite(physical_params)) or physical_params[0] <= 0
                 or physical_params[1] <= 0):
             raise ValueError(
@@ -1351,7 +1382,51 @@ class Filter:
                 "resistance is required for the zero-filtrate startup in either "
                 "parameterization; "
                 f"received {physical_params}.")
-        return np.log(physical_params) if self.log_params else physical_params
+
+    def validate_param_seed(self, param_seed: ArrayLike) -> None:
+        """Validate an explicit estimation seed on the declared basis.
+
+        Parameters
+        ----------
+        param_seed : array-like
+            Real (integer or floating-point) seed with shape (2,), ordered
+            as alpha and medium resistance. With log_params=False, units
+            are [m/kg] and [1/m]. With log_params=True, entries are natural
+            logarithms of the SI numerical values [-]. The seed is neither
+            modified nor converted for the caller.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        ValueError
+            If the seed is ragged or not real numbers (for example a
+            dictionary, strings, booleans or complex numbers, which are not
+            coerced), does not have shape (2,), a configured resistance is
+            callable, or the seed's physical resistances (the seed itself,
+            or its exponential when log_params is True) are nonfinite or
+            nonpositive. The last two are the rules of ``param_seed``,
+            applied to a supplied seed instead of the configured
+            resistances. No other exception type is raised for the seed.
+
+        Notes
+        -----
+        The configured alpha and r_medium are consulted only to reject
+        callable resistances; their values are not read as a seed and are
+        not changed. Logarithms that overflow or underflow on
+        exponentiation are rejected, as in ``solve_unit``.
+        """
+        message = ("Filter estimation seeds hold alpha and medium resistance "
+                   "as two real numbers, shape (2,); received "
+                   f"{param_seed!r}.")
+        seed = _real_float_array(param_seed, message)  # [m/kg, 1/m] or [-]
+        if seed.shape != (2,):
+            raise ValueError(message)
+        with np.errstate(over='ignore', under='ignore'):
+            physical_params = np.exp(seed) if self.log_params else seed  # [m/kg, 1/m]
+        self._check_estimation_resistances(physical_params)
 
     def reset(self) -> None:
         """Reset the batch clock while preserving physical parameters.

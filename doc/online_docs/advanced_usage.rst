@@ -15,6 +15,11 @@ the last experiment's trajectory when several experiments share one unit.
 This reporting step does not establish convergence. Inspect the solver's
 termination diagnostics before interpreting the fit.
 
+:code:`SimulationExec.EstimateParams` stores the wall-clock duration of the
+optimization in seconds as :code:`optimization_time`. It prints the
+:code:`Optimization time` line only when :code:`verbose` is true; earlier
+versions printed it also with :code:`verbose=False`.
+
 :code:`y_model`, :code:`y_runs`, and :code:`resid_runs` retain experiment order,
 measured-state order, and the model's state units (for example [mol/L]).
 :code:`weighted_residuals` applies the observation weighting once and follows
@@ -89,6 +94,20 @@ If a sample's exception is already propagating, that exception is raised and
 the restore failure is reported as a :code:`RuntimeWarning`, which is dropped
 when warnings are turned into errors. A keyboard interrupt aborts without the
 extra evaluation.
+
+An explicit :code:`param_seed` given to :code:`SimulationExec.SetParamEstimation`
+takes precedence over the fitted unit's default seed. For a unit with kinetics
+it is set on the kinetics and read back, as before. For a unit without kinetics,
+such as a :code:`Filter`, it is passed to the estimator as a float copy in the
+unit's estimation basis and parameter order, without conversion: alpha [m/kg]
+and medium resistance [1/m], or their natural logarithms when the Filter has
+:code:`log_params=True`. The unit's configured parameters are not changed. A
+seed that is not a finite one-dimensional array of real numbers with one entry
+per parameter raises :code:`ValueError`, as does a Filter seed that breaks the
+rules of :code:`Filter.param_seed`: callable configured resistances are not
+estimable, and alpha and the medium resistance (after exponentiation when
+:code:`log_params=True`) must be finite and strictly positive. Earlier versions
+raised :code:`AttributeError` for such units.
 
 Liquid heat capacity
 ====================
@@ -327,6 +346,8 @@ Tank reactors accept a :code:`controls` dictionary mapping state names to callab
                 'args': (320.0,), 'kwargs': {'rate': 0.5}}}
 
 Time is in seconds and the returned temperature is in kelvin. Tank controls receive scalar times during integration and result retrieval, so scalar Python functions and piecewise schedules are supported. A :code:`temp` control removes :code:`temp` and :code:`temp_ht` from the integrated tank states. Each return must be a finite scalar; singleton arrays are rejected. PFR rejects nonempty controls with :code:`NotImplementedError`, since it does not implement prescribed distributed states. Empty controls and :code:`None` remain supported. In bath mode, the Utility inlet temperature takes precedence over a :code:`temp_ht` control.
+
+Batch, MSMPR and semibatch crystallizers accept the same callable or record form of :code:`controls`, validate records like the tank reactors (entries other than :code:`fun`, :code:`args` and :code:`kwargs` raise :code:`ValueError`, and non-sequence :code:`args` or non-dictionary :code:`kwargs` raise :code:`TypeError`, where earlier releases accepted such records; a missing :code:`fun` raises :code:`KeyError`, as before), and store copies of the records and their :code:`kwargs`, so later changes to the caller's dictionaries no longer reach the unit.
 
 Tank heat rates use positive :code:`q_rxn` for reaction heat generation and positive :code:`q_ht` for utility heat added to the liquid, both in watts. This corrects the former isothermal Batch/CSTR sign conventions; consumers using those old signs must update their balances. Prescribed-temperature duty reconstructs the control derivative from the completed reporting interval, including a shortened interval after a terminating event. The nominal step is :code:`control_step_fraction` times the smallest reporting interval, bounded below by :code:`control_minimum_step` [s] and above by the smallest reporting interval and half the completed duration. Both settings are public :code:`solve_unit` arguments; their defaults are 1/1024 and 1/1024 s. Choose a smaller minimum step and a reporting grid that resolves fast controls. Second-order central and one-sided differences keep evaluations inside the completed interval. At least two finite, increasing reported times are required. Discontinuous controls are differentiated across jumps, so the apparent rate at a jump depends on the step.
 
