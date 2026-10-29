@@ -1320,8 +1320,13 @@ class CrystKinetics:
         self.coeff_solub = np.asarray(coeff_solub)
         self.solub_type = solubility_type
 
+        # Count the parsed growth entries rather than testing the caller's
+        # container for truth: a NumPy array has no single truth value, and
+        # the docstring accepts array-like parameters.
+        num_growth_params = len(self.params['growth'])  # [-]
+
         if reformulate_kin:
-            if len(param_dict.get('growth') or ()) <= 3:
+            if num_growth_params <= 3:
                 self.name_params = (r'\log(k_{bp})', r'\log(E_{bp}/R)', 'b',
                                     r'\log(k_{bs})', r'\log(E_{bs}/R)', 's_1', 's_2',
                                     r'\log(k_{g})', r'\log(E_{g}/R)', 'g',
@@ -1332,7 +1337,7 @@ class CrystKinetics:
                                 r'\log(k_{g})', r'\log(E_{g}/R)', 'g','alpha','beta',
                                 r'\log(k_{d})', r'\log(E_{d}/R)', 'd')
         else:
-            if len(param_dict.get('growth') or ()) <= 3:
+            if num_growth_params <= 3:
                 self.name_params = ('k_{bp}', 'E_{bp}', 'b',
                                     'k_{bs}', 'E_{bs}', 's_1', 's_2',
                                     'k_{g}', 'E_{g}', 'g',
