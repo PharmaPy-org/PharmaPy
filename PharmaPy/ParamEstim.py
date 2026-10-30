@@ -7,12 +7,15 @@ Created on Mon Oct 28 15:35:48 2019
 """
 
 import copy
+import dataclasses
+import inspect
 import numbers
 import warnings
 
 import numpy as np
+import numpy.typing as npt
 from scipy.linalg import cholesky, solve_triangular
-from scipy.optimize import least_squares
+from scipy.optimize import Bounds, least_squares
 from collections.abc import Mapping
 from itertools import cycle
 from types import MappingProxyType
@@ -24,12 +27,18 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import pandas as pd
 from PharmaPy.jac_module import (numerical_jac_data, dx_jac_p, numerical_jac,
+                                 CENTRAL_DIFFERENCE_REL_STEP,
+                                 DEFAULT_OUTPUT_RTOL,
                                  PARAMETER_MAGNITUDE_FLOOR)
 from PharmaPy import Gaussians as gs
 
 from PharmaPy.LevMarq import levenberg_marquardt
 from PharmaPy.Commons import plot_sens, reorder_sens
-from PharmaPy.StatsModule import StatisticsClass
+from PharmaPy.StatsModule import (IdentifiabilityReport, StatisticsClass,
+                                  _JACOBIAN_SOURCES, _linearized_covariance,
+                                  _parameter_scale, _per_parameter_fractions,
+                                  _read_only, _read_only_bool,
+                                  _require_defined_covariance, _scaled_norm)
 
 try:
     from cyipopt import minimize_ipopt
@@ -49,10 +58,178 @@ _ABSENT = object()
 #: 12, default 5; Ipopt options reference,
 #: https://coin-or.github.io/Ipopt/OPTIONS.html). ``verbose=False`` gives 0.
 IPOPT_VERBOSE_PRINT_LEVEL = 5
+#: ``stop_criterion`` values of ``levenberg_marquardt`` (PharmaPy/LevMarq.py)
+#: that mean a stopping test was met: a step below ``eps_2``, a gradient
+#: below ``eps_1`` or a residual norm below ``tol_fun``. Its only other
+#: value, ``'Maximum iterations exceeded'``, means that ``max_fun_eval``
+#: trials were spent without meeting any of them.
+_LM_CONVERGED_STOPS = (
+    'Small step', 'Small gradient',
+    'Value of the objective function lower than tolerance')
+#: ``stop_criterion`` of ``levenberg_marquardt`` when its evaluation budget
+#: ``max_fun_eval`` was spent.
+_LM_BUDGET_STOP = 'Maximum iterations exceeded'
+#: ``status`` of ``scipy.optimize.least_squares`` when its evaluation budget
+#: ``max_nfev`` was exceeded (SciPy documentation of ``least_squares``,
+#: ``OptimizeResult.status``); other unsuccessful statuses, -1 (improper
+#: MINPACK input) and -2 (callback stop), have other causes.
+_SCIPY_BUDGET_STATUS = 0
+#: Stopping criteria of ``levenberg_marquardt`` recorded in
+#: ``info['tolerances']``, in its signature order: ``max_fun_eval`` [-]
+#: trial evaluations, ``eps_1`` [residual units**2 / parameter units] on
+#: the gradient norm, ``eps_2`` [-] on the step relative to the parameter
+#: norm and ``tol_fun`` [residual units] on the residual norm.
+_LM_STOPPING_OPTIONS = ('max_fun_eval', 'eps_1', 'eps_2', 'tol_fun')
+#: Stopping criteria of ``scipy.optimize.least_squares`` recorded in
+#: ``info['tolerances']``, in its signature order: ``ftol`` [-] on the
+#: relative cost change, ``xtol`` [-] on the relative step, ``gtol`` on the
+#: method-scaled gradient norm (see the SciPy documentation) and
+#: ``max_nfev`` [-] residual evaluations.
+_SCIPY_STOPPING_OPTIONS = ('ftol', 'xtol', 'gtol', 'max_nfev')
+#: Ipopt options of the "Termination" section of the Ipopt options
+#: reference (https://coin-or.github.io/Ipopt/OPTIONS.html), the stopping
+#: criteria recorded in ``info['tolerances']`` when they are in the options
+#: of an IPOPT fit: tolerances on the scaled and unscaled optimality
+#: error and its components, the iteration and time limits [-] and [s],
+#: the "acceptable" termination thresholds and counts, the divergence
+#: threshold and the complementarity target.
+_IPOPT_STOPPING_OPTIONS = (
+    'tol', 's_max', 'max_iter', 'max_wall_time', 'max_cpu_time',
+    'dual_inf_tol', 'constr_viol_tol', 'compl_inf_tol', 'acceptable_tol',
+    'acceptable_iter', 'acceptable_dual_inf_tol',
+    'acceptable_constr_viol_tol', 'acceptable_compl_inf_tol',
+    'acceptable_obj_change_tol', 'diverging_iterates_tol', 'mu_target')
 
 linestyles = cycle(['-', '--', '-.', ':'])
 
 eps = np.finfo(float).eps
+
+
+def _user_stacklevel() -> int:
+    """Return the ``warnings.warn`` stacklevel of the nearest user frame.
+
+    Public estimation methods reach the same warning through call chains of
+    different depth (``get_covariance`` directly, through ``optimize_fn``,
+    ``estimate_parameters``, ``SimulationExec.EstimateParams``,
+    ``CalibrationRecord.from_estimation`` or the bootstrap refits), so a
+    fixed ``stacklevel`` cannot point at the user's call.
+
+    Returns
+    -------
+    int
+        Stacklevel [-] of the first frame, counted from the caller of this
+        helper (stacklevel 1), whose module is not ``PharmaPy`` or one of
+        its submodules. Falls back to 1 when every frame belongs to
+        PharmaPy.
+    """
+    frame = inspect.currentframe()
+    if frame is None:  # pragma: no cover - no frame support on this runtime
+        return 1
+
+    frame = frame.f_back  # caller of this helper, i.e. stacklevel 1
+    level = 1
+    while frame is not None:
+        module = frame.f_globals.get('__name__', '')
+        if module != 'PharmaPy' and not module.startswith('PharmaPy.'):
+            return level
+        frame = frame.f_back
+        level += 1
+
+    return 1
+
+
+def _stopping_tolerances(method: str, options: Mapping) -> dict:
+    """Return the stopping criteria that governed a fit, with their values.
+
+    Parameters
+    ----------
+    method : {'LM', 'IPOPT', 'scipy', 'least_squares'}
+        Optimization method of the fit.
+    options : Mapping
+        Effective options of the fit as the solver left them
+        (``optimize_fn``'s private copy). For IPOPT, cyipopt has converted
+        its keys to bytes and added its own entries, such as ``tol``.
+
+    Returns
+    -------
+    dict
+        For LM, ``_LM_STOPPING_OPTIONS`` and for ``'scipy'`` and
+        ``'least_squares'``, ``_SCIPY_STOPPING_OPTIONS``, each with the
+        value in ``options`` or, when not given, the keyword default of
+        ``levenberg_marquardt`` or ``scipy.optimize.least_squares`` read
+        from its signature, so that it cannot drift from the code that ran
+        the fit (as ``Records._default_options`` reads the LM defaults).
+        SciPy's ``max_nfev`` default is None, which selects SciPy's
+        automatic, version-dependent evaluation limit (``100 * n`` for
+        ``n`` parameters in SciPy 1.16 and later); None is recorded rather
+        than a number SciPy may not use. For IPOPT, the entries of
+        ``_IPOPT_STOPPING_OPTIONS`` present in ``options``, with bytes keys
+        decoded as UTF-8: the caller's options and cyipopt's ``tol``
+        default. Ipopt's native defaults, e.g. ``max_iter`` and
+        ``acceptable_tol``, are not available there and are not recorded,
+        as in ``Records.SolverSettings.default_options``. Units are those
+        documented with each tuple of option names.
+    """
+    if method == 'IPOPT':
+        decoded = {(key.decode('utf-8', errors='replace')
+                    if isinstance(key, bytes) else key): value
+                   for key, value in options.items()}
+        return {name: decoded[name] for name in _IPOPT_STOPPING_OPTIONS
+                if name in decoded}
+
+    if method == 'LM':
+        function, names = levenberg_marquardt, _LM_STOPPING_OPTIONS
+    else:  # 'scipy' or 'least_squares'
+        function, names = least_squares, _SCIPY_STOPPING_OPTIONS
+    parameters = inspect.signature(function).parameters
+    return {name: options.get(name, parameters[name].default)
+            for name in names}
+
+
+def _warn_unconverged(solver: str, reason: str, evaluations: str,
+                      budget_option: Optional[str] = None,
+                      budget_value: Optional[int] = None) -> None:
+    """Warn that a fit stopped before meeting a convergence criterion.
+
+    Parameters
+    ----------
+    solver : str
+        Description of the optimizer and the ``method`` that selected it.
+    reason : str
+        The optimizer's stop reason (status and message).
+    evaluations : str
+        Description of the evaluation counts of the fit.
+    budget_option : str, optional
+        Name of the option whose evaluation budget stopped the fit
+        (``max_fun_eval`` or ``max_nfev``). None (the default) when the fit
+        stopped for another reason, e.g. a SciPy callback; the warning then
+        names no budget and does not suggest raising one.
+    budget_value : int, optional
+        Effective value of ``budget_option`` [-]; None for SciPy's
+        automatic limit. Ignored without ``budget_option``.
+
+    Warns
+    -----
+    RuntimeWarning
+        Always, pointing at the first caller outside PharmaPy
+        (``_user_stacklevel``).
+    """
+    if budget_option is None:
+        cause = ''
+        advice = 'Review the solver status and message.'
+    else:
+        limit = (f"{budget_option}=None, SciPy's automatic limit"
+                 if budget_value is None
+                 else f"{budget_option}={budget_value!r}")
+        cause = f', bounded by {limit}'
+        advice = (f'Raise {budget_option} or review the seed, scaling and '
+                  "tolerances (info['tolerances']).")
+    warnings.warn(
+        f"{solver} stopped without converging ({reason}) after "
+        f"{evaluations}{cause}; the returned parameters, covariance and "
+        "statistics describe the last accepted iterate, not a converged "
+        f"estimate. {advice}",
+        RuntimeWarning, stacklevel=_user_stacklevel())
 
 
 def pseudo_inv(states, dstates_dparam=None):
@@ -1242,6 +1419,9 @@ class _CompiledExperiments(NamedTuple):
         Callback keywords per experiment.
     num_data : list of int
         Observed entries per experiment.
+    measurement_units : list of str or None
+        Declared unit of each measurement column (``Measurement.units``),
+        None where no measurement of that name declares one.
     """
 
     measurement_names: list
@@ -1253,6 +1433,7 @@ class _CompiledExperiments(NamedTuple):
     args_fun: list
     kwargs_fun: list
     num_data: list
+    measurement_units: list
 
 
 def _validate_output_names(output_names) -> Optional[tuple]:
@@ -1614,7 +1795,9 @@ def _compile_experiments(experiments: dict,
         fields=[column_fields[name][0] for name in measurement_names],
         x_model=x_model, x_masks=x_masks, y_data=y_data,
         residual_std=residual_std if with_std else None,
-        args_fun=args_fun, kwargs_fun=kwargs_fun, num_data=num_data)
+        args_fun=args_fun, kwargs_fun=kwargs_fun, num_data=num_data,
+        measurement_units=[declared.get(('units', 'name', name), (None,))[0]
+                           for name in measurement_names])
 
 
 def _holds_measurements(x_data) -> bool:
@@ -2159,6 +2342,602 @@ def flatten_spectral_sens(sens):
     return out
 
 
+#: Finite-difference formulas of ``DerivativeCheck.formulas``: the central
+#: difference and the one-sided second-order three-point differences toward
+#: larger and smaller parameter values (``_three_point_difference``).
+DIFFERENCE_FORMULAS = ('central', 'forward', 'backward')
+
+
+def _parameter_bounds(bounds, names: Sequence[str]) -> tuple:
+    """Return the lower and upper bounds of the optimized parameters.
+
+    Parameters
+    ----------
+    bounds : sequence of pairs, scipy.optimize.Bounds or None
+        One ``(lower, upper)`` pair per optimized parameter, in
+        ``name_params`` order and parameter units, the convention of the
+        ``bounds`` of an IPOPT fit (``optimize_fn``) and of
+        ``CalibrationRecord.optimizer_inputs()``; None or an infinity marks
+        an unbounded side. A ``(num_params, 2)`` array is accepted too.
+        Alternatively a ``scipy.optimize.Bounds`` whose ``lb`` and ``ub``
+        are scalars or have shape ``(num_params,)`` (infinities unbounded),
+        the way to pass the ``(lower_array, upper_array)`` bounds of
+        ``scipy.optimize.least_squares``: a plain tuple of two arrays is
+        read as per-parameter pairs, and is rejected only when its shape
+        cannot be one pair per parameter. None leaves every parameter
+        unbounded.
+    names : sequence of str
+        Optimized parameter names, used in the messages.
+
+    Returns
+    -------
+    lower : numpy.ndarray
+        Lower bounds, shape ``(num_params,)`` [parameter units], ``-inf``
+        where unbounded.
+    upper : numpy.ndarray
+        Upper bounds, shape ``(num_params,)`` [parameter units], ``+inf``
+        where unbounded.
+
+    Raises
+    ------
+    TypeError
+        If ``bounds`` is neither a ``scipy.optimize.Bounds`` nor a sequence
+        of pairs, or a bound is neither None nor a real number (booleans
+        and complex excluded).
+    ValueError
+        If ``bounds`` does not hold one pair per optimized parameter, a pair
+        does not have two entries, the ``lb`` or ``ub`` of a
+        ``scipy.optimize.Bounds`` does not broadcast to ``(num_params,)``,
+        a bound is NaN, a lower bound is ``+inf``, an upper bound is
+        ``-inf``, or a lower bound exceeds its upper bound.
+    """
+    num_params = len(names)  # [-]
+    lower = np.full(num_params, -np.inf)  # [parameter units]
+    upper = np.full(num_params, np.inf)  # [parameter units]
+    forms = ("one (lower, upper) pair per optimized parameter, or a "
+             "scipy.optimize.Bounds(lower_array, upper_array) (a plain "
+             "(lower_array, upper_array) tuple is read as pairs)")
+    if bounds is None:
+        return lower, upper
+    if isinstance(bounds, Bounds):
+        try:
+            # [parameter units], scalars broadcast to every parameter
+            sides = [np.broadcast_to(np.asarray(side, dtype=float),
+                                     (num_params,))
+                     for side in (bounds.lb, bounds.ub)]
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "scipy.optimize.Bounds lb and ub must be scalars or have "
+                f"shape ({num_params},), one entry per optimized parameter "
+                f"({', '.join(names)}); {error}") from error
+        bounds = list(zip(sides[0].tolist(), sides[1].tolist()))
+    if isinstance(bounds, np.ndarray):
+        bounds = bounds.tolist()
+    if isinstance(bounds, (str, bytes)) or not isinstance(bounds,
+                                                          (list, tuple)):
+        raise TypeError(f"bounds must be {forms}; got "
+                        f"{type(bounds).__name__}")
+    if len(bounds) != num_params:
+        raise ValueError(
+            f"bounds must be {forms}, for {num_params} parameters "
+            f"({', '.join(names)}); got {len(bounds)} entries")
+    for ind, (name, pair) in enumerate(zip(names, bounds)):
+        if isinstance(pair, np.ndarray):
+            pair = pair.tolist()
+        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
+            raise ValueError(f"bounds of {name!r} must be a (lower, upper) "
+                             f"pair; got {pair!r}. bounds must be {forms}")
+        for side, value in enumerate(pair):
+            if value is None:
+                continue
+            if isinstance(value, (bool, np.bool_)) or not isinstance(
+                    value, numbers.Real):
+                raise TypeError(
+                    f"bounds of {name!r} must be real numbers or None; got "
+                    f"{type(value).__name__}")
+            if np.isnan(value):
+                raise ValueError(f"bounds of {name!r} must not be NaN")
+            (lower if side == 0 else upper)[ind] = float(value)
+        if lower[ind] == np.inf or upper[ind] == -np.inf:
+            raise ValueError(
+                f"bounds of {name!r} exclude every finite value: lower "
+                f"{float(lower[ind])!r}, upper {float(upper[ind])!r}")
+        if lower[ind] > upper[ind]:
+            raise ValueError(
+                f"The lower bound of {name!r} ({float(lower[ind])!r}) "
+                f"exceeds its upper bound ({float(upper[ind])!r})")
+    return lower, upper
+
+
+def _array_contents(values) -> list:
+    """Copy the contents of the arrays among saved values.
+
+    Parameters
+    ----------
+    values : iterable
+        Saved attribute values; arrays held directly or in lists and tuples
+        are copied, read-only ones included: a read-only view of a
+        writeable buffer changes when the buffer is refilled.
+
+    Returns
+    -------
+    list of tuple
+        ``(array, copy)`` pairs, units of each array preserved, for
+        ``_restore_array_contents``: e.g. a preallocated sensitivity array
+        returned by the model, or a read-only view of one, and stored in
+        ``sens_second``.
+    """
+    pairs = []
+    for value in values:
+        items = value if isinstance(value, (list, tuple)) else (value,)
+        for item in items:
+            if isinstance(item, np.ndarray):
+                pairs.append((item, item.copy()))
+    return pairs
+
+
+def _restore_array_contents(pairs: list) -> None:
+    """Write saved contents back into arrays changed in place.
+
+    Parameters
+    ----------
+    pairs : list of tuple
+        Result of ``_array_contents``.
+
+    Notes
+    -----
+    Writeable arrays are restored directly. A read-only view whose memory
+    is writeable through its base is made writeable for the copy and
+    read-only again afterwards, so its flags are unchanged. Arrays whose
+    memory cannot be written at all (NumPy refuses to set the flag) cannot
+    have been changed in place and are skipped.
+    """
+    for array, saved in pairs:
+        if array.flags.writeable:
+            np.copyto(array, saved)
+            continue
+        try:
+            array.setflags(write=True)
+        except ValueError:
+            continue
+        try:
+            np.copyto(array, saved)
+        finally:
+            array.setflags(write=False)
+
+
+def _agreement_threshold(rtol) -> Optional[float]:
+    """Validate the optional agreement threshold of a derivative check.
+
+    Parameters
+    ----------
+    rtol : float or None
+        Threshold [-] on relative errors, or None for no threshold.
+
+    Returns
+    -------
+    float or None
+        ``rtol`` as a Python float [-], or None.
+
+    Raises
+    ------
+    TypeError
+        If ``rtol`` is not a real number (booleans excluded).
+    ValueError
+        If ``rtol`` is not positive and finite.
+    """
+    if rtol is None:
+        return None
+    if isinstance(rtol, (bool, np.bool_)) or not isinstance(rtol,
+                                                            numbers.Real):
+        raise TypeError(f"rtol must be a real number; got "
+                        f"{type(rtol).__name__}")
+    threshold = float(rtol)  # [-]
+    if not (np.isfinite(threshold) and threshold > 0):
+        raise ValueError(f"rtol must be positive and finite; got {rtol!r}")
+    return threshold
+
+
+def _relative_row_error(row: np.ndarray,
+                        reference_row: np.ndarray) -> float:
+    """Return ``||row - reference|| / max(||reference||, tiny)`` safely.
+
+    Parameters
+    ----------
+    row : numpy.ndarray
+        Jacobian entries of one parameter, shape ``(k,)`` [weighted
+        residual unit / parameter unit].
+    reference_row : numpy.ndarray
+        Reference entries, same shape and units.
+
+    Returns
+    -------
+    float
+        Relative error [-]: 0 when both rows are zero (or empty), ``inf``
+        or a huge finite value when only the reference is zero, NaN when
+        either row holds a non-finite entry.
+
+    Notes
+    -----
+    Both rows are divided by their common largest magnitude before the
+    difference is formed, and the norms are computed by
+    ``StatsModule._scaled_norm``, so no intermediate overflows or
+    underflows: entries near the float64 limits give the true ratio, not
+    ``inf / inf`` or ``0 / 0``, and a difference far below the largest
+    entry is not lost to squaring. ``tiny`` is the smallest normal
+    float64, scaled the same way.
+    """
+    if not (np.isfinite(row).all() and np.isfinite(reference_row).all()):
+        return float('nan')
+    largest = max(float(np.max(np.abs(row), initial=0.0)),
+                  float(np.max(np.abs(reference_row),
+                               initial=0.0)))  # [r / p]
+    if largest == 0:
+        return 0.0
+    # [-]; _scaled_norm rescales again, so squares of entries far below
+    # the largest one do not underflow to zero
+    error_norm = _scaled_norm(row / largest - reference_row / largest)
+    reference_norm = _scaled_norm(reference_row / largest)  # [-]
+    # [-], tiny in the scaled units; may underflow to 0 for large rows
+    floor = np.finfo(float).tiny / largest
+    denominator = max(reference_norm, floor)  # [-]
+    if denominator == 0:
+        return float('inf')
+    with np.errstate(over='ignore'):
+        return float(error_norm / denominator)
+
+
+def _three_point_difference(f_center: np.ndarray, f_near: np.ndarray,
+                            f_far: np.ndarray, step: float) -> np.ndarray:
+    """Return the one-sided second-order three-point derivative.
+
+    Parameters
+    ----------
+    f_center : numpy.ndarray
+        Function values at ``p`` [output units], shape ``(m,)``.
+    f_near : numpy.ndarray
+        Function values at ``p + step`` [output units], shape ``(m,)``.
+    f_far : numpy.ndarray
+        Function values at ``p + 2 * step`` [output units], shape ``(m,)``.
+    step : float
+        Signed step [parameter units]: positive for the forward formula,
+        negative for the backward one.
+
+    Returns
+    -------
+    numpy.ndarray
+        ``(-3 f(p) + 4 f(p + s) - f(p + 2 s)) / (2 s)`` [output units /
+        parameter units], shape ``(m,)``.
+
+    Notes
+    -----
+    Taylor expansion, ``f(p + s) = f + s f' + s**2 f''/2 + s**3 f'''/6``
+    and ``f(p + 2 s) = f + 2 s f' + 2 s**2 f'' + 4 s**3 f'''/3`` (plus
+    higher-order terms), gives ``-3 f + 4 f(p + s) - f(p + 2 s) = 2 s f' -
+    2 s**3 f'''/3``: the ``f''`` terms cancel and the truncation error is
+    ``-s**2 f'''(p) / 3``, of the same order as the ``s**2 f'''(p) / 6`` of
+    the central difference. Only points on one side of ``p`` are
+    evaluated.
+    """
+    return (-3 * f_center + 4 * f_near - f_far) / (2 * step)
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class DerivativeCheck:
+    """Independent finite-difference check of the estimator's Jacobian.
+
+    Built by ``ParameterEstimation.check_derivatives``. It compares the
+    weighted residual Jacobian the optimizer and the covariance use,
+    ``get_gradient(p, out_array=True)``, with second-order finite
+    differences of the weighted residuals ``get_objective(p,
+    out_array=True)`` at the same point, perturbing only the optimized
+    parameters. Both arrays follow ``get_residual_layout``: unobserved
+    entries are exactly zero in both and are excluded from the norms. No
+    pass/fail threshold is applied unless the caller supplies ``rtol``.
+
+    Attributes
+    ----------
+    parameter_names : tuple of str
+        Optimized parameter names (``name_params``), in parameter order.
+    params : numpy.ndarray
+        Point of the check, shape ``(n,)`` [parameter units].
+    rel_step : numpy.ndarray
+        Relative steps [-], shape ``(n,)``.
+    param_scale : numpy.ndarray
+        Parameter scales the relative steps refer to, shape ``(n,)``
+        [parameter units]: ``|params|`` or the caller's ``param_scale``.
+    steps : numpy.ndarray
+        Steps ``h_i`` actually used, shape ``(n,)`` [parameter units],
+        positive: ``rel_step * param_scale`` rounded so that ``p + h`` (or
+        ``p - h``) is the floating-point number evaluated.
+    formulas : tuple of str
+        ``'central'``, ``'forward'`` or ``'backward'`` per parameter (see
+        ``DIFFERENCE_FORMULAS``); a one-sided formula is used where a
+        central step would leave the bounds.
+    jacobian_source : {'model', 'jac_fun', 'finite_difference'}
+        Origin of ``jacobian`` (``ParameterEstimation._jacobian_source``):
+        sensitivities returned by the model callback, ``jac_fun``, or the
+        estimator's forward differences with ``dx_finitediff``.
+    jacobian : numpy.ndarray
+        Estimator's weighted residual Jacobian, shape ``(n, m)``; row ``i``
+        in weighted residual units per unit of parameter ``i``.
+    reference : numpy.ndarray
+        Finite-difference reference, same shape and units.
+    abs_error : numpy.ndarray
+        ``|jacobian - reference|``, same shape and units.
+    observed : numpy.ndarray
+        Boolean, shape ``(m,)``: True for the observed entries of the
+        residual layout (and for every penalty row of
+        ``MultipleCurveResolution``).
+    max_abs_error : numpy.ndarray
+        Largest ``abs_error`` of each row over the observed entries, shape
+        ``(n,)`` [weighted residual unit / parameter unit]; 0 without
+        observed entries.
+    relative_error : numpy.ndarray
+        ``||J_i - R_i|| / max(||R_i||, tiny)`` over the observed entries,
+        shape ``(n,)`` [-], with ``tiny`` the smallest normal float64 so
+        that two zero rows give 0, computed after scaling both rows by
+        their largest magnitude so that no norm overflows or underflows;
+        NaN when either row holds a non-finite observed entry.
+    rtol : float or None
+        Agreement threshold [-] supplied by the caller, or None.
+    agrees : numpy.ndarray or None
+        Boolean, shape ``(n,)``: ``relative_error <= rtol`` (False for NaN);
+        None without ``rtol``.
+
+    Notes
+    -----
+    The reference is itself approximate. Its truncation error is about
+    ``h**2 |f'''| / 6`` (central) or ``h**2 |f'''| / 3`` (one-sided), and
+    its rounding error about ``u |f| / h`` for outputs of relative accuracy
+    ``u``; see ``ParameterEstimation.check_derivatives`` for the step
+    choice. A relative error far above that level for one parameter points
+    at that parameter's sensitivities.
+    """
+
+    parameter_names: tuple
+    params: np.ndarray
+    rel_step: np.ndarray
+    param_scale: np.ndarray
+    steps: np.ndarray
+    formulas: tuple
+    jacobian_source: str
+    jacobian: np.ndarray
+    reference: np.ndarray
+    abs_error: np.ndarray
+    observed: np.ndarray
+    max_abs_error: np.ndarray
+    relative_error: np.ndarray
+    rtol: Optional[float]
+    agrees: Optional[np.ndarray]
+
+    #: Float array fields, frozen as read-only copies by __post_init__.
+    _ARRAY_FIELDS = ('params', 'rel_step', 'param_scale', 'steps',
+                     'jacobian', 'reference', 'abs_error', 'max_abs_error',
+                     'relative_error')
+
+    def __post_init__(self) -> None:
+        """Freeze the array fields.
+
+        Returns
+        -------
+        None
+
+        Notes
+        -----
+        Arrays are replaced by read-only copies, also after unpickling
+        (see ``__reduce__``).
+        """
+        for name in self._ARRAY_FIELDS:
+            object.__setattr__(self, name, _read_only(getattr(self, name)))
+        object.__setattr__(self, 'observed', _read_only_bool(self.observed))
+        if self.agrees is not None:
+            object.__setattr__(self, 'agrees', _read_only_bool(self.agrees))
+        object.__setattr__(self, 'parameter_names',
+                           tuple(self.parameter_names))
+        object.__setattr__(self, 'formulas', tuple(self.formulas))
+
+    def __reduce__(self) -> tuple:
+        """Support pickling and deep copying.
+
+        Returns
+        -------
+        tuple
+            ``(DerivativeCheck, field values)``; the constructor freezes the
+            arrays again.
+        """
+        return (type(self), tuple(getattr(self, field.name)
+                                  for field in dataclasses.fields(self)))
+
+    @classmethod
+    def from_derivatives(cls, parameter_names: Sequence[str],
+                         params: np.ndarray, rel_step: np.ndarray,
+                         param_scale: np.ndarray, steps: np.ndarray,
+                         formulas: Sequence[str], jacobian_source: str,
+                         jacobian: np.ndarray, reference: np.ndarray,
+                         observed: np.ndarray,
+                         rtol: Optional[float] = None
+                         ) -> 'DerivativeCheck':
+        """Compare a Jacobian with its finite-difference reference.
+
+        Parameters
+        ----------
+        parameter_names : sequence of str
+            Optimized parameter names, ``n`` entries.
+        params : numpy.ndarray
+            Point of the check, shape ``(n,)`` [parameter units].
+        rel_step : numpy.ndarray
+            Relative steps, shape ``(n,)`` [-].
+        param_scale : numpy.ndarray
+            Parameter scales, shape ``(n,)`` [parameter units].
+        steps : numpy.ndarray
+            Positive steps used, shape ``(n,)`` [parameter units].
+        formulas : sequence of str
+            One of ``DIFFERENCE_FORMULAS`` per parameter.
+        jacobian_source : {'model', 'jac_fun', 'finite_difference'}
+            Origin of ``jacobian``.
+        jacobian : numpy.ndarray
+            Estimator's Jacobian, shape ``(n, m)`` [weighted residual unit
+            / parameter unit].
+        reference : numpy.ndarray
+            Finite-difference reference, shape ``(n, m)``, same units.
+        observed : numpy.ndarray
+            Boolean, shape ``(m,)``: entries entering the norms.
+        rtol : float, optional
+            Agreement threshold [-], positive and finite. The default None
+            computes no ``agrees``.
+
+        Returns
+        -------
+        DerivativeCheck
+            The comparison; ``abs_error``, ``max_abs_error``,
+            ``relative_error`` and ``agrees`` are computed here. A row with
+            a non-finite observed entry in ``jacobian`` or ``reference``
+            has NaN ``relative_error`` (and ``agrees`` False); no NumPy
+            floating-point warning is emitted.
+
+        Raises
+        ------
+        ValueError
+            If ``params``, ``rel_step``, ``param_scale``, ``steps`` or
+            ``formulas`` does not have ``n`` entries, the Jacobian shapes
+            disagree, a formula or ``jacobian_source`` is unknown, or
+            ``rtol`` is not positive and finite.
+        TypeError
+            If ``rtol`` is not a real number.
+        """
+        names = tuple(parameter_names)
+        num_params = len(names)  # [-]
+        vectors = {'params': params, 'rel_step': rel_step,
+                   'param_scale': param_scale, 'steps': steps}
+        for label, values in vectors.items():
+            if np.shape(values) != (num_params,):
+                raise ValueError(
+                    f"{label} must have shape ({num_params},), one entry "
+                    f"per parameter; got {np.shape(values)}")
+        jac = np.array(jacobian, dtype=float)  # [r / p_i]
+        ref = np.array(reference, dtype=float)  # [r / p_i]
+        mask = np.array(observed, dtype=bool)
+        if jac.ndim != 2 or jac.shape[0] != num_params or (
+                ref.shape != jac.shape) or mask.shape != (jac.shape[1],):
+            raise ValueError(
+                f"jacobian {jac.shape} and reference {ref.shape} must have "
+                f"shape ({num_params}, m) and observed {mask.shape} shape "
+                "(m,)")
+        unknown = [name for name in formulas
+                   if name not in DIFFERENCE_FORMULAS]
+        if unknown or len(formulas) != num_params:
+            raise ValueError(f"formulas must hold one of "
+                             f"{DIFFERENCE_FORMULAS} per parameter; got "
+                             f"{list(formulas)}")
+        if jacobian_source not in _JACOBIAN_SOURCES:
+            raise ValueError(f"Unknown jacobian_source {jacobian_source!r}; "
+                             f"expected one of {tuple(_JACOBIAN_SOURCES)}")
+        rtol = _agreement_threshold(rtol)  # [-]
+
+        # [r / p_i]; inf where the true difference exceeds the float64
+        # range, NaN where an entry is not finite
+        with np.errstate(over='ignore', invalid='ignore'):
+            abs_error = np.abs(jac - ref)
+        max_abs_error = np.zeros(num_params)  # [r / p_i]
+        relative_error = np.zeros(num_params)  # [-]
+        for ind in range(num_params):
+            observed_error = abs_error[ind, mask]  # [r / p_i]
+            if observed_error.size:
+                max_abs_error[ind] = (np.nan if np.isnan(observed_error).any()
+                                      else np.max(observed_error))
+            relative_error[ind] = _relative_row_error(jac[ind, mask],
+                                                      ref[ind, mask])
+        agrees = None if rtol is None else relative_error <= rtol
+
+        return cls(parameter_names=names, params=params, rel_step=rel_step,
+                   param_scale=param_scale, steps=steps,
+                   formulas=tuple(formulas),
+                   jacobian_source=jacobian_source, jacobian=jac,
+                   reference=ref, abs_error=abs_error, observed=mask,
+                   max_abs_error=max_abs_error,
+                   relative_error=relative_error, rtol=rtol, agrees=agrees)
+
+    @property
+    def max_relative_error(self) -> float:
+        """Return the largest relative error over the parameters.
+
+        Returns
+        -------
+        float
+            ``max(relative_error)`` [-]; NaN if any entry is NaN, 0 without
+            parameters.
+        """
+        if self.relative_error.size == 0:
+            return 0.0
+        return float(np.max(self.relative_error))
+
+    def to_frame(self) -> pd.DataFrame:
+        """Return the per-parameter comparison as a table.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Indexed by parameter name, in ``parameter_names`` order, with
+            columns ``value`` and ``step`` [parameter units], ``rel_step``
+            [-], ``formula`` (str), ``max_abs_error`` [weighted residual
+            unit / parameter unit] and ``relative_error`` [-], plus
+            ``agrees`` (bool) when ``rtol`` was given.
+            ``DataFrame.attrs`` holds ``'jacobian_source'``, ``'rtol'`` and
+            ``'max_relative_error'``.
+        """
+        columns = {'value': self.params, 'step': self.steps,
+                   'rel_step': self.rel_step, 'formula': list(self.formulas),
+                   'max_abs_error': self.max_abs_error,
+                   'relative_error': self.relative_error}
+        if self.agrees is not None:
+            columns['agrees'] = self.agrees
+        frame = pd.DataFrame(columns, index=pd.Index(self.parameter_names,
+                                                     name='parameter'))
+        frame.attrs['jacobian_source'] = self.jacobian_source
+        frame.attrs['rtol'] = self.rtol
+        frame.attrs['max_relative_error'] = self.max_relative_error
+        return frame
+
+    def summary(self) -> str:
+        """Return a human-readable account of the check.
+
+        Returns
+        -------
+        str
+            The Jacobian source and the number of observed entries; a table
+            with each parameter's value, step, formula, largest absolute
+            error and relative error (and agreement with ``rtol`` when it
+            was given); the largest relative error; and a reminder of the
+            accuracy of the reference itself.
+        """
+        lines = [
+            f"Derivative check of {_JACOBIAN_SOURCES[self.jacobian_source]} "
+            "against second-order finite differences of the weighted "
+            f"residuals over {int(self.observed.sum())} observed entries.",
+            f"{'parameter':<14} {'value':>12} {'step':>11} "
+            f"{'formula':>9} {'max abs err':>12} {'rel. error':>11}"
+            + ('' if self.agrees is None else f" {'agrees':>7}")]
+        for ind, name in enumerate(self.parameter_names):
+            line = (f"{name:<14} {self.params[ind]:>12.5g} "
+                    f"{self.steps[ind]:>11.3g} {self.formulas[ind]:>9} "
+                    f"{self.max_abs_error[ind]:>12.3g} "
+                    f"{self.relative_error[ind]:>11.3g}")
+            if self.agrees is not None:
+                line += f" {'yes' if self.agrees[ind] else 'NO':>7}"
+            lines.append(line)
+        lines.append(f"Largest relative error: {self.max_relative_error:.3g}"
+                     + ("" if self.rtol is None else
+                        f" (rtol {self.rtol:.3g})") + ".")
+        lines.append(
+            "The reference is accurate to about rel_step**2 (truncation) "
+            "plus the output accuracy divided by rel_step (rounding); for "
+            "ODE outputs computed with the integrator relative tolerance "
+            "solver_rtol (e.g. CVode rtol) use rel_step ~ "
+            "solver_rtol**(1/3).")
+        return '\n'.join(lines)
+
+
 class ParameterEstimation:
     """Fit model parameters to weighted observations from one or more experiments.
 
@@ -2191,7 +2970,7 @@ class ParameterEstimation:
                        'y_runs', 'resid_runs', 'residuals',
                        'params_residuals', 'weighted_residuals', 'sens',
                        'sens_second', '_params_sens_second',
-                       'num_model_states')
+                       'num_model_states', '_accepted_y_runs')
 
     def __init__(self, func: Callable, param_seed, x_data=None, y_data=None,
                  measured_ind=None,
@@ -2515,12 +3294,10 @@ class ParameterEstimation:
             param_seed = param_seed[np.newaxis]
 
         if dx_finitediff is None:
-            # Relative accuracy assumed for the model outputs [-]: the
-            # default rtol of Assimulo's CVode (1e-6 in Assimulo 3.4), the
-            # integrator of PharmaPy's ODE unit models unless sundials
-            # options override it. The relative step is its square root,
-            # 1e-3, as in the CVODES parameter increment (dx_jac_p Notes).
-            rel_tol = 1e-6
+            # Relative accuracy assumed for the model outputs [-]; the
+            # relative step is its square root, 1e-3 (rationale at
+            # jac_module.DEFAULT_OUTPUT_RTOL).
+            rel_tol = DEFAULT_OUTPUT_RTOL
             # Parameter magnitude below which the step stops shrinking
             # [parameter units], 1e-6; its rationale is documented at
             # jac_module.PARAMETER_MAGNITUDE_FLOOR. Every |p| >= 1e-6 keeps
@@ -2721,6 +3498,10 @@ class ParameterEstimation:
         # Compiled layout; None for the analyze_data layout.
         self._measurement_names = (None if compiled is None
                                    else list(compiled.measurement_names))
+        # Declared unit (str) or None per measurement column, read by
+        # get_identifiability; None for the analyze_data layout.
+        self._measurement_units = (None if compiled is None
+                                   else list(compiled.measurement_units))
         self._measured_fields = (None if compiled is None
                                  else list(compiled.fields))
         # Legacy input with one measured column ignores its field for
@@ -2765,6 +3546,9 @@ class ParameterEstimation:
 
         num_columns = (len(self.measured_ind) if compiled is None
                        else len(self._measured_fields))  # [-]
+        # Whether the caller supplied weight_matrix (even the identity);
+        # read by get_identifiability to state the noise model.
+        self._weight_matrix_given = weight_matrix is not None
         if weight_matrix is None:
             weight_matrix = np.eye(num_columns)  # [-]
 
@@ -3724,6 +4508,10 @@ class ParameterEstimation:
         covar_params : numpy.ndarray
             Estimated covariance, shape ``(num_params, num_params)``. Entry
             ``(i, j)`` has the product of parameter i and parameter j units.
+            Filled with NaN, with a ``RuntimeWarning`` stating the cause,
+            when it is undefined, for example because the parameters are not
+            (locally) identifiable from the observed data (see
+            ``get_covariance``); the fit is kept.
         info : dict
             Solver information at the accepted parameters. ``info['fun']`` is
             the weighted residual vector, ordered by experiment then
@@ -3756,6 +4544,29 @@ class ParameterEstimation:
             ``info['status']`` (int, Ipopt's return status),
             ``info['message']`` (str, Ipopt's status message) and, when
             cyipopt reports it, ``info['nit']`` (int, iterations [-]).
+            Every method reports ``info['success']`` (bool) and
+            ``info['message']`` (str). For LM, ``success`` is True when
+            ``info['stop_criterion']`` is a convergence test
+            (``'Small step'``, ``'Small gradient'`` or ``'Value of the
+            objective function lower than tolerance'``) and False for
+            ``'Maximum iterations exceeded'``; ``message`` repeats the stop
+            criterion. With ``max_fun_eval=0`` LM evaluates the seed only,
+            reports no ``stop_criterion``, and ``success`` is False with a
+            message saying that no iterations were requested. For
+            ``'scipy'``/``'least_squares'``, ``success``, ``status`` and
+            ``message`` are SciPy's (``success`` True for ``status > 0``).
+            ``info['tolerances']`` (dict) holds the stopping criteria that
+            governed the fit with their effective values, the given options
+            merged over the optimizer defaults: ``max_fun_eval`` [-],
+            ``eps_1`` [residual units**2 / parameter units], ``eps_2`` [-]
+            and ``tol_fun`` [residual units] for LM (defaults read from
+            ``levenberg_marquardt``'s signature); ``ftol`` [-], ``xtol``
+            [-], ``gtol`` and ``max_nfev`` [-] for SciPy (defaults read from
+            ``scipy.optimize.least_squares``'s signature; ``max_nfev=None``
+            means SciPy's automatic limit); and, for IPOPT, only the
+            termination options present in the solver's options, with
+            ``str`` keys: the caller's and cyipopt's ``tol`` default, not
+            Ipopt's native defaults (see ``_stopping_tolerances``).
 
         Raises
         ------
@@ -3769,8 +4580,6 @@ class ParameterEstimation:
             finite-difference sensitivities are used and ``dx_finitediff``
             gives a zero or infinite step for an optimized parameter (see
             ``get_gradient``).
-        numpy.linalg.LinAlgError
-            If the accepted Jacobian yields a singular covariance matrix.
 
         Warns
         -----
@@ -3779,6 +4588,35 @@ class ParameterEstimation:
             for example at its iteration limit. The warning names the status
             and message; the returned parameters, covariance and statistics
             then describe the last iterate, not a converged estimate.
+            Likewise if LM stops with ``'Maximum iterations exceeded'`` or
+            ``scipy.optimize.least_squares`` without success (e.g. status
+            0 at ``max_nfev``, or status -2 after a callback stop): the
+            warning names the method, the stop reason (SciPy's status and
+            message) and the evaluation counts, and states that the results
+            describe the last accepted iterate, not a converged estimate.
+            Only when the evaluation budget stopped the fit (LM's
+            ``'Maximum iterations exceeded'``, SciPy status 0) does it name
+            the limiting option with its effective value (``max_fun_eval``
+            for LM, ``max_nfev`` for SciPy) and suggest raising it.
+            The returned parameters, covariance and statistics are those of
+            the solver, unchanged. No warning is issued for the
+            evaluation-only LM call ``max_fun_eval=0``. These warnings point
+            at the caller outside PharmaPy, also through
+            ``estimate_parameters`` or ``SimulationExec.EstimateParams``.
+            Also, from ``get_covariance``, if the covariance at the accepted
+            parameters is undefined. The warning gives one of three causes:
+            a non-finite weighted residual Jacobian (naming those
+            parameters); a singular or numerically singular ``J @ J.T``,
+            i.e. parameters that the observed data do not (locally)
+            identify (naming them and the undetermined parameter
+            directions); or an inversion of ``J @ J.T`` that failed or gave
+            non-finite or negative variances although it passed the
+            conditioning test (naming those parameters and the
+            least-determined direction). The fit is stored and returned
+            with an all-NaN ``covar_params`` and ``correl_params``. Earlier
+            releases raised ``numpy.linalg.LinAlgError`` for an exactly
+            singular ``J @ J.T`` and kept the previous fit, or returned
+            meaningless values such as negative variances (#532).
 
         Notes
         -----
@@ -3804,8 +4642,9 @@ class ParameterEstimation:
         solver returns, so they always describe the same fit.
         ``optimize_flag`` is set to ``not simulate`` during the solve,
         because ``get_objective`` reads it. A call that raises, during the
-        solve or afterwards (for example ``get_covariance`` with a singular
-        ``J @ J.T``), restores every attribute named in the class's
+        solve or afterwards (for example when a ``get_covariance`` warning
+        is turned into an error by a warnings filter), restores every
+        attribute named in the class's
         ``_FIT_ATTRIBUTES`` to its value before the call, or removes it if a
         first fit had not yet created it: the fit results (``opt_method``,
         ``optim_options``, ``optimize_flag``, ``params_convg``,
@@ -3814,7 +4653,9 @@ class ParameterEstimation:
         ``cond_number``, ``paramest_df``), the evaluation buffers that
         ``get_objective`` and ``get_gradient`` overwrite (``y_runs``,
         ``resid_runs``, ``residuals``, ``weighted_residuals``, ``sens`` and
-        the others listed there), and the attributes subclasses add, such as
+        the others listed there), the snapshot of the accepted raw model
+        outputs that ``get_identifiability`` reads (``_accepted_y_runs``),
+        and the attributes subclasses add, such as
         ``epsilon_mcr`` and the projections of
         ``MultipleCurveResolution``, which also clears its evaluation cache
         (see ``_restore_fit_state``).
@@ -3869,6 +4710,30 @@ class ParameterEstimation:
                 # metadata.
                 self.get_objective(opt_par, out_array=True)
 
+                if 'stop_criterion' not in info:
+                    # max_fun_eval=0: an explicit evaluation at the seed,
+                    # not a fit, so it is reported but not warned about.
+                    info['success'] = False
+                    info['message'] = (
+                        'No iterations were requested (max_fun_eval=0); '
+                        'the parameters are the seed, evaluated only')
+                else:
+                    info['success'] = (info['stop_criterion']
+                                       in _LM_CONVERGED_STOPS)
+                    info['message'] = str(info['stop_criterion'])
+                    if not info['success']:
+                        budget = (
+                            ('max_fun_eval', _stopping_tolerances(
+                                'LM', effective_options)['max_fun_eval'])
+                            if info['stop_criterion'] == _LM_BUDGET_STOP
+                            else (None, None))
+                        _warn_unconverged(
+                            "Levenberg-Marquardt (method='LM')",
+                            info['message'],
+                            f"{info['num_fun_eval']} trial evaluations and "
+                            f"{info['num_iter']} accepted steps",
+                            *budget)
+
             elif method == 'IPOPT':
                 effective_options['print_level'] = (
                     int(verbose) * IPOPT_VERBOSE_PRINT_LEVEL)  # [-]
@@ -3883,6 +4748,11 @@ class ParameterEstimation:
                 opt_par = result['x']
 
                 info = self.assemble_solver_info(opt_par)
+                # assemble_solver_info evaluates without storing. Refresh the
+                # model buffers at the accepted point, as for the other
+                # methods, so the stored outputs describe opt_par whatever
+                # point IPOPT evaluated last.
+                self.get_objective(opt_par, out_array=True)
                 # Keep the termination outcome (#475); cyipopt returns the
                 # message as bytes.
                 message = result['message']
@@ -3899,7 +4769,7 @@ class ParameterEstimation:
                         f"{info['status']}: {message}); the returned "
                         "parameters, covariance and statistics describe its "
                         "last iterate, not a converged estimate",
-                        RuntimeWarning, stacklevel=2)
+                        RuntimeWarning, stacklevel=_user_stacklevel())
 
             else:  # 'scipy' or 'least_squares'
                 scipy_options = effective_options
@@ -3960,6 +4830,24 @@ class ParameterEstimation:
                 info['scipy_result'] = result
                 # [residual unit / parameter unit], shape (num_params, n_data).
                 info['jac'] = np.asarray(result.jac).T
+                info['success'] = bool(result.success)
+                info['message'] = str(result.message)
+                if not info['success']:
+                    budget = (
+                        ('max_nfev', _stopping_tolerances(
+                            method, effective_options)['max_nfev'])
+                        if result.status == _SCIPY_BUDGET_STATUS
+                        else (None, None))
+                    _warn_unconverged(
+                        "scipy.optimize.least_squares "
+                        f"(method={method!r})",
+                        f"status {int(result.status)}: {info['message']}",
+                        f"{result.nfev} residual and {result.njev} Jacobian "
+                        "evaluations",
+                        *budget)
+
+            info['tolerances'] = _stopping_tolerances(method,
+                                                      effective_options)
 
             # Statistics use the data residuals; see _data_solver_info.
             info = self._data_solver_info(info)
@@ -3989,11 +4877,18 @@ class ParameterEstimation:
             # Model prediction with final parameters, [model state units], one
             # array per experiment; see _model_predictions.
             self.y_model = self._model_predictions()
+            # Accepted raw model outputs [model state units], copied so that
+            # later evaluations (get_objective at other parameters, callbacks
+            # refilling their output arrays) cannot change what the
+            # identifiability report reads; see _weighted_predictions.
+            self._accepted_y_runs = [np.array(run, dtype=float, copy=True)
+                                     for run in self.y_runs]
 
             covar_params = self.get_covariance()
         except BaseException:
             # Keep the previous fit, also when the post-solve assembly fails,
-            # e.g. a singular covariance (#479).
+            # e.g. an undefined-covariance warning raised as an error
+            # (#479, #532).
             self._restore_fit_state(previous_fit)
             raise
 
@@ -4041,10 +4936,17 @@ class ParameterEstimation:
         covar_params : numpy.ndarray
             Estimated covariance, shape ``(num_params, num_params)``. Entry
             ``(i, j)`` has the product of parameter i and parameter j units.
+            All NaN, with a ``RuntimeWarning``, when it is undefined, for
+            example because the parameters are not identifiable (see
+            ``optimize_fn``).
         info : dict
             Solver information at the accepted parameters, with ``info['jac']``
             in the canonical ``(num_params, len(info['fun']))`` orientation
-            documented by ``optimize_fn``.
+            documented by ``optimize_fn``, the termination outcome
+            ``info['success']`` and ``info['message']``, and the effective
+            stopping criteria ``info['tolerances']``, which include the
+            options given here through ``optim_options`` or
+            ``**solver_options``.
 
         Raises
         ------
@@ -4054,6 +4956,12 @@ class ParameterEstimation:
             If the same option is given in both ``optim_options`` and
             ``**solver_options``, or if ``optimize_fn`` rejects ``method`` or
             ``bounds``.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the optimizer stops without converging, or the covariance is
+            undefined; see ``optimize_fn``.
         """
         if optim_options is not None and not isinstance(optim_options, Mapping):
             raise TypeError(
@@ -4132,10 +5040,13 @@ class ParameterEstimation:
         ValueError
             If ``alpha`` is not in the open interval ``(0, 1)``, both
             ``covar_params`` and ``include_mse`` are supplied, the number of
-            observed data entries does not exceed ``num_params``, or
-            ``covar_params`` does not have finite entries of shape
-            ``(num_params, num_params)`` with non-negative diagonal
-            variances.
+            observed data entries does not exceed ``num_params``, the
+            stored or recomputed covariance (``covar_params`` None) is
+            undefined (all NaN, as ``get_covariance`` returns it; the message
+            says so and points to its warning for the cause), or
+            ``covar_params`` does not have finite
+            entries of shape ``(num_params, num_params)`` with
+            non-negative diagonal variances.
         """
         if (isinstance(alpha, bool)
                 or not isinstance(alpha, (int, float, np.number))
@@ -4163,6 +5074,7 @@ class ParameterEstimation:
                 f"(num_data_total={int(self.num_data_total)}, "
                 f"num_params={int(self.num_params)})")
 
+        given_covar = covar_params is not None
         if covar_params is None:
             had_covar = hasattr(self, 'covar_params')
             prev_covar = getattr(self, 'covar_params', None)
@@ -4195,6 +5107,9 @@ class ParameterEstimation:
             raise ValueError(
                 f"covar_params must have shape {expected_shape}; got "
                 f"{covar_array.shape}")
+        if not given_covar:
+            _require_defined_covariance(
+                covar_array, 'ParameterEstimation.get_confidence_intervals')
         if not np.all(np.isfinite(covar_array)):
             raise ValueError("covar_params entries must be finite")
         if np.any(np.diag(covar_array) < 0.0):
@@ -4244,17 +5159,47 @@ class ParameterEstimation:
             form is a physical covariance: it depends on the units chosen
             for each measurement. Also stored as ``covar_params``; the
             matching correlation matrix [-] is stored as ``correl_params``.
+            Both are filled with NaN, in the unit of the requested form,
+            when the covariance is undefined (see Warns and Notes).
 
         Raises
         ------
         AttributeError
             If no fit has been run, so ``info_opt`` does not exist.
-        numpy.linalg.LinAlgError
-            If ``J @ J.T`` is singular, for example when a parameter does
-            not affect any observed entry.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the covariance is undefined, with one of three diagnostics:
+            the weighted residual Jacobian has non-finite entries (naming
+            those parameters); the parameters are not (locally)
+            identifiable from the observed data (naming every parameter
+            with no effect on any observed entry and every poorly
+            determined direction as a combination of parameter names, e.g.
+            ``0.707*k - 0.707*b``); or ``J @ J.T`` passed the conditioning
+            test but its inversion failed or gave non-finite or negative
+            variances (naming those parameters and the least-determined
+            direction).
 
         Notes
         -----
+        The linearized covariance is undefined when ``J`` is not finite or
+        ``J @ J.T`` is singular or numerically singular: a parameter has
+        zero information (it changes no observed entry), the Jacobi-scaled
+        matrix ``D J J^T D``, ``D = diag((J J^T)_ii**-0.5)``, has a
+        condition number of at least ``1/eps`` with ``eps`` the machine
+        epsilon (``2u`` for the unit roundoff ``u``; the computed inverse
+        would have an error of order one and no correct significant digit,
+        Golub & Van Loan, *Matrix Computations*, 4th ed., 2013, Sec. 2.6;
+        evaluated from the singular values of ``D J``), the inversion
+        fails, or it yields a non-finite or negative variance. The Jacobi
+        scaled matrix does not change with the units chosen for the
+        parameters, so neither does the test; ``_information_inverse``
+        gives the details. Earlier releases raised ``numpy.linalg.LinAlgError``
+        for an exactly singular ``J @ J.T`` and otherwise returned
+        meaningless values, including negative variances (#532). A defined
+        covariance is computed exactly as before.
+
         Only observed entries count as data: unobserved entries have zero
         weighted residual and zero Jacobian column, and the degrees of
         freedom are ``num_data_total - num_params`` with ``num_data_total``
@@ -4276,25 +5221,869 @@ class ParameterEstimation:
         jac = self.info_opt['jac']
         resid = self.info_opt['fun']
 
-        hessian_approx = np.dot(jac, jac.T)
-
-        dof = self.num_data_total - self.num_params
-        mse = 1 / dof * np.dot(resid.T, resid)
-
-        if include_mse:
-            covar = mse * np.linalg.inv(hessian_approx)
-
-        else:
-            covar = np.linalg.inv(hessian_approx)
-        # Correlation matrix
-        sigma = np.sqrt(covar.diagonal())
-        d_matrix = np.diag(1/sigma)
-        correlation = d_matrix.dot(covar).dot(d_matrix)
+        dof = self.num_data_total - self.num_params  # [-]
+        # [p_i*p_j] with include_mse, [p_i*p_j/r**2] without; correlation
+        # [-]. Both all NaN, with a diagnostic, when undefined.
+        covar, correlation, _, diagnostic = _linearized_covariance(
+            jac, resid, dof, self.name_params, include_mse)
+        if diagnostic is not None:
+            warnings.warn(diagnostic, RuntimeWarning,
+                          stacklevel=_user_stacklevel())
 
         self.covar_params = covar
         self.correl_params = correlation
 
         return covar
+
+    def _noise_model(self) -> str:
+        """Return the measurement-error weighting of this estimator.
+
+        Returns
+        -------
+        {'declared_uncertainty', 'weight_matrix', 'identity'}
+            ``'declared_uncertainty'`` when measurements declare standard
+            deviations (``_residual_std`` is not None), ``'weight_matrix'``
+            when ``weight_matrix`` was supplied, also the identity (a
+            statement that the errors have standard deviation 1 in each
+            measured unit), and ``'identity'`` for the unweighted fit.
+
+        Notes
+        -----
+        Reads ``_weight_matrix_given``, which every estimator built by this
+        version stores at construction.
+        """
+        if self._residual_std is not None:
+            return 'declared_uncertainty'
+        return 'weight_matrix' if self._weight_matrix_given else 'identity'
+
+    def _jacobian_source(self) -> str:
+        """Return the origin of the weighted residual Jacobian.
+
+        Returns
+        -------
+        {'model', 'jac_fun', 'finite_difference'}
+            ``'model'`` when the model callback returns sensitivities with
+            its outputs (``sens_second`` is stored), ``'jac_fun'`` when a
+            Jacobian callback was given, ``'finite_difference'`` otherwise;
+            the precedence of ``get_gradient``.
+        """
+        if self.sens_second is not None:
+            return 'model'
+        if self.jac_fun is not None:
+            return 'jac_fun'
+        return 'finite_difference'
+
+    def _finite_difference_steps(self) -> np.ndarray:
+        """Return the forward-difference steps of the optimized parameters.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``|dx_finitediff|`` evaluated, as ``get_gradient`` does, at the
+            full parameter vector of the accepted fit, for the optimized
+            parameters, shape ``(num_params,)`` [parameter units].
+        """
+        return np.abs(self._signed_finite_difference_steps(
+            self.params_convg))  # [parameter units]
+
+    def _signed_finite_difference_steps(self, params) -> np.ndarray:
+        """Return the signed forward-difference steps at a point.
+
+        Parameters
+        ----------
+        params : array_like
+            Optimized parameters, shape ``(num_params,)`` [parameter
+            units].
+
+        Returns
+        -------
+        numpy.ndarray
+            ``dx_finitediff`` evaluated, as ``get_gradient`` does, at the
+            full parameter vector of ``params``, for the optimized
+            parameters, shape ``(num_params,)`` [parameter units]: the
+            finite-difference Jacobian evaluates the model at ``params +
+            steps``, one parameter at a time.
+        """
+        # [parameter units], the vector at which get_gradient evaluates
+        # dx_finitediff
+        params_full = np.asarray(self.reconstruct_params(params),
+                                 dtype=float)
+        # [parameter units], one step per entry of params_full
+        steps = (self.dx_fd(params_full) if callable(self.dx_fd)
+                 else np.ones_like(params_full) * self.dx_fd)
+        # [parameter units], steps of the optimized parameters
+        return np.asarray(steps, dtype=float)[self.map_variable]
+
+    def _default_jacobian_rtol(self, source: str,
+                               steps: Optional[np.ndarray],
+                               param_scale) -> np.ndarray:
+        """Return the default row-relative accuracy of the sensitivities.
+
+        Parameters
+        ----------
+        source : {'model', 'jac_fun', 'finite_difference'}
+            Origin of the Jacobian (``_jacobian_source``).
+        steps : numpy.ndarray or None
+            Forward-difference steps ``h_i`` of the optimized parameters,
+            shape ``(num_params,)`` [parameter units]; read for
+            ``'finite_difference'``.
+        param_scale : float, array_like or None
+            Typical magnitude of the parameters [parameter units]; None uses
+            ``|params_convg|``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(num_params,)`` [-]: machine epsilon for ``'model'`` and
+            ``'jac_fun'`` (derivatives exact to rounding); for
+            ``'finite_difference'`` the relative steps ``h_i / scale_i``,
+            the truncation error of a forward difference relative to the
+            derivative (see Notes).
+
+        Raises
+        ------
+        ValueError
+            If a finite-difference relative step is undefined (a parameter
+            at zero without ``param_scale``), not finite or not in ``(0,
+            1)``; pass ``param_scale`` or ``jacobian_rtol`` explicitly then.
+
+        Notes
+        -----
+        The forward difference ``(f(p + h) - f(p)) / h`` has the truncation
+        error ``(h / 2) |f''|`` (Nocedal and Wright, *Numerical
+        Optimization*, 2nd ed., Springer, 2006, Sec. 8.1, eq. 8.5, first
+        term). Under the well-scaled-curvature assumption ``scale |f''| <~
+        |f'|``, that error relative to the derivative is at most about
+        ``h / scale``, independent of any additive offset of ``f``. The
+        rounding term of eq. 8.5 enters ``IdentifiabilityReport`` through
+        ``output_rtol``.
+        """
+        num_params = int(self.num_params)  # [-]
+        if source != 'finite_difference':
+            return np.full(num_params, float(np.finfo(float).eps))
+        try:
+            scale = _parameter_scale(
+                np.asarray(self.params_convg, dtype=float), param_scale,
+                list(self.name_params))  # [parameter units]
+        except ValueError as error:
+            raise ValueError(
+                f"{error}. It sets the relative step |dx| / scale, the "
+                "default jacobian_rtol of a finite-difference Jacobian; "
+                "alternatively pass jacobian_rtol") from error
+        relative_steps = steps / scale  # [-]
+        if not (np.isfinite(relative_steps).all()
+                and (relative_steps > 0).all() and (relative_steps < 1).all()):
+            raise ValueError(
+                "The default jacobian_rtol of the finite-difference "
+                "Jacobian, the relative steps |dx| / scale = "
+                f"{relative_steps.tolist()} of {list(self.name_params)}, is "
+                "not in (0, 1); pass jacobian_rtol explicitly")
+        return relative_steps
+
+    def _weighted_predictions(self) -> np.ndarray:
+        """Return the accepted model outputs weighted like the residuals.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(len(info_opt['fun']),)`` [weighted residual unit]: the
+            model outputs of each experiment at the accepted parameters
+            (``_accepted_y_runs``, the copy of ``y_runs`` that
+            ``optimize_fn`` stores after refreshing it there for every
+            method) passed through ``_weight_sample_rows`` (declared
+            standard deviations or the ``weight_matrix`` roots), zero where
+            unobserved, in the residual layout (experiment, measurement
+            column, sample).
+
+        Notes
+        -----
+        The raw outputs are used directly rather than residuals plus
+        observations, whose sum cancels when the predictions are far below
+        the data. ``y_runs`` itself describes the last ``get_objective``
+        evaluation with ``set_self=True``, which an explicit evaluation
+        after the fit replaces; the snapshot keeps the accepted outputs, so
+        the report of a fit does not depend on later evaluations.
+
+        Raises
+        ------
+        AttributeError
+            If no fit has stored the snapshot.
+        """
+        parts = []
+        for outputs, x_mask, std in zip(self._accepted_y_runs, self.x_masks,
+                                        self._residual_std_runs()):
+            # [model state units]; unobserved entries are not read
+            predictions = np.asarray(outputs, dtype=float)
+            weighted = self._weight_sample_rows(predictions, x_mask, std)
+            parts.append(weighted.T.ravel())
+        return np.concatenate(parts)
+
+    def _residual_blocks(self, values: np.ndarray) -> list:
+        """Split a vector in the residual layout into sample-row blocks.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            Shape ``(len(info_opt['fun']),)``, in the layout of the weighted
+            residuals [weighted residual unit].
+
+        Returns
+        -------
+        list of tuple
+            Per experiment ``(rows, x_mask)``: ``rows`` of shape ``(n_times,
+            n_columns)`` (sample rows, measurement columns) and the
+            observation mask (None when every entry is observed).
+        """
+        blocks = []
+        start = 0  # [-]
+        for observations, x_mask in zip(self.y_data, self.x_masks):
+            num_times, num_columns = np.shape(observations)  # [-]
+            stop = start + num_times * num_columns  # [-]
+            # [weighted residual unit], (n_times, n_columns)
+            blocks.append((values[start:stop].reshape(num_columns,
+                                                      num_times).T, x_mask))
+            start = stop
+        return blocks
+
+    def _diagonal_weighting(self) -> bool:
+        """Return whether the residual whitening is entry by entry.
+
+        Returns
+        -------
+        bool
+            True for declared standard deviations and for a diagonal
+            ``weight_matrix`` (including the identity default); False for a
+            correlated ``weight_matrix``.
+        """
+        if self._residual_std is not None:
+            return True
+        covariance = self._measurement_covariance  # [u_i * u_j]
+        return not np.count_nonzero(covariance - np.diag(np.diag(covariance)))
+
+    def _output_error_scale(self, weighted_predictions: np.ndarray) -> float:
+        """Bound the whitened effect of a relative output error.
+
+        Parameters
+        ----------
+        weighted_predictions : numpy.ndarray
+            Weighted model predictions in the residual layout, shape
+            ``(len(info_opt['fun']),)`` [weighted residual unit].
+
+        Returns
+        -------
+        float
+            Upper bound [weighted residual unit] on the norm of the whitened
+            output errors per unit relative output error: errors of at most
+            ``r * |y_j|`` in each raw prediction ``y_j`` give whitened errors
+            of norm at most ``r`` times this value. For diagonal weighting it
+            is ``||W |y|||``, which equals ``||y_w||`` (exact). For a
+            correlated ``weight_matrix`` it is ``||W||_2 * ||y||`` over the
+            observed entries, with ``||W||_2`` the largest singular value of
+            the whitening factors used (``sigma_inv`` for fully observed
+            sample rows, the marginal roots for partially observed ones),
+            because whitening may amplify errors in directions that the
+            predictions themselves do not occupy.
+
+        Notes
+        -----
+        Norms are computed scaled, free of overflow and underflow
+        (``StatsModule._scaled_norm``). No state is modified: marginal roots
+        are computed afresh rather than cached.
+        """
+        if self._diagonal_weighting():
+            return _scaled_norm(weighted_predictions)
+
+        largest_gain = 0.0  # [1/u], largest singular value of the roots
+        raw_parts = []  # [measurement units], observed raw predictions
+        for rows, x_mask in self._residual_blocks(weighted_predictions):
+            observed = (np.ones(rows.shape, dtype=bool) if x_mask is None
+                        else np.asarray(x_mask, dtype=bool))
+            patterns, pattern_of_row = np.unique(observed, axis=0,
+                                                 return_inverse=True)
+            for pattern_index, pattern in enumerate(patterns):
+                if not pattern.any():
+                    continue
+                root = (self.sigma_inv if pattern.all()
+                        else _measurement_precision_root(
+                            self._measurement_covariance[
+                                np.ix_(pattern, pattern)]))  # [1/u_i]
+                largest_gain = max(largest_gain,
+                                   float(np.linalg.norm(root, 2)))
+                selected = pattern_of_row.ravel() == pattern_index
+                # [measurement units]: rows_w = raw @ root, solved for raw
+                raw = np.linalg.solve(root.T, rows[selected][:, pattern].T)
+                raw_parts.append(raw.ravel())
+        return largest_gain * _scaled_norm(np.concatenate(raw_parts))
+
+    def get_identifiability(
+            self, alpha: float = 0.95, include_mse: bool = True,
+            jacobian_rtol: Optional[Union[float, Sequence[float],
+                                          np.ndarray]] = None,
+            output_rtol: float = DEFAULT_OUTPUT_RTOL,
+            param_scale: Optional[Union[float, Sequence[float],
+                                        np.ndarray]] = None
+    ) -> IdentifiabilityReport:
+        """Report parameter uncertainty and practical identifiability.
+
+        Builds an ``IdentifiabilityReport`` from the accepted fit only
+        (``info_opt['jac']``, ``info_opt['fun']``, ``params_convg``,
+        ``name_params``, ``num_data_total``, the observations and the
+        weights): the explicit noise assumption, the information matrix
+        (the hand-off to experiment design, #355), the covariance, standard
+        errors, correlations and Student-t intervals of ``get_covariance``
+        and ``get_confidence_intervals``, the singular values, condition
+        number and collinearity index of the Jacobi-scaled Jacobian, the
+        parameters and directions the data do not resolve given the
+        accuracy of the sensitivities, the parameters at active bounds and
+        the optimizer's convergence outcome. Nothing is refitted, no model
+        is evaluated, and the estimator (``covar_params``,
+        ``correl_params``, ``params_convg``, ``info_opt``, ...) is not
+        modified.
+
+        Parameters
+        ----------
+        alpha : float, optional
+            Confidence level [-] in ``(0, 1)`` of the intervals and of the
+            significance test. The default is 0.95.
+        include_mse : bool, optional
+            If True (the default), declared uncertainties or the
+            ``weight_matrix`` are relative weights whose common scale is
+            re-estimated from the residual mean square; if False they are
+            absolute (see ``get_covariance``).
+        jacobian_rtol : float or array_like, optional
+            Row-relative accuracy [-] of the sensitivities, in ``(0, 1)``,
+            for every parameter or one per optimized parameter:
+            ``||dJ_i|| <= jacobian_rtol_i * ||J_i||``. The default None uses
+            machine epsilon for model-returned sensitivities and
+            ``jac_fun`` (exact to rounding) and the relative
+            forward-difference step ``h_i / scale_i`` for finite differences
+            (truncation term). For sensitivities integrated by an ODE solver
+            pass a bound established by ``check_derivatives``: CVODES
+            controls the sensitivity error relative to the sensitivities,
+            but only to a modest multiple of the solver ``rtol``, so the
+            ``rtol`` alone can understate it.
+        output_rtol : float, optional
+            Relative accuracy [-] of the model outputs, in ``(0, 1)``,
+            used only for finite-difference Jacobians (rounding term). The
+            default ``jac_module.DEFAULT_OUTPUT_RTOL`` (1e-6, CVode's default
+            rtol) is the accuracy the default step ``sqrt(1e-6) * |p|`` is
+            designed for; closed-form models can pass machine epsilon and
+            ODE models their solver ``rtol``.
+        param_scale : float or array_like, optional
+            Positive finite typical magnitude of every optimized parameter,
+            or one per parameter, in the parameter units, for the default
+            finite-difference ``jacobian_rtol``. The default None uses
+            ``|params_convg|``; it is required when an estimate is exactly
+            zero and that default is used.
+
+        Returns
+        -------
+        IdentifiabilityReport
+            Immutable report; its attributes document units, shapes and
+            meaning. ``identifiable`` is False when the covariance is
+            undefined (its numbers are then NaN), any parameter or
+            direction is unresolved (its numbers are then kept but not
+            precise).
+
+        Raises
+        ------
+        AttributeError
+            If no fit has been run, so ``info_opt`` does not exist.
+        TypeError
+            If ``alpha``, ``jacobian_rtol``, ``output_rtol`` or
+            ``param_scale`` is not real, or ``include_mse`` is not a bool.
+        ValueError
+            If ``alpha``, ``output_rtol`` or ``jacobian_rtol`` is not finite
+            and strictly between 0 and 1 or has the wrong shape;
+            ``param_scale`` is not positive and finite or has the wrong
+            shape; the default finite-difference ``jacobian_rtol`` is
+            undefined (an estimate at exactly zero without ``param_scale``)
+            or not in ``(0, 1)`` (a relative step of at least 1); parameter
+            names repeat; or the number of observed entries does not exceed
+            ``num_params``.
+
+        Notes
+        -----
+        The weighted predictions are the accepted model outputs
+        (``y_runs``) weighted like the residuals
+        (``_weighted_predictions``); ``MultipleCurveResolution`` weights its
+        curve-resolved spectra and non-spectral predictions in its residual
+        sign convention, which leaves the norms unchanged.
+        ``_output_error_scale`` turns them into the whitened output-error
+        bound (exact for diagonal weights, an operator-norm bound for
+        correlated ones), and the forward difference of two such outputs
+        is wrong by at most twice it.
+
+        Active bounds are read from ``info_opt['active_mask']`` of
+        ``scipy.optimize.least_squares``; Levenberg-Marquardt ignores
+        bounds (#533) and IPOPT fits store no active set, so for them
+        ``active_bounds`` is None.
+
+        No warning is issued for an unavailable covariance: the report
+        carries the reason in ``covariance_diagnostic``. Unlike
+        ``get_covariance``, which keeps its earlier behaviour, the report
+        does not present a covariance computed with a zero or non-finite
+        residual mean square (``include_mse=True``), one that is not
+        finite, or one with a variance that is not positive.
+        """
+        info = self.info_opt
+        names = list(self.name_params)
+        estimates = np.asarray(self.params_convg, dtype=float)  # [p_i]
+        if param_scale is not None:
+            _parameter_scale(estimates, param_scale, names)  # validation
+        source = self._jacobian_source()
+        steps = (self._finite_difference_steps()
+                 if source == 'finite_difference' else None)  # [p_i]
+        if jacobian_rtol is None:
+            jacobian_rtol = self._default_jacobian_rtol(
+                source, steps, param_scale)  # [-]
+        # [weighted residual unit], weighted model predictions
+        predictions = self._weighted_predictions()
+        # [weighted residual unit] per unit relative output error
+        error_scale = self._output_error_scale(predictions)
+        units = self._measurement_units
+        columns = self._measurement_names
+        measurement_units = (None if columns is None or units is None
+                             else dict(zip(columns, units)))
+        noise_model = self._noise_model()
+        weight_identity = noise_model == 'weight_matrix' and np.array_equal(
+            self._measurement_covariance,
+            np.eye(self._measurement_covariance.shape[0]))
+        active_mask = info.get('active_mask')
+        active_bounds = (None if active_mask is None else
+                         [name for name, flag in zip(names, active_mask)
+                          if flag != 0])
+        convergence = ({'success': info.get('success'),
+                        'message': info.get('message'),
+                        'tolerances': info.get('tolerances')}
+                       if 'success' in info else None)
+        return IdentifiabilityReport.from_fit(
+            info['jac'], info['fun'], estimates, names, self.num_data_total,
+            noise_model=noise_model, measurement_units=measurement_units,
+            jacobian_source=source, jacobian_rtol=jacobian_rtol,
+            output_rtol=output_rtol, output_error_scale=error_scale,
+            finite_difference_steps=steps, alpha=alpha,
+            include_mse=include_mse, active_bounds=active_bounds,
+            weight_matrix_is_identity=weight_identity,
+            convergence=convergence)
+
+    def _observed_residual_entries(self, num_entries: int) -> np.ndarray:
+        """Return which entries of the weighted residual vector are observed.
+
+        Parameters
+        ----------
+        num_entries : int
+            Length of ``get_objective(..., out_array=True)`` [-].
+
+        Returns
+        -------
+        numpy.ndarray
+            Boolean, shape ``(num_entries,)``: the ``'observed'`` column of
+            ``get_residual_layout``. Every entry is marked observed for
+            nested state observation dictionaries, which have no residual
+            layout; their unobserved entries are zero in the residuals and
+            the Jacobian alike, so norms are unchanged.
+
+        Raises
+        ------
+        ValueError
+            If the residual layout does not have ``num_entries`` rows.
+        """
+        try:
+            layout = self.get_residual_layout()
+        except NotImplementedError:
+            return np.ones(num_entries, dtype=bool)
+        observed = layout['observed'].to_numpy(dtype=bool)
+        if observed.size != num_entries:
+            raise ValueError(
+                f"The residual layout has {observed.size} entries, but the "
+                f"weighted residual vector has {num_entries}")
+        return observed
+
+    def _end_derivative_check(self, state: dict, contents: list,
+                              restore_point: np.ndarray,
+                              failure: Optional[BaseException]) -> None:
+        """Re-evaluate the model and restore the fit after a check.
+
+        Parameters
+        ----------
+        state : dict
+            Result of ``_fit_state`` before the check.
+        contents : list of tuple
+            ``_array_contents`` of the saved attribute values: ``(array,
+            copy)`` pairs whose contents are copied back.
+        restore_point : numpy.ndarray
+            Optimized parameters [parameter units] at which the model is
+            evaluated once more: ``params_convg``, or the checked point
+            before a fit.
+        failure : BaseException or None
+            Exception raised by the check, or None after success.
+
+        Raises
+        ------
+        Exception
+            Whatever the re-evaluation raises when ``failure`` is None,
+            after the state has been restored.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the re-evaluation raises while ``failure`` is an
+            ``Exception``; the caller re-raises ``failure``. The report is
+            dropped when warnings are turned into errors, so that it never
+            replaces ``failure``.
+
+        Notes
+        -----
+        No re-evaluation is attempted when ``failure`` is not an
+        ``Exception`` (e.g. ``KeyboardInterrupt``).
+        """
+        try:
+            if failure is None or isinstance(failure, Exception):
+                try:
+                    self.get_objective(
+                        np.array(restore_point, dtype=float, copy=True),
+                        out_array=True, set_self=False)
+                except Exception as refresh_error:
+                    if failure is None:
+                        raise
+                    try:
+                        warnings.warn(
+                            "check_derivatives could not re-evaluate the "
+                            f"model at {np.asarray(restore_point).tolist()} "
+                            f"after an evaluation failed ({refresh_error!r});"
+                            " a stateful model callback may be left at the "
+                            "last evaluated parameters",
+                            RuntimeWarning, stacklevel=_user_stacklevel())
+                    except Exception:
+                        # A warnings filter set to 'error' turns the report
+                        # into an exception; the original failure, which
+                        # the caller re-raises, takes priority.
+                        pass
+        finally:
+            self._restore_fit_state(state)
+            _restore_array_contents(contents)
+
+    def check_derivatives(
+            self, params: Optional[npt.ArrayLike] = None,
+            rel_step: Optional[Union[float, npt.ArrayLike]] = None,
+            param_scale: Optional[Union[float, npt.ArrayLike]] = None,
+            bounds: Optional[Union[Sequence, Bounds]] = None,
+            rtol: Optional[float] = None) -> DerivativeCheck:
+        """Verify the estimator's Jacobian against finite differences.
+
+        Compares the weighted residual Jacobian that the optimizer and the
+        covariance use, ``get_gradient(p, out_array=True)`` (model-returned
+        sensitivities, ``jac_fun`` or the estimator's forward differences
+        with ``dx_finitediff``), with an independent second-order
+        finite-difference derivative of the weighted residuals
+        ``get_objective(p, out_array=True)`` at the same point ``p``. Only
+        the optimized parameters are perturbed, one at a time; fixed
+        parameters keep their ``param_seed`` values. The estimator's fit is
+        not modified (see Notes).
+
+        Parameters
+        ----------
+        params : array_like, optional
+            Optimized parameters at which to check, shape ``(num_params,)``
+            [parameter units], finite. The default is ``params_convg`` after
+            a fit and the optimized entries of ``param_seed`` before one.
+        rel_step : float or array_like, optional
+            Relative step [-] in ``(0, 1)``, for every parameter or one per
+            optimized parameter. The step of parameter ``i`` is ``h_i =
+            rel_step_i * scale_i``. The default is
+            ``jac_module.CENTRAL_DIFFERENCE_REL_STEP``, the cube root of the
+            machine epsilon (about 6.06e-6), which is right only for
+            outputs accurate to machine precision, such as closed-form
+            models (see Notes).
+        param_scale : float or array_like, optional
+            Positive finite typical magnitude ``scale_i`` of every
+            optimized parameter, or one per parameter [parameter units].
+            The default None uses ``|params|`` and requires every parameter
+            to be nonzero: no magnitude is invented for a parameter at zero.
+        bounds : sequence of pairs or scipy.optimize.Bounds, optional
+            Valid domain of the optimized parameters, in ``name_params``
+            order and parameter units: one ``(lower, upper)`` pair per
+            optimized parameter, as for an IPOPT fit (``optimize_fn``) and
+            in ``CalibrationRecord.optimizer_inputs()``, with None or an
+            infinity for an unbounded side; or a ``scipy.optimize.Bounds``
+            (``lb`` and ``ub`` scalars or one entry per parameter). The
+            ``(lower_array, upper_array)`` form of
+            ``scipy.optimize.least_squares`` must be wrapped in
+            ``scipy.optimize.Bounds``: a plain tuple of two arrays is read
+            as per-parameter pairs (for two parameters it is accepted with
+            that meaning; otherwise its shape is rejected). ``params`` must
+            lie inside, and after a fit ``params_convg`` too, where the
+            model is re-evaluated at the end (see Notes); the model is
+            never evaluated outside: a
+            parameter whose central points ``p +/- h`` leave the domain
+            uses the one-sided three-point formula toward the interior
+            (needs ``p + 2h`` or ``p - 2h`` inside). The default None is
+            unbounded.
+        rtol : float, optional
+            Agreement threshold [-] on the relative errors, positive and
+            finite. Supplied, it fills ``DerivativeCheck.agrees``; the
+            default None applies no threshold.
+
+        Returns
+        -------
+        DerivativeCheck
+            Immutable comparison: the estimator's ``jacobian`` and the
+            ``reference``, shape ``(num_params, n_entries)`` [weighted
+            residual unit / parameter unit] in the ``get_residual_layout``
+            order, their absolute errors, and per parameter the step,
+            formula, largest absolute error and relative error ``||J_i -
+            R_i|| / ||R_i||`` over the observed entries.
+
+        Raises
+        ------
+        TypeError
+            If ``params``, ``rel_step``, ``param_scale``, a bound or
+            ``rtol`` is not real.
+        ValueError
+            If ``params`` does not have shape ``(num_params,)``, is not
+            finite or lies outside ``bounds``; ``bounds`` is given after
+            a fit and ``params_convg``, where the model is re-evaluated at
+            the end, lies outside it; ``rel_step`` is not in
+            ``(0, 1)`` or has the wrong shape; ``param_scale`` is not
+            positive and finite or has the wrong shape; a parameter is
+            exactly zero without ``param_scale``; ``bounds`` is malformed
+            (see ``_parameter_bounds``); a parameter's bounds have zero
+            width (fix it through ``optimize_flags`` instead); a step
+            vanishes at the floating-point spacing of its parameter;
+            neither a central nor a one-sided step of a parameter fits
+            inside its bounds; or the Jacobian is the estimator's forward
+            difference and ``dx_finitediff`` would step outside ``bounds``.
+        Exception
+            Whatever the model callback or ``jac_fun`` raises; the model is
+            re-evaluated and the fit state restored first (see Notes).
+
+        Warns
+        -----
+        RuntimeWarning
+            If an evaluation raised and the model then also fails at the
+            restoring re-evaluation (see Notes); the original exception
+            propagates.
+
+        Notes
+        -----
+        *Formulas.* The central difference ``(f(p + h) - f(p - h)) / (2h)``
+        has the truncation error ``h**2 f'''(p) / 6``; the one-sided
+        three-point difference ``(-3 f(p) + 4 f(p + s) - f(p + 2s)) /
+        (2s)``, ``s = +h`` (forward) or ``-h`` (backward), has
+        ``-s**2 f'''(p) / 3`` (derivation in ``_three_point_difference``).
+        The steps are rounded so that ``p + h`` is the evaluated number.
+
+        *Step choice.* If each output is accurate to a relative ``u``, the
+        rounding error of either formula is of order ``u |f| / h``. The
+        total, of order ``h**2 |f'''| + u |f| / h``, is smallest for ``h``
+        proportional to ``u**(1/3)`` (Nocedal and Wright, *Numerical
+        Optimization*, 2nd ed., Springer, 2006, Sec. 8.1, for ``u`` the
+        machine epsilon), with an error of order ``u**(2/3)``. The default
+        relative step assumes machine-precision outputs. For outputs of an
+        ODE integrator with relative tolerance ``solver_rtol`` (e.g. the
+        CVode ``rtol``), ``u`` is about ``solver_rtol``: pass ``rel_step``
+        of about ``solver_rtol**(1/3)``, e.g.
+        ``jac_module.DEFAULT_OUTPUT_RTOL**(1/3)`` = 1e-2 at CVode's default
+        ``rtol`` of 1e-6, and tighten the solver tolerances when a sharper
+        check is needed. (The ``rtol`` argument of this method is the
+        agreement threshold, unrelated to the solver tolerance.) A too
+        small step for noisy outputs reports rounding noise as a
+        derivative error.
+
+        *Reading the result.* The relative errors include the error of the
+        reference itself, so compare them with its expected accuracy,
+        about ``rel_step**2`` plus ``u / rel_step`` for well-scaled
+        parameters, rather than with zero. A forward-difference Jacobian
+        (``jacobian_source='finite_difference'``) differs from the
+        reference by its own truncation error, about ``|dx| |f''| / 2``,
+        relative ``|dx| / scale`` for well-scaled curvature.
+
+        *Domain.* The estimator's forward-difference Jacobian is evaluated
+        exactly as the optimizer evaluates it, at ``p + dx_finitediff``;
+        it is checked against ``bounds`` before any of those evaluations.
+
+        *State.* ``get_objective`` and ``get_gradient`` overwrite the
+        evaluation buffers (``y_runs``, ``resid_runs``,
+        ``weighted_residuals``, ``sens``, ``sens_second``, ...) and append
+        to the iteration histories, and stateful model callbacks, such as
+        the unit operations behind a ``SimulationExec`` estimator, keep the
+        parameters and results of their last evaluation. After the check,
+        also when an evaluation raises, the model is therefore evaluated
+        once more at ``params_convg`` (at the checked point before a fit),
+        as ``optimize_fn`` refreshes its accepted point, so such callbacks
+        end at the parameters they started from. Then the attributes in
+        ``_FIT_ATTRIBUTES`` saved before the evaluations are rebound, and
+        the contents of the writeable arrays they hold (directly or in
+        lists and tuples) are copied back, which also undoes callbacks
+        that refill a preallocated sensitivity array in place. The
+        histories are detached during the check. So ``params_convg``,
+        ``info_opt``, ``covar_params``, ``params_iter`` and the buffers
+        that ``StatisticsClass`` reads keep their objects and values. If
+        that re-evaluation fails after a successful check, its exception
+        propagates (the attributes are still restored); after a failed
+        evaluation, the original exception propagates and a
+        ``RuntimeWarning`` reports the second failure. Only internal caches
+        change: the marginal precision roots of ``_weight_sample_rows`` may
+        gain entries, and ``MultipleCurveResolution`` clears its evaluation
+        cache (see its ``_restore_fit_state``).
+        """
+        names = list(self.name_params)
+        num_params = int(self.num_params)  # [-]
+        rtol = _agreement_threshold(rtol)  # [-]
+        if params is None:
+            params = getattr(self, 'params_convg', None)
+            if params is None:
+                params = self.param_seed[self.map_variable]
+        point = _float_vector(params, 'params')  # [parameter units]
+        if point.shape != (num_params,):
+            raise ValueError(
+                f"params must have shape ({num_params},), one value per "
+                f"optimized parameter ({', '.join(names)}); got "
+                f"{point.shape}")
+        if not np.isfinite(point).all():
+            raise ValueError(f"params must be finite; got {point.tolist()}")
+        lower, upper = _parameter_bounds(bounds, names)  # [parameter units]
+        outside = [f"{name} = {float(value)!r} not in [{float(low)!r}, "
+                   f"{float(high)!r}]"
+                   for name, value, low, high in zip(names, point, lower,
+                                                     upper)
+                   if not low <= value <= high]
+        if outside:
+            raise ValueError("params lie outside bounds: "
+                             + '; '.join(outside))
+        for name, low, high in zip(names, lower, upper):
+            if low == high:
+                raise ValueError(
+                    f"The bounds of {name!r} have zero width "
+                    f"([{float(low)!r}, {float(high)!r}]), so it cannot be "
+                    "perturbed: fix the parameter through optimize_flags "
+                    "instead of bounds")
+        accepted = getattr(self, 'params_convg', None)  # [parameter units]
+        if accepted is not None:
+            accepted = np.asarray(accepted, dtype=float)
+            stray = [f"{name} = {float(value)!r} not in [{float(low)!r}, "
+                     f"{float(high)!r}]"
+                     for name, value, low, high in zip(names, accepted,
+                                                       lower, upper)
+                     if not low <= value <= high]
+            if stray:
+                raise ValueError(
+                    "params_convg lies outside bounds ("
+                    + '; '.join(stray) + "), and check_derivatives "
+                    "re-evaluates the model there at the end to leave "
+                    "stateful callbacks at the accepted parameters; widen "
+                    "the bounds to include params_convg or check without "
+                    "bounds")
+        rel_steps = _per_parameter_fractions(
+            CENTRAL_DIFFERENCE_REL_STEP if rel_step is None else rel_step,
+            'rel_step', num_params)  # [-]
+        try:
+            scale = _parameter_scale(point, param_scale,
+                                     names)  # [parameter units]
+        except ValueError as error:
+            raise ValueError(
+                f"{error}. It sets the step h = rel_step * scale of the "
+                "derivative check") from error
+
+        # Per parameter: formula, signed step [parameter units] and the
+        # evaluated parameter values [parameter units], all inside bounds.
+        plan = []
+        for ind, name in enumerate(names):
+            value = point[ind]  # [parameter units]
+            nominal = rel_steps[ind] * scale[ind]  # [parameter units]
+            above = value + nominal  # [parameter units]
+            step = above - value  # [parameter units], as represented
+            below = value - step  # [parameter units]
+            if not step > 0:
+                raise ValueError(
+                    f"The step of {name!r}, rel_step * scale = "
+                    f"{float(nominal)!r}, vanishes at the floating-point "
+                    f"spacing of {float(value)!r}; "
+                    "pass a larger rel_step or param_scale")
+            if lower[ind] <= below and above <= upper[ind]:
+                plan.append(('central', step, (above, below)))
+                continue
+            far = value + 2 * step  # [parameter units]
+            if far <= upper[ind]:
+                plan.append(('forward', step, (above, far)))
+                continue
+            near = value - nominal  # [parameter units]
+            back = near - value  # [parameter units], negative
+            far = value + 2 * back  # [parameter units]
+            if back < 0 and lower[ind] <= far:
+                plan.append(('backward', back, (near, far)))
+                continue
+            raise ValueError(
+                f"Neither a central nor a one-sided three-point step of "
+                f"{name!r} (h = {float(step)!r} at {float(value)!r}) fits "
+                f"inside its bounds [{float(lower[ind])!r}, "
+                f"{float(upper[ind])!r}]; pass a smaller rel_step or "
+                "param_scale")
+
+        state = self._fit_state()
+        contents = _array_contents(state.values())
+        # Detached histories: get_objective appends only to lists.
+        self.params_iter = None
+        self.objfun_iter = None
+        # [parameter units], where stateful callbacks are left afterwards
+        restore_point = state['params_convg']
+        if restore_point is _ABSENT or restore_point is None:
+            restore_point = point
+        try:
+            # [weighted residual unit], also refreshes model-returned
+            # sensitivities at the point
+            center = np.array(self.get_objective(point.copy(), out_array=True,
+                                                 set_self=False), dtype=float)
+            source = self._jacobian_source()
+            if source == 'finite_difference':
+                # [parameter units], points of the forward differences
+                fd_points = point + self._signed_finite_difference_steps(
+                    point)
+                stepping_out = [
+                    f"{name} = {float(value)!r}"
+                    for name, value, low, high in zip(names, fd_points,
+                                                      lower, upper)
+                    if value < low or value > high]
+                if stepping_out:
+                    raise ValueError(
+                        "The estimator's forward-difference Jacobian would "
+                        "evaluate the model outside bounds at "
+                        + ', '.join(stepping_out) + ", as the optimizer "
+                        "would at this point; pass dx_finitediff steps that "
+                        "point into the domain")
+            # [weighted residual unit / parameter unit], (n, n_entries)
+            jacobian = np.array(self.get_gradient(point.copy(),
+                                                  out_array=True),
+                                dtype=float)
+            reference = np.zeros((num_params, center.size))  # same units
+
+            for ind, (formula, step, values) in enumerate(plan):
+                outputs = []  # [weighted residual unit]
+                for value in values:
+                    trial = point.copy()  # [parameter units]
+                    trial[ind] = value
+                    outputs.append(np.array(
+                        self.get_objective(trial, out_array=True,
+                                           set_self=False), dtype=float))
+                if formula == 'central':
+                    reference[ind] = ((outputs[0] - outputs[1])
+                                      / (values[0] - values[1]))
+                else:
+                    reference[ind] = _three_point_difference(
+                        center, outputs[0], outputs[1], step)
+            observed = self._observed_residual_entries(center.size)
+        except BaseException as failure:
+            self._end_derivative_check(state, contents, restore_point,
+                                       failure)
+            raise
+        self._end_derivative_check(state, contents, restore_point, None)
+
+        return DerivativeCheck.from_derivatives(
+            names, point, rel_steps, scale,
+            np.abs([step for _, step, _ in plan]),
+            [formula for formula, _, _ in plan], source, jacobian, reference,
+            observed, rtol=rtol)
 
     def plot_data_model(self, **fig_kwargs):
 
@@ -4440,6 +6229,30 @@ class ParameterEstimation:
         return fig, axis
 
     def plot_correlation(self):
+        """Plot the parameter correlation matrix as a heatmap.
+
+        Returns
+        -------
+        fig_heat : matplotlib.figure.Figure
+            Figure holding the heatmap.
+        axis_heat : matplotlib.axes.Axes
+            Axis of the heatmap: the lower triangle of ``correl_params``
+            [-], diagonal included, on a -1 to 1 colour scale, with the
+            optimized parameters' plot labels (``name_params_plot``).
+
+        Raises
+        ------
+        AttributeError
+            If no covariance has been computed, so ``correl_params`` does
+            not exist.
+        ValueError
+            If the correlations are undefined (all NaN, as stored by
+            ``get_covariance`` when the covariance is undefined; its
+            warning states the cause). Earlier releases drew an empty
+            heatmap.
+        """
+        _require_defined_covariance(self.correl_params,
+                                    'ParameterEstimation.plot_correlation')
 
         # Mask
         mask = np.tri(self.num_params, k=-1).T
@@ -4815,6 +6628,77 @@ class MultipleCurveResolution(ParameterEstimation):
         self._mcr_evaluation = None
         self.mult_penalty = mult_penalty  # [objective unit / eps unit**2]
 
+    def _jacobian_source(self) -> str:
+        """Return the origin of the weighted residual Jacobian.
+
+        Returns
+        -------
+        {'model', 'finite_difference'}
+            ``'model'`` when the model callback returns sensitivities with
+            its outputs (``sens_second`` is stored), otherwise
+            ``'finite_difference'``: ``get_gradient`` of this class does not
+            call ``jac_fun``.
+        """
+        if self.sens_second is not None:
+            return 'model'
+        return 'finite_difference'
+
+    def _weighted_predictions(self) -> np.ndarray:
+        """Return the accepted MCR predictions weighted like the residuals.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(len(info_opt['fun']),)`` [weighted residual unit]: the
+            stacked accepted predictions ``y_model``, which ``optimize_fn``
+            stores from ``_model_predictions`` at the accepted parameters
+            (curve-resolved spectra ``C eps`` [-] from ``y_runs``, then the
+            non-spectral
+            model values [model units]; zero where unobserved), each column
+            multiplied by its residual sign (``_residual_signs``: -1
+            spectral, +1 non-spectral) and whitened by
+            ``_weight_sample_rows``, flattened column-major like
+            ``_assemble_residuals``.
+
+        Notes
+        -----
+        The spectral predictions are the raw ``y_runs``. The non-spectral
+        model values are not stored separately: ``_model_predictions``
+        rebuilds them as residuals plus observations, which loses accuracy
+        when they are far below the data. ``y_model`` holds fresh arrays
+        stored with the fit, so evaluations after the fit do not change it.
+        Before a fit ``get_identifiability`` raises ``AttributeError`` (no
+        ``info_opt``) before this method is reached.
+        """
+        # [-] spectral, [model units] non-spectral; NaN where unobserved
+        predictions = np.vstack(self.y_model)
+        signed = (np.nan_to_num(predictions)
+                  * self._residual_signs(0))  # [-] / [model units]
+        # [weighted residual unit]
+        weighted = self._weight_sample_rows(
+            signed, self._residual_observation_mask())
+        return weighted.T.ravel()
+
+    def _residual_blocks(self, values: np.ndarray) -> list:
+        """Split a vector in the MCR residual layout into sample rows.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            Shape ``(len(info_opt['fun']),)``, flattened column-major over
+            the stacked model-grid rows of all experiments, as in
+            ``_assemble_residuals`` [weighted residual unit].
+
+        Returns
+        -------
+        list of tuple
+            One ``(rows, mask)``: ``rows`` of shape ``(sum(len_spectra),
+            n_lambda + n_non)`` and ``_residual_observation_mask()``.
+        """
+        num_rows = int(sum(self.len_spectra))  # [-]
+        rows = values.reshape(-1, num_rows).T  # [weighted residual unit]
+        return [(rows, self._residual_observation_mask())]
+
     def _residual_observation_mask(self) -> Optional[np.ndarray]:
         """Return the observation mask of the stacked MCR residual columns.
 
@@ -4851,6 +6735,41 @@ class MultipleCurveResolution(ParameterEstimation):
 
         mask = np.vstack(blocks)
         return None if mask.all() else mask
+
+    def _observed_residual_entries(self, num_entries: int) -> np.ndarray:
+        """Return which entries of the MCR residual vector are observed.
+
+        Parameters
+        ----------
+        num_entries : int
+            Length of ``get_objective(..., out_array=True)``: the data
+            residuals followed by the absorptivity-penalty rows [-].
+
+        Returns
+        -------
+        numpy.ndarray
+            Boolean, shape ``(num_entries,)``: ``_residual_observation_mask``
+            flattened column-major over the stacked model-grid rows, as the
+            data residuals are (``_assemble_residuals``), then True for
+            every penalty row.
+
+        Raises
+        ------
+        ValueError
+            If ``num_entries`` is smaller than the number of data residuals.
+        """
+        num_rows = int(sum(self.len_spectra))  # [-]
+        num_columns = (self.spectra_tot.shape[1]
+                       + len(self.measured_ind.get('non_spectra', [])))  # [-]
+        mask = self._residual_observation_mask()
+        data = (np.ones(num_rows * num_columns, dtype=bool) if mask is None
+                else mask.T.ravel())
+        if data.size > num_entries:
+            raise ValueError(
+                f"The MCR residual vector has {num_entries} entries, fewer "
+                f"than its {data.size} data residuals")
+        return np.concatenate((data, np.ones(num_entries - data.size,
+                                             dtype=bool)))
 
     def get_sens_projection(self, c_target: np.ndarray, c_plus: np.ndarray,
                             sens_states: np.ndarray,

@@ -3,6 +3,8 @@
 Synthetic squared gains force a rejected terminal trial without replacing the
 solver. Weighted, unequal experiments exercise ordering and fixed parameters;
 StatisticsClass exercises the consumer of the reported trajectories.
+The one-trial fits stop at max_fun_eval, so each also asserts the single
+non-convergence RuntimeWarning of optimize_fn (#352).
 """
 
 import numpy as np
@@ -18,6 +20,31 @@ ROUNDING_ATOL = 64 * np.finfo(float).eps  # [-]
 # Allow cancellation in the explicit forward-difference quotient below.
 DERIVATIVE_RTOL = 32 * np.sqrt(np.finfo(float).eps)  # [-]
 FINITE_DIFFERENCE_STEP = 1.0e-4  # [-], resolves curvature at the .1 gain seed
+# The #352 warning of a one-trial LM fit whose only trial is rejected.
+ONE_REJECTED_TRIAL_WARNING = (
+    r"Levenberg-Marquardt \(method='LM'\) stopped without converging "
+    r"\(Maximum iterations exceeded\) after 1 trial evaluations and 0 "
+    r"accepted steps, bounded by max_fun_eval=1;")
+
+
+def assert_one_unconverged_warning(record):
+    """Assert that a fit emitted exactly one non-convergence warning here.
+
+    Parameters
+    ----------
+    record : pytest.WarningsRecorder
+        Warnings recorded around the fit.
+
+    Raises
+    ------
+    AssertionError
+        If there is not exactly one RuntimeWarning, or it does not point at
+        this file.
+    """
+    runtime = [item for item in record
+               if issubclass(item.category, RuntimeWarning)]
+    assert len(runtime) == 1
+    assert runtime[0].filename == __file__
 
 
 def squared_gain(parameters, inputs):
@@ -66,8 +93,12 @@ def test_rejected_terminal_trial_reports_accepted_point(jacobian, store_iter):
                                     jac_fun=jacobian,
                                     dx_finitediff=FINITE_DIFFERENCE_STEP)
     # One trial tests rejection reporting, not convergence to the truth.
-    accepted, _, info = estimator.optimize_fn(
-        optim_options={"max_fun_eval": 1}, verbose=False, store_iter=store_iter)
+    with pytest.warns(RuntimeWarning,
+                      match=ONE_REJECTED_TRIAL_WARNING) as record:
+        accepted, _, info = estimator.optimize_fn(
+            optim_options={"max_fun_eval": 1}, verbose=False,
+            store_iter=store_iter)
+    assert_one_unconverged_warning(record)
     assert info["num_fun_eval"] == 1 and info["num_iter"] == 0
     np.testing.assert_allclose(accepted, seed, rtol=0.0, atol=ROUNDING_ATOL)
     expected_model = np.array([0.01, 0.02, 0.03])  # [-], seed squared * inputs
@@ -130,8 +161,11 @@ def test_rejected_trial_preserves_weighting_state_order_and_fixed_parameters():
     estimator = ParameterEstimation(
         three_state_gain, seed, inputs, observations, measured_ind=[2, 0],
         optimize_flags=[False, True], weight_matrix=weights)
-    accepted, _, info = estimator.optimize_fn(
-        optim_options={"max_fun_eval": 1}, verbose=False)
+    with pytest.warns(RuntimeWarning,
+                      match=ONE_REJECTED_TRIAL_WARNING) as record:
+        accepted, _, info = estimator.optimize_fn(
+            optim_options={"max_fun_eval": 1}, verbose=False)
+    assert_one_unconverged_warning(record)
     assert info["num_iter"] == 0 and info["num_fun_eval"] == 1
     np.testing.assert_allclose(accepted, [0.1], rtol=0.0, atol=ROUNDING_ATOL)
     # At the retained seed the response is exactly 1/100 of the observations.

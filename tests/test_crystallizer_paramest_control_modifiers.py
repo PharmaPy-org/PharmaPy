@@ -54,8 +54,7 @@ HEATING_SLOPE = 1.0  # [K/s], issue #492 modifier: 310 K to 315 K over 5 s
 HOLD_TIME = 3.0  # [s], ramp-then-hold profile stops rising here
 END_TIME = 5.0  # [s], issue #492 horizon
 SAMPLE_COUNT = 6  # [-], 1 s sampling
-# Crystallizer callbacks return the solver rows, which include the charge
-# time, so experiment grids start at 0 s (issue #328).
+# Experiment grid from the charge at 0 s to END_TIME.
 TIMES = np.linspace(0.0, END_TIME, SAMPLE_COUNT)  # [s]
 # Control values at TIMES, written out instead of recomputed.
 CONFIGURED_PROFILE = np.full(SAMPLE_COUNT, 310.0)  # [K]

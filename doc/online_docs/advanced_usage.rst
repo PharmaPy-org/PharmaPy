@@ -13,7 +13,10 @@ the model once more per experiment to refresh its stored outputs. This also
 restores a stateful unit-operation callback to those parameters; the unit retains
 the last experiment's trajectory when several experiments share one unit.
 This reporting step does not establish convergence. Inspect the solver's
-termination diagnostics before interpreting the fit.
+termination diagnostics before interpreting the fit. SciPy fits refresh their
+outputs the same way, and IPOPT fits now do too (issue #352): earlier
+releases kept the outputs of IPOPT's last stored evaluation, which in the
+cases checked was already the accepted point.
 
 :code:`SimulationExec.EstimateParams` stores the wall-clock duration of the
 optimization in seconds as :code:`optimization_time`. It prints the
@@ -201,8 +204,9 @@ raised :code:`AttributeError` for such units.
 :code:`optimize_fn` validates :code:`method` against :code:`'LM'`,
 :code:`'IPOPT'`, :code:`'scipy'` and :code:`'least_squares'` and checks that
 cyipopt is installed for IPOPT before changing the estimator (issue #479). A
-call that raises, during the solve or afterwards (for example a singular
-covariance), keeps the previous fit: :code:`opt_method`, :code:`optim_options`,
+call that raises, during the solve or afterwards (for example when a warnings
+filter turns the undefined-covariance warning below into an error), keeps the
+previous fit: :code:`opt_method`, :code:`optim_options`,
 :code:`optimize_flag`, :code:`params_convg`, :code:`info_opt`, :code:`y_model`,
 :code:`covar_params`, :code:`correl_params`, :code:`paramest_df`, the
 iteration histories and the evaluation buffers (:code:`y_runs`,
@@ -230,6 +234,44 @@ calibration records. SciPy fits already used a shallow copy, so only in-place
 edits of nested values, such as arrays or the bounds, reached their stored
 options.
 
+When the parameters are not (locally) identifiable from the observed data,
+:code:`optimize_fn` keeps the solved fit and returns an all-NaN covariance
+instead of discarding the fit or reporting meaningless numbers (issue #532).
+The linearized covariance is undefined when :code:`J @ J.T` of the weighted
+residual Jacobian is singular or numerically singular: a parameter changes no
+observed entry, or the Jacobi-scaled matrix :code:`D J J^T D`, with
+:code:`D = diag((J J^T)_ii**-0.5)`, has a condition number of at least
+:code:`1/eps`. Here :code:`eps` is the machine epsilon, twice the unit
+roundoff :code:`u`; a computed inverse has a relative error of order
+:code:`u * cond` (Golub and Van Loan, *Matrix Computations*, 4th ed., Johns
+Hopkins University Press, 2013, Sec. 2.6), so such an inverse would have no
+correct significant digit. The scaled matrix, and hence the test, does not
+change with the units chosen for the parameters; Jacobi scaling is moreover
+within a factor of the number of parameters of the best diagonal scaling (van
+der Sluis, A., 1969, Condition numbers and equilibration of matrices,
+Numerische Mathematik 14(1), 14-23, doi:10.1007/BF02165096). The covariance
+is also undefined when the Jacobian has non-finite entries, or when
+:code:`J @ J.T` passes the test but its inversion fails or gives non-finite or
+negative variances. :code:`get_covariance` then stores all-NaN
+:code:`covar_params` and :code:`correl_params` and emits a
+:code:`RuntimeWarning` that states the cause and names the parameters
+involved: the parameters without effect and the poorly determined directions,
+for example :code:`0.707*a - 0.707*b` when only the product :code:`a * b` is
+determined; the parameters with non-finite sensitivities; or the parameters
+with invalid variances and the least-determined direction.
+:code:`get_confidence_intervals`, :code:`plot_correlation`,
+:code:`StatisticsClass.get_intervals`, :code:`confidence_regions`,
+:code:`bootstrap_confid` and :code:`CalibrationRecord.from_estimation` raise a
+:code:`ValueError` saying that the covariance is undefined and pointing to that
+warning; :code:`bootstrap_params` keeps the refitted estimates of such samples.
+Earlier releases raised :code:`numpy.linalg.LinAlgError` for an exactly
+singular :code:`J @ J.T` (Levenberg-Marquardt inside the solver, other methods
+after it, discarding the fit; bootstrap refits became NaN rows), otherwise
+returned meaningless values, including negative variances, and
+:code:`plot_correlation` drew an empty heatmap. The final inverse of
+:code:`levenberg_marquardt` is NaN instead of raising for a singular matrix.
+Well-conditioned covariances are unchanged.
+
 IPOPT fits report Ipopt's termination outcome in :code:`info`:
 :code:`success`, :code:`status`, :code:`message` and the iteration count
 :code:`nit` (issue #475). An unsuccessful termination, for example at
@@ -237,6 +279,48 @@ IPOPT fits report Ipopt's termination outcome in :code:`info`:
 message; the returned parameters, covariance and statistics then describe the
 last iterate, not a converged estimate. Earlier releases discarded the outcome,
 so such fits were indistinguishable from converged ones.
+
+Levenberg-Marquardt and SciPy fits report their outcome the same way (issue
+#352): :code:`info['success']` (bool) and :code:`info['message']` (str) for
+every method. For LM, :code:`success` is True when :code:`stop_criterion` is
+one of its convergence tests (:code:`'Small step'`, :code:`'Small gradient'`,
+:code:`'Value of the objective function lower than tolerance'`) and False for
+:code:`'Maximum iterations exceeded'`; for :code:`'scipy'` and
+:code:`'least_squares'` they are SciPy's own :code:`success`, :code:`status`
+and :code:`message`. A fit that stops without converging, for example at
+:code:`max_fun_eval` (LM) or :code:`max_nfev` (SciPy), emits a
+:code:`RuntimeWarning` naming the method, the stop reason and the evaluation
+counts, and stating that the returned parameters, covariance and statistics
+describe the last accepted iterate, not a converged estimate. When the
+evaluation budget stopped the fit (LM's :code:`'Maximum iterations
+exceeded'`, SciPy status 0), the warning also names the limiting option with
+its effective value and suggests raising it; other unsuccessful SciPy
+statuses, such as -2 after a callback stop, are reported with their status
+and message only. The returned values themselves are unchanged. Earlier
+releases did not warn: the outcome was only available as LM's
+:code:`info['stop_criterion']` or SciPy's native :code:`info['success']`,
+:code:`info['status']` and :code:`info['message']`. An LM call
+with :code:`max_fun_eval=0` evaluates the seed only: it reports
+:code:`success` False with a message saying that no iterations were
+requested, and does not warn. These warnings, like IPOPT's, point at the
+user's call, also through :code:`estimate_parameters`,
+:code:`SimulationExec.EstimateParams` and :code:`CalibrationRecord.rerun`.
+Like other warnings, they can be turned into errors by a warnings filter;
+a bootstrap refit that stops without converging then aborts the run
+(see :code:`StatisticsClass.bootstrap_params`).
+
+:code:`info['tolerances']` records the stopping criteria that governed the
+fit with their effective values, the given options merged over the optimizer
+defaults: :code:`max_fun_eval`, :code:`eps_1`, :code:`eps_2` and
+:code:`tol_fun` for LM (defaults 100, 1e-8, 1e-8 and 1e-12, read from
+:code:`levenberg_marquardt`), and :code:`ftol`, :code:`xtol`, :code:`gtol`
+and :code:`max_nfev` for SciPy (defaults 1e-8, 1e-8, 1e-8 and None, read from
+:code:`scipy.optimize.least_squares`; :code:`max_nfev=None` selects SciPy's
+automatic limit, which is recorded as None rather than as a number). For
+IPOPT it holds only the Ipopt termination options present in the solver's
+options, i.e. the caller's and cyipopt's :code:`tol` default; Ipopt's native
+defaults, such as :code:`max_iter`, are not recorded, as in calibration
+records.
 
 Default parameter labels (:code:`name_params` omitted) are numbered over the
 full parameter vector (issue #477): with :code:`optimize_flags=[False, True]`
@@ -251,6 +335,216 @@ plot labels (:code:`name_params_plot`) now brace the index, e.g.
 :code:`$\theta_{10}$`, so that multi-digit indices form one subscript
 (earlier :code:`$\theta_10$` rendered as theta_1 followed by 0); single-digit
 labels render as before.
+
+Parameter uncertainty and identifiability
+-----------------------------------------
+
+:code:`ParameterEstimation.get_identifiability(alpha=0.95, include_mse=True,
+jacobian_rtol=None, output_rtol=1e-6, param_scale=None)` returns an
+immutable, picklable :code:`StatsModule.IdentifiabilityReport` of an
+accepted fit (issue #352). It is built from :code:`info_opt['jac']`,
+:code:`info_opt['fun']`, :code:`params_convg`, the observations and the
+weights only: nothing is refitted and the
+estimator, including :code:`covar_params`, is not modified. The model
+outputs it uses are a copy of the accepted outputs that :code:`optimize_fn`
+stores with the fit, so evaluating the model at other parameters afterwards
+(for example :code:`get_objective`, which replaces the evaluation buffer
+:code:`y_runs`) does not change the report.
+:code:`MultipleCurveResolution` inherits it. The report contains:
+
+- :code:`noise_model` (:code:`'declared_uncertainty'`,
+  :code:`'weight_matrix'` or :code:`'identity'`) and
+  :code:`noise_assumption`, a statement built from the estimator: independent
+  (or, with a :code:`weight_matrix`, correlated) zero-mean Gaussian
+  measurement errors; declared uncertainties treated as relative weights
+  rescaled by the residual mean square (:code:`include_mse=True`, like
+  :code:`scipy.optimize.curve_fit(..., absolute_sigma=False)`) or as
+  absolute (:code:`include_mse=False`); a supplied identity
+  :code:`weight_matrix` as errors of standard deviation 1 in each measured
+  unit; for no weighting of measurements in different declared units, that
+  the covariance depends on the unit choice and is not a physical
+  covariance; and that the analysis is local and linearized (Gauss-Newton)
+  at the accepted parameters, assuming a correct model, an interior optimum
+  and parameter-independent weights.
+- :code:`information_matrix` (:code:`J @ J.T`) and
+  :code:`fisher_information` (divided by the residual mean square when the
+  scale is estimated), the hand-off to experiment design (issue #355).
+- The covariance, correlation, standard errors, relative standard errors and
+  Student-t intervals of :code:`get_covariance` and
+  :code:`get_confidence_intervals`, bit for bit; :code:`t_ratios` and
+  :code:`significant`, a test of each estimate against zero, which is not an
+  identifiability test. When the variance scale cannot be estimated (a zero
+  or non-finite residual mean square with :code:`include_mse=True`, e.g.
+  noise-free synthetic data) or the covariance overflows or underflows to
+  a non-positive variance, these are NaN and
+  :code:`covariance_diagnostic` says why; :code:`get_covariance` itself keeps
+  its earlier behaviour.
+- :code:`active_bounds`, the parameters at an active bound of
+  :code:`scipy.optimize.least_squares` (:code:`info_opt['active_mask']`),
+  whose intervals and significance are not reported because the linearized
+  analysis assumes an interior optimum; None for Levenberg-Marquardt, which
+  ignores bounds (#533), and IPOPT, which stores no active set.
+- The singular values of the Jacobi-scaled Jacobian :code:`D J` (unit row
+  norms, as in the #532 test), the scaled condition number and the
+  collinearity index :code:`1 / s_min` of Brun, Reichert and Kuensch (2001,
+  Water Resources Research 37(4), 1015-1030, doi:10.1029/2000WR900350),
+  reported without a threshold; the :code:`weakest_direction`; the
+  parameters with zero information; and the :code:`unresolved_directions`.
+- :code:`convergence`, the optimizer's :code:`success`, :code:`message` and
+  :code:`tolerances`.
+
+Whether the data resolve a direction depends on how accurate the
+sensitivities are. In the row-normalized coordinates of :code:`D J`, the
+error bound of row :code:`i` (:code:`sensitivity_error_bounds`) is
+:code:`jacobian_rtol_i`, plus, for finite-difference Jacobians only,
+:code:`2 * output_error_norm / (h_i * ||J_i||)`. :code:`jacobian_rtol` (one
+value, or one per parameter) is the accuracy of each sensitivity row
+relative to itself: machine epsilon by default for model-returned
+sensitivities and :code:`jac_fun`, and the relative forward-difference step
+:code:`h_i /
+scale_i` by default for finite differences, the truncation term of Nocedal
+and Wright (*Numerical Optimization*, 2nd ed., Springer, 2006, Sec. 8.1,
+eq. 8.5) under a well-scaled curvature; it does not depend on additive
+offsets of the outputs. For sensitivities integrated by an ODE solver,
+pass a bound established by :code:`check_derivatives` (see `Verifying
+derivatives`_): CVODES controls the sensitivity error relative to the
+sensitivities, but only to a modest multiple of the solver :code:`rtol`. In
+the Ziegler validation case, an independent matrix-exponential check found
+row errors up to about 8 times the CVode :code:`rtol` of 1e-6, so the
+:code:`rtol` alone understates them;
+:code:`tests/test_calibration_validation_ziegler.py` derives its
+:code:`jacobian_rtol` from the derivative check instead.
+:code:`scale_i` is :code:`|estimate|`, or
+:code:`param_scale`, which that default needs for an estimate at exactly
+zero. The second term is the rounding term of the same equation: the
+forward difference subtracts two model outputs, each accurate to
+:code:`output_rtol * |y|`, so their difference may be wrong by twice that,
+divided by the step :code:`h_i`. :code:`output_rtol` defaults to
+:code:`jac_module.DEFAULT_OUTPUT_RTOL` (1e-6, CVode's default rtol), the
+accuracy the default step :code:`sqrt(1e-6) * |p|` is designed for;
+closed-form models can pass machine epsilon and ODE models their solver
+:code:`rtol`. :code:`output_error_norm` whitens those output errors:
+exactly, :code:`output_rtol * ||W |y|||` with :code:`y` the accepted model
+outputs, for diagonal weights (declared
+uncertainties, a diagonal or identity :code:`weight_matrix`), and through
+the bound :code:`output_rtol * ||W||_2 * ||y||` for a correlated
+:code:`weight_matrix`, with :code:`||W||_2` the largest singular value of
+the whitening factors used, because whitening can amplify errors in
+directions the predictions do not occupy. Norms are computed scaled, so
+magnitudes near the floating-point limits neither overflow nor underflow.
+
+A row whose error bound is at least 1 (its error may be as large as the row
+itself) is consistent with a zero row under the declared accuracy: that
+parameter is listed in :code:`unresolved_parameters` (distinct from the
+exactly zero rows of :code:`zero_information`), reported as its own
+unresolved direction, and set aside from the analysis of the other rows. By
+Weyl's inequality (Golub and Van Loan, *Matrix Computations*, 4th ed., 2013,
+Cor. 8.6.2) the singular values of the remaining rows of :code:`D J` move
+by at most the Frobenius norm of their bounds, the
+:code:`resolution_floor`; a direction whose singular value is at or below
+it, or which makes the covariance undefined (#532), is unresolved.
+:code:`identifiable` is True only when the covariance is not undefined
+(#532) and no direction or parameter is unresolved; otherwise the standard
+errors and intervals are NaN (undefined covariance) or kept but flagged as
+not precise. :code:`summary()` starts with any
+non-convergence, then the noise assumption, active bounds, the verdict and
+directions, and a parameter table; :code:`to_frame()` returns the
+per-parameter table as a :code:`pandas.DataFrame`, with an
+:code:`unresolved` column (unresolved and zero-information parameters and
+those carried by an unresolved direction, whose :code:`significant` entry
+is missing) and :code:`identifiable` and :code:`covariance_diagnostic` in
+:code:`DataFrame.attrs`.
+
+.. code-block:: python
+
+    estimator.optimize_fn()
+    report = estimator.get_identifiability()
+    print(report.summary())
+    table = report.to_frame()
+
+Verifying derivatives
+---------------------
+
+The optimizer, the covariance and the identifiability report all use the
+weighted residual Jacobian of :code:`get_gradient`: sensitivities returned
+by the model callback (for example CVODES forward sensitivities of the
+reactor and crystallizer models), a user :code:`jac_fun`, or the
+estimator's own forward differences with :code:`dx_finitediff`. Before
+relying on a new model, verify that Jacobian with
+:code:`ParameterEstimation.check_derivatives(params=None, rel_step=None,
+param_scale=None, bounds=None, rtol=None)` (issue #352). It returns an
+immutable, picklable :code:`ParamEstim.DerivativeCheck` that compares the
+Jacobian at :code:`params` (default: :code:`params_convg` after a fit, the
+optimized seed before one) with an independent second-order
+finite-difference derivative of the weighted residuals
+:code:`get_objective(params, out_array=True)`. Only the optimized
+parameters are perturbed, one at a time; fixed parameters keep their
+values. Both arrays follow :code:`get_residual_layout`; unobserved entries
+are zero in both and are left out of the norms. Per parameter it reports
+the step, the formula, the largest absolute error and the relative error
+:code:`||J_i - R_i|| / ||R_i||`. No pass/fail threshold is applied unless
+:code:`rtol` is given (then :code:`agrees` holds :code:`relative_error <=
+rtol`). The estimator's fit (:code:`params_convg`, :code:`info_opt`,
+:code:`covar_params`, the evaluation buffers, including arrays a callback
+refills in place, and the iteration histories) is left unchanged, also when
+an evaluation raises. Afterwards the model is evaluated once more at
+:code:`params_convg` (at the checked point before a fit), as
+:code:`optimize_fn` refreshes its accepted point, so stateful callbacks such
+as the unit operations of a :code:`SimulationExec` estimator end with the
+parameters and results they started from. If that re-evaluation fails after
+a failed check, the original error is raised and a :code:`RuntimeWarning`
+reports the second failure.
+
+The step of parameter :code:`i` is :code:`h_i = rel_step * scale_i`, with
+:code:`scale_i = |p_i|` or :code:`param_scale`; a parameter at exactly zero
+needs :code:`param_scale`, because no magnitude is invented for it. The
+central difference has a truncation error proportional to :code:`h**2`
+and a rounding error of about :code:`u |f| / h` for outputs of relative
+accuracy :code:`u`; the sum is smallest for :code:`h` proportional to
+:code:`u**(1/3)` (Nocedal and Wright, *Numerical Optimization*, 2nd ed.,
+Springer, 2006, Sec. 8.1). The default :code:`rel_step`,
+:code:`jac_module.CENTRAL_DIFFERENCE_REL_STEP`, is the cube root of the
+machine epsilon (about 6e-6) and is right only for outputs accurate to
+machine precision, such as closed-form models. For a model solved by an ODE
+integrator with relative tolerance :code:`solver_rtol` (e.g. the CVode
+:code:`rtol` option, not the agreement threshold :code:`rtol` of this
+method), :code:`u` is about :code:`solver_rtol`: pass :code:`rel_step` of
+about :code:`solver_rtol**(1/3)`, e.g.
+:code:`jac_module.DEFAULT_OUTPUT_RTOL**(1/3) = 0.01` at CVode's default
+relative tolerance of 1e-6, and tighten the solver tolerances for a sharper
+check. Judge the relative errors against the accuracy of the reference
+itself, about :code:`rel_step**2 + u / rel_step` for well-scaled
+parameters; a forward-difference Jacobian additionally differs from it by
+its own truncation error, about :code:`|dx_finitediff| / |p|`.
+
+:code:`bounds` gives the valid domain in parameter units: one
+:code:`(lower, upper)` pair per optimized parameter (None for an unbounded
+side), as for an IPOPT fit and in
+:code:`CalibrationRecord.optimizer_inputs()`, or a
+:code:`scipy.optimize.Bounds(lower_array, upper_array)`. Wrap the
+:code:`(lower_array, upper_array)` bounds of
+:code:`scipy.optimize.least_squares` in :code:`scipy.optimize.Bounds`: a
+plain tuple of two arrays is read as per-parameter pairs (for two
+parameters it is accepted with that meaning, otherwise its shape is
+rejected). A parameter whose bounds have zero width cannot be checked; fix
+it through :code:`optimize_flags` instead.
+:code:`params` must lie inside, and after a fit :code:`params_convg` too,
+because the model is re-evaluated there at the end (widen the bounds to
+include it, or check without bounds); the model is never evaluated outside: a
+parameter whose central points :code:`p - h` or :code:`p + h` would leave
+the domain uses the one-sided three-point formula :code:`(-3 f(p) + 4 f(p
++ s) - f(p + 2s)) / (2s)` toward the interior (:code:`s = +h` or
+:code:`-h`), which has the same :code:`h**2` order. A parameter with room
+for neither stencil, or an estimator forward difference
+(:code:`dx_finitediff`) that would step outside, raises
+:code:`ValueError`.
+
+.. code-block:: python
+
+    check = estimator.check_derivatives(rel_step=1e-2,
+                                        bounds=[(0.0, None), (None, None)])
+    print(check.summary())
+    table = check.to_frame()
 
 Liquid heat capacity
 ====================
