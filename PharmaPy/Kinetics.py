@@ -451,7 +451,7 @@ class RxnKinetics:
     ``stoich_normalization`` would therefore apply the normalization twice.
 
     """
-    def __init__(self, path, k_params, ea_params, rxn_list=None,
+    def __init__(self, path, k_params=None, ea_params=None, rxn_list=None,
                  stoich_matrix=None, partic_species=None,
                  temp_ref=None, reformulate_kin=False,
                  keq_params=None, params_f=None, delta_hrxn=0,
@@ -468,9 +468,10 @@ class RxnKinetics:
             Factors ``[mol/L]**(1-m)/time`` for total forward order m [-].
             May be a reaction-ID-keyed mapping, a 1-D sequence aligned with
             ``rxn_names``, or a scalar/length-1 value.
-        ea_params : array-like or mapping of str to float
+        ea_params : array-like or mapping of str to float, optional
             Activation energies [J/mol]. May be a reaction-ID-keyed mapping, a
             1-D sequence aligned with ``rxn_names``, or a scalar/length-1 value.
+            Defaults to 0.0 [J/mol] when omitted or None.
         rxn_list : sequence of str or mapping of str to str, optional
             Reactions as written, used instead of ``stoich_matrix`` if given.
             Accepts ASCII (``'-->'``, ``'<-->'``, ``'<=>'``) and Unicode
@@ -816,15 +817,23 @@ class RxnKinetics:
         default_reactant_map = self.stoich_react > 0
 
         if isinstance(params_f, Mapping):
+            non_str = [k for k in params_f.keys() if not isinstance(k, str)]
+            if non_str:
+                raise ValueError(
+                    f"params_f mapping keys must be strings, got {non_str!r}."
+                )
             missing = [k for k in self.rxn_names if k not in params_f]
             unexpected = [k for k in params_f.keys() if k not in self.rxn_names]
-            if missing or unexpected:
+            all_species_mappings = bool(params_f) and all(
+                isinstance(val, Mapping) for val in params_f.values()
+            )
+            if not params_f or unexpected or (missing and not all_species_mappings):
                 raise ValueError(
                     f"params_f keys must match reaction identifiers "
                     f"{list(self.rxn_names)}; missing={missing}, "
                     f"unexpected={unexpected}."
                 )
-            row_specs = [params_f[k] for k in self.rxn_names]
+            row_specs = [params_f.get(k, {}) for k in self.rxn_names]
         elif isinstance(params_f, np.ndarray):
             if params_f.ndim == 2 and params_f.shape == (self.num_rxns, self.num_species):
                 orders = np.asarray(params_f, dtype=np.float64)  # [-]
@@ -943,8 +952,12 @@ class RxnKinetics:
         ``concat_params``, parameter names, flat updates, and Jacobians.
         """
         if isinstance(params, dict):
-            raw_k = params['k_params']
-            raw_ea = params['ea_params']
+            raw_k = params.get('k_params', None)
+            if raw_k is None:
+                raise ValueError("k_params is required to initialize RxnKinetics.")
+            raw_ea = params.get('ea_params', None)
+            if raw_ea is None:
+                raw_ea = 0.0  # [J/mol], isothermal default
             k_aligned = self._align_rxn_param(
                 raw_k, 'k_params', allow_scalar=True, allow_shared_single=True
             )  # [k units]
@@ -1031,6 +1044,9 @@ class RxnKinetics:
             fit_paramsf = False
 
         self.phi_1, self.phi_2 = phi_1, phi_2  # [k units, J/mol] or [-]
+        if not self.reformulate_kin:
+            self.k_params = self.phi_1  # [k units]
+            self.ea_params = self.phi_2  # [J/mol]
         self.params_f = params_f  # [-] for orders; custom model units otherwise
         if isinstance(params, dict):
             self.num_paramsk = len(self.phi_1) + len(self.phi_2)
