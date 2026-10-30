@@ -4,6 +4,26 @@ from PharmaPy.DataClasses import *
 from PharmaPy.ProcessControl_Refactored import Controller, DefaultContinuousVesselVolume
 
 class _BaseReactor(MultiPhaseVessel):
+    """Stirred tank with one reaction mechanism per liquid phase.
+
+    The balances are those of ``MultiPhaseVessel``: the integrated material
+    states are the species masses [kg] of each phase, and every intensive
+    property is recomputed from them at each state. In particular the liquid
+    volume is ``mass / density``, with the density of the mixture at the
+    current composition and temperature (ideal-volume mixing of the
+    pure-component densities, ``getDensity``), so a reaction that changes the
+    mixture density changes the volume. The legacy ``PharmaPy.Reactors`` tanks
+    instead integrate concentrations at a constant liquid volume. On the
+    workshop case study the refactored volume grows 0.5 % over the batch and
+    the final amounts differ from the legacy tank's by about 1e-4 of the
+    limiting charge; stage 12 of
+    ``tests/Flowsheet/test_flowsheet_refactored.py`` pins that comparison.
+
+    Reaction kinetics attach through the ``RxnKinetics`` setter, which builds
+    one ``ReactionMechanism`` per liquid phase. The constructor defaults are
+    the vessel's (non-isothermal, ``h_conv=0``, ``temp_ref=273.15`` K), not
+    those of the legacy tanks (isothermal, 1000 W/m**2/K, 298.15 K).
+    """
 
     # Forwarded wholesale rather than re-declared: repeating the base
     # signature here and passing it on positionally meant every parameter
@@ -61,6 +81,11 @@ class _BaseReactor(MultiPhaseVessel):
         "Place holder in case future children need special behavior"
         self.nomenclature(overwrite=True)
 class BatchReactor(_BaseReactor):
+    """Closed reacting tank: no inlet or outlet.
+
+    The volume changes only through the mixture density; see ``_BaseReactor``
+    for that assumption and how it differs from the legacy ``BatchReactor``.
+    """
 
     oper_mode = "Batch"
 
@@ -69,6 +94,11 @@ class BatchReactor(_BaseReactor):
         super().__init__(**kwargs)
 
 class SemiBatchReactor(_BaseReactor):
+    """Fed reacting tank: inlets, no outlet.
+
+    The volume grows with the feed and moves with the mixture density; see
+    ``_BaseReactor``.
+    """
 
     oper_mode = "Semibatch"
 
@@ -77,6 +107,13 @@ class SemiBatchReactor(_BaseReactor):
         super().__init__(**kwargs)
 
 class ContinuousReactor(_BaseReactor):
+    """Fed and drained reacting tank.
+
+    Unless a controller is given, ``DefaultContinuousVesselVolume`` holds the
+    volume by trimming the outlet flow around the inlet flow, and the default
+    outlet connection carries every phase out in one stream. The volume it
+    holds is the density-based one described on ``_BaseReactor``.
+    """
 
     oper_mode = "Continuous"
 

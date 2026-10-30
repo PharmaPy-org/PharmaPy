@@ -1082,6 +1082,83 @@ def test_stage11_refactored_crystallizer_matches_legacy():
                 % (name, 100 * value, 100 * rtol, refactored, legacy))
 
 
+# =====================================================================
+# Stage 12 -- the refactored batch reactor against the legacy one, on the
+# same charge, kinetics and temperature.
+# =====================================================================
+# The two stacks differ in one modelling assumption. The legacy BatchReactor
+# integrates concentrations at a constant liquid volume; the refactored
+# vessel integrates species masses and recomputes the volume from the
+# mixture density at each state, which for these liquids is ideal-volume
+# mixing of the pure-component densities. With both tanks isothermal at
+# TEMP_INIT the refactored volume grows 0.51 % over the batch, so its
+# concentrations end about 0.5 % lower and the final amounts move by at most
+# 1.2e-4 of the initial A charge (A +1.2e-4, B +6e-5, C -5e-6, D -6e-5,
+# measured with CVode at the MAX_STEP cap). The bound is about four times
+# the largest of those.
+LEGACY_AMOUNT_TOL = 5e-4      # [-], |refactored - legacy| / initial A charge
+# The sum of m_j / rho_j over the species is the ideal-mixing volume of the
+# final masses; the vessel volume must reproduce it to round-off.
+IDEAL_MIXING_RTOL = 1e-12     # [-]
+LITERS_PER_M3 = 1000.0        # [L/m**3]
+MOL_PER_KMOL = 1000.0         # [mol/kmol]
+
+
+def _legacy_reactor_summary():
+    """Final amounts of A, B, C, D [mol] and the liquid volume profile [m3]."""
+    unit = OldBatchReactor(isothermal=True)
+    unit.Utility = CoolingWater(mass_flow=0.01, temp_in=TEMP_INIT)
+    unit.Phases = LiquidPhase(PATH, temp=TEMP_INIT, mole_conc=CONC_INIT.copy(),
+                              vol=VOL_INIT, name_solv='solvent')
+    unit.Kinetics = rxn_kinetics()
+    unit.solve_unit(runtime=TIME_R01, verbose=False)
+
+    conc = np.asarray(unit.result.mole_conc)[-1]  # [mol/L] of A, B, C, D
+    vol = np.asarray(unit.result.vol)             # [m3]
+
+    return conc * vol[-1] * LITERS_PER_M3, vol
+
+
+def _refactored_reactor_summary():
+    """Final amounts of A, B, C, D [mol], the volume profile [m3] and the
+    ideal-mixing volume of the final masses [m3]."""
+    liquid = NewLiquidPhase(PATH, temp=TEMP_INIT, mole_conc=CONC_INIT.copy(),
+                            vol=VOL_INIT, name_solv='solvent')
+    unit = NewBatchReactor(integrator=make_integrator(), isothermal=True)
+    unit.Phases = liquid
+    unit.RxnKinetics = rxn_kinetics()
+    unit.solve_unit(runtime=TIME_R01, verbose=False)
+
+    mass_j = np.asarray(unit.result.mass_j_liquid0)[-1]    # [kg] per species
+    vol = np.asarray(unit.result.vessel_vol)               # [m3]
+    moles = mass_j / np.asarray(liquid.mw) * MOL_PER_KMOL  # [mol]
+    rho_pure, _ = liquid.getDensityPure('liquid', TEMP_INIT)  # [kg/m3]
+    vol_ideal = float(np.sum(mass_j / rho_pure))           # [m3]
+
+    return moles[:4], vol, vol_ideal
+
+
+def test_stage12_refactored_reactor_matches_legacy():
+    """Final amounts agree with the legacy tank; the volume follows the density."""
+    legacy, vol_legacy = _legacy_reactor_summary()
+    refactored, vol_refactored, vol_ideal = _refactored_reactor_summary()
+
+    # The legacy tank keeps its charge volume. The refactored one ends at the
+    # ideal-mixing volume of its final masses, above the charge volume here.
+    assert np.all(vol_legacy == VOL_INIT)
+    assert vol_refactored[-1] == pytest.approx(vol_ideal, rel=IDEAL_MIXING_RTOL)
+    assert vol_refactored[-1] > vol_refactored[0]
+
+    charge = CONC_INIT[0] * VOL_INIT * LITERS_PER_M3  # [mol] of A charged
+    gap = np.abs(refactored - legacy) / charge
+    for value, name in zip(gap, 'ABCD'):
+        if value > LEGACY_AMOUNT_TOL:
+            raise AssertionError(
+                'final amount of %s differs from the legacy reactor by %.2e of '
+                'the A charge (bound %.1e): refactored %s mol, legacy %s mol'
+                % (name, value, LEGACY_AMOUNT_TOL, refactored, legacy))
+
+
 STAGES = (
     ('0  old Filter alone                                 ', test_stage0_filter_alone),
     ('1  all-old   R01 -> CR01 -> F01                     ', test_stage1_all_old),
@@ -1095,6 +1172,7 @@ STAGES = (
     ('9  1D-FVM vs moments, compared on mass              ', test_stage9_fvm_versus_moments),
     ('10 each unit class solved standalone                ', test_stage10_standalone_all_modes),
     ('11 refactored crystallizer vs legacy                ', test_stage11_refactored_crystallizer_matches_legacy),
+    ('12 refactored batch reactor vs legacy               ', test_stage12_refactored_reactor_matches_legacy),
 )
 
 
