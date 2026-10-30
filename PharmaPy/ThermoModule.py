@@ -8,13 +8,34 @@ Created on Sun Apr  5 17:28:24 2020
 import json
 import pathlib
 import warnings
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
 
+from PharmaPy.Errors import PharmaPyValueError
+
 
 _DatabasePath = Union[str, pathlib.Path]
+
+# Absolute closure tolerance for solvent-blend mass fractions z_j (sum_j z_j == 1).
+_SOLVENT_FRACTION_SUM_ATOL = 1e-6  # [-], tolerance for solvent-blend mass-fraction closure
+
+# Phase and thermophysical fields whose last axis is indexed by self.name_species.
+_SPECIES_INDEXED_PHASE_FIELDS = frozenset({
+    'mass_frac', 'mole_frac', 'mole_conc', 'mass_conc',
+    'mw', 'rho_liq', 'rho_solid', 't_crit',
+    'delta_hvap', 'tref_hvap', 'henry_constant', 'visc_gas',
+})
+
+
+class FieldLookupError(KeyError, ValueError):
+    """Requested phase field or species name does not exist on the phase."""
+
+    def __str__(self) -> str:
+        """Return the unquoted message string for both KeyError and ValueError."""
+        return str(self.args[0]) if self.args else ''
 
 
 VALID_ACTIVITY_MODELS = ('ideal', 'UNIFAC', 'UNIQUAC')
@@ -1986,28 +2007,388 @@ class ThermoPhysicalManager:
 
         return frac_out
 
-    def conc_to_frac(self, conc, solvent_ind=None, basis=None):
+    def _coerce_composition_mapping(
+        self,
+        comp: Any,
+        name: str = 'composition',
+    ) -> Any:
+        """Convert a species-keyed composition mapping into a database-ordered array.
+
+        Parameters
+        ----------
+        comp : mapping of str to float/array-like, or array-like, or None
+            Species composition values in the caller's basis (fractions [-],
+            molar concentrations [mol/L], or mass concentrations [kg/m**3]).
+            Non-mapping inputs are returned unchanged.
+        name : str, optional
+            Argument name included in validation error messages.
+
+        Returns
+        -------
+        numpy.ndarray or Any
+            When ``comp`` is a mapping, a float64 array of shape
+            ``(num_species,)`` for scalar entries or ``(num_points, num_species)``
+            for 1-D profile entries, with omitted species initialized to ``0.0``.
+            Otherwise ``comp`` is returned unchanged.
+
+        Raises
+        ------
+        ValueError
+            If ``comp`` is an empty mapping, contains unknown species names, or
+            has non-finite, negative, or shape-mismatched values.
+        """
+        if comp is None or not isinstance(comp, Mapping):
+            return comp
+
+        if len(comp) == 0:
+            raise ValueError(f"{name} mapping must not be empty.")
+
+        unknown = [
+            key for key in comp.keys()
+            if not isinstance(key, str) or key not in self.name_species
+        ]
+        if unknown:
+            raise ValueError(
+                f"Unknown species {unknown} in {name}; available species are "
+                f"{self.name_species}."
+            )
+
+        parsed_entries: dict[int, np.ndarray] = {}
+        ndims = set()
+        profile_lengths = set()
+        for sp_name, raw_val in comp.items():
+            arr = np.asarray(raw_val, dtype=float)  # [-], [mol/L], or [kg/m**3]
+            if arr.ndim > 1 or arr.size == 0 or not np.all(np.isfinite(arr)) or np.any(arr < 0):
+                raise ValueError(
+                    f"{name} entry for species {sp_name!r} must be a finite "
+                    "non-negative scalar or 1-D profile array."
+                )
+            ndims.add(arr.ndim)
+            if arr.ndim == 1:
+                profile_lengths.add(len(arr))
+            parsed_entries[self.name_species.index(sp_name)] = arr
+
+        if len(ndims) > 1 or len(profile_lengths) > 1:
+            raise ValueError(
+                f"{name} mapping entries must all be scalars or 1-D arrays of "
+                "identical length."
+            )
+
+        if 1 in ndims:
+            num_points = next(iter(profile_lengths))
+            out = np.zeros((num_points, self.num_species), dtype=float)  # [-], [mol/L], or [kg/m**3]
+            for sp_idx, arr in parsed_entries.items():
+                out[:, sp_idx] = arr
+        else:
+            out = np.zeros(self.num_species, dtype=float)  # [-], [mol/L], or [kg/m**3]
+            for sp_idx, arr in parsed_entries.items():
+                out[sp_idx] = float(arr)
+
+        return out
+
+    def _resolve_solvent_blend_mass_conc(
+        self,
+        mass_conc: np.ndarray,
+        solv_mass_frac: Union[Mapping[str, float], np.ndarray],
+    ) -> np.ndarray:
+        """Close the ideal-mixture volume balance for a single solvent or solvent blend.
+
+        Parameters
+        ----------
+        mass_conc : numpy.ndarray
+            Solute mass concentrations [kg/m**3], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
+        solv_mass_frac : mapping of str to float or numpy.ndarray
+            Solvent-blend mass fractions [-] on a solute-free basis, either as
+            a species-keyed mapping ``{solvent_name: z_j}`` or a 1-D array of
+            shape ``(num_species,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Complete species mass concentrations [kg/m**3], matching the shape
+            of ``mass_conc``, with solvent concentrations filled so that
+            ``sum_i C_i / rho_i == 1`` and ``C_j / sum_{k in solv} C_k == z_j``.
+
+        Raises
+        ------
+        IndexError
+            If ``mass_conc`` is neither 1-D nor 2-D.
+        ValueError
+            If solvent fractions are empty, negative, non-finite, do not sum to
+            1.0 within ``_SOLVENT_FRACTION_SUM_ATOL``, or overlap with nonzero
+            solute concentrations.
+        PharmaPyValueError
+            If the specified solute concentrations occupy a volume fraction
+            ``sum_s C_s / rho_s >= 1.0``, leaving non-positive volume for the
+            solvent blend.
+        MissingPropertyError
+            If a present solute or solvent lacks ``rho_liq`` [kg/m**3].
+        """
+        if mass_conc.ndim not in (1, 2) or mass_conc.shape[-1] != self.num_species:
+            raise IndexError(
+                "Solvent-blend back-calculation requires 1-D or 2-D "
+                f"concentrations with species axis {self.num_species}, "
+                f"got shape {mass_conc.shape}."
+            )
+
+        if isinstance(solv_mass_frac, Mapping):
+            if len(solv_mass_frac) == 0:
+                raise ValueError("Solvent mass_frac mapping must not be empty.")
+            unknown = [
+                k for k in solv_mass_frac.keys()
+                if not isinstance(k, str) or k not in self.name_species
+            ]
+            if unknown:
+                raise ValueError(
+                    f"Unknown solvent species {unknown} in mass_frac; "
+                    f"available species are {self.name_species}."
+                )
+            z_solv = np.zeros(self.num_species, dtype=float)  # [-], solvent-blend basis
+            solv_mask = np.zeros(self.num_species, dtype=bool)
+            for sp_name, raw_val in solv_mass_frac.items():
+                val_arr = np.asarray(raw_val, dtype=float)
+                if val_arr.ndim != 0 or not np.isfinite(val_arr) or float(val_arr) < 0:
+                    raise ValueError(
+                        f"Solvent mass_frac for {sp_name!r} must be a finite "
+                        "non-negative scalar."
+                    )
+                sp_idx = self.name_species.index(sp_name)
+                z_solv[sp_idx] = float(val_arr)  # [-]
+                solv_mask[sp_idx] = True
+        else:
+            z_solv = np.asarray(solv_mass_frac, dtype=float)  # [-], solvent-blend basis
+            if z_solv.shape != (self.num_species,) or not np.all(np.isfinite(z_solv)) or np.any(z_solv < 0):
+                raise ValueError(
+                    f"solv_mass_frac must be a finite non-negative 1-D array of "
+                    f"shape ({self.num_species},)."
+                )
+            solv_mask = z_solv > 0
+
+        z_sum = float(z_solv.sum())  # [-]
+        if abs(z_sum - 1.0) > _SOLVENT_FRACTION_SUM_ATOL:
+            raise ValueError(
+                f"Solvent-blend mass_frac must sum to 1.0 (got {z_sum:.6g})."
+            )
+        z_solv = z_solv / z_sum  # [-]
+        active_solv_mask = z_solv > 0
+
+        if not np.all(np.isfinite(mass_conc)) or np.any(mass_conc < 0):
+            raise ValueError(
+                "Solute concentrations must be finite and non-negative."
+            )
+
+        any_conc_nonzero = (
+            np.any(mass_conc != 0, axis=0)
+            if mass_conc.ndim == 2
+            else (mass_conc != 0)
+        )
+        overlap = np.flatnonzero(any_conc_nonzero & solv_mask)
+        if overlap.size > 0:
+            overlap_names = [self.name_species[idx] for idx in overlap]
+            raise ValueError(
+                f"Species {overlap_names} cannot be specified with both solute "
+                "concentrations and solvent mass_frac."
+            )
+
+        needed = any_conc_nonzero | active_solv_mask
+        inv_dens, _ = self._inverse_densities(
+            'liquid',
+            needed,
+            'carry a nonzero concentration or are part of the solvent blend, '
+            'so the solvent concentration',
+        )  # [m**3/kg]
+
+        solute_mask = ~solv_mask
+        phi_solutes = np.dot(
+            mass_conc[..., solute_mask], inv_dens[solute_mask]
+        )  # [-], solute volume fraction
+        if np.any(phi_solutes >= 1.0):
+            max_phi = float(np.max(phi_solutes))  # [-]
+            raise PharmaPyValueError(
+                f"Specified solute concentrations occupy volume fraction "
+                f"{max_phi:.6g} >= 1.0, leaving non-positive volume for the "
+                "solvent blend."
+            )
+
+        beta = float(
+            np.dot(z_solv[active_solv_mask], inv_dens[active_solv_mask])
+        )  # [m**3/kg], pure-solvent-blend specific volume
+        total_solv_mass_conc = (1.0 - phi_solutes) / beta  # [kg/m**3]
+
+        filled = mass_conc.copy()  # [kg/m**3]
+        if filled.ndim == 1:
+            filled[solv_mask] = z_solv[solv_mask] * float(total_solv_mass_conc)  # [kg/m**3]
+        else:
+            filled[:, solv_mask] = (
+                np.asarray(total_solv_mass_conc, dtype=float)[:, None]
+                * z_solv[None, solv_mask]
+            )  # [kg/m**3]
+        return filled
+
+    def retrieve_field(
+        self,
+        field_name: str,
+        species: Optional[Union[str, Sequence[str]]] = None,
+        copy: bool = True,
+        as_dict: bool = False,
+    ) -> Union[float, np.ndarray, dict[str, Union[float, np.ndarray]]]:
+        """Retrieve a named composition, property, or state field from the phase.
+
+        Parameters
+        ----------
+        field_name : str
+            Name of the phase field to retrieve, such as ``'mass_frac'`` [-],
+            ``'mole_frac'`` [-], ``'mole_conc'`` [mol/L], ``'mass_conc'``
+            [kg/m**3], ``'mw'`` [g/mol], ``'temp'`` [K], ``'pres'`` [Pa],
+            ``'mass'`` [kg], ``'vol'`` [m**3], ``'moles'`` [mol],
+            ``'mass_flow'`` [kg/s], ``'vol_flow'`` [m**3/s], ``'mole_flow'``
+            [mol/s], ``'moments'`` [m**n], ``'distrib'`` [#/um], or
+            ``'x_distrib'`` [um].
+        species : str or sequence of str, optional
+            Species name or ordered sequence of species names to extract from a
+            species-indexed field. When a single species string is given, a
+            scalar float (for 1-D fields) or 1-D spatial profile array is
+            returned. When a sequence of species names is given, the last axis
+            is reordered/subsetted to match ``species`` in caller order.
+        copy : bool, optional
+            If True (default), return a copy of array-valued fields so mutating
+            the returned array does not corrupt internal phase state. When
+            ``copy=False``, whole-field retrieval, single-species retrieval,
+            and ``as_dict=True`` profile entries return views into the stored
+            array when ``raw_val`` is already a ``float`` ``ndarray``;
+            multi-species array subset selection (``as_dict=False`` with a
+            sequence of ``species``) always allocates a new array via NumPy
+            advanced indexing.
+        as_dict : bool, optional
+            If True, return species-indexed fields as a dictionary mapping each
+            selected species name to its value or spatial profile.
+
+        Returns
+        -------
+        float, numpy.ndarray, or dict of str to float/numpy.ndarray
+            Requested field value in its stored physical units and profile
+            axes (1-D ``(num_species,)`` or 2-D ``(num_points, num_species)``
+            for species-indexed fields).
+
+        Raises
+        ------
+        FieldLookupError
+            A subclass of ``KeyError`` and ``ValueError``. Raised when
+            ``field_name`` does not exist on the phase, is unset, or when
+            ``species`` is requested on a non-species field or names an unknown
+            species.
+        """
+        if not isinstance(field_name, str) or not field_name or field_name.startswith('_'):
+            raise FieldLookupError(
+                f"Field {field_name!r} does not exist on {self.__class__.__name__}."
+            )
+        if not hasattr(self, field_name):
+            raise FieldLookupError(
+                f"Field {field_name!r} does not exist on {self.__class__.__name__}."
+            )
+        raw_val = getattr(self, field_name)
+        if raw_val is None or callable(raw_val):
+            raise FieldLookupError(
+                f"Field {field_name!r} is not available on {self.__class__.__name__}."
+            )
+
+        is_species_field = field_name in _SPECIES_INDEXED_PHASE_FIELDS
+        if not is_species_field:
+            if species is not None:
+                raise FieldLookupError(
+                    f"Field {field_name!r} on {self.__class__.__name__} is not "
+                    "indexed by species."
+                )
+            if as_dict:
+                raise FieldLookupError(
+                    f"Field {field_name!r} on {self.__class__.__name__} is not "
+                    "indexed by species and cannot be returned as a dictionary."
+                )
+            if np.ndim(raw_val) == 0:
+                return float(raw_val)
+            return np.array(raw_val, dtype=float, copy=bool(copy))
+
+        arr = np.array(raw_val, dtype=float, copy=bool(copy))
+        if species is None:
+            if as_dict:
+                return {
+                    sp: (float(arr[idx]) if arr.ndim == 1 else arr[..., idx])
+                    for idx, sp in enumerate(self.name_species)
+                }
+            return arr
+
+        if isinstance(species, str):
+            if species not in self.name_species:
+                raise FieldLookupError(
+                    f"Unknown species {species!r}; available species are "
+                    f"{self.name_species}."
+                )
+            sp_idx = self.name_species.index(species)
+            selected = arr[..., sp_idx]
+            if as_dict:
+                return {
+                    species: (float(selected) if selected.ndim == 0 else selected)
+                }
+            if selected.ndim == 0:
+                return float(selected)
+            return selected.copy() if copy else selected
+
+        if isinstance(species, Sequence):
+            unknown = [
+                sp for sp in species
+                if not isinstance(sp, str) or sp not in self.name_species
+            ]
+            if unknown:
+                raise FieldLookupError(
+                    f"Unknown species {unknown}; available species are "
+                    f"{self.name_species}."
+                )
+            indices = [self.name_species.index(sp) for sp in species]
+            if as_dict:
+                return {
+                    sp: (
+                        float(arr[idx])
+                        if arr.ndim == 1
+                        else (arr[..., idx].copy() if copy else arr[..., idx])
+                    )
+                    for sp, idx in zip(species, indices)
+                }
+            return arr[..., indices]
+
+        raise FieldLookupError(
+            f"species must be a species name string or sequence of strings, "
+            f"got {type(species).__name__}."
+        )
+
+    def conc_to_frac(self, conc, solvent_ind=None, basis=None,
+                     solv_mass_frac=None):
         """Convert liquid molar concentrations into composition fractions.
 
         Parameters
         ----------
-        conc : array-like
+        conc : array-like or mapping of str to float/array-like
             Species molar concentrations [mol/L]. Shape ``(num_species,)``
             is always accepted; ``(num_points, num_species)`` is accepted
-            only when ``solvent_ind`` is ``None``. When ``solvent_ind`` is
-            given, the value at that index is ignored on input and replaced
-            by the concentration that closes the mixture volume balance, and
-            that back-calculation supports one-dimensional input only.
-        solvent_ind : int, optional
-            Positional index of the solvent species [-]. Index ``0`` is a
+            when ``solvent_ind`` is ``None`` (including with
+            ``solv_mass_frac``). When ``solvent_ind`` or ``solv_mass_frac``
+            is given, the solvent concentration(s) are back-calculated to
+            close the mixture volume balance.
+        solvent_ind : int or mapping of str to float, optional
+            Positional index of the solvent species [-], or a solvent-blend
+            mass-fraction mapping ``{solvent_name: z_j}`` [-]. Index ``0`` is a
             valid solvent index, so this argument is compared with ``None``
-            and never tested for truth. When ``None``, ``conc`` is taken as a
-            complete composition and no solvent concentration is
-            back-calculated.
+            and never tested for truth. When ``None`` (and ``solv_mass_frac``
+            is ``None``), ``conc`` is taken as a complete composition and no
+            solvent concentration is back-calculated.
         basis : {'mole', 'mass', None}, optional
             Basis of the returned fractions. ``'mole'`` returns mole
             fractions only, ``'mass'`` returns mass fractions only, and the
             default ``None`` returns both.
+        solv_mass_frac : mapping of str to float or array-like, optional
+            Solvent-blend mass fractions [-] on a solute-free basis, summing
+            to 1.0. When provided, solvent concentrations are back-calculated
+            from the coupled volume-additive equations.
 
         Returns
         -------
@@ -2020,20 +2401,24 @@ class ThermoPhysicalManager:
         conc : numpy.ndarray
             Species molar concentrations with the solvent entry filled in
             [mol/L]. Appended to the returned tuple only when ``solvent_ind``
-            is not ``None``.
+            or ``solv_mass_frac`` is not ``None``.
 
         Raises
         ------
         IndexError
-            If ``conc`` is two-dimensional and ``solvent_ind`` is not
-            ``None``. The solvent mask is built with ``numpy.ones_like``, so
-            for a two-dimensional argument it selects along the point axis
-            instead of the species axis.
+            If ``conc`` is two-dimensional and an integer ``solvent_ind`` is
+            not ``None`` (``solv_mass_frac`` supports both 1-D and 2-D
+            ``conc`` arrays).
+        ValueError
+            If a species mapping contains unknown species or invalid solvent
+            fractions.
+        PharmaPyValueError
+            If solute concentrations with ``solv_mass_frac`` exceed the
+            available volume (``sum_s c_s * v_s >= 1.0``).
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If
-            ``solvent_ind`` is given and the solvent, or a species with a
-            nonzero concentration, has no ``rho_liq``. A species whose
-            concentration is zero needs none and adds no volume.
+            ``solvent_ind`` or ``solv_mass_frac`` is given and a solvent, or a
+            species with a nonzero concentration, has no ``rho_liq``.
 
         Notes
         -----
@@ -2045,19 +2430,36 @@ class ThermoPhysicalManager:
             c_solv = (1 - sum_{i != solv} c_i * v_i) / v_solv
 
         The length of the returned tuple therefore depends on whether
-        ``solvent_ind`` was supplied, not on its value, so callers must
-        branch on ``solvent_ind is not None``.
+        ``solvent_ind`` or ``solv_mass_frac`` was supplied, not on its value.
 
         Warnings
         --------
         ``conc`` is wrapped with ``numpy.asarray`` and the solvent entry is
         written in place, so a NumPy array supplied by the caller is modified
-        by this call. A list or tuple is copied by ``asarray`` and is left
-        untouched.
+        by this call. A list, tuple, or mapping is copied and left untouched.
         """
-        conc = np.asarray(conc)
+        if isinstance(solvent_ind, Mapping) and solv_mass_frac is None:
+            solv_mass_frac = solvent_ind
+            solvent_ind = None
 
-        if solvent_ind is not None:
+        if isinstance(conc, Mapping):
+            conc = self._coerce_composition_mapping(conc, 'mole_conc')
+        else:
+            conc = np.asarray(conc)
+
+        has_solvent = (solvent_ind is not None) or (solv_mass_frac is not None)
+
+        if solv_mass_frac is not None:
+            mass_conc = np.asarray(conc, dtype=float) * self.mw  # [kg/m**3]
+            filled_mass_conc = self._resolve_solvent_blend_mass_conc(
+                mass_conc, solv_mass_frac
+            )  # [kg/m**3]
+            filled_mole_conc = filled_mass_conc / self.mw  # [mol/L]
+            if isinstance(conc, np.ndarray) and np.issubdtype(conc.dtype, np.floating):
+                conc[:] = filled_mole_conc
+            else:
+                conc = filled_mole_conc
+        elif solvent_ind is not None:
             mask_solv = np.ones_like(conc, dtype=bool)
             mask_solv[solvent_ind] = False
 
@@ -2080,46 +2482,52 @@ class ThermoPhysicalManager:
             mole_frac = (conc.T / conc.sum(axis=1)).T
 
         if basis == 'mole':
-            if solvent_ind is not None:
+            if has_solvent:
                 return mole_frac, conc
             else:
                 return mole_frac
 
         elif basis == 'mass':
             mass_frac = self.frac_to_frac(mole_frac=mole_frac)
-            if solvent_ind is not None:
+            if has_solvent:
                 return mass_frac, conc
             else:
                 return mass_frac
         else:
             mass_frac = self.frac_to_frac(mole_frac=mole_frac)
-            if solvent_ind is not None:
+            if has_solvent:
                 return mass_frac, mole_frac, conc
             else:
                 return mass_frac, mole_frac
 
-    def mass_conc_to_frac(self, conc, solvent_ind=None, basis=None):
+    def mass_conc_to_frac(self, conc, solvent_ind=None, basis=None,
+                          solv_mass_frac=None):
         """Convert liquid mass concentrations into composition fractions.
 
         Parameters
         ----------
-        conc : array-like
+        conc : array-like or mapping of str to float/array-like
             Species mass concentrations [kg/m**3]. Shape ``(num_species,)``
             is always accepted; ``(num_points, num_species)`` is accepted
-            only when ``solvent_ind`` is ``None``. When ``solvent_ind`` is
-            given, the value at that index is ignored on input and replaced
-            by the concentration that closes the mixture volume balance, and
-            that back-calculation supports one-dimensional input only.
-        solvent_ind : int, optional
-            Positional index of the solvent species [-]. Index ``0`` is a
+            when ``solvent_ind`` is ``None`` (including with
+            ``solv_mass_frac``). When ``solvent_ind`` or ``solv_mass_frac``
+            is given, the solvent concentration(s) are back-calculated to
+            close the mixture volume balance.
+        solvent_ind : int or mapping of str to float, optional
+            Positional index of the solvent species [-], or a solvent-blend
+            mass-fraction mapping ``{solvent_name: z_j}`` [-]. Index ``0`` is a
             valid solvent index, so this argument is compared with ``None``
-            and never tested for truth. When ``None``, ``conc`` is taken as a
-            complete composition and no solvent concentration is
-            back-calculated.
+            and never tested for truth. When ``None`` (and ``solv_mass_frac``
+            is ``None``), ``conc`` is taken as a complete composition and no
+            solvent concentration is back-calculated.
         basis : {'mass', 'mole', None}, optional
             Basis of the returned fractions. ``'mass'`` returns mass
             fractions only, ``'mole'`` returns mole fractions only, and the
             default ``None`` returns both.
+        solv_mass_frac : mapping of str to float or array-like, optional
+            Solvent-blend mass fractions [-] on a solute-free basis, summing
+            to 1.0. When provided, solvent concentrations are back-calculated
+            from the coupled volume-additive equations.
 
         Returns
         -------
@@ -2132,18 +2540,24 @@ class ThermoPhysicalManager:
         conc : numpy.ndarray
             Species mass concentrations with the solvent entry filled in
             [kg/m**3]. Appended to the returned tuple only when
-            ``solvent_ind`` is not ``None``.
+            ``solvent_ind`` or ``solv_mass_frac`` is not ``None``.
 
         Raises
         ------
         IndexError
-            If ``conc`` is two-dimensional and ``solvent_ind`` is not
-            ``None``, for the same reason as in :meth:`conc_to_frac`.
+            If ``conc`` is two-dimensional and an integer ``solvent_ind`` is
+            not ``None`` (``solv_mass_frac`` supports both 1-D and 2-D
+            ``conc`` arrays), for the same reason as in :meth:`conc_to_frac`.
+        ValueError
+            If a species mapping contains unknown species or invalid solvent
+            fractions.
+        PharmaPyValueError
+            If solute concentrations with ``solv_mass_frac`` exceed the
+            available volume (``sum_s C_s / rho_s >= 1.0``).
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If
-            ``solvent_ind`` is given and the solvent, or a species with a
-            nonzero concentration, has no ``rho_liq``. A species whose
-            concentration is zero needs none and adds no volume.
+            ``solvent_ind`` or ``solv_mass_frac`` is given and a solvent, or a
+            species with a nonzero concentration, has no ``rho_liq``.
 
         Notes
         -----
@@ -2156,18 +2570,34 @@ class ThermoPhysicalManager:
 
         This is the mass-basis counterpart of :meth:`conc_to_frac`, and the
         length of the returned tuple likewise depends on whether
-        ``solvent_ind`` was supplied, not on its value.
+        ``solvent_ind`` or ``solv_mass_frac`` was supplied, not on its value.
 
         Warnings
         --------
         ``conc`` is wrapped with ``numpy.asarray`` and the solvent entry is
         written in place, so a NumPy array supplied by the caller is modified
-        by this call. A list or tuple is copied by ``asarray`` and is left
-        untouched.
+        by this call. A list, tuple, or mapping is copied and left untouched.
         """
-        conc = np.asarray(conc)
+        if isinstance(solvent_ind, Mapping) and solv_mass_frac is None:
+            solv_mass_frac = solvent_ind
+            solvent_ind = None
 
-        if solvent_ind is not None:
+        if isinstance(conc, Mapping):
+            conc = self._coerce_composition_mapping(conc, 'mass_conc')
+        else:
+            conc = np.asarray(conc)
+
+        has_solvent = (solvent_ind is not None) or (solv_mass_frac is not None)
+
+        if solv_mass_frac is not None:
+            filled_mass_conc = self._resolve_solvent_blend_mass_conc(
+                np.asarray(conc, dtype=float), solv_mass_frac
+            )  # [kg/m**3]
+            if isinstance(conc, np.ndarray) and np.issubdtype(conc.dtype, np.floating):
+                conc[:] = filled_mass_conc
+            else:
+                conc = filled_mass_conc
+        elif solvent_ind is not None:
             mask_solv = np.ones_like(conc, dtype=bool)
             mask_solv[solvent_ind] = False
 
@@ -2192,21 +2622,21 @@ class ThermoPhysicalManager:
             mass_frac = (conc.T / conc.sum(axis=1)).T
 
         if basis == 'mass':
-            if solvent_ind is not None:
+            if has_solvent:
                 return mass_frac, conc
             else:
                 return mass_frac
 
         elif basis == 'mole':
             mole_frac = self.frac_to_frac(mass_frac=mass_frac)
-            if solvent_ind is not None:
+            if has_solvent:
                 return mole_frac, conc
             else:
                 return mole_frac
 
         else:
             mole_frac = self.frac_to_frac(mass_frac=mass_frac)
-            if solvent_ind is not None:
+            if has_solvent:
                 return mass_frac, mole_frac, conc
             else:
                 return mass_frac, mole_frac

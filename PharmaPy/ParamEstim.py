@@ -39,8 +39,12 @@ except ImportError:
 
 #: Values of ``method`` accepted by ``ParameterEstimation.optimize_fn``;
 #: ``'scipy'`` and ``'least_squares'`` both select
-#: ``scipy.optimize.least_squares``.
-OPTIMIZATION_METHODS = ('LM', 'IPOPT', 'scipy', 'least_squares')
+#: ``scipy.optimize.least_squares``, and ``'custom'`` selects a user-supplied
+#: optimizer callable.
+OPTIMIZATION_METHODS = ('LM', 'IPOPT', 'scipy', 'least_squares', 'custom')
+#: Reserved keyword arguments of ``scipy.optimize.least_squares`` that
+#: ``ParameterEstimation.optimize_fn`` supplies internally (#536).
+_SCIPY_RESERVED_OPTIONS = ('fun', 'x0', 'jac', 'args')
 #: Marks an estimator attribute that did not exist when ``optimize_fn``
 #: saved the previous fit.
 _ABSENT = object()
@@ -2191,7 +2195,7 @@ class ParameterEstimation:
                        'y_runs', 'resid_runs', 'residuals',
                        'params_residuals', 'weighted_residuals', 'sens',
                        'sens_second', '_params_sens_second',
-                       'num_model_states')
+                       'num_model_states', '_custom_optimizer')
 
     def __init__(self, func: Callable, param_seed, x_data=None, y_data=None,
                  measured_ind=None,
@@ -3671,9 +3675,129 @@ class ParameterEstimation:
             elif hasattr(self, name):
                 delattr(self, name)
 
+    @staticmethod
+    def _coerce_scipy_bounds(raw_bounds, num_params: int):
+        """Normalize parameter bounds for ``scipy.optimize.least_squares``.
+
+        Parameters
+        ----------
+        raw_bounds : sequence
+            Either SciPy's ``(lower_bounds, upper_bounds)`` 2-container (as
+            also returned by ``CalibrationRecord.optimizer_inputs`` for
+            ``'scipy'`` and ``'least_squares'`` records) or a sequence of
+            ``num_params`` per-parameter ``(lower, upper)`` pairs (when
+            ``num_params != 2`` or a bound side is ``None``), in parameter
+            units.
+        num_params : int
+            Number of optimized parameters [-].
+
+        Returns
+        -------
+        tuple or sequence
+            Bounds formatted for ``scipy.optimize.least_squares``, with
+            ``None`` converted to ``-np.inf`` or ``np.inf``.
+        """
+        if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == num_params:
+            all_pairs = all(
+                isinstance(item, (list, tuple)) and len(item) == 2
+                for item in raw_bounds)
+            has_none = all_pairs and any(
+                item[0] is None or item[1] is None for item in raw_bounds)
+            if all_pairs and (num_params != 2 or has_none):
+                lower = [
+                    -np.inf if item[0] is None else float(item[0])
+                    for item in raw_bounds]  # [model parameter units]
+                upper = [
+                    np.inf if item[1] is None else float(item[1])
+                    for item in raw_bounds]  # [model parameter units]
+                return (lower, upper)
+        if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == 2:
+            lo_raw, hi_raw = raw_bounds
+            if isinstance(lo_raw, (list, tuple)) and any(x is None for x in lo_raw):
+                lo_raw = [-np.inf if x is None else float(x) for x in lo_raw]
+            if isinstance(hi_raw, (list, tuple)) and any(x is None for x in hi_raw):
+                hi_raw = [np.inf if x is None else float(x) for x in hi_raw]
+            return (lo_raw, hi_raw)
+        return raw_bounds
+
+    @staticmethod
+    def _unpack_custom_optimizer_result(
+            custom_result, num_params: int) -> tuple[np.ndarray, dict]:
+        """Validate and unpack the return value of a custom optimizer callable.
+
+        Parameters
+        ----------
+        custom_result : Mapping, tuple, OptimizeResult or array_like
+            Return value of the custom optimizer callable: a mapping or
+            ``scipy.optimize.OptimizeResult`` with key/attribute ``'x'``, a
+            2-tuple ``(x_opt, info_dict)``, or a 1-D array-like parameter
+            vector ``x_opt`` in model parameter units.
+        num_params : int
+            Expected number of optimized parameters [-].
+
+        Returns
+        -------
+        opt_par : numpy.ndarray
+            Accepted variable parameter vector, shape ``(num_params,)``, in
+            the model callback's parameter units.
+        extra_info : dict
+            Additional solver diagnostics returned by the custom optimizer.
+
+        Raises
+        ------
+        ValueError
+            If a mapping lacks ``'x'``, or the parameter vector is not a
+            finite 1-D real array of shape ``(num_params,)``.
+        TypeError
+            If ``custom_result`` cannot be converted to a float parameter
+            vector.
+        """
+        extra_info: dict = {}
+        if isinstance(custom_result, Mapping):
+            if 'x' not in custom_result:
+                raise ValueError(
+                    "Custom optimizer mapping result must contain key 'x' "
+                    "with the accepted parameter vector")
+            raw_x = custom_result['x']
+            extra_info = {
+                key: value for key, value in custom_result.items()
+                if key not in ('x', 'fun', 'jac')}
+        elif hasattr(custom_result, 'x'):
+            raw_x = custom_result.x
+            for key in ('status', 'success', 'message', 'nit', 'nfev', 'njev',
+                        'stop_criterion', 'num_iter', 'num_fun_eval'):
+                if hasattr(custom_result, key):
+                    extra_info[key] = getattr(custom_result, key)
+        elif (isinstance(custom_result, tuple)
+              and len(custom_result) == 2
+              and isinstance(custom_result[1], Mapping)):
+            raw_x, raw_meta = custom_result
+            extra_info = {
+                key: value for key, value in raw_meta.items()
+                if key not in ('x', 'fun', 'jac')}
+        else:
+            raw_x = custom_result
+
+        try:
+            opt_par = np.asarray(raw_x, dtype=float)  # [model parameter units]
+        except (TypeError, ValueError) as exc:
+            raise TypeError(
+                "Custom optimizer must return a real parameter vector, a "
+                "(params, info) 2-tuple, or a mapping/OptimizeResult with "
+                "entry 'x'") from exc
+        if opt_par.ndim != 1 or opt_par.shape != (num_params,):
+            raise ValueError(
+                f"Custom optimizer must return a 1-D parameter vector of "
+                f"shape {(num_params,)}; got shape {opt_par.shape}")
+        if not np.all(np.isfinite(opt_par)):
+            raise ValueError(
+                "Custom optimizer returned non-finite parameter values")
+        return opt_par, extra_info
+
     def optimize_fn(self, optim_options: Optional[dict] = None,
                     simulate: bool = False, verbose: int | bool = True,
-                    store_iter: bool = True, method: str = 'LM',
+                    store_iter: bool = True,
+                    method: Union[str, Callable] = 'LM',
                     bounds: Optional[Sequence] = None
                     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Optimize variable parameters and assemble fit statistics.
@@ -3686,7 +3810,8 @@ class ParameterEstimation:
             a copy, with deep copies of the non-callable values, to the
             solver, with the entries it sets itself (``full_output`` and
             ``verbose`` for LM, ``print_level`` for IPOPT, ``verbose`` and,
-            if given, ``bounds`` for ``'scipy'``/``'least_squares'``).
+            if given, ``bounds`` for ``'scipy'``/``'least_squares'``, and
+            ``bounds`` when given for a custom optimizer).
             After a successful call that copy, as the solver left it, is
             stored as ``optim_options``, the effective options of the last
             fit; for IPOPT, cyipopt has converted its keys to bytes and
@@ -3708,13 +3833,58 @@ class ParameterEstimation:
             describe this fit only. If False, ``params_iter`` and
             ``objfun_iter`` keep every evaluation of this call, in order,
             and no ``paramest_df`` is stored.
-        method : {'LM', 'IPOPT', 'scipy', 'least_squares'}, optional
+        method : {'LM', 'IPOPT', 'scipy', 'least_squares', 'custom'} or callable, optional
             Optimization method used for fitting. ``'scipy'`` and
             ``'least_squares'`` both select
-            ``scipy.optimize.least_squares``. The default is ``'LM'``.
+            ``scipy.optimize.least_squares``. A custom optimizer can be
+            supplied either directly as a callable
+            ``optimizer(seed, objective_fun, gradient_fun, **options)`` or by
+            passing ``method='custom'`` with ``optim_options={'optimizer':
+            callable, ...}``. The default is ``'LM'``.
+
+            When a custom optimizer callable is used:
+
+            * **Signature and callback defaults**: ``seed`` is a 1-D
+              ``numpy.ndarray`` of the free parameters only
+              (``param_seed[map_variable]``), shape ``(num_params,)``, in
+              model parameter units; fixed parameters (``optimize_flags``
+              entries set to ``False``) are held constant inside
+              ``get_objective`` and ``get_gradient`` and reassembled into
+              the full parameter vector automatically. ``objective_fun`` is
+              ``self.get_objective`` (where ``objective_fun(x, out_array=False)``
+              returns the scalar objective ``0.5 * r @ r`` and
+              ``objective_fun(x, out_array=True)`` returns the 1-D weighted
+              residual vector ``r`` of shape ``(n_residuals,)``).
+              ``gradient_fun`` is ``self.get_gradient`` (where
+              ``gradient_fun(x, out_array=False)`` returns the 1-D objective
+              gradient ``J @ r`` of shape ``(num_params,)`` and
+              ``gradient_fun(x, out_array=True)`` returns the 2-D weighted
+              sensitivity Jacobian ``J = dr/dtheta`` of shape
+              ``(num_params, n_residuals)``). The callable is always invoked
+              with three positional arguments as
+              ``optimizer(seed, objective_fun, gradient_fun, **options)``;
+              callables that do not accept three positional arguments raise
+              ``TypeError``.
+            * **Bounds**: When ``bounds`` is supplied (either via ``bounds=``
+              or ``optim_options['bounds']``), it is forwarded as the
+              ``bounds`` keyword argument to ``optimizer``. When replaying a
+              recorded custom-optimizer fit through
+              ``CalibrationRecord.optimizer_inputs()`` or
+              ``CalibrationRecord.rerun()``, ``bounds`` is supplied as a list
+              of per-parameter ``(lower, upper)`` pairs.
+            * **Accepted return forms**: ``optimizer`` may return (1) a
+              mapping containing ``'x'`` (1-D array of shape
+              ``(num_params,)``) plus optional diagnostic entries
+              (``'status'``, ``'success'``, ``'message'``, ``'nit'``,
+              ``'nfev'``, ``'njev'``, ``'stop_criterion'``, ``'num_iter'``,
+              ``'num_fun_eval'``), (2) an object with attribute ``.x`` (such
+              as ``scipy.optimize.OptimizeResult``), (3) a 2-tuple
+              ``(x_opt, info_dict)``, or (4) a 1-D array-like ``x_opt`` of
+              shape ``(num_params,)``.
         bounds : sequence, optional
-            Parameter bounds in the model parameter units, passed to IPOPT or
-            ``scipy.optimize.least_squares``.
+            Parameter bounds in the model parameter units, passed to IPOPT,
+            ``scipy.optimize.least_squares`` (as SciPy's ``(lower, upper)``
+            2-container), or a custom optimizer.
 
         Returns
         -------
@@ -3762,10 +3932,12 @@ class ParameterEstimation:
         ImportError
             If IPOPT is selected without the optional cyipopt dependency.
         ValueError
-            If ``method`` is not one of ``'LM'``, ``'IPOPT'``, ``'scipy'`` or
-            ``'least_squares'``, if ``bounds`` is supplied both through
-            ``bounds=`` and ``optim_options``, or if ``loss`` is not
-            ``'linear'`` when using ``'scipy'``/``'least_squares'``, or if
+            If ``method`` is not one of ``'LM'``, ``'IPOPT'``, ``'scipy'``,
+            ``'least_squares'``, ``'custom'``, or a callable; if ``bounds``
+            is supplied both through ``bounds=`` and ``optim_options``; if
+            ``optim_options`` overrides reserved ``scipy.optimize.least_squares``
+            arguments (``fun``, ``x0``, ``jac``, ``args``); if ``loss`` is not
+            ``'linear'`` when using ``'scipy'``/``'least_squares'``; or if
             finite-difference sensitivities are used and ``dx_finitediff``
             gives a zero or infinite step for an optimized parameter (see
             ``get_gradient``).
@@ -3782,7 +3954,8 @@ class ParameterEstimation:
 
         Notes
         -----
-        After LM or ``scipy.optimize.least_squares`` finishes, the model is
+        After LM, ``scipy.optimize.least_squares``, or a custom optimizer
+        finishes, the model is
         evaluated once per experiment at the accepted parameters to refresh
         ``y_runs``, ``resid_runs``, ``residuals``, and ``weighted_residuals``
         before assembling ``y_model`` (``_model_predictions``). This
@@ -3820,11 +3993,18 @@ class ParameterEstimation:
         (see ``_restore_fit_state``).
 
         """
-        if method not in OPTIMIZATION_METHODS:
+        custom_callable: Optional[Callable] = None
+        if callable(method):
+            custom_callable = method
+            method_name = 'custom'
+        elif isinstance(method, str) and method in OPTIMIZATION_METHODS:
+            method_name = method
+        else:
             raise ValueError(
                 f"Unknown optimization method {method!r}; expected 'LM', "
-                "'IPOPT', 'scipy' or 'least_squares'")
-        if method == 'IPOPT' and not have_cyipopt:
+                "'IPOPT', 'scipy' or 'least_squares', 'custom', or a "
+                "callable optimizer")
+        if method_name == 'IPOPT' and not have_cyipopt:
             raise ImportError(
                 'cyipopt is an optional import. Please install cyipopt to '
                 'use IPOPT as a solver for parameter estimation. conda '
@@ -3843,6 +4023,21 @@ class ParameterEstimation:
             key: value if callable(value) else copy.deepcopy(value)
             for key, value in given_options.items()}
 
+        if method_name == 'custom':
+            if custom_callable is not None and 'optimizer' in effective_options:
+                raise ValueError(
+                    "Pass a custom optimizer either as method=<callable> or "
+                    "through optim_options['optimizer'] with method='custom', "
+                    "not both")
+            if custom_callable is None:
+                opt_entry = effective_options.get('optimizer')
+                if not callable(opt_entry):
+                    raise ValueError(
+                        "method='custom' requires a callable 'optimizer' in "
+                        "optim_options, or pass the callable directly as "
+                        "method=<callable>")
+                custom_callable = opt_entry
+
         previous_fit = self._fit_state()
         # This fit's iteration history (#479): get_objective appends to these
         # lists only, so arrays left by an earlier fit would keep its history.
@@ -3853,7 +4048,7 @@ class ParameterEstimation:
             del self.paramest_df
         self.optimize_flag = not simulate
         try:
-            if method == 'LM':
+            if method_name == 'LM':
                 effective_options['full_output'] = True
                 effective_options['verbose'] = verbose
 
@@ -3869,7 +4064,7 @@ class ParameterEstimation:
                 # metadata.
                 self.get_objective(opt_par, out_array=True)
 
-            elif method == 'IPOPT':
+            elif method_name == 'IPOPT':
                 effective_options['print_level'] = (
                     int(verbose) * IPOPT_VERBOSE_PRINT_LEVEL)  # [-]
 
@@ -3901,8 +4096,44 @@ class ParameterEstimation:
                         "last iterate, not a converged estimate",
                         RuntimeWarning, stacklevel=2)
 
+            elif method_name == 'custom':
+                if 'bounds' in effective_options and bounds is not None:
+                    raise ValueError(
+                        "Pass bounds either through bounds= or optim_options, "
+                        "not both")
+                if bounds is not None:
+                    effective_options['bounds'] = copy.deepcopy(bounds)
+                custom_call_options = {
+                    key: value for key, value in effective_options.items()
+                    if key != 'optimizer'}
+                custom_result = custom_callable(
+                    params_var.copy(),
+                    self.get_objective,
+                    self.get_gradient,
+                    **custom_call_options)
+                opt_par, extra_info = self._unpack_custom_optimizer_result(
+                    custom_result, len(params_var))
+                # Refresh model evaluation buffers at the accepted parameters
+                # and assemble canonical residuals and Jacobian (#347).
+                self.get_objective(opt_par, out_array=True)
+                info = self.assemble_solver_info(opt_par)
+                info['x'] = opt_par
+                for key, value in extra_info.items():
+                    if key not in ('fun', 'jac', 'x'):
+                        info[key] = value
+
             else:  # 'scipy' or 'least_squares'
                 scipy_options = effective_options
+                reserved_scipy = [
+                    key for key in _SCIPY_RESERVED_OPTIONS
+                    if key in scipy_options]
+                if reserved_scipy:
+                    raise ValueError(
+                        "optim_options cannot override reserved "
+                        f"scipy.optimize.least_squares arguments "
+                        f"{reserved_scipy!r}; ParameterEstimation supplies "
+                        "the residual callback, initial guess, Jacobian "
+                        "callback and callback arguments internally")
                 if 'bounds' in scipy_options and bounds is not None:
                     raise ValueError(
                         "Pass bounds either through bounds= or optim_options, "
@@ -3918,6 +4149,11 @@ class ParameterEstimation:
                     scipy_options['verbose'] = int(scipy_options['verbose'])
                 else:
                     scipy_options['verbose'] = int(verbose)
+
+                scipy_call_options = dict(scipy_options)
+                if 'bounds' in scipy_call_options and scipy_call_options['bounds'] is not None:
+                    scipy_call_options['bounds'] = self._coerce_scipy_bounds(
+                        scipy_call_options['bounds'], len(params_var))
 
                 def _scipy_jac(params_eval: np.ndarray,
                                *args_eval) -> np.ndarray:
@@ -3947,7 +4183,7 @@ class ParameterEstimation:
                     params_var,
                     jac=_scipy_jac,
                     args=(True,),
-                    **scipy_options)
+                    **scipy_call_options)
 
                 opt_par = np.asarray(result.x)  # [model parameter units]
 
@@ -3963,12 +4199,16 @@ class ParameterEstimation:
 
             # Statistics use the data residuals; see _data_solver_info.
             info = self._data_solver_info(info)
-            if method in ('scipy', 'least_squares'):
+            if method_name in ('scipy', 'least_squares', 'custom'):
                 # (n_data, num_params) [residual unit / parameter unit]
                 self.sens = info['jac'].T
 
             # Store
-            self.opt_method = method
+            self.opt_method = method_name
+            if method_name == 'custom':
+                self._custom_optimizer = custom_callable
+            elif hasattr(self, '_custom_optimizer'):
+                del self._custom_optimizer
             self.optim_options = effective_options
             self.params_convg = opt_par  # [model parameter units]
             self.info_opt = info
@@ -4002,7 +4242,8 @@ class ParameterEstimation:
     def estimate_parameters(
             self, optim_options: Optional[dict] = None,
             simulate: bool = False, verbose: int | bool = True,
-            store_iter: bool = True, method: str = 'scipy',
+            store_iter: bool = True,
+            method: Union[str, Callable] = 'scipy',
             bounds: Optional[Sequence] = None, **solver_options
     ) -> tuple[np.ndarray, np.ndarray, dict]:
         """Estimate variable parameters with ``scipy.optimize.least_squares``.
@@ -4023,9 +4264,12 @@ class ParameterEstimation:
             If True, store unique parameter/objective iterates in
             ``params_iter``, ``objfun_iter`` and ``paramest_df``. The default
             is True.
-        method : {'scipy', 'least_squares', 'LM', 'IPOPT'}, optional
+        method : {'scipy', 'least_squares', 'LM', 'IPOPT', 'custom'} or callable, optional
             Optimization method forwarded to ``optimize_fn``. The default is
-            ``'scipy'`` (``scipy.optimize.least_squares``).
+            ``'scipy'`` (``scipy.optimize.least_squares``). See
+            :meth:`optimize_fn` for the custom-optimizer callable signature,
+            callback defaults, fixed-parameter mask handling, bounds
+            forwarding, and accepted return forms.
         bounds : sequence, optional
             Parameter bounds in the model parameter units, forwarded to
             ``optimize_fn``.
