@@ -1584,6 +1584,101 @@ def test_report_does_not_change_the_estimator(identifiable):
             assert_same(before[name], getattr(estimator, name), name)
 
 
+# Short-window decay of the accepted-state test: c = exp(-k t) observed at
+# 1, 1.01 and 1.02 s near k = 0.00198 1/s with sigma = 0.01 mol/L. The rate
+# row is t exp(-k t) ~ 1 s, so the default forward step dx = 1e-3 k ~ 2e-6
+# 1/s changes each output by about 2e-6 mol/L, the size of twice the 1e-6
+# relative output accuracy of outputs near 1 mol/L: the rounding term puts
+# the row's error bound near 1 and makes the verdict depend on the output
+# magnitudes the report reads.
+WINDOW_TIMES = np.array([1.0, 1.01, 1.02])  # [s]
+WINDOW_RATE = 0.00198  # [1/s], rate that generates the data
+WINDOW_PERTURBATION = np.array([1e-7, -2e-7, 1e-7])  # [mol/L], arbitrary
+WINDOW_SIGMA = 0.01  # [mol/L]
+WINDOW_SEED = 0.002  # [1/s]
+# A rate six times the fitted one: an evaluation there lowers the outputs
+# by about 1 %, enough to move the error bound below 1.
+OFF_FIT_RATE = 0.012  # [1/s]
+# Report fields that depend on the accepted outputs or the accepted fit.
+ACCEPTED_FIELDS = ('output_error_norm', 'sensitivity_error_bounds',
+                   'resolution_floor', 'singular_values', 'covariance',
+                   'unresolved_parameters', 'identifiable')
+
+
+def window_decay(params, time_s):
+    """Return the concentration of a first-order decay from 1 mol/L.
+
+    Parameters
+    ----------
+    params : numpy.ndarray
+        Rate constant k, shape (1,) [1/s].
+    time_s : numpy.ndarray
+        Model grid, shape (n_times,) [s].
+
+    Returns
+    -------
+    numpy.ndarray
+        ``exp(-k t)`` [mol/L], shape (n_times,).
+    """
+    return np.exp(-params[0] * time_s)
+
+
+def assert_same_report_fields(actual, expected):
+    """Assert the accepted-fit fields of two reports are bitwise equal.
+
+    Parameters
+    ----------
+    actual, expected : IdentifiabilityReport
+        Reports to compare on ``ACCEPTED_FIELDS``.
+    """
+    for name in ACCEPTED_FIELDS:
+        value, reference = getattr(actual, name), getattr(expected, name)
+        if isinstance(reference, np.ndarray):
+            np.testing.assert_array_equal(value, reference, err_msg=name)
+        else:
+            assert value == reference or (np.isnan(value)
+                                          and np.isnan(reference)), name
+
+
+@pytest.mark.parametrize('case_name', ['window', 'mcr'])
+def test_report_reads_the_accepted_outputs_not_later_evaluations(case_name):
+    """A public evaluation after the fit must not change the report.
+
+    ``get_objective`` at other parameters replaces the evaluation buffers
+    (``y_runs``); the report describes the accepted fit, whose parameters,
+    Jacobian and residuals are unchanged, so it must not change either. For
+    the window case an evaluation at ``OFF_FIT_RATE`` lowers the outputs
+    enough to flip the verdict if the report read them.
+    """
+    if case_name == 'window':
+        observed = (window_decay([WINDOW_RATE], WINDOW_TIMES)
+                    + WINDOW_PERTURBATION)  # [mol/L]
+        estimator = ParameterEstimation(
+            window_decay, [WINDOW_SEED],
+            {'run': Experiment({'c': Measurement(
+                0, WINDOW_TIMES, observed, uncertainty=WINDOW_SIGMA,
+                units='mol/L')})}, name_params=['k'])
+        off_fit = np.array([OFF_FIT_RATE])  # [1/s]
+    else:
+        estimator = mcr_case._estimator(mcr_case.model_states_only, None)
+        off_fit = None
+    estimator.optimize_fn(verbose=False)
+    before = estimator.get_identifiability()
+    if off_fit is None:  # [parameter units], twice the accepted values
+        off_fit = 2 * np.asarray(estimator.params_convg, dtype=float)
+    if case_name == 'window':
+        # The accepted short-window rate is not resolved under the default
+        # accuracy: the rounding term alone reaches the row norm.
+        assert before.identifiable is False
+        assert before.sensitivity_error_bounds[0] >= 1
+
+    estimator.get_objective(off_fit, out_array=True)
+
+    assert not np.array_equal(estimator.params_residuals,
+                              estimator.params_convg)
+    assert_same_report_fields(estimator.get_identifiability(), before)
+
+
 def test_report_is_immutable_and_round_trips():
     report = fit_decay('declared_uncertainty').get_identifiability()
     with pytest.raises(dataclasses.FrozenInstanceError):

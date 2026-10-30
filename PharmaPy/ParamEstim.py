@@ -2970,7 +2970,7 @@ class ParameterEstimation:
                        'y_runs', 'resid_runs', 'residuals',
                        'params_residuals', 'weighted_residuals', 'sens',
                        'sens_second', '_params_sens_second',
-                       'num_model_states')
+                       'num_model_states', '_accepted_y_runs')
 
     def __init__(self, func: Callable, param_seed, x_data=None, y_data=None,
                  measured_ind=None,
@@ -4653,7 +4653,9 @@ class ParameterEstimation:
         ``cond_number``, ``paramest_df``), the evaluation buffers that
         ``get_objective`` and ``get_gradient`` overwrite (``y_runs``,
         ``resid_runs``, ``residuals``, ``weighted_residuals``, ``sens`` and
-        the others listed there), and the attributes subclasses add, such as
+        the others listed there), the snapshot of the accepted raw model
+        outputs that ``get_identifiability`` reads (``_accepted_y_runs``),
+        and the attributes subclasses add, such as
         ``epsilon_mcr`` and the projections of
         ``MultipleCurveResolution``, which also clears its evaluation cache
         (see ``_restore_fit_state``).
@@ -4746,6 +4748,11 @@ class ParameterEstimation:
                 opt_par = result['x']
 
                 info = self.assemble_solver_info(opt_par)
+                # assemble_solver_info evaluates without storing. Refresh the
+                # model buffers at the accepted point, as for the other
+                # methods, so the stored outputs describe opt_par whatever
+                # point IPOPT evaluated last.
+                self.get_objective(opt_par, out_array=True)
                 # Keep the termination outcome (#475); cyipopt returns the
                 # message as bytes.
                 message = result['message']
@@ -4870,6 +4877,12 @@ class ParameterEstimation:
             # Model prediction with final parameters, [model state units], one
             # array per experiment; see _model_predictions.
             self.y_model = self._model_predictions()
+            # Accepted raw model outputs [model state units], copied so that
+            # later evaluations (get_objective at other parameters, callbacks
+            # refilling their output arrays) cannot change what the
+            # identifiability report reads; see _weighted_predictions.
+            self._accepted_y_runs = [np.array(run, dtype=float, copy=True)
+                                     for run in self.y_runs]
 
             covar_params = self.get_covariance()
         except BaseException:
@@ -5375,7 +5388,8 @@ class ParameterEstimation:
         numpy.ndarray
             Shape ``(len(info_opt['fun']),)`` [weighted residual unit]: the
             model outputs of each experiment at the accepted parameters
-            (``y_runs``, which ``optimize_fn`` refreshes there for every
+            (``_accepted_y_runs``, the copy of ``y_runs`` that
+            ``optimize_fn`` stores after refreshing it there for every
             method) passed through ``_weight_sample_rows`` (declared
             standard deviations or the ``weight_matrix`` roots), zero where
             unobserved, in the residual layout (experiment, measurement
@@ -5385,12 +5399,18 @@ class ParameterEstimation:
         -----
         The raw outputs are used directly rather than residuals plus
         observations, whose sum cancels when the predictions are far below
-        the data. ``y_runs`` describes the last ``get_objective``
-        evaluation with ``set_self=True``: an explicit evaluation after the
-        fit replaces it.
+        the data. ``y_runs`` itself describes the last ``get_objective``
+        evaluation with ``set_self=True``, which an explicit evaluation
+        after the fit replaces; the snapshot keeps the accepted outputs, so
+        the report of a fit does not depend on later evaluations.
+
+        Raises
+        ------
+        AttributeError
+            If no fit has stored the snapshot.
         """
         parts = []
-        for outputs, x_mask, std in zip(self.y_runs, self.x_masks,
+        for outputs, x_mask, std in zip(self._accepted_y_runs, self.x_masks,
                                         self._residual_std_runs()):
             # [model state units]; unobserved entries are not read
             predictions = np.asarray(outputs, dtype=float)
@@ -5535,10 +5555,13 @@ class ParameterEstimation:
             for every parameter or one per optimized parameter:
             ``||dJ_i|| <= jacobian_rtol_i * ||J_i||``. The default None uses
             machine epsilon for model-returned sensitivities and
-            ``jac_fun`` (exact to rounding; for sensitivities integrated by
-            an ODE solver pass its ``rtol``, which is how CVODES controls
-            the sensitivity error) and the relative forward-difference step
-            ``h_i / scale_i`` for finite differences (truncation term).
+            ``jac_fun`` (exact to rounding) and the relative
+            forward-difference step ``h_i / scale_i`` for finite differences
+            (truncation term). For sensitivities integrated by an ODE solver
+            pass a bound established by ``check_derivatives``: CVODES
+            controls the sensitivity error relative to the sensitivities,
+            but only to a modest multiple of the solver ``rtol``, so the
+            ``rtol`` alone can understate it.
         output_rtol : float, optional
             Relative accuracy [-] of the model outputs, in ``(0, 1)``,
             used only for finite-difference Jacobians (rounding term). The
@@ -6627,8 +6650,10 @@ class MultipleCurveResolution(ParameterEstimation):
         -------
         numpy.ndarray
             Shape ``(len(info_opt['fun']),)`` [weighted residual unit]: the
-            stacked predictions of ``_model_predictions`` (curve-resolved
-            spectra ``C eps`` [-] from ``y_runs``, then the non-spectral
+            stacked accepted predictions ``y_model``, which ``optimize_fn``
+            stores from ``_model_predictions`` at the accepted parameters
+            (curve-resolved spectra ``C eps`` [-] from ``y_runs``, then the
+            non-spectral
             model values [model units]; zero where unobserved), each column
             multiplied by its residual sign (``_residual_signs``: -1
             spectral, +1 non-spectral) and whitened by
@@ -6640,10 +6665,13 @@ class MultipleCurveResolution(ParameterEstimation):
         The spectral predictions are the raw ``y_runs``. The non-spectral
         model values are not stored separately: ``_model_predictions``
         rebuilds them as residuals plus observations, which loses accuracy
-        when they are far below the data.
+        when they are far below the data. ``y_model`` holds fresh arrays
+        stored with the fit, so evaluations after the fit do not change it.
+        Before a fit ``get_identifiability`` raises ``AttributeError`` (no
+        ``info_opt``) before this method is reached.
         """
         # [-] spectral, [model units] non-spectral; NaN where unobserved
-        predictions = np.vstack(self._model_predictions())
+        predictions = np.vstack(self.y_model)
         signed = (np.nan_to_num(predictions)
                   * self._residual_signs(0))  # [-] / [model units]
         # [weighted residual unit]

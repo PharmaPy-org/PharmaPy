@@ -2530,8 +2530,8 @@ class IdentifiabilityReport:
 
     The first term is the accuracy of the sensitivity row relative to
     itself: machine epsilon for model-returned sensitivities and
-    ``jac_fun`` by default (an ODE solver's sensitivity ``rtol`` when
-    passed), and for finite differences the truncation error ``(h_i / 2)
+    ``jac_fun`` by default (for ODE-solver sensitivities, pass a bound
+    established with ``check_derivatives``), and for finite differences the truncation error ``(h_i / 2)
     |d2y/dp_i2|`` of Nocedal and Wright (*Numerical Optimization*, 2nd
     ed., 2006, Sec. 8.1, eq. 8.5, first term), at most about the relative
     step ``h_i / scale_i`` under the well-scaled-curvature assumption

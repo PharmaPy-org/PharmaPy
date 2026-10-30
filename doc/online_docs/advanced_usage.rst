@@ -13,7 +13,10 @@ the model once more per experiment to refresh its stored outputs. This also
 restores a stateful unit-operation callback to those parameters; the unit retains
 the last experiment's trajectory when several experiments share one unit.
 This reporting step does not establish convergence. Inspect the solver's
-termination diagnostics before interpreting the fit.
+termination diagnostics before interpreting the fit. SciPy fits refresh their
+outputs the same way, and IPOPT fits now do too (issue #352): earlier
+releases kept the outputs of IPOPT's last stored evaluation, which in the
+cases checked was already the accepted point.
 
 :code:`SimulationExec.EstimateParams` stores the wall-clock duration of the
 optimization in seconds as :code:`optimization_time`. It prints the
@@ -342,7 +345,11 @@ immutable, picklable :code:`StatsModule.IdentifiabilityReport` of an
 accepted fit (issue #352). It is built from :code:`info_opt['jac']`,
 :code:`info_opt['fun']`, :code:`params_convg`, the observations and the
 weights only: nothing is refitted and the
-estimator, including :code:`covar_params`, is not modified.
+estimator, including :code:`covar_params`, is not modified. The model
+outputs it uses are a copy of the accepted outputs that :code:`optimize_fn`
+stores with the fit, so evaluating the model at other parameters afterwards
+(for example :code:`get_objective`, which replaces the evaluation buffer
+:code:`y_runs`) does not change the report.
 :code:`MultipleCurveResolution` inherits it. The report contains:
 
 - :code:`noise_model` (:code:`'declared_uncertainty'`,
@@ -393,13 +400,21 @@ error bound of row :code:`i` (:code:`sensitivity_error_bounds`) is
 :code:`2 * output_error_norm / (h_i * ||J_i||)`. :code:`jacobian_rtol` (one
 value, or one per parameter) is the accuracy of each sensitivity row
 relative to itself: machine epsilon by default for model-returned
-sensitivities and :code:`jac_fun` (pass the solver :code:`rtol` for
-sensitivities integrated by an ODE solver, which is how CVODES controls
-their error), and the relative forward-difference step :code:`h_i /
+sensitivities and :code:`jac_fun`, and the relative forward-difference step
+:code:`h_i /
 scale_i` by default for finite differences, the truncation term of Nocedal
 and Wright (*Numerical Optimization*, 2nd ed., Springer, 2006, Sec. 8.1,
 eq. 8.5) under a well-scaled curvature; it does not depend on additive
-offsets of the outputs. :code:`scale_i` is :code:`|estimate|`, or
+offsets of the outputs. For sensitivities integrated by an ODE solver,
+pass a bound established by :code:`check_derivatives` (see `Verifying
+derivatives`_): CVODES controls the sensitivity error relative to the
+sensitivities, but only to a modest multiple of the solver :code:`rtol`. In
+the Ziegler validation case, an independent matrix-exponential check found
+row errors up to about 8 times the CVode :code:`rtol` of 1e-6, so the
+:code:`rtol` alone understates them;
+:code:`tests/test_calibration_validation_ziegler.py` derives its
+:code:`jacobian_rtol` from the derivative check instead.
+:code:`scale_i` is :code:`|estimate|`, or
 :code:`param_scale`, which that default needs for an estimate at exactly
 zero. The second term is the rounding term of the same equation: the
 forward difference subtracts two model outputs, each accurate to
