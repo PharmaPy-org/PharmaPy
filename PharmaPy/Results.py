@@ -6,10 +6,19 @@ Created on Mon Jun 13 11:38:23 2022
 """
 
 from collections import Counter
-from typing import List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
+
+from PharmaPy.ThermoModule import FieldLookupError
+
+
+# Default maximum number of string component names rendered inline in
+# DynamicResult / pprint tables before ellipsis truncation (#341). Five
+# preserves standard five-species flowsheet fixtures while bounding wider
+# multicomponent reaction/crystallization tables.
+DEFAULT_MAX_COMPONENTS = 5  # [-]
 
 
 def get_name_object(obj):
@@ -71,17 +80,69 @@ def get_di_multiindex(di):
     return out
 
 
-def pprint(di, name_items, fields, str_out=True):
+def _format_index_list(
+    val: Sequence[Any],
+    max_components: Optional[int] = DEFAULT_MAX_COMPONENTS,
+) -> str:
+    """Format an index list for bounded table display without mutating inputs.
+
+    Parameters
+    ----------
+    val : sequence
+        Component name list or numeric index list stored in state metadata.
+    max_components : int or None, optional
+        Maximum number of string component names rendered inline before
+        ellipsis truncation [-]. ``None`` disables truncation and renders all
+        component names. Defaults to ``DEFAULT_MAX_COMPONENTS`` (5).
+
+    Returns
+    -------
+    str
+        Formatted index string for table display.
+
+    Raises
+    ------
+    ValueError
+        If ``max_components`` is not ``None`` and is less than 1.
     """
-    Create a table showing items with their respective fields as columns.
+    if max_components is not None and (
+        isinstance(max_components, bool)
+        or not isinstance(max_components, int)
+        or max_components < 1
+    ):
+        raise ValueError(
+            f"max_components must be a positive integer or None; got {max_components!r}."
+        )
+    if len(val) == 0:
+        return ''
+    if all(isinstance(a, str) for a in val):
+        if max_components is None or len(val) <= max_components:
+            return ', '.join(val)
+        if max_components == 1:
+            return f"{val[0]}, ..."
+        head_count = max_components - 1  # [-]
+        return ', '.join(list(val[:head_count]) + ['...', val[-1]])
+    if len(val) == 1:
+        return str(val[0])
+    return '%i, ..., %i' % (val[0], val[-1])
+
+
+def pprint(
+    di,
+    name_items,
+    fields,
+    str_out=True,
+    max_components: Optional[int] = DEFAULT_MAX_COMPONENTS,
+):
+    """Create a table showing items with their respective fields as columns.
 
     Parameters
     ----------
     di : dict
-        dictionary structured as:
+        Dictionary structured as::
 
-            {'item_1': {'field_1':..., 'field_2':...},
-             'item_2': {'field_1':..., 'field_2':...},
+            {'item_1': {'field_1': ..., 'field_2': ...},
+             'item_2': {'field_1': ..., 'field_2': ...},
              ...}
 
         It may be empty, in which case only the header is rendered.
@@ -92,6 +153,10 @@ def pprint(di, name_items, fields, str_out=True):
         their ``str.format`` type codes (e.g. ``'d'`` or ``'s'``).
     str_out : bool, optional
         If True (default), join the table lines into one string.
+    max_components : int or None, optional
+        Maximum number of string component names rendered inline in list-valued
+        fields before truncating with ``'...'`` [-]. ``None`` renders all
+        components. Defaults to ``DEFAULT_MAX_COMPONENTS`` (5).
 
     Returns
     -------
@@ -99,8 +164,15 @@ def pprint(di, name_items, fields, str_out=True):
         The table, as one string or as its lines. Column widths fit the
         header and the widest value; an empty ``di`` gives the header
         between two separator lines, followed by the closing separator.
-
     """
+    if max_components is not None and (
+        isinstance(max_components, bool)
+        or not isinstance(max_components, int)
+        or max_components < 1
+    ):
+        raise ValueError(
+            f"max_components must be a positive integer or None; got {max_components!r}."
+        )
 
     out = []
 
@@ -123,11 +195,10 @@ def pprint(di, name_items, fields, str_out=True):
         field_vals = [di[name].get(field, '') for name in items]
 
         for ind, val in enumerate(field_vals):
-            if isinstance(val, list):
-                if all([type(a) == str for a in val]):
-                    field_vals[ind] = ', '.join(val)
-                else:
-                    field_vals[ind] = '%i, ..., %i' % (val[0], val[-1])
+            if isinstance(val, (list, tuple)):
+                field_vals[ind] = _format_index_list(
+                    val, max_components=max_components
+                )
 
         len_vals = [len(repr(val)) for val in field_vals]
         max_lens[field] = max(len_vals, default=0)
@@ -156,11 +227,10 @@ def pprint(di, name_items, fields, str_out=True):
         field_vals = [di[name].get(field, '') for field in fields]
 
         for ind, val in enumerate(field_vals):
-            if isinstance(val, list):
-                if all([type(a) == str for a in val]):
-                    field_vals[ind] = ', '.join(val)
-                else:
-                    field_vals[ind] = '%i, ..., %i' % (val[0], val[-1])
+            if isinstance(val, (list, tuple)):
+                field_vals[ind] = _format_index_list(
+                    val, max_components=max_components
+                )
 
         item = form_vals.format(*([name] + field_vals))
 
@@ -175,17 +245,248 @@ def pprint(di, name_items, fields, str_out=True):
 
 
 class DynamicResult:
-    def __init__(self, di_states, di_fstates=None, **results):
+    """Store and display dynamic or steady-state unit-operation trajectories.
+
+    Parameters
+    ----------
+    di_states : dict
+        Metadata dictionary for primary model states, keyed by state name with
+        entries ``'dim'``, ``'units'``, and optional ``'index'`` / ``'type'``.
+    di_fstates : dict, optional
+        Metadata dictionary for derived or algebraic function-of-state
+        trajectories.
+    max_components : int or None, optional
+        Maximum number of component names displayed inline in summary tables
+        before ellipsis truncation [-]. Defaults to ``DEFAULT_MAX_COMPONENTS``.
+    **results
+        State trajectory arrays or mappings keyed by state name (including
+        ``time`` [s]).
+    """
+
+    def __init__(
+        self,
+        di_states,
+        di_fstates=None,
+        max_components: Optional[int] = DEFAULT_MAX_COMPONENTS,
+        **results,
+    ):
         self.__dict__.update(**results)
         self.di_states = di_states
         self.di_fstates = di_fstates
+        self.max_components = max_components  # [-]
 
-    def __repr__(self):
+    def retrieve_state(
+        self,
+        field_name: str,
+        species: Optional[Union[str, Sequence[str]]] = None,
+        copy: bool = True,
+    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """Retrieve a named state trajectory with consistent species indexing.
+
+        Parameters
+        ----------
+        field_name : str
+            Name of the state or function-of-state trajectory to retrieve,
+            such as ``'mole_conc'`` [mol/L], ``'mass_frac'`` [-],
+            ``'mole_frac'`` [-], ``'temp'`` [K], ``'vol'`` [m**3],
+            ``'pres'`` [Pa], or ``'time'`` [s].
+        species : str or sequence of str, optional
+            Optional species selector for component-indexed states.
+            - ``None`` (default): returns a ``dict[str, np.ndarray]`` mapping
+              each component name in database/state order to its trajectory
+              array (with preserved time and optional spatial axes) for
+              component-indexed states, or the state array itself for unindexed
+              states.
+            - ``str``: returns the trajectory ``np.ndarray`` for that single
+              species.
+            - ``Sequence[str]``: returns a ``dict[str, np.ndarray]`` for the
+              requested species in the requested order.
+        copy : bool, optional
+            If ``True`` (default), return a copy of the underlying NumPy
+            array(s) so caller mutations do not alter stored simulation
+            results.
+
+        Returns
+        -------
+        numpy.ndarray or dict of str to numpy.ndarray
+            Species-keyed dictionary of state arrays (when ``species`` is
+            ``None`` or a sequence of species names on a component-indexed
+            state), or a single state ``np.ndarray`` (when ``species`` is a
+            single species name or ``field_name`` is an unindexed state).
+
+        Raises
+        ------
+        FieldLookupError
+            Subclass of both ``KeyError`` and ``ValueError``. Raised if
+            ``field_name`` is not present on this result object, if ``species``
+            is requested on a state that is not component-indexed, or if any
+            requested species name is unknown.
+        """
+        if not isinstance(field_name, str) or not hasattr(self, field_name):
+            available: List[str] = []
+            if isinstance(self.di_states, Mapping):
+                available.extend(self.di_states.keys())
+            if isinstance(self.di_fstates, Mapping):
+                available.extend(
+                    k for k in self.di_fstates.keys() if k not in available
+                )
+            if hasattr(self, 'time') and 'time' not in available:
+                available.append('time')
+            raise FieldLookupError(
+                f"State {field_name!r} does not exist on {self.__class__.__name__}. "
+                f"Available states are {available}."
+            )
+
+        raw_val = getattr(self, field_name)
+        meta: Mapping[str, Any] = {}
+        if isinstance(self.di_states, Mapping) and field_name in self.di_states:
+            meta = self.di_states[field_name]
+        elif isinstance(self.di_fstates, Mapping) and field_name in self.di_fstates:
+            meta = self.di_fstates[field_name]
+
+        index_meta = meta.get('index') if isinstance(meta, Mapping) else None
+        has_str_index = (
+            isinstance(index_meta, (list, tuple))
+            and len(index_meta) > 0
+            and all(isinstance(k, str) for k in index_meta)
+        )
+
+        if isinstance(raw_val, Mapping):
+            comp_names = (
+                list(index_meta) if has_str_index else list(raw_val.keys())
+            )
+            if species is None:
+                return {
+                    sp: (
+                        np.array(raw_val[sp], copy=True)
+                        if copy
+                        else np.asarray(raw_val[sp])
+                    )
+                    for sp in comp_names
+                    if sp in raw_val
+                }
+            if isinstance(species, str):
+                if species not in raw_val:
+                    raise FieldLookupError(
+                        f"Unknown species {species!r} for state {field_name!r}; "
+                        f"available species are {comp_names}."
+                    )
+                return (
+                    np.array(raw_val[species], copy=True)
+                    if copy
+                    else np.asarray(raw_val[species])
+                )
+            if isinstance(species, Sequence):
+                unknown = [
+                    sp for sp in species
+                    if not isinstance(sp, str) or sp not in raw_val
+                ]
+                if unknown:
+                    raise FieldLookupError(
+                        f"Unknown species {unknown} for state {field_name!r}; "
+                        f"available species are {comp_names}."
+                    )
+                return {
+                    sp: (
+                        np.array(raw_val[sp], copy=True)
+                        if copy
+                        else np.asarray(raw_val[sp])
+                    )
+                    for sp in species
+                }
+            raise TypeError(
+                "species must be None, a species name (str), or a sequence of "
+                "species names."
+            )
+
+        if has_str_index:
+            comp_names = list(index_meta)
+            arr = np.asarray(raw_val)
+            if species is None:
+                return {
+                    comp_names[idx]: (
+                        arr[..., idx].copy() if copy else arr[..., idx]
+                    )
+                    for idx in range(len(comp_names))
+                }
+            if isinstance(species, str):
+                if species not in comp_names:
+                    raise FieldLookupError(
+                        f"Unknown species {species!r} for state {field_name!r}; "
+                        f"available species are {comp_names}."
+                    )
+                sp_idx = comp_names.index(species)
+                return arr[..., sp_idx].copy() if copy else arr[..., sp_idx]
+            if isinstance(species, Sequence):
+                unknown = [
+                    sp for sp in species
+                    if not isinstance(sp, str) or sp not in comp_names
+                ]
+                if unknown:
+                    raise FieldLookupError(
+                        f"Unknown species {unknown} for state {field_name!r}; "
+                        f"available species are {comp_names}."
+                    )
+                return {
+                    sp: (
+                        arr[..., comp_names.index(sp)].copy()
+                        if copy
+                        else arr[..., comp_names.index(sp)]
+                    )
+                    for sp in species
+                }
+            raise TypeError(
+                "species must be None, a species name (str), or a sequence of "
+                "species names."
+            )
+
+        if species is not None:
+            raise FieldLookupError(
+                f"State {field_name!r} on {self.__class__.__name__} is not "
+                "indexed by species."
+            )
+
+        if isinstance(raw_val, np.ndarray):
+            return raw_val.copy() if copy else raw_val
+        if isinstance(raw_val, (list, tuple)):
+            return np.array(raw_val, copy=copy)
+        return raw_val
+
+    def pprint(
+        self,
+        max_components: Optional[int] = DEFAULT_MAX_COMPONENTS,
+        str_out: bool = True,
+    ) -> Union[str, List[str]]:
+        """Format the state and function-of-state tables with bounded component display.
+
+        Parameters
+        ----------
+        max_components : int or None, optional
+            Maximum number of component names rendered inline before ellipsis
+            truncation [-]. ``None`` renders all component names. Defaults to
+            ``DEFAULT_MAX_COMPONENTS``.
+        str_out : bool, optional
+            If ``True`` (default), return a single newline-joined string;
+            otherwise return the list of lines.
+
+        Returns
+        -------
+        str or list of str
+            Formatted state metadata table(s).
+        """
         headers = {'dim': '', 'units': 's', 'index': 's'}
 
-        str_states = pprint(self.di_states, 'states', headers)
+        str_states = pprint(
+            self.di_states,
+            'states',
+            headers,
+            str_out=True,
+            max_components=max_components,
+        )
 
-        state_example = list(self.di_states.keys())[0]
+        state_example = (
+            list(self.di_states.keys())[0] if self.di_states else '<field>'
+        )
 
         header = 'PharmaPy result object'
         lines = '-' * (len(header) + 2)
@@ -199,7 +500,13 @@ class DynamicResult:
 
         if self.di_fstates is not None and len(self.di_fstates) > 0:
             head = {'dim': '', 'units': 's', 'index': 's'}
-            str_fstates = pprint(self.di_fstates, 'f(states)', head)
+            str_fstates = pprint(
+                self.di_fstates,
+                'f(states)',
+                head,
+                str_out=True,
+                max_components=max_components,
+            )
 
             out_str = str_states + '\n\n' + str_fstates
 
@@ -209,7 +516,12 @@ class DynamicResult:
         out_str = top_text + out_str
         out_str += '\n\nTime vector can be accessed as result.time\n'
 
+        if not str_out:
+            return out_str.splitlines()
         return out_str
+
+    def __repr__(self):
+        return self.pprint(max_components=self.max_components, str_out=True)
 
 
 def _flowsheet_diagram_lines(graph: Mapping[str, Sequence[str]],
