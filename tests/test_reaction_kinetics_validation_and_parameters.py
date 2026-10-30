@@ -11,6 +11,9 @@ https://github.com/PharmaPy-org/PharmaPy/issues/44
 https://github.com/PharmaPy-org/PharmaPy/issues/60
 https://github.com/PharmaPy-org/PharmaPy/issues/166
 https://github.com/PharmaPy-org/PharmaPy/issues/235
+https://github.com/PharmaPy-org/PharmaPy/issues/283
+https://github.com/PharmaPy-org/PharmaPy/issues/290
+https://github.com/PharmaPy-org/PharmaPy/issues/339
 """
 
 from pathlib import Path
@@ -433,3 +436,190 @@ def test_batched_sensitivities_preserve_shared_arrhenius_parameters(
         kinetics.dk_dkparams(temp) for temp in TEMPERATURES
     ])  # [rate-constant/parameter units]
     np.testing.assert_array_equal(batched_constants, scalar_constants)
+
+
+@pytest.mark.parametrize("arrow_1,arrow_2", [
+    ("-->", "-->"),
+    ("<-->", "<-->"),
+    ("<=>", "<=>"),
+    ("\u2192", "\u21c4"),
+    ("-->", "\u21c4"),
+])
+def test_reaction_id_mappings_align_reordered_parameters_and_arrows(
+        arrow_1, arrow_2):
+    """Align reaction-ID-keyed mappings regardless of parameter key insertion order."""
+    rxn_map = {
+        "coupling": f"A {arrow_1} B",
+        "dimer_step": f"2 B {arrow_2} 2 C",
+    }
+    # Deliberately reverse key insertion order in every parameter mapping.
+    k_map = {"dimer_step": float(K_PARAMS[1]), "coupling": float(K_PARAMS[0])}  # [L/mol/s], [1/s]
+    ea_map = {"dimer_step": float(EA_PARAMS[1]), "coupling": float(EA_PARAMS[0])}  # [J/mol]
+    keq_map = {"dimer_step": float(KEQ[1]), "coupling": float(KEQ[0])}  # [-]
+    dh_map = {"dimer_step": float(HEATS[1]), "coupling": float(HEATS[0])}  # [J/mol_rxn]
+
+    mapped = RxnKinetics(
+        path=str(DATABASE),
+        rxns=rxn_map,
+        k_params=k_map,
+        ea_params=ea_map,
+        keq_params=keq_map,
+        dh_rxn=dh_map,
+        temp_ref=REFERENCE_TEMP,
+    )
+    baseline = RxnKinetics(
+        path=str(DATABASE),
+        rxn_list=["A --> B", "2 B --> 2 C"],
+        k_params=K_PARAMS,
+        ea_params=EA_PARAMS,
+        keq_params=KEQ,
+        delta_hrxn=HEATS,
+        temp_ref=REFERENCE_TEMP,
+    )
+
+    assert mapped.rxn_names == ("coupling", "dimer_step")
+    assert mapped.partic_species == ["A", "B", "C"]
+    np.testing.assert_array_equal(mapped.stoich_matrix, baseline.stoich_matrix)
+    np.testing.assert_array_equal(mapped.normalized_stoich, baseline.normalized_stoich)
+    np.testing.assert_array_equal(mapped.concat_params(), baseline.concat_params())
+    np.testing.assert_array_equal(mapped.delta_hrxn, baseline.delta_hrxn)
+
+    conc_batch = AWAY_CONC[:, :3]  # [mol/L], participating species A, B, C
+    np.testing.assert_allclose(
+        mapped.get_rxn_rates(conc_batch, TEMPERATURES, overall_rates=True),
+        baseline.get_rxn_rates(conc_batch, TEMPERATURES, overall_rates=True),
+        rtol=RATE_RTOL, atol=0.0,
+    )
+    np.testing.assert_allclose(
+        mapped.get_rxn_rates(conc_batch, TEMPERATURES, overall_rates=False),
+        baseline.get_rxn_rates(conc_batch, TEMPERATURES, overall_rates=False),
+        rtol=RATE_RTOL, atol=0.0,
+    )
+    np.testing.assert_allclose(
+        mapped.derivatives(conc_batch, TEMPERATURES, dstates=True),
+        baseline.derivatives(conc_batch, TEMPERATURES, dstates=True),
+        rtol=RATE_RTOL, atol=0.0,
+    )
+    np.testing.assert_allclose(
+        mapped.derivatives(conc_batch, TEMPERATURES, dstates=False),
+        baseline.derivatives(conc_batch, TEMPERATURES, dstates=False),
+        rtol=RATE_RTOL, atol=0.0,
+    )
+
+
+def test_mismatched_reaction_id_keys_are_rejected():
+    """Reject the slide's 'coupling' vs. 'activation' key mismatch explicitly."""
+    rxns = {"coupling": "A + B \u2192 C", "degradation": "A + C \u21c4 D"}
+    k_vals = {"activation": 1.0e2, "degradation": 15.0}  # [L/mol/s]
+    ea_vals = {"coupling": 5.0e3, "degradation": 1.0e4}  # [J/mol]
+
+    with pytest.raises(
+        ValueError,
+        match=r"k_params keys must match reaction identifiers.*missing=\['coupling'\].*unexpected=\['activation'\]",
+    ):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns={"coupling": "A \u2192 B", "degradation": "B \u21c4 C"},
+            k_params=k_vals,
+            ea_params=ea_vals,
+        )
+    # Also verify rejection on dh_rxn, keq_params, and params_f mappings.
+    with pytest.raises(ValueError, match=r"delta_hrxn keys must match reaction identifiers"):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns={"coupling": "A \u2192 B", "degradation": "B \u21c4 C"},
+            k_params={"coupling": 1.0, "degradation": 2.0},
+            ea_params={"coupling": 0.0, "degradation": 0.0},
+            dh_rxn={"activation": -5000.0, "degradation": 7000.0},
+        )
+    with pytest.raises(ValueError, match=r"params_f keys must match reaction identifiers"):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns={"coupling": "A \u2192 B", "degradation": "B \u21c4 C"},
+            k_params={"coupling": 1.0, "degradation": 2.0},
+            ea_params=0.0,
+            params_f={"activation": {"A": 1.0}, "degradation": {"B": 1.0}},
+        )
+    assert len(rxns) == 2
+
+
+def test_catalytic_and_repeated_species_stoichiometry_and_species_keyed_orders():
+    """Accumulate net stoichiometry while preserving raw reactant orders and species-keyed overrides."""
+    # Reaction 1: B + A --> C + A has net stoichiometry B -> C (A net 0),
+    # while A is a catalytic reactant with raw order 1.
+    rxns = {
+        "rxn_1": "B + A --> C + A",
+        "rxn_2": "A + A --> B",
+    }
+    k_vals = {"rxn_2": 0.5, "rxn_1": 2.0}  # [L/mol/s]
+    # First check default elementary orders (both B and A are order 1 in rxn_1; A is order 2 in rxn_2).
+    default_kin = RxnKinetics(
+        path=str(DATABASE),
+        rxn_list=rxns,
+        k_params=k_vals,
+        ea_params=0.0,
+    )
+    assert default_kin.partic_species == ["A", "B", "C"]
+    # Net stoichiometry: rxn_1 has A=0, B=-1, C=+1; rxn_2 has A=-2, B=+1, C=0.
+    np.testing.assert_array_equal(
+        default_kin.stoich_matrix,
+        [[0.0, -1.0, 1.0], [-2.0, 1.0, 0.0]],
+    )
+    # Raw reactant orders: rxn_1 has A=1, B=1, C=0; rxn_2 has A=2, B=0, C=0.
+    np.testing.assert_array_equal(
+        default_kin.params_f,
+        [[1.0, 1.0, 0.0], [2.0, 0.0, 0.0]],
+    )
+    conc = np.array([2.0, 3.0, 0.5])  # [mol/L] for A, B, C
+    # r_1 = k_1 * C_A * C_B = 2.0 * 2.0 * 3.0 = 12.0 [mol/L/s] (extent norm = 1)
+    # r_2 = k_2 * C_A**2 = 0.5 * 4.0 = 2.0 [mol/L/s] (extent norm = 2 -> normalized_stoich A=-1, B=+0.5)
+    rxn_rates = default_kin.get_rxn_rates(conc, overall_rates=False)  # [mol/L/s]
+    np.testing.assert_allclose(rxn_rates, [12.0, 2.0], rtol=RATE_RTOL, atol=0.0)
+    species_rates = default_kin.get_rxn_rates(conc, overall_rates=True)  # [mol/L/s]
+    # dC_A/dt = 0*12.0 - 1*2.0 = -2.0; dC_B/dt = -1*12.0 + 0.5*2.0 = -11.0; dC_C/dt = +12.0
+    np.testing.assert_allclose(species_rates, [-2.0, -11.0, 12.0], rtol=RATE_RTOL, atol=0.0)
+
+    # Now override orders via reaction-ID and species-keyed mapping (pseudo-first-order B=0, A=1 in rxn_1).
+    custom_orders = {
+        "rxn_2": {"A": 1.0},
+        "rxn_1": {"B": 0.0, "A": 1.0},
+    }
+    pseudo_kin = RxnKinetics(
+        path=str(DATABASE),
+        rxn_list=rxns,
+        k_params=k_vals,
+        ea_params=0.0,
+        params_f=custom_orders,
+    )
+    np.testing.assert_array_equal(
+        pseudo_kin.params_f,
+        [[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+    )
+    # r_1 = 2.0 * C_A^1 * C_B^0 = 4.0; r_2 = 0.5 * C_A^1 = 1.0
+    np.testing.assert_allclose(
+        pseudo_kin.get_rxn_rates(conc, overall_rates=False),
+        [4.0, 1.0],
+        rtol=RATE_RTOL, atol=0.0,
+    )
+    # Parameter Jacobian must match central finite differences across all 4+3=7 parameters.
+    analytical = pseudo_kin.derivatives(
+        conc, SCALAR_TEMP, dstates=False, delta_hrxn=np.zeros(2)
+    )  # [rate/parameter units]
+    expected = _parameter_central_difference(
+        pseudo_kin, conc, SCALAR_TEMP, np.zeros(2)
+    )  # [rate/parameter units]
+    np.testing.assert_allclose(analytical, expected, rtol=FD_RTOL, atol=FD_ATOL)
+
+
+@pytest.mark.parametrize("bad_rxn", [
+    "A + B",
+    "A --> B --> C",
+    "--> B",
+    "A -->",
+    "A + --> B",
+    "2 --> B",
+])
+def test_malformed_reaction_strings_are_rejected(bad_rxn):
+    """Reject reaction strings with missing/multiple arrows or empty tokens."""
+    with pytest.raises(ValueError):
+        disect_rxns([bad_rxn])
