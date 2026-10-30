@@ -7,7 +7,8 @@ components satisfy the physical, numerical, and API contracts established by
 the legacy reactor, crystallizer, phase, stream, utility, and flowsheet test
 suites and open issue audit:
 
-- Heat-transfer mode validation (#169) and utility heat-transfer rate / dynamic
+- Heat-transfer mode validation (#169), a positive vessel-side ``h_conv``
+  before a utility is assigned, and utility heat-transfer rate / dynamic
   ``CoolingWater`` controls (#279, #409).
 - Reaction enthalpy stoichiometry normalization (#22) and reversible reaction
   energy balance shape consistency (#270).
@@ -39,6 +40,7 @@ from PharmaPy.Crystallizers_Refactored import (
     SemiBatchCrystallizer,
 )
 from PharmaPy.DataClasses import OperatingKey, PhaseRef, StateEvent, StateKey
+from PharmaPy.Errors import PharmaPyValueError
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics, RxnKinetics
 from PharmaPy.Mechanisms import MomentsPopulationBalance, OneDFVMMechanism
@@ -85,6 +87,8 @@ UTILITY_MASS_FLOW = 0.25  # [kg/s]
 UTILITY_MASS_FLOW_STEP = 0.50  # [kg/s]
 VESSEL_H_CONV = 800.0  # [W/m**2/K]
 UTILITY_H_CONV = 1200.0  # [W/m**2/K]
+# Series combination of the two film coefficients, 1 / (1/800 + 1/1200).
+SERIES_H_CONV = 480.0  # [W/m**2/K]
 VESSEL_DIAM = 0.50  # [m]
 VESSEL_AREA_BASE = 0.05  # [m**2]
 LIQUID_MASS = 5.0  # [kg]
@@ -178,6 +182,44 @@ def test_heat_transfer_mode_validation_in_constructor_and_rate(vessel_cls, ht_mo
     vessel.ht_mode = "jackt"
     with pytest.raises(ValueError, match="jackt.*jacket.*bath"):
         vessel.get_heat_transfer_rate(INITIAL_TEMP, UTILITY_TEMP_IN)
+
+
+@pytest.mark.parametrize(
+    "vessel_cls",
+    [
+        BatchReactor,
+        SemiBatchReactor,
+        ContinuousReactor,
+        BatchCrystallizer,
+        SemiBatchCrystallizer,
+        ContinuousCrystallizer,
+    ],
+)
+def test_utility_assignment_requires_positive_vessel_h_conv(vessel_cls):
+    """The default h_conv=0 cannot take a utility and says so by name.
+
+    The overall coefficient is the series combination of the vessel-side and
+    utility-side film coefficients, which has no value at h_conv=0, so the
+    assignment is refused with PharmaPyValueError instead of a bare
+    ZeroDivisionError and the vessel keeps no utility. With a positive
+    coefficient the same assignment gives the series value the legacy tanks
+    compute.
+    """
+    utility = CoolingWater(
+        mass_flow=UTILITY_MASS_FLOW,
+        temp_in=UTILITY_TEMP_IN,
+        h_conv=UTILITY_H_CONV,
+    )
+
+    vessel = vessel_cls(integrator=_scipy_lsoda())
+    with pytest.raises(PharmaPyValueError, match="h_conv"):
+        vessel.Utility = utility
+    assert vessel.Utility is None
+
+    vessel = vessel_cls(h_conv=VESSEL_H_CONV, integrator=_scipy_lsoda())
+    vessel.Utility = utility
+    assert vessel.Utility is utility
+    assert vessel.u_ht == pytest.approx(SERIES_H_CONV, rel=ALGEBRA_RTOL)
 
 
 @pytest.mark.parametrize("utility_first", [True, False])

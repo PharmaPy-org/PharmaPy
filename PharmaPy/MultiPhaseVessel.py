@@ -12,6 +12,7 @@ from PharmaPy.ProcessControl_Refactored import Controller
 from PharmaPy.Results import DynamicResult
 from PharmaPy.IntegratorBackends import default_integrator
 from PharmaPy.Connections import interpolate_inputs
+from PharmaPy.Errors import PharmaPyValueError
 
 
 
@@ -62,7 +63,11 @@ class MultiPhaseVessel():
         controller : Controller, optional
             Operating controller; a fresh ``Controller()`` by default.
         h_conv : float, optional
-            Heat-transfer coefficient to the utility [W/m**2/K].
+            Vessel-side heat-transfer coefficient [W/m**2/K], combined in
+            series with the utility's own coefficient when a ``Utility`` is
+            assigned. Defaults to 0, which only suits a vessel that never
+            receives a utility; assigning one then raises
+            ``PharmaPyValueError``. The legacy tanks default to 1000.
         state_events : list, optional
             State events the integrator should locate.
         adiabatic : bool, optional
@@ -686,7 +691,29 @@ class MultiPhaseVessel():
 
     @Utility.setter
     def Utility(self, utility):
-        self.u_ht = 1 / (1 / self.h_conv + 1 / utility.h_conv)
+        """Attach the heat-transfer utility and register the duty output.
+
+        Parameters
+        ----------
+        utility : CoolingWater or compatible
+            Utility carrying its own film coefficient ``h_conv`` [W/m**2/K]
+            and inlet conditions.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the vessel's ``h_conv`` is not positive. The overall
+            coefficient is the series combination
+            ``1 / (1/h_conv + 1/utility.h_conv)``, which has no value for the
+            constructor default ``h_conv=0``.
+        """
+        if not self.h_conv > 0:
+            raise PharmaPyValueError(
+                '%s was built with h_conv=%r; a positive vessel-side '
+                'heat-transfer coefficient [W/m**2/K] is required before a '
+                'Utility can be assigned.' % (type(self).__name__, self.h_conv))
+
+        self.u_ht = 1 / (1 / self.h_conv + 1 / utility.h_conv)  # [W/m**2/K]
         self._Utility = utility
         self.output_state_collection.add(
             StateVariable(
