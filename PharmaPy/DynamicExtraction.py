@@ -1,3 +1,5 @@
+from typing import Optional
+
 import numpy as np
 from scipy import linalg
 from scipy.optimize import root
@@ -11,8 +13,10 @@ from PharmaPy.Streams import LiquidStream
 
 from PharmaPy.Extractors import BatchExtractor, validate_gamma_method
 from PharmaPy.Plotting import plot_distrib
+from PharmaPy.Presence import StructuralPresenceMixin
 
 import copy
+import functools
 
 from matplotlib.ticker import MaxNLocator, AutoMinorLocator
 
@@ -72,7 +76,7 @@ def complete_molefrac(mole_frac, mapping):
     return out
 
 
-class DynamicExtractor:
+class DynamicExtractor(StructuralPresenceMixin):
     """Model a staged dynamic liquid-liquid extractor.
 
     Notes
@@ -86,6 +90,27 @@ class DynamicExtractor:
     last-indexed component's phase-equilibrium relation. Results may depend on
     the order of ``name_species`` until the variable-outlet-flow MESH
     formulation tracked in #195 replaces this approximation.
+
+    The stage mole fractions of both liquid phases are IDA states, which
+    difference-quotient Jacobians, the initial ``root`` iterates and
+    round-off perturb, so the extractor decides species presence
+    structurally (issue #425,
+    ``PharmaPy.Presence.StructuralPresenceMixin``): a species is present if
+    it has a nonzero fraction in the holdup charge (``Liquid_1``) as it is
+    at the start of the solve, if it is the last-indexed species, whose
+    fractions close both phases' normalization and so are part of every
+    stage by construction, or, from the time of that evaluation on, if the
+    feed or the solvent supplies it with a nonzero molar flow (with a stage
+    efficiency other than 1, also if the light-phase inlet holds it, flow
+    or not, because the Murphree term carries that inlet's composition into
+    the first stage). One record
+    serves both phases: stage equilibrium distributes a present species
+    into both liquids with a finite distribution ratio. The default
+    activity-based ``k_fun``, the stage enthalpies and the initial
+    densities are weighted by that record, and the published compositions
+    hold absent species at exactly zero, so an absent species needs no
+    property data other than ``mw``. A user ``k_fun`` receives the state
+    fractions unchanged.
     """
 
     def __init__(self, num_stages, k_fun=None, eff=1, gamma_model='UNIQUAC'):
@@ -132,37 +157,62 @@ class DynamicExtractor:
         self.is_continuous = True
         self.default_output = 'feed'
 
-    def _default_k_fun(self, x_light, x_heavy, temp):
+    def _default_k_fun(self, x_light: np.ndarray, x_heavy: np.ndarray,
+                       temp: np.ndarray, time: Optional[float] = None
+                       ) -> np.ndarray:
         """Return liquid-liquid distribution coefficients.
 
         Parameters
         ----------
         x_light : ndarray
-            Light-phase liquid mole fractions [-].
+            Light-phase liquid mole fractions [-], shape ``(num_comp,)`` or
+            ``(num_stages, num_comp)``.
         x_heavy : ndarray
-            Heavy-phase liquid mole fractions [-].
+            Heavy-phase liquid mole fractions [-], with the shape of
+            ``x_light``.
         temp : ndarray
             Liquid temperature [K].
+        time : float, optional
+            Absolute evaluation time [s] of the structural presence (issue
+            #425): only species recorded at or before it count. None counts
+            every recorded species.
 
         Returns
         -------
         ndarray
             Distribution coefficients ``K_i = gamma_light/gamma_heavy`` [-].
+            With a presence record, exactly 1 for an absent species.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. With
+            UNIQUAC and a presence record, if a present species lacks
+            ``ri``, ``qi`` or (when the database has the key) ``qip``.
 
         Notes
         -----
         Activity coefficients are dimensionless, so their ratio is the
-        dimensionless extraction equilibrium constant.
+        dimensionless extraction equilibrium constant. The activity model
+        is evaluated on the species present at ``time`` only
+        (``getActivityCoeff`` with presence weights), as if the others were
+        absent from both liquids; they get the neutral coefficient 1 in
+        both phases and need no activity parameters. Without a presence
+        record every species enters the model, as before.
         """
         gamma_light = self.Liquid_1.getActivityCoeff(
-            method=self.gamma_model, mole_frac=x_light, temp=temp)  # [-]
+            method=self.gamma_model, mole_frac=x_light, temp=temp,
+            weights=self._presence_weights(x_light, time=time))  # [-]
 
         gamma_heavy = self.Liquid_1.getActivityCoeff(
-            method=self.gamma_model, mole_frac=x_heavy, temp=temp)  # [-]
+            method=self.gamma_model, mole_frac=x_heavy, temp=temp,
+            weights=self._presence_weights(x_heavy, time=time))  # [-]
 
         return gamma_light / gamma_heavy  # K_i [-]
 
-    def _evaluate_distribution_coefficients(self, x_light, x_heavy, temp):
+    def _evaluate_distribution_coefficients(
+            self, x_light: np.ndarray, x_heavy: np.ndarray,
+            temp: np.ndarray, time: Optional[float] = None) -> np.ndarray:
         """Evaluate and broadcast distribution coefficients.
 
         Parameters
@@ -173,6 +223,10 @@ class DynamicExtractor:
             Stage heavy-phase liquid mole fractions [-].
         temp : ndarray
             Stage liquid temperatures [K].
+        time : float, optional
+            Absolute evaluation time [s], passed to the default ``k_fun``
+            for its structural presence; a user ``k_fun`` keeps its
+            three-argument signature and does not receive it.
 
         Returns
         -------
@@ -192,7 +246,11 @@ class DynamicExtractor:
         broadcasting across stages. A stricter stage-wise callback contract is
         tracked in #123.
         """
-        k_i = np.asarray(self.k_fun(x_light, x_heavy, temp))  # K_i [-]
+        if self.k_fun == self._default_k_fun:
+            k_i = np.asarray(self._default_k_fun(
+                x_light, x_heavy, temp, time=time))  # K_i [-]
+        else:
+            k_i = np.asarray(self.k_fun(x_light, x_heavy, temp))  # K_i [-]
         expected_shape = np.shape(x_light)
 
         try:
@@ -272,6 +330,22 @@ class DynamicExtractor:
 
     @Phases.setter
     def Phases(self, phases):
+        """Attach the liquid holdup charge of the extractor.
+
+        Parameters
+        ----------
+        phases : LiquidPhase or list or tuple of LiquidPhase
+            Holdup charge with mole fractions [-], amount [mol] and
+            temperature [K]; the batch extraction of ``initialize_model``
+            splits it into the two liquid phases.
+
+        Notes
+        -----
+        The setter classifies the phases (``Liquid_1``), declares the state
+        names and starts the structural presence record from the charge and
+        the closure species (issue #425, ``_start_extractor_presence``);
+        ``solve_unit`` rebuilds that record at every solve.
+        """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
         else:
@@ -283,6 +357,61 @@ class DynamicExtractor:
         self.num_comp = len(self.name_species)
 
         self.nomenclature()
+        self._start_extractor_presence()
+
+    def _start_extractor_presence(self) -> None:
+        """Start the structural presence record from the holdup charge.
+
+        Notes
+        -----
+        A species is present from the start if its mole fraction in the
+        holdup charge (``Liquid_1``) is nonzero, or if it is the
+        last-indexed species: its stage fractions in both phases are the
+        normalization closures ``1 - sum`` of the others, which the
+        constant-flow approximation (#195) leaves nonzero during transients
+        whatever the species' feed, so it is part of every stage by
+        construction (issue #425). The feed and the solvent add their
+        species while they are evaluated (``unit_model``).
+        """
+        closure = np.zeros(self.num_comp)  # [-], flag of the closure species
+        closure[-1] = 1.0
+        self._start_presence(self.num_comp, self.Liquid_1.mole_frac, closure)
+
+    def _record_inlets(self, inputs: dict, time: float) -> None:
+        """Add the species that the inlets bring into the stages.
+
+        Parameters
+        ----------
+        inputs : dict
+            Inlet values of ``get_inputs``, keyed by ``'feed'`` and/or
+            ``'solvent'``, each with ``Inlet`` molar flow [mol/s] and mole
+            fractions [-].
+        time : float
+            Absolute evaluation time [s] of the inputs; a species becomes
+            present from it on (latched). The phase roles
+            (``target_states``) must be assigned (``initialize_model``).
+
+        Notes
+        -----
+        A species of an inlet with a nonzero molar flow is present. With a
+        stage efficiency ``eff`` other than 1, the first stage's Murphree
+        relation ``y_1 = m (x_1 - (1 - eff) x_in)`` uses the light-phase
+        inlet composition ``x_in`` whatever that inlet's flow, so the
+        species of the light inlet enter the stages by construction of the
+        model even when it does not flow, and they are recorded as present
+        too (issue #425). Making that term flow-aware would change the
+        model's equations, which this presence record must not do.
+        """
+        for inlet in inputs.values():
+            self._record_feed(inlet['Inlet']['mole_flow'],
+                              inlet['Inlet']['mole_frac'], time=time)
+
+        presence = getattr(self, '_presence', None)
+        if presence is not None and np.any(np.asarray(self.eff) != 1):
+            light = self.target_states['light_phase']
+            if light in inputs:
+                presence.record(inputs[light]['Inlet']['mole_frac'],
+                                time=time)
 
     @property
     def Inlet(self):
@@ -434,6 +563,22 @@ class DynamicExtractor:
             Flattened material and energy residuals. Entries combine
             mole-fraction rates [1/s], equilibrium residuals [-],
             internal-energy rates [J/s], and energy residuals [J].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at ``time`` lacks the ``cp_liq`` of the stage enthalpies
+            or, with the default UNIQUAC ``k_fun``, its activity parameters;
+            absent species need none (issue #425).
+
+        Notes
+        -----
+        Side effect: the evaluated feed and solvent add every species they
+        supply with a nonzero molar flow (and, with ``eff`` other than 1,
+        every species of the light-phase inlet, see ``_record_inlets``) to
+        the structural presence record at ``time``, where it stays
+        (latched) until the record is rebuilt.
         """
 
         # ---------- Unpack variables
@@ -447,6 +592,8 @@ class DynamicExtractor:
                                          self.name_states)
 
         inputs = self.get_inputs(time)
+        # Species fed with a nonzero molar flow are present from now on.
+        self._record_inlets(inputs, time)
 
         augm_arrays = self.get_augmented_arrays(di_states, inputs)
 
@@ -470,12 +617,10 @@ class DynamicExtractor:
 
         balances = np.column_stack(material + energy).ravel()
 
-        # print(balances)
-
         return balances
 
     def material_balances(self, time, x_i, y_i,
-                          holdup_light, holdup_heavy,  # top_flows,
+                          holdup_light, holdup_heavy,
                           u_int, temp,
                           di_sdot, augm_arrays):
         """Evaluate dynamic extractor material residuals.
@@ -514,6 +659,12 @@ class DynamicExtractor:
         the final-indexed component's equilibrium relation is omitted. This
         closure keeps both phases normalized, but it is not permutation
         invariant with respect to component order.
+
+        Notes
+        -----
+        The default ``k_fun`` evaluates the activity model on the species
+        present at ``time`` (structural presence, issue #425); an absent
+        species gets the unit distribution ratio.
         """
 
         x_augm, y_augm, temp_augm, light_flows, heavy_flows = augm_arrays
@@ -521,7 +672,7 @@ class DynamicExtractor:
 
         # ---------- Equilibrium
         k_ij = self._evaluate_distribution_coefficients(
-            x_i, y_i, temp)  # K_i [-]
+            x_i, y_i, temp, time=time)  # K_i [-]
         m_ij = k_ij / self.eff  # [-]
 
         # ---------- Differential block
@@ -567,7 +718,7 @@ class DynamicExtractor:
         return out
 
     def energy_balances(self, time, x_i, y_i,
-                        holdup_light, holdup_heavy,  # top_flows,
+                        holdup_light, holdup_heavy,
                         u_int, temp,
                         di_sdot, augm_arrays):
         """Evaluate dynamic extractor energy residuals.
@@ -594,17 +745,33 @@ class DynamicExtractor:
         -------
         list of ndarray
             Internal-energy rates [J/s] and algebraic energy residuals [J].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at ``time`` lacks ``cp_liq``; absent species need none.
+
+        Notes
+        -----
+        The stage and inlet enthalpies are weighted with the structural
+        presence at ``time`` (issue #425) rather than with the state
+        fractions, whose absent entries the solver perturbs; an absent
+        species without ``cp_liq`` then adds exactly zero. An inlet species
+        that flows was recorded as present before this evaluation
+        (``unit_model``), and one that does not flow adds nothing to the
+        balances, since its inlet enthalpy is multiplied by a zero flow.
         """
 
         x_augm, y_augm, temp_augm, light_flows, heavy_flows = augm_arrays
 
-        h_light = self.Liquid_1.getEnthalpy(mole_frac=x_augm,
-                                            temp=temp_augm[:-1],
-                                            basis='mole')  # [J/mol]
+        h_light = self.Liquid_1.getEnthalpy(
+            mole_frac=x_augm, temp=temp_augm[:-1], basis='mole',
+            weights=self._presence_weights(x_augm, time=time))  # [J/mol]
 
-        h_heavy = self.Liquid_1.getEnthalpy(mole_frac=y_augm,
-                                            temp=temp_augm[1:],
-                                            basis='mole')  # [J/mol]
+        h_heavy = self.Liquid_1.getEnthalpy(
+            mole_frac=y_augm, temp=temp_augm[1:], basis='mole',
+            weights=self._presence_weights(y_augm, time=time))  # [J/mol]
 
         duint_dt = heavy_flows[1:] * h_heavy[1:] \
             + light_flows[:-1] * h_light[:-1] \
@@ -629,6 +796,14 @@ class DynamicExtractor:
             Initial light/heavy mole fractions [-], stage internal energy [J],
             and temperature [K] for each dynamic extraction stage.
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at the start lacks ``rho_liq``, ``cp_liq`` or, with the
+            default UNIQUAC ``k_fun``, its activity parameters; absent
+            species need none.
+
         Notes
         -----
         The nested ``BatchExtractor`` receives both the selected ``k_fun`` and
@@ -642,9 +817,29 @@ class DynamicExtractor:
         own equilibrium relation is omitted. Initial compositions can therefore
         depend on component ordering until #195 introduces variable outlet
         flows.
+
+        The initial densities and enthalpies, and the default ``k_fun`` of the
+        batch split and of the equilibrium correction (whose ``root``
+        iterates perturb every fraction), are weighted with the structural
+        presence at the start, time 0 [s] (issue #425): absent species need
+        no data, and a present species without the density or heat capacity
+        the stages need is reported by name here, before IDA starts. This
+        holds also when the record has species latched by later
+        evaluations, as in a re-initialization after a run; a custom
+        ``k_fun`` is passed to the batch split unchanged. That
+        presence includes the species that the inlets evaluated at time 0
+        bring into the stages (``_record_inlets``, once the phase roles are
+        known): those of the inlets that flow and, with ``eff`` other than
+        1, those of the light-phase inlet.
         """
         # ---------- Equilibrium calculations
-        extr = BatchExtractor(k_fun=self.k_fun,
+        if self.k_fun == self._default_k_fun:
+            # The batch split is part of the initialization at time 0 [s],
+            # so the default ratio uses the presence at that time (#425).
+            batch_k_fun = functools.partial(self._default_k_fun, time=0.0)
+        else:
+            batch_k_fun = self.k_fun
+        extr = BatchExtractor(k_fun=batch_k_fun,
                               gamma_method=self.gamma_model)
         extr.Phases = copy.deepcopy(self.Liquid_1)
 
@@ -670,6 +865,9 @@ class DynamicExtractor:
             target_states['heavy_phase'] = 'solvent'
 
         self.target_states = target_states
+        # Species that the inlets bring in at the start are present, so the
+        # initial densities and enthalpies below check their data (#425).
+        self._record_inlets(self.get_inputs(0.0), 0.0)
 
         # Store fixed values
         self.fixed_vals['H_R'] = res.mol_light  # [mol]
@@ -695,26 +893,54 @@ class DynamicExtractor:
 
         keys_frac = ('y_i', 'x_i')
 
+        # Present species at the start (time 0 [s]) need the stage data,
+        # whatever their initial fraction (issue #425).
         rhos_holdups = [
-            self.Liquid_1.getDensity(mole_frac=di_init[key], basis='mole',
-                                     temp=di_init['temp'])
+            self.Liquid_1.getDensity(
+                mole_frac=di_init[key], basis='mole', temp=di_init['temp'],
+                weights=self._presence_weights(di_init[key], time=0.0))
             for key in keys_frac]  # [mol/L]
 
         # Energy balance calculations
-        h_light = self.Liquid_1.getEnthalpy(mole_frac=di_init['x_i'],
-                                            temp=di_init['temp'],
-                                            basis='mole')  # [J/mol]
+        h_light = self.Liquid_1.getEnthalpy(
+            mole_frac=di_init['x_i'], temp=di_init['temp'], basis='mole',
+            weights=self._presence_weights(di_init['x_i'],
+                                           time=0.0))  # [J/mol]
 
-        h_heavy = self.Liquid_1.getEnthalpy(mole_frac=di_init['y_i'],
-                                            temp=di_init['temp'],
-                                            basis='mole')  # [J/mol]
+        h_heavy = self.Liquid_1.getEnthalpy(
+            mole_frac=di_init['y_i'], temp=di_init['temp'], basis='mole',
+            weights=self._presence_weights(di_init['y_i'],
+                                           time=0.0))  # [J/mol]
 
         u_int = res.mol_light * h_light + res.mol_heavy * h_heavy  # [J]
 
         di_init['u_int'] = u_int  # [J]
 
         # ---------- Equilibrium correction for x_i and y_i
-        def equilibrium_eqns(fracs, temp, mol_i, holdups):
+        def equilibrium_eqns(fracs: np.ndarray, temp: np.ndarray,
+                             mol_i: np.ndarray, holdups: list) -> np.ndarray:
+            """Evaluate the stage equilibrium-correction residuals.
+
+            Parameters
+            ----------
+            fracs : numpy.ndarray
+                Stage light- then heavy-phase mole fractions [-], flattened
+                stage by stage, shape ``(num_stages * 2 * num_comp,)``.
+            temp : numpy.ndarray
+                Stage temperatures [K], shape ``(num_stages,)``.
+            mol_i : numpy.ndarray
+                Species amounts of one stage [mol], shape ``(num_comp,)``.
+            holdups : list of float
+                Light- and heavy-phase holdups [mol].
+
+            Returns
+            -------
+            numpy.ndarray
+                Component-balance residuals divided by the light holdup and
+                equilibrium residuals [-], with the last component of each
+                phase replaced by its normalization, flattened like
+                ``fracs``.
+            """
             var = fracs.reshape(self.num_stages, -1)  # mole fractions [-]
 
             xi = var[:, :self.num_comp]  # light-phase mole fractions [-]
@@ -725,7 +951,7 @@ class DynamicExtractor:
             x_eqns = (HR * xi + HE * yi - mol_i) / HR  # [-]
 
             k_ij = self._evaluate_distribution_coefficients(
-                xi, yi, temp)  # K_i [-]
+                xi, yi, temp, time=0.0)  # K_i [-], presence at the start
             m_ij = k_ij / self.eff  # [-]
 
             y_eqns = np.zeros_like(yi)  # equilibrium residuals [-]
@@ -781,38 +1007,70 @@ class DynamicExtractor:
         states : ndarray
             Flattened state history. Mole fractions are [-], internal energy is
             [J], and temperature is [K].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``, before IDA
+            starts: if a species present at the start (in the holdup charge,
+            the closure species, or fed with a nonzero flow) lacks the
+            ``rho_liq`` or ``cp_liq`` of the stages or, with the default
+            UNIQUAC ``k_fun``, its activity parameters. Absent species need
+            no property data other than ``mw`` (issue #425). A species first
+            fed later without data is reported by IDA instead, whose error
+            does not name it (issue #435).
+
+        Notes
+        -----
+        The structural presence record is rebuilt from the holdup charge as
+        it is at the start of the call. A solve that raises, in the
+        initialization, the integration or the publication of the results,
+        keeps no results: the extractor's attributes (``fixed_vals``,
+        ``target_states``, ``result``, ``outputs``, ``Outlet`` and
+        ``profiles_runs``) and its presence record are restored to their
+        values before the call.
         """
+        # A failed solve keeps no results: the extractor and its presence
+        # record are restored if anything below raises (issue #425).
+        before_solve = self._solve_snapshot()
+        try:
+            self._start_extractor_presence()
 
-        di_init = self.initialize_model()
-        di_init = {key: di_init[key] for key in self.name_states}
+            di_init = self.initialize_model()
+            di_init = {key: di_init[key] for key in self.name_states}
 
-        init_states = np.column_stack(tuple(di_init.values()))
-        init_states = init_states.ravel()
+            init_states = np.column_stack(tuple(di_init.values()))
+            init_states = init_states.ravel()
 
-        init_deriv = self.unit_model(0, init_states)
+            # Evaluated before IDA, so that missing data of the species fed
+            # at the start are reported by name (issue #425).
+            init_deriv = self.unit_model(0, init_states)
 
-        problem = Implicit_Problem(self.unit_model,
-                                   y0=init_states, yd0=init_deriv)
+            problem = Implicit_Problem(self.unit_model,
+                                       y0=init_states, yd0=init_deriv)
 
-        problem.algvar = self.alg_map
+            problem.algvar = self.alg_map
 
-        solver = IDA(problem)
-        solver.make_consistent('IDA_YA_YDP_INIT')
-        solver.suppress_alg = True
+            solver = IDA(problem)
+            solver.make_consistent('IDA_YA_YDP_INIT')
+            solver.suppress_alg = True
 
-        if not verbose:
-            solver.verbosity = 50
+            if not verbose:
+                solver.verbosity = 50
 
-        if sundials_opts is not None:
-            for name, val in sundials_opts.items():
-                setattr(solver, name, val)
+            if sundials_opts is not None:
+                for name, val in sundials_opts.items():
+                    setattr(solver, name, val)
 
-                if name == 'time_limit':
-                    solver.report_continuously = True
+                    if name == 'time_limit':
+                        solver.report_continuously = True
 
-        time, states, sdot = solver.simulate(runtime)
+            time, states, sdot = solver.simulate(runtime)
 
-        self.retrieve_results(time, states)
+            self.retrieve_results(time, states)
+        except BaseException:
+            self._restore_solve_snapshot(before_solve)
+            raise
 
         return time, states
 
@@ -832,6 +1090,22 @@ class DynamicExtractor:
         None
             The method updates ``result``, ``outputs``, ``Outlet``, and
             ``profiles_runs`` in place.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            present at the final time lacks the ``rho_liq`` that the outlet
+            streams need; absent species need none.
+
+        Notes
+        -----
+        The published compositions ``x_i`` and ``y_i`` (``profiles_runs``,
+        ``result``, ``outputs`` and ``Outlet``) hold the species absent at
+        each row's time (structural presence, issue #425) at exactly zero
+        instead of the solver's round-off, so the outlets need no data for
+        them; the ``states`` returned by ``solve_unit`` keep the solver
+        values.
         """
         time = np.asarray(time)
 
@@ -840,6 +1114,17 @@ class DynamicExtractor:
 
         di = unpack_discretized(states, self.dim_states, self.name_states,
                                 indexes=indexes)
+        # Species absent at a row's time are published at exactly zero.
+        for key in ('x_i', 'y_i'):
+            # [-], shape (num_times, num_stages, num_comp)
+            fractions = np.stack(list(di[key].values()), axis=-1)
+            num_times, num_stages = fractions.shape[:2]
+            projected = self._project_absent(
+                fractions.reshape(num_times * num_stages, -1),
+                time=np.repeat(time, num_stages)).reshape(
+                    fractions.shape)  # [-]
+            di[key] = {name: projected[..., idx]
+                       for idx, name in enumerate(di[key])}  # [-]
         di['stage'] = np.arange(1, self.num_stages + 1)
         di['time'] = time
 
@@ -882,10 +1167,6 @@ class DynamicExtractor:
                                          len(time))
 
         self.outputs = di_last
-
-        # self.Outlet = LiquidStream(self.Liquid_1.path_data,
-        #                            temp=di_last['temp'][-1],
-        #                            **kws['feed'])
 
     def plot_profiles(self, times=None, stages=None, pick_comp=None,
                       **fig_kwargs):

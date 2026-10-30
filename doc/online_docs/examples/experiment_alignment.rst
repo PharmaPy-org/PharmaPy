@@ -81,6 +81,20 @@ versions silently dropped modifier entries for names absent from ``x_data`` and
 rejected several unnamed experiments with ``ValueError``; before that rejection
 was added, their wrapper keywords were misrouted by position.
 
+The batch, CSTR and semibatch reactor callbacks and the batch, MSMPR and
+semibatch crystallizer callbacks apply each experiment's ``modify_controls`` to
+a fresh copy of the unit's configured controls: ``fun`` and ``args`` replace
+the configured entries and ``kwargs`` is merged key by key. An experiment
+without a control modifier uses the configured controls, so no experiment
+inherits another experiment's modifier, whatever the experiment order. Unknown
+control names or record entries raise ``ValueError`` when the objective is
+evaluated. Earlier releases silently ignored reactor control modifiers
+(`issue #271 <https://github.com/PharmaPy-org/PharmaPy/issues/271>`__) and
+applied crystallizer control modifiers permanently, replacing all configured
+keyword arguments
+(`issue #492 <https://github.com/PharmaPy-org/PharmaPy/issues/492>`__); see
+:doc:`experiment_measurement` for the complete rules.
+
 ``Experiment`` and ``Measurement`` objects, which carry experiment and field
 identity explicitly, are described in :doc:`experiment_measurement`, including
 their use with ``SetParamEstimation``.

@@ -6,7 +6,9 @@ Created on Mon Oct 28 15:35:48 2019
 @author: casas100
 """
 
+import copy
 import numbers
+import warnings
 
 import numpy as np
 from scipy.linalg import cholesky, solve_triangular
@@ -14,14 +16,15 @@ from scipy.optimize import least_squares
 from collections.abc import Mapping
 from itertools import cycle
 from types import MappingProxyType
-from typing import Callable, NamedTuple, Optional, Sequence
+from typing import Callable, NamedTuple, Optional, Sequence, Union
 
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import pandas as pd
-from PharmaPy.jac_module import numerical_jac_data, dx_jac_p, numerical_jac
+from PharmaPy.jac_module import (numerical_jac_data, dx_jac_p, numerical_jac,
+                                 PARAMETER_MAGNITUDE_FLOOR)
 from PharmaPy import Gaussians as gs
 
 from PharmaPy.LevMarq import levenberg_marquardt
@@ -33,6 +36,19 @@ try:
     have_cyipopt = True
 except ImportError:
     have_cyipopt = False
+
+#: Values of ``method`` accepted by ``ParameterEstimation.optimize_fn``;
+#: ``'scipy'`` and ``'least_squares'`` both select
+#: ``scipy.optimize.least_squares``.
+OPTIMIZATION_METHODS = ('LM', 'IPOPT', 'scipy', 'least_squares')
+#: Marks an estimator attribute that did not exist when ``optimize_fn``
+#: saved the previous fit.
+_ABSENT = object()
+#: Ipopt ``print_level`` [-] that ``optimize_fn`` requests when ``verbose``
+#: is True: Ipopt's own default output level (``print_level`` accepts 0 to
+#: 12, default 5; Ipopt options reference,
+#: https://coin-or.github.io/Ipopt/OPTIONS.html). ``verbose=False`` gives 0.
+IPOPT_VERBOSE_PRINT_LEVEL = 5
 
 linestyles = cycle(['-', '--', '-.', ':'])
 
@@ -2163,6 +2179,19 @@ class ParameterEstimation:
     #: with a different residual definition (``MultipleCurveResolution``)
     #: keep the legacy ``analyze_data`` layout.
     _compiles_experiments = True
+    #: Attributes that describe the last completed ``optimize_fn`` fit; a
+    #: call that raises restores them (see ``_restore_fit_state``). The fit
+    #: results and iteration histories are followed by the evaluation
+    #: buffers that ``get_objective`` and ``get_gradient`` overwrite at
+    #: every trial and that consumers such as ``StatisticsClass`` read.
+    _FIT_ATTRIBUTES = ('opt_method', 'optim_options', 'optimize_flag',
+                       'params_convg', 'info_opt', 'cond_number',
+                       'params_iter', 'objfun_iter', 'paramest_df',
+                       'y_model', 'covar_params', 'correl_params',
+                       'y_runs', 'resid_runs', 'residuals',
+                       'params_residuals', 'weighted_residuals', 'sens',
+                       'sens_second', '_params_sens_second',
+                       'num_model_states')
 
     def __init__(self, func: Callable, param_seed, x_data=None, y_data=None,
                  measured_ind=None,
@@ -2269,10 +2298,18 @@ class ParameterEstimation:
             which is formed by stacking jacobian matrices for each state
             vertically, with units of state / parameter. If None, it is
             computed using finite differences. The default is None.
-        dx_finitediff : float, optional
+        dx_finitediff : float, array-like or callable, optional
             perturbation in the parameter space used to estimate the
-            parametric jacobian, in the corresponding parameter units.
-            The default is None.
+            parametric jacobian, in the corresponding parameter units, or
+            a callable mapping the full parameter vector to the steps.
+            Steps of estimated parameters must be nonzero and not
+            infinite. The default is None, which uses forward-difference
+            steps of magnitude ``1e-3 * max(|param|, 1e-6)`` [parameter
+            units]: a relative step of 1e-3 [-] (positive) for
+            ``|param| >= 1e-6``, and an absolute step of 1e-9 [parameter
+            units] away from zero for smaller magnitudes (positive at
+            zero), so a small negative parameter stays negative (see
+            ``jac_module.dx_jac_p``).
         weight_matrix : numpy array, optional
             Symmetric positive-definite measurement-error covariance with
             dimension N_meas x N_meas. Rows and columns follow the measured
@@ -2293,7 +2330,14 @@ class ParameterEstimation:
             It must be None when measurements declare an ``uncertainty``.
             The default is None, which uses the dimensionless identity.
         name_params : list of str, optional
-            list with parameter names. The default is None.
+            Parameter names, either one per parameter of ``param_seed`` (in
+            callback order; ``name_params`` then keeps the optimized ones)
+            or one per optimized parameter (``name_params_total`` then holds
+            only these). The default is None, which names parameter ``i``
+            of ``param_seed`` ``'theta_<i+1>'`` in ``name_params_total``
+            and keeps the same name for it in ``name_params``,
+            ``name_params_plot`` and the ``paramest_df`` columns when it is
+            optimized.
         name_states : list of str, optional
             list with state names. The default is None, which uses the
             measurement names for ``Experiment`` input.
@@ -2471,10 +2515,37 @@ class ParameterEstimation:
             param_seed = param_seed[np.newaxis]
 
         if dx_finitediff is None:
-            abs_tol = 1e-6 * np.ones_like(param_seed)
+            # Relative accuracy assumed for the model outputs [-]: the
+            # default rtol of Assimulo's CVode (1e-6 in Assimulo 3.4), the
+            # integrator of PharmaPy's ODE unit models unless sundials
+            # options override it. The relative step is its square root,
+            # 1e-3, as in the CVODES parameter increment (dx_jac_p Notes).
             rel_tol = 1e-6
+            # Parameter magnitude below which the step stops shrinking
+            # [parameter units], 1e-6; its rationale is documented at
+            # jac_module.PARAMETER_MAGNITUDE_FLOOR. Every |p| >= 1e-6 keeps
+            # its previous step |p| * 1e-3. Below that the step is 1e-9 away
+            # from zero (positive at zero): larger than the previous
+            # 1e-3 * |p| for 0 < |p| < 1e-6, and nonzero at zero, where the
+            # zero step made the Jacobian column NaN. Pass dx_finitediff for
+            # parameters whose natural scale is smaller.
+            abs_tol = PARAMETER_MAGNITUDE_FLOOR
 
             def dparam_fun(param):
+                """Default finite-difference step of the parameters.
+
+                Parameters
+                ----------
+                param : numpy.ndarray
+                    Parameter values [parameter units], shape (n,).
+
+                Returns
+                -------
+                numpy.ndarray
+                    Steps of magnitude ``1e-3 * max(|param|, 1e-6)``
+                    [parameter units], shape (n,), negative only for
+                    ``-1e-6 < param < 0``; see ``jac_module.dx_jac_p``.
+                """
                 dp = dx_jac_p(param, abs_tol, rel_tol, eps)
                 return dp
 
@@ -2733,14 +2804,18 @@ class ParameterEstimation:
         # --------------- Names
         # Parameters
         if name_params is None:
-            self.name_params = ['theta_{}'.format(ind + 1)
-                                for ind in range(self.num_params)]
-
+            # Number over the full parameter vector, so an optimized
+            # parameter keeps its full-vector name when others are fixed.
+            optimized_ind = np.flatnonzero(self.map_variable)
             self.name_params_total = ['theta_{}'.format(ind + 1)
                                       for ind in range(self.num_params_total)]
 
-            self.name_params_plot = [r'$\theta_{}$'.format(ind + 1)
-                                     for ind in range(self.num_params)]
+            self.name_params = [self.name_params_total[ind]
+                                for ind in optimized_ind]
+
+            # Braces keep multi-digit indices in the subscript.
+            self.name_params_plot = [r'$\theta_{{{}}}$'.format(ind + 1)
+                                     for ind in optimized_ind]
         else:
             self.name_params_total = name_params
             if len(name_params) > sum(self.map_variable):
@@ -3340,6 +3415,13 @@ class ParameterEstimation:
             squared state units; ``get_objective`` documents the residual
             units.
 
+        Raises
+        ------
+        ValueError
+            If the finite-difference path is used (no ``jac_fun`` and no
+            model-returned sensitivities) and ``dx_finitediff`` gives a
+            zero or infinite step for an optimized parameter.
+
         Notes
         -----
         Analytical (``jac_fun`` or model-returned) and finite-difference
@@ -3479,6 +3561,116 @@ class ParameterEstimation:
         jacobian = self.get_gradient(opt_par, out_array=True)
         return {'jac': jacobian, 'fun': residuals}
 
+    def _data_solver_info(self, info: dict) -> dict:
+        """Return the solver information reported for the measured data.
+
+        Parameters
+        ----------
+        info : dict
+            Solver information at the accepted parameters, with ``fun`` the
+            residual vector the solver minimized and ``jac`` its Jacobian,
+            shape ``(num_params, len(fun))``, in the units documented by
+            ``assemble_solver_info``.
+
+        Returns
+        -------
+        dict
+            ``info`` itself: every residual of ``get_objective`` is a data
+            residual. ``optimize_fn`` stores the result as ``info_opt``, the
+            input of ``get_covariance`` and ``StatisticsClass``.
+
+        Notes
+        -----
+        Subclasses whose solver residual vector appends non-data rows, such
+        as the absorptivity penalty of ``MultipleCurveResolution``, override
+        this to report the data rows only.
+        """
+        return info
+
+    def _model_predictions(self) -> list:
+        """Return the model predictions of the last stored evaluation.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            One array per experiment in ``x_data`` order, shape
+            ``(n_times, n_measured)``: model-grid rows and measured-state
+            columns in the model state units, ``resid_runs + y_data`` because
+            the residuals are model minus data. Entries without an
+            observation are NaN, as in ``y_data``.
+
+        Notes
+        -----
+        ``optimize_fn`` stores the result as ``y_model``, the nominal
+        response of ``StatisticsClass``. Subclasses whose residuals are not
+        model minus data, such as ``MultipleCurveResolution``, override this.
+        """
+        predictions = []  # [model state units], one array per experiment
+        for ind in range(self.num_datasets):
+            # [model state units], NaN where unobserved
+            y_data = self.y_data[ind]
+            if isinstance(y_data, dict):
+                y_data = np.hstack(list(y_data.values()))
+
+            y_model = self.resid_runs[ind] + y_data  # [model state units]
+            predictions.append(y_model)
+
+        return predictions
+
+    def _residual_signs(self, ind: int) -> Optional[np.ndarray]:
+        """Return the sign convention of one experiment's residual columns.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``x_data`` order.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            None: every column of ``resid_runs[ind]`` is model minus data.
+            Subclasses return one sign per column [-], +1 for model minus
+            data and -1 for data minus model; ``StatisticsClass``
+            multiplies the residuals by it to pool model-minus-data
+            residuals.
+        """
+        return None
+
+    def _fit_state(self) -> dict:
+        """Save the attributes that describe the last completed fit.
+
+        Returns
+        -------
+        dict
+            The object bound to each name in ``_FIT_ATTRIBUTES``, or
+            ``_ABSENT`` if the attribute does not exist. Values keep their
+            units (``params_convg`` in parameter units, ``covar_params`` in
+            their products, and so on).
+
+        Notes
+        -----
+        Saving references suffices: ``optimize_fn`` binds new iteration
+        history lists after saving, and evaluations bind new buffers
+        instead of modifying the saved objects in place.
+        """
+        return {name: getattr(self, name, _ABSENT)
+                for name in self._FIT_ATTRIBUTES}
+
+    def _restore_fit_state(self, state: dict) -> None:
+        """Restore the attributes saved by ``_fit_state``.
+
+        Parameters
+        ----------
+        state : dict
+            Result of ``_fit_state``. Each saved object is rebound, and
+            attributes saved as ``_ABSENT`` are deleted if they exist now.
+        """
+        for name, value in state.items():
+            if value is not _ABSENT:
+                setattr(self, name, value)
+            elif hasattr(self, name):
+                delattr(self, name)
+
     def optimize_fn(self, optim_options: Optional[dict] = None,
                     simulate: bool = False, verbose: int | bool = True,
                     store_iter: bool = True, method: str = 'LM',
@@ -3489,7 +3681,16 @@ class ParameterEstimation:
         Parameters
         ----------
         optim_options : dict, optional
-            Solver options passed to the selected optimization method.
+            Solver options passed to the selected optimization method. The
+            mapping and its values are not modified: ``optimize_fn`` passes
+            a copy, with deep copies of the non-callable values, to the
+            solver, with the entries it sets itself (``full_output`` and
+            ``verbose`` for LM, ``print_level`` for IPOPT, ``verbose`` and,
+            if given, ``bounds`` for ``'scipy'``/``'least_squares'``).
+            After a successful call that copy, as the solver left it, is
+            stored as ``optim_options``, the effective options of the last
+            fit; for IPOPT, cyipopt has converted its keys to bytes and
+            added its own defaults, such as ``mu_strategy``.
         simulate : bool, optional
             If True, evaluate residuals in simulation mode by disabling the
             optimization residual contribution.
@@ -3503,7 +3704,10 @@ class ParameterEstimation:
             (twice the objective) when measurements declare uncertainties,
             and otherwise the unweighted sum of squared raw residuals in
             squared measured-state units, also with ``weight_matrix`` (see
-            ``get_objective``).
+            ``get_objective``). Every call starts new histories, so they
+            describe this fit only. If False, ``params_iter`` and
+            ``objfun_iter`` keep every evaluation of this call, in order,
+            and no ``paramest_df`` is stored.
         method : {'LM', 'IPOPT', 'scipy', 'least_squares'}, optional
             Optimization method used for fitting. ``'scipy'`` and
             ``'least_squares'`` both select
@@ -3541,7 +3745,17 @@ class ParameterEstimation:
             stored in the canonical ``(num_params, n_data)`` orientation and,
             for ``'scipy'``/``'least_squares'``, the raw
             ``scipy.optimize.OptimizeResult`` stored in
-            ``info['scipy_result']``).
+            ``info['scipy_result']``). ``info['fun']`` and ``info['jac']``
+            hold data residuals only (see ``_data_solver_info``):
+            ``MultipleCurveResolution`` moves its absorptivity-penalty rows to
+            ``info['fun_penalty']`` and ``info['jac_penalty']``, while native
+            solver diagnostics such as SciPy's ``cost`` and ``grad`` describe
+            the full residual vector.
+            IPOPT fits add cyipopt's termination outcome: ``info['success']``
+            (bool, True only for Ipopt status 0, ``Solve_Succeeded``),
+            ``info['status']`` (int, Ipopt's return status),
+            ``info['message']`` (str, Ipopt's status message) and, when
+            cyipopt reports it, ``info['nit']`` (int, iterations [-]).
 
         Raises
         ------
@@ -3551,19 +3765,31 @@ class ParameterEstimation:
             If ``method`` is not one of ``'LM'``, ``'IPOPT'``, ``'scipy'`` or
             ``'least_squares'``, if ``bounds`` is supplied both through
             ``bounds=`` and ``optim_options``, or if ``loss`` is not
-            ``'linear'`` when using ``'scipy'``/``'least_squares'``.
+            ``'linear'`` when using ``'scipy'``/``'least_squares'``, or if
+            finite-difference sensitivities are used and ``dx_finitediff``
+            gives a zero or infinite step for an optimized parameter (see
+            ``get_gradient``).
         numpy.linalg.LinAlgError
             If the accepted Jacobian yields a singular covariance matrix.
+
+        Warns
+        -----
+        RuntimeWarning
+            If IPOPT terminates unsuccessfully (``info['success']`` False),
+            for example at its iteration limit. The warning names the status
+            and message; the returned parameters, covariance and statistics
+            then describe the last iterate, not a converged estimate.
 
         Notes
         -----
         After LM or ``scipy.optimize.least_squares`` finishes, the model is
         evaluated once per experiment at the accepted parameters to refresh
         ``y_runs``, ``resid_runs``, ``residuals``, and ``weighted_residuals``
-        before assembling ``y_model``. This includes termination after a
-        rejected trial; it does not imply convergence. Predictions and raw
-        residuals retain the model state units and measured-state order.
-        Repeated calls replace the previous ``y_model`` list.
+        before assembling ``y_model`` (``_model_predictions``). This
+        includes termination after a rejected trial; it does not imply
+        convergence. Predictions and raw residuals retain the model state
+        units and measured-state order. Repeated calls replace the previous
+        ``y_model`` list.
 
         The reporting evaluation does not change the solver's returned ``x``,
         ``fun``, ``jac``, or solver counters. It uses the usual objective
@@ -3572,145 +3798,204 @@ class ParameterEstimation:
         support another evaluation at the same parameters, as during
         optimization.
 
+        ``method`` and the availability of cyipopt are validated before any
+        attribute changes. ``opt_method``, ``optim_options``,
+        ``params_convg`` and ``info_opt`` are assigned together after the
+        solver returns, so they always describe the same fit.
+        ``optimize_flag`` is set to ``not simulate`` during the solve,
+        because ``get_objective`` reads it. A call that raises, during the
+        solve or afterwards (for example ``get_covariance`` with a singular
+        ``J @ J.T``), restores every attribute named in the class's
+        ``_FIT_ATTRIBUTES`` to its value before the call, or removes it if a
+        first fit had not yet created it: the fit results (``opt_method``,
+        ``optim_options``, ``optimize_flag``, ``params_convg``,
+        ``info_opt``, ``y_model``, ``covar_params``, ``correl_params``), the
+        iteration histories (``params_iter``, ``objfun_iter``,
+        ``cond_number``, ``paramest_df``), the evaluation buffers that
+        ``get_objective`` and ``get_gradient`` overwrite (``y_runs``,
+        ``resid_runs``, ``residuals``, ``weighted_residuals``, ``sens`` and
+        the others listed there), and the attributes subclasses add, such as
+        ``epsilon_mcr`` and the projections of
+        ``MultipleCurveResolution``, which also clears its evaluation cache
+        (see ``_restore_fit_state``).
+
         """
-
-        self.optimize_flag = not simulate
-        self.opt_method = method
-
-        params_var = self.param_seed[self.map_variable]  # [model parameter units]
-
-        if method == 'LM':
-            if optim_options is None:
-                optim_options = {'full_output': True, 'verbose': verbose}
-            else:
-                optim_options['full_output'] = True
-                optim_options['verbose'] = verbose
-
-            opt_par, inv_hessian, info = levenberg_marquardt(
-                params_var,
-                self.get_objective,
-                self.get_gradient,
-                args=(True,),
-                **optim_options)
-
-            # Rejected trial callbacks overwrite model buffers. Refresh them
-            # at the accepted point while retaining native LM result metadata.
-            self.get_objective(opt_par, out_array=True)
-
-        elif method == 'IPOPT':
-            if not have_cyipopt:
-                raise ImportError('cyipopt is an optional import. Please install cyipopt to use IPOPT as a solver for parameter estimation. conda install -c conda-forge cyipopt')
-            if optim_options is None:
-                optim_options = {'print_level': int(verbose) * 5}
-            else:
-                optim_options['print_level'] = int(verbose) * 5
-
-            kwargs_fun = {'out_array': False}
-            result = minimize_ipopt(self.get_objective, params_var,
-                                    jac=self.get_gradient,
-                                    bounds=bounds, options=optim_options,
-                                    kwargs=kwargs_fun)
-
-            opt_par = result['x']
-
-            info = self.assemble_solver_info(opt_par)
-
-        elif method in ('scipy', 'least_squares'):
-            scipy_options = ({} if optim_options is None
-                             else dict(optim_options))
-            if 'bounds' in scipy_options and bounds is not None:
-                raise ValueError(
-                    "Pass bounds either through bounds= or optim_options, "
-                    "not both")
-            loss = scipy_options.get('loss', 'linear')
-            if loss != 'linear':
-                raise ValueError(
-                    "Only loss='linear' is supported for least-squares "
-                    f"parameter estimation and covariance; got {loss!r}")
-            if bounds is not None:
-                scipy_options['bounds'] = bounds
-            if 'verbose' in scipy_options and verbose is True:
-                scipy_options['verbose'] = int(scipy_options['verbose'])
-            else:
-                scipy_options['verbose'] = int(verbose)
-            optim_options = scipy_options
-
-            def _scipy_jac(params_eval: np.ndarray,
-                           *args_eval) -> np.ndarray:
-                """Return weighted residual Jacobian in SciPy orientation.
-
-                Parameters
-                ----------
-                params_eval : numpy.ndarray
-                    Variable parameter vector, shape ``(num_params,)``, in the
-                    model callback's parameter units.
-                *args_eval
-                    Positional arguments forwarded to ``get_gradient``
-                    (``out_array=True``).
-
-                Returns
-                -------
-                numpy.ndarray
-                    Weighted residual Jacobian, shape ``(n_data, num_params)``.
-                    Entry ``(k, i)`` is in the unit of weighted residual ``k``
-                    divided by the unit of variable parameter ``i``.
-                """
-                return self.get_gradient(params_eval, *args_eval).T
-
-            result = least_squares(
-                self.get_objective,
-                params_var,
-                jac=_scipy_jac,
-                args=(True,),
-                **scipy_options)
-
-            opt_par = np.asarray(result.x)  # [model parameter units]
-
-            # Rejected trial callbacks overwrite model buffers. Refresh them
-            # at the accepted point while retaining native solver metadata
-            # and canonical (num_params, n_data) Jacobian orientation.
-            self.get_objective(opt_par, out_array=True)
-            info = dict(result)
-            info['scipy_result'] = result
-            # [residual unit / parameter unit], shape (num_params, n_data).
-            info['jac'] = np.asarray(result.jac).T
-            self.sens = info['jac'].T
-
-        else:
+        if method not in OPTIMIZATION_METHODS:
             raise ValueError(
                 f"Unknown optimization method {method!r}; expected 'LM', "
                 "'IPOPT', 'scipy' or 'least_squares'")
+        if method == 'IPOPT' and not have_cyipopt:
+            raise ImportError(
+                'cyipopt is an optional import. Please install cyipopt to '
+                'use IPOPT as a solver for parameter estimation. conda '
+                'install -c conda-forge cyipopt')
 
-        self.optim_options = optim_options
+        params_var = self.param_seed[self.map_variable]  # [model parameter units]
 
-        # Store
-        self.params_convg = opt_par  # [model parameter units]
-        self.info_opt = info
+        # Effective options of this fit: a private deep copy, so the entries
+        # set below and cyipopt's in-place rewrite never reach the caller,
+        # and later in-place edits of the caller's values (e.g. a d_diag
+        # array) never reach the stored options or info_opt (#476).
+        # Callable values are kept as given: deepcopy would copy the object
+        # bound to a method.
+        given_options = {} if optim_options is None else dict(optim_options)
+        effective_options = {
+            key: value if callable(value) else copy.deepcopy(value)
+            for key, value in given_options.items()}
 
-        self.cond_number = np.array(self.cond_number)
-        self.params_iter = np.array(self.params_iter)
-        _, idx = np.unique(self.params_iter, axis=0, return_index=True)
+        previous_fit = self._fit_state()
+        # This fit's iteration history (#479): get_objective appends to these
+        # lists only, so arrays left by an earlier fit would keep its history.
+        self.params_iter = []
+        self.objfun_iter = []
+        self.cond_number = []
+        if hasattr(self, 'paramest_df'):
+            del self.paramest_df
+        self.optimize_flag = not simulate
+        try:
+            if method == 'LM':
+                effective_options['full_output'] = True
+                effective_options['verbose'] = verbose
 
-        if store_iter:
-            self.params_iter = self.params_iter[np.sort(idx)]
-            self.objfun_iter = np.array(self.objfun_iter)[np.sort(idx)]
+                opt_par, inv_hessian, info = levenberg_marquardt(
+                    params_var,
+                    self.get_objective,
+                    self.get_gradient,
+                    args=(True,),
+                    **effective_options)
 
-            col_names = ['obj_fun'] + self.name_params
-            self.paramest_df = pd.DataFrame(
-                np.column_stack((self.objfun_iter, self.params_iter)),
-                columns=col_names)
+                # Rejected trial callbacks overwrite model buffers. Refresh
+                # them at the accepted point while retaining native LM result
+                # metadata.
+                self.get_objective(opt_par, out_array=True)
 
-        # Model prediction with final parameters
-        self.y_model = []  # [model state units], one array per experiment
-        for ind in range(self.num_datasets):
-            y_data = self.y_data[ind]
-            if isinstance(y_data, dict):
-                y_data = np.hstack(list(y_data.values()))
+            elif method == 'IPOPT':
+                effective_options['print_level'] = (
+                    int(verbose) * IPOPT_VERBOSE_PRINT_LEVEL)  # [-]
 
-            y_model = self.resid_runs[ind] + y_data  # [model state units]
-            self.y_model.append(y_model)
+                kwargs_fun = {'out_array': False}
+                result = minimize_ipopt(self.get_objective, params_var,
+                                        jac=self.get_gradient,
+                                        bounds=bounds,
+                                        options=effective_options,
+                                        kwargs=kwargs_fun)
 
-        covar_params = self.get_covariance()
+                opt_par = result['x']
+
+                info = self.assemble_solver_info(opt_par)
+                # Keep the termination outcome (#475); cyipopt returns the
+                # message as bytes.
+                message = result['message']
+                if isinstance(message, bytes):
+                    message = message.decode('utf-8', errors='replace')
+                info['success'] = bool(result['success'])
+                info['status'] = int(result['status'])
+                info['message'] = message
+                if 'nit' in result:
+                    info['nit'] = int(result['nit'])  # [-]
+                if not info['success']:
+                    warnings.warn(
+                        f"IPOPT terminated unsuccessfully (status "
+                        f"{info['status']}: {message}); the returned "
+                        "parameters, covariance and statistics describe its "
+                        "last iterate, not a converged estimate",
+                        RuntimeWarning, stacklevel=2)
+
+            else:  # 'scipy' or 'least_squares'
+                scipy_options = effective_options
+                if 'bounds' in scipy_options and bounds is not None:
+                    raise ValueError(
+                        "Pass bounds either through bounds= or optim_options, "
+                        "not both")
+                loss = scipy_options.get('loss', 'linear')
+                if loss != 'linear':
+                    raise ValueError(
+                        "Only loss='linear' is supported for least-squares "
+                        f"parameter estimation and covariance; got {loss!r}")
+                if bounds is not None:
+                    scipy_options['bounds'] = copy.deepcopy(bounds)
+                if 'verbose' in scipy_options and verbose is True:
+                    scipy_options['verbose'] = int(scipy_options['verbose'])
+                else:
+                    scipy_options['verbose'] = int(verbose)
+
+                def _scipy_jac(params_eval: np.ndarray,
+                               *args_eval) -> np.ndarray:
+                    """Return weighted residual Jacobian in SciPy orientation.
+
+                    Parameters
+                    ----------
+                    params_eval : numpy.ndarray
+                        Variable parameter vector, shape ``(num_params,)``,
+                        in the model callback's parameter units.
+                    *args_eval
+                        Positional arguments forwarded to ``get_gradient``
+                        (``out_array=True``).
+
+                    Returns
+                    -------
+                    numpy.ndarray
+                        Weighted residual Jacobian, shape
+                        ``(n_data, num_params)``. Entry ``(k, i)`` is in the
+                        unit of weighted residual ``k`` divided by the unit of
+                        variable parameter ``i``.
+                    """
+                    return self.get_gradient(params_eval, *args_eval).T
+
+                result = least_squares(
+                    self.get_objective,
+                    params_var,
+                    jac=_scipy_jac,
+                    args=(True,),
+                    **scipy_options)
+
+                opt_par = np.asarray(result.x)  # [model parameter units]
+
+                # Rejected trial callbacks overwrite model buffers. Refresh
+                # them at the accepted point while retaining native solver
+                # metadata and canonical (num_params, n_data) Jacobian
+                # orientation.
+                self.get_objective(opt_par, out_array=True)
+                info = dict(result)
+                info['scipy_result'] = result
+                # [residual unit / parameter unit], shape (num_params, n_data).
+                info['jac'] = np.asarray(result.jac).T
+
+            # Statistics use the data residuals; see _data_solver_info.
+            info = self._data_solver_info(info)
+            if method in ('scipy', 'least_squares'):
+                # (n_data, num_params) [residual unit / parameter unit]
+                self.sens = info['jac'].T
+
+            # Store
+            self.opt_method = method
+            self.optim_options = effective_options
+            self.params_convg = opt_par  # [model parameter units]
+            self.info_opt = info
+
+            self.cond_number = np.array(self.cond_number)
+            self.params_iter = np.array(self.params_iter)
+            _, idx = np.unique(self.params_iter, axis=0, return_index=True)
+
+            if store_iter:
+                self.params_iter = self.params_iter[np.sort(idx)]
+                self.objfun_iter = np.array(self.objfun_iter)[np.sort(idx)]
+
+                col_names = ['obj_fun'] + self.name_params
+                self.paramest_df = pd.DataFrame(
+                    np.column_stack((self.objfun_iter, self.params_iter)),
+                    columns=col_names)
+
+            # Model prediction with final parameters, [model state units], one
+            # array per experiment; see _model_predictions.
+            self.y_model = self._model_predictions()
+
+            covar_params = self.get_covariance()
+        except BaseException:
+            # Keep the previous fit, also when the post-solve assembly fails,
+            # e.g. a singular covariance (#479).
+            self._restore_fit_state(previous_fit)
+            raise
 
         return opt_par, covar_params, info
 
@@ -4336,11 +4621,23 @@ class MultipleCurveResolution(ParameterEstimation):
     Concentration profiles from the model are resolved against measured
     absorbance spectra with least-squares pure-component absorptivities;
     optional non-spectral states are fitted as model minus data.
+
+    The absorptivities are eliminated by variable projection (they are not
+    optimized parameters), assuming the Beer-Lambert law; analytic
+    derivatives assume concentrations of constant rank. Negative
+    absorptivities are penalized by ``mult_penalty * sum(max(-eps,
+    0)**2)``; least-squares solvers see the penalty as extra residual rows,
+    while fit statistics use the data residuals only (see
+    ``get_objective``).
     """
 
     # Spectral residuals are not model outputs minus observations, so data
     # keep the legacy analyze_data layout (see __init__ Notes).
     _compiles_experiments = False
+    #: Also restore the resolved absorptivities and the projections of the
+    #: last evaluation after a failed ``optimize_fn`` call.
+    _FIT_ATTRIBUTES = ParameterEstimation._FIT_ATTRIBUTES + (
+        'epsilon_mcr', 'projection_kwargs', '_projection_blocks')
 
     def __init__(self, func, param_seed, time_data, y_spectra, mult_penalty=1,
                  global_analysis=True,
@@ -4369,13 +4666,17 @@ class MultipleCurveResolution(ParameterEstimation):
             experiment a dictionary with ``'spectra'`` and
             ``'non_spectra'`` observations (model state units).
         mult_penalty : float, optional
-            Weight of the penalty ``mult_penalty * sum(min(eps, 0)**2)`` on
-            negative pure-component absorptivities ``eps``, added to the
-            objective; units of the objective per squared absorptivity unit
-            (absorbance per concentration unit). The default 1 is a scaling
-            assumption, not a calibrated value.
+            Nonnegative weight of the penalty ``mult_penalty * sum(min(eps,
+            0)**2)`` on negative pure-component absorptivities ``eps``, added
+            to the objective and represented in the least-squares residual
+            vector by the rows ``sqrt(2 * mult_penalty) * max(-eps, 0)``;
+            units of the objective per squared absorptivity unit (absorbance
+            per concentration unit). The default 1 is a scaling assumption,
+            not a calibrated value; 0 disables the penalty.
         global_analysis : bool, optional
-            Resolve one set of absorptivities for all experiments.
+            If True (the default), resolve one set of absorptivities for all
+            experiments. If False, each experiment resolves its own
+            pure-component spectra (``get_local_analysis``).
         args_fun, kwargs_fun, optimize_flags, jac_fun, dx_finitediff,
         name_params, name_states : optional
             As for ``ParameterEstimation``.
@@ -4395,12 +4696,13 @@ class MultipleCurveResolution(ParameterEstimation):
         Raises
         ------
         ValueError
-            If a spectra dictionary lacks ``'spectra'`` or ``weight_matrix``
-            does not match the residual columns, besides the
-            ``ParameterEstimation`` input errors.
+            If ``mult_penalty`` is negative or not finite, a spectra
+            dictionary lacks ``'spectra'`` or ``weight_matrix`` does not
+            match the residual columns, besides the ``ParameterEstimation``
+            input errors.
         TypeError
             If ``time_data`` holds ``Experiment`` or ``Measurement``
-            objects.
+            objects, or ``mult_penalty`` is not a real number.
 
         Notes
         -----
@@ -4421,6 +4723,13 @@ class MultipleCurveResolution(ParameterEstimation):
                 "MultipleCurveResolution does not accept Experiment or "
                 "Measurement objects; pass spectral observations through "
                 "time_data and y_spectra")
+        if (isinstance(mult_penalty, bool)
+                or not isinstance(mult_penalty, numbers.Real)):
+            raise TypeError("mult_penalty must be a real number; got "
+                            f"{type(mult_penalty).__name__}")
+        if not np.isfinite(mult_penalty) or mult_penalty < 0:
+            raise ValueError("mult_penalty must be finite and nonnegative; "
+                             f"got {mult_penalty!r}")
 
         super().__init__(func, param_seed, time_data, y_spectra, measured_ind,
                          args_fun, kwargs_fun, optimize_flags, jac_fun,
@@ -4494,8 +4803,17 @@ class MultipleCurveResolution(ParameterEstimation):
         # Marginal roots must follow the residual-column covariance above.
         self._observed_roots = {}
 
+        # Legacy: projection of the last global analysis, no longer read.
         self.projection_kwargs = {}
-        self.mult_penalty = mult_penalty
+        # (first row [-], end row [-], C [conc unit], pinv(C) [1/conc
+        # unit], absorptivities [-/conc unit]) per resolution block of the
+        # last evaluation; see _projection_sensitivities.
+        self._projection_blocks = []
+        # Optimized parameters [parameter units] and results of the last
+        # objective evaluation, whatever set_self was.
+        self._params_mcr_eval = None
+        self._mcr_evaluation = None
+        self.mult_penalty = mult_penalty  # [objective unit / eps unit**2]
 
     def _residual_observation_mask(self) -> Optional[np.ndarray]:
         """Return the observation mask of the stacked MCR residual columns.
@@ -4534,113 +4852,493 @@ class MultipleCurveResolution(ParameterEstimation):
         mask = np.vstack(blocks)
         return None if mask.all() else mask
 
-    def get_sens_projection(self, c_target, c_plus, sens_states):
-        eye = np.eye(c_target.shape[0])
-        proj_orthogonal = eye - np.dot(c_target, c_plus)
+    def get_sens_projection(self, c_target: np.ndarray, c_plus: np.ndarray,
+                            sens_states: np.ndarray,
+                            spectra: Optional[np.ndarray] = None
+                            ) -> np.ndarray:
+        """Differentiate the curve-resolved spectra of one projection block.
+
+        Parameters
+        ----------
+        c_target : numpy.ndarray
+            Concentrations of the spectrally active states, shape
+            ``(n_rows, n_spectral)``, in the model's concentration unit; their
+            rank is assumed constant near the evaluated parameters.
+        c_plus : numpy.ndarray
+            Pseudo-inverse of ``c_target``, shape ``(n_spectral, n_rows)``,
+            in reciprocal concentration units.
+        sens_states : numpy.ndarray
+            Sensitivities of ``c_target``, shape ``(n_params_total, n_rows,
+            n_spectral)`` or ``(n_params, n_rows, n_spectral)`` with only the
+            optimized parameters, in concentration unit per parameter unit.
+        spectra : numpy.ndarray, optional
+            Measured absorbance of the block, shape ``(n_rows, n_lambda)``
+            [-]. The default is ``spectra_tot``, the global-analysis block.
+
+        Returns
+        -------
+        numpy.ndarray
+            Derivative of the predicted absorbance ``c_target @ c_plus @
+            spectra`` with respect to each optimized parameter, shape
+            ``(n_params, n_rows, n_lambda)``, in absorbance [-] per parameter
+            unit.
+
+        Notes
+        -----
+        For ``C`` of constant rank the projector ``C @ C+`` has the
+        derivative ``P dC C+ + (P dC C+)^T`` with ``P = I - C @ C+``
+        (G. H. Golub and V. Pereyra, "The differentiation of pseudo-inverses
+        and nonlinear least squares problems whose variables separate",
+        SIAM J. Numer. Anal. 10(2):413-432, 1973); it is undefined where the
+        rank changes.
+        """
+        if spectra is None:
+            spectra = self.spectra_tot  # [-]
+
+        eye = np.eye(c_target.shape[0])  # [-], identity over the block rows
+        proj_orthogonal = eye - np.dot(c_target, c_plus)  # [-], P = I - C C+
 
         if sens_states.shape[0] == sum(self.map_variable):
+            # [conc unit / param unit], optimized parameters
             sens_pick = sens_states
         else:
+            # [conc unit / param unit], optimized parameters
             sens_pick = sens_states[self.map_variable]
 
+        # [1/param unit], (n_params, n_rows, n_rows)
         first_term = proj_orthogonal @ sens_pick @ c_plus
-        second_term = first_term.transpose((0, 2, 1))
-        sens_an = (first_term + second_term) @ self.spectra_tot
+        second_term = first_term.transpose((0, 2, 1))  # [1/param unit]
+        sens_an = (first_term + second_term) @ spectra  # [-/param unit]
 
         return sens_an
 
-    def func_aux(self, params, x_vals, spectra, *args):
-        states = self.function(params, x_vals, *args)
+    def _projection_sensitivities(self, sens_spectral: np.ndarray
+                                  ) -> tuple[np.ndarray, np.ndarray]:
+        """Differentiate the resolved spectra and absorptivities.
 
-        _, epsilon, absorbance = mcr_spectra(
-            states[:, self.spectral_ind], spectra)
+        Parameters
+        ----------
+        sens_spectral : numpy.ndarray
+            Sensitivities of the spectrally active states of all experiments
+            stacked by row, shape ``(n_params_total, sum(len_spectra),
+            n_spectral)`` or with only the optimized parameters, in
+            concentration unit per parameter unit.
 
-        return absorbance.T.ravel()
+        Returns
+        -------
+        sens_spectra : numpy.ndarray
+            Derivative of the predicted absorbance, shape ``(n_params,
+            sum(len_spectra), n_lambda)``, in absorbance [-] per parameter
+            unit.
+        sens_absorptivity : numpy.ndarray
+            Derivative of ``epsilon_mcr``, shape ``(n_params,) +
+            epsilon_mcr.shape``, in absorptivity unit per parameter unit.
 
-    def get_gradient(self, params, out_array=False):
-        """Return the Jacobian of the weighted MCR residuals or a gradient.
+        Notes
+        -----
+        Uses the projection blocks of the last objective evaluation: one for
+        global analysis, one per experiment for local analysis. For a block
+        with concentrations ``C`` of constant rank near the evaluated
+        parameters, spectra ``S``, absorptivities ``eps = C+ S`` and
+        spectral residual ``R = S - C eps``, the pseudoinverse derivative
+        is (G. H. Golub and V. Pereyra, "The differentiation of
+        pseudo-inverses and nonlinear least squares problems whose
+        variables separate", SIAM J. Numer. Anal. 10(2):413-432, 1973)::
+
+            dC+ = -C+ dC C+ + C+ C+^T dC^T (I - C C+)
+                  + (I - C+ C) dC^T C+^T C+
+
+        so that::
+
+            deps = dC+ S = -C+ dC eps + C+ C+^T dC^T R
+                           + (I - C+ C) dC^T C+^T eps
+
+        The first two terms follow from differentiating the normal
+        equations ``C^T C eps = C^T S``. The third is the component of
+        ``dC+`` in the null space of ``C``: differentiating the identity
+        ``C+ = C^T C+^T C+`` and multiplying by ``I - C+ C``, which
+        annihilates ``C^T``, gives ``(I - C+ C) dC+ = (I - C+ C) dC^T
+        C+^T C+``. It vanishes for full column rank, where ``C+ C = I``.
+        The projector derivative ``d(C C+) = P dC C+ + (P dC C+)^T`` with
+        ``P = I - C C+`` (``get_sens_projection``) also needs only constant
+        rank. Both derivatives are undefined where the rank of ``C``
+        changes; the central-difference regressions in
+        ``tests/test_paramestim_mcr_objective_consistency.py`` cover the
+        data and penalty rows of full-rank and constant-rank-deficient
+        blocks.
+        """
+        if sens_spectral.shape[0] == sum(self.map_variable):
+            # [conc unit / param unit], (n_params, n_rows, n_spectral)
+            sens_pick = sens_spectral
+        else:
+            # [conc unit / param unit], optimized parameters
+            sens_pick = sens_spectral[self.map_variable]
+
+        # [-/param unit], one (n_params, n_rows, n_lambda) per block
+        spectra_blocks = []
+        absorptivity_blocks = []  # [absorptivity / param unit], one per block
+        for start, stop, c_target, c_plus, absorptivity in (
+                self._projection_blocks):
+            # (n_params, n_rows, n_spectral) [conc unit / param unit]
+            sens_block = sens_pick[:, start:stop]
+            spectra = self.spectra_tot[start:stop]  # [-]
+            spectra_blocks.append(self.get_sens_projection(
+                c_target, c_plus, sens_block, spectra=spectra))
+
+            resid = spectra - c_target @ absorptivity  # [-]
+            # C+ C+^T [1/conc unit**2]; inv(C^T C) for full column rank.
+            gram_plus = c_plus @ c_plus.T
+            # I - C+ C [-], projector onto the null space of C.
+            null_proj = np.eye(c_plus.shape[0]) - c_plus @ c_target
+            # dC^T [conc unit / param unit], (n_params, n_spectral, n_rows)
+            sens_t = sens_block.transpose(0, 2, 1)
+            # (n_params, n_spectral, n_lambda) [absorptivity / param unit]
+            absorptivity_blocks.append(
+                gram_plus @ sens_t @ resid
+                - c_plus @ sens_block @ absorptivity
+                + null_proj @ sens_t @ c_plus.T @ absorptivity)
+
+        # [-/param unit], (n_params, sum(len_spectra), n_lambda)
+        sens_spectra = np.concatenate(spectra_blocks, axis=1)
+        if self.global_analysis:
+            # [absorptivity / param unit]
+            sens_absorptivity = absorptivity_blocks[0]
+        else:
+            # [absorptivity / param unit]
+            sens_absorptivity = np.stack(absorptivity_blocks, axis=1)
+
+        return sens_spectra, sens_absorptivity
+
+    def _penalty_residuals(self, absorptivity: np.ndarray) -> np.ndarray:
+        """Return the residual rows of the absorptivity penalty.
+
+        Parameters
+        ----------
+        absorptivity : numpy.ndarray
+            Resolved absorptivities, shape ``(n_spectral, n_lambda)`` for
+            global analysis or ``(n_experiments, n_spectral, n_lambda)`` for
+            local analysis, in absorbance per model concentration unit.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``sqrt(2 * mult_penalty) * max(-absorptivity, 0)`` flattened in
+            C order (experiment, species, wavelength), shape
+            ``(absorptivity.size,)``, in the unit of the weighted residuals.
+
+        Notes
+        -----
+        The factor 2 matches the ``1/2 r @ r`` objective convention, so half
+        the sum of squares of these rows is the penalty term
+        ``mult_penalty * sum(max(-absorptivity, 0)**2)`` of
+        ``get_objective``. Nonnegative absorptivities give zero rows.
+        """
+        violation = np.maximum(-absorptivity, 0)  # [absorptivity unit]
+        return np.sqrt(2 * self.mult_penalty) * violation.ravel()
+
+    def _penalty_sensitivities(self, absorptivity: np.ndarray,
+                               sens_absorptivity: np.ndarray) -> np.ndarray:
+        """Differentiate the absorptivity-penalty residual rows.
+
+        Parameters
+        ----------
+        absorptivity : numpy.ndarray
+            Resolved absorptivities, as for ``_penalty_residuals``.
+        sens_absorptivity : numpy.ndarray
+            Their derivatives, shape ``(n_params,) + absorptivity.shape``,
+            in absorptivity unit per parameter unit.
+
+        Returns
+        -------
+        numpy.ndarray
+            Derivatives of ``_penalty_residuals(absorptivity)``, shape
+            ``(absorptivity.size, n_params)``, in the weighted-residual unit
+            per parameter unit. Rows of nonnegative absorptivities are zero
+            (the one-sided derivative of ``max(-eps, 0)`` at ``eps = 0``).
+        """
+        num_params = sens_absorptivity.shape[0]  # [-]
+        active = absorptivity < 0  # bool, same shape as absorptivity
+        # [weighted residual / param unit]
+        sens = -np.sqrt(2 * self.mult_penalty) * sens_absorptivity * active
+        return sens.reshape(num_params, -1).T
+
+    def _evaluate_runs(self, params: np.ndarray
+                       ) -> tuple[list, Union[np.ndarray, list]]:
+        """Evaluate the model for every experiment.
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Full parameter vector in the model's units.
+
+        Returns
+        -------
+        c_runs : list of numpy.ndarray
+            Spectrally active concentrations per experiment, shape
+            ``(n_times, n_spectral)``, in model concentration units.
+        resid_non : numpy.ndarray or list
+            Non-spectral residuals, model minus data, of all experiments
+            stacked by row, shape ``(sum(len_spectra), n_non)`` in model
+            units and zero where unobserved; an empty list without
+            non-spectral states.
+
+        Raises
+        ------
+        ValueError
+            If a callback output is not two-dimensional with one row per
+            model-grid sample of its experiment.
+
+        Notes
+        -----
+        The model is called with ``reord_sens=False``. When it returns
+        sensitivities, shape ``(n_params_total, n_times, n_states)``, they
+        are stored as ``sens_second``. The cached evaluation of
+        ``get_objective`` is invalidated, so a direct call of
+        ``get_global_analysis`` or ``get_local_analysis`` makes
+        ``get_gradient`` evaluate the model again.
+        """
+        # This evaluation replaces the projection and sensitivities that
+        # get_gradient reuses; get_objective records its parameters after.
+        self._params_mcr_eval = None
+        self._mcr_evaluation = None
+
+        c_runs = []  # [conc unit], one (n_times, n_spectral) per run
+        states_non = []  # [model units], one (n_times, n_non) per run
+        sens_states = []  # [state unit / param unit], one per run
+
+        y_data_non = []  # [model units], one (n_times, n_non) per run
+        for ind in range(self.num_datasets):
+            result = self.function(params, self.x_model[ind],
+                                   reord_sens=False,
+                                   *self.args_fun[ind], **self.kwargs_fun[ind])
+
+            if isinstance(result, tuple):
+                # [model units], [state unit / param unit]
+                states, sens_st = result
+                sens_states.append(sens_st)
+            else:
+                states = result  # [model units]
+
+            self._check_model_output(ind, states, two_dimensional=True)
+            # [conc unit]
+            conc_target = states[:, self.measured_ind['spectra']]
+
+            if self.has_non:
+                # [model units]
+                non_spectra = states[:, self.measured_ind['non_spectra']]
+
+                # [model units]
+                y_non = self.y_data[ind]['non_spectra'].copy()
+                x_mask = self.x_masks[ind]['non_spectra']
+                if x_mask is not None:
+                    y_non[~x_mask] = non_spectra[~x_mask]
+
+                states_non.append(non_spectra)
+                y_data_non.append(y_non)
+
+            c_runs.append(conc_target)
+
+        if self.has_non:
+            states_non = np.vstack(states_non)  # [model units], stacked rows
+            y_data_non = np.vstack(y_data_non)  # [model units], stacked rows
+
+            # [model units], model minus data
+            resid_non = states_non - y_data_non
+
+        else:
+            resid_non = []
+
+        if len(sens_states) > 0:
+            self.sens_second = sens_states
+
+        return c_runs, resid_non
+
+    def _assemble_residuals(self, spectra_pred: np.ndarray,
+                            resid_non: Union[np.ndarray, list]
+                            ) -> tuple[list, list, np.ndarray]:
+        """Assemble raw and weighted residuals from predicted spectra.
+
+        Parameters
+        ----------
+        spectra_pred : numpy.ndarray
+            Predicted absorbance of all experiments stacked by row, shape
+            ``(sum(len_spectra), n_lambda)`` [-].
+        resid_non : numpy.ndarray or list
+            Non-spectral residuals from ``_evaluate_runs``.
+
+        Returns
+        -------
+        y_runs : list of numpy.ndarray
+            Predicted spectra per experiment, ``(n_times, n_lambda)`` [-].
+        resid_runs : list of numpy.ndarray
+            Raw residuals per experiment, ``(n_times, n_lambda + n_non)``:
+            spectral data minus prediction [-], then non-spectral model
+            minus data (zero where unobserved) in model units.
+        weighted_resid : numpy.ndarray
+            Row-whitened residuals flattened column-major, shape
+            ``(n_data,)`` (see ``_weight_sample_rows``); unobserved entries
+            are zero.
+        """
+        # [-], spectral data minus prediction
+        residuals = self.spectra_tot - spectra_pred
+        if self.has_non:
+            # [-] spectral, [model units] non-spectral
+            residuals = np.hstack((residuals, resid_non))
+
+        # Row-wise whitening: sigma_inv for fully observed rows, the
+        # marginal precision root for partially observed rows, zero for
+        # unobserved entries (ParameterEstimation._weight_sample_rows).
+        # [weighted residual unit]
+        weighted_resid = self._weight_sample_rows(
+            residuals, self._residual_observation_mask())
+
+        # [-], row indices splitting the experiments
+        trim_y = np.cumsum(self.len_spectra)[:-1]
+
+        y_runs = np.split(spectra_pred, trim_y, axis=0)  # [-], per experiment
+        # [-] spectral, [model units] non-spectral
+        resid_runs = np.split(residuals, trim_y, axis=0)
+
+        # [weighted residual unit], column-major
+        weighted_resid = weighted_resid.T.ravel()
+
+        return y_runs, resid_runs, weighted_resid
+
+    def get_gradient(self, params: np.ndarray, out_array: bool = False,
+                     set_self: bool = True) -> np.ndarray:
+        """Return the Jacobian of the MCR residuals or the objective gradient.
 
         Parameters
         ----------
         params : array_like
             Optimized parameters in the model's units.
         out_array : bool, optional
-            If True, return the weighted-residual Jacobian for LM;
-            otherwise the scalar-objective gradient. The default is False.
+            If True, return the Jacobian of the residual vector
+            ``get_objective(params, out_array=True)`` for least-squares
+            solvers; otherwise the gradient of the scalar objective for
+            IPOPT. The default is False.
+        set_self : bool, optional
+            Forwarded to ``get_objective`` when the model has to be
+            evaluated at ``params`` first (model-returned sensitivities of
+            another point, or no evaluation yet). The default is True.
 
         Returns
         -------
         numpy.ndarray
-            With ``out_array``, shape ``(n_params, n_data)``: derivatives of
-            the weighted residuals of ``get_objective`` (column-major over
-            residual columns and stacked times) per parameter unit, from
-            finite differences or from model-returned sensitivities.
-            Unobserved non-spectral entries are zero. Otherwise the
-            objective gradient from finite differences, shape
-            ``(n_params,)``.
+            With ``out_array``, shape ``(n_params, n_data + n_penalty)``:
+            derivatives of the weighted data residuals (column-major over
+            residual columns and stacked times; unobserved non-spectral
+            entries are zero) followed by those of the penalty rows, per
+            parameter unit. Otherwise the gradient of ``get_objective``,
+            shape ``(n_params,)``, in objective unit per parameter unit.
+
+        Raises
+        ------
+        ValueError
+            If the finite-difference path is used (no model-returned
+            sensitivities) and ``dx_finitediff`` gives a zero or infinite
+            step for an optimized parameter.
+
+        Notes
+        -----
+        Without model-returned sensitivities both results are forward
+        differences of ``get_objective``, so they include the penalty. With
+        them, the data rows come from the variable-projection derivative of
+        the spectra (``get_sens_projection``), the penalty rows from the
+        absorptivity derivative (``_projection_sensitivities``), and the
+        gradient is ``J @ r`` with ``J`` the Jacobian above and ``r`` the
+        augmented residual vector of ``get_objective``: the exact derivative
+        of ``f = 1/2 r_data @ r_data + mult_penalty * sum(max(-eps, 0)**2) =
+        1/2 r @ r``.
         """
-        raw_sens = []
+        stale = (self._params_mcr_eval is None or
+                 not np.array_equal(params, self._params_mcr_eval))
+        if stale and (self.sens_second is not None or
+                      self._params_mcr_eval is None):
+            self.get_objective(params, out_array=out_array,
+                               set_self=set_self)
+
         if self.sens_second is None:
             pick_p = np.where(self.map_variable)[0]
 
             if out_array:
-                args = (True, False)  # out_array, update_self
-                jac_fun = numerical_jac_data
-            else:
-                args = (False, False)
-                jac_fun = numerical_jac
+                # Finite differences of the residual vector are already its
+                # Jacobian, (n_data + n_penalty, n_params).
+                # [weighted residual / param unit], (n_rows, n_params)
+                jacobian = numerical_jac_data(
+                    self.get_objective, params, args=(True, False),
+                    dx=self.dx_fd, pick_x=pick_p)
+                return jacobian.T
 
-            weighted_sens = jac_fun(self.get_objective, params, args=args,
-                                    dx=self.dx_fd, pick_x=pick_p)
+            # [objective unit / param unit], (1, n_params)
+            gradient = numerical_jac(self.get_objective, params,
+                                     args=(False, False), dx=self.dx_fd,
+                                     pick_x=pick_p)
+            return gradient[0]
 
-            if out_array:
-                # Finite differences of the weighted residual are already
-                # its Jacobian, (n_data, n_params); LM needs no sign change.
-                return weighted_sens.T
+        raw_sens = self.sens_second  # [state unit / param unit], one per run
+        # [state unit / param unit], (n_par, n_times, n_states)
+        sens_tot = np.concatenate(raw_sens, axis=1)
 
+        # [conc unit / param unit]
+        sens_mcr = sens_tot[:, :, self.measured_ind['spectra']]
+
+        # Variable projection derivatives: n_par x n_times x n_lambda for the
+        # spectra and n_par x epsilon_mcr.shape for the absorptivities.
+        sens_spectra, sens_absorptivity = self._projection_sensitivities(
+            sens_mcr)
+
+        x_mask = self._residual_observation_mask()
+        if self.has_non:
+            # [model unit / param unit]
+            sens_regular = sens_tot[:, :, self.measured_ind['non_spectra']]
+
+            # weighted_sens holds minus the residual derivative (it is
+            # negated below): the spectral residual is data minus
+            # prediction, the non-spectral one model minus data.
+            # [-/param unit] spectral, [model unit / param unit] non-spectral
+            all_sens = np.concatenate((sens_spectra, -sens_regular),
+                                      axis=2)
+
+            n_lambda = sens_spectra.shape[2]  # [-], wavelengths
+            # (n_par, n_times, n_columns); rows whitened like the
+            # residuals, unobserved entries zero.
+            # [weighted residual / param unit]
+            weighted_all = self._weight_sample_rows(
+                all_sens.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
+
+            # [weighted residual / param unit], (n_rows, n_params)
+            weighted_sp = flatten_spectral_sens(weighted_all[:, :, :n_lambda])
+            # [weighted residual / param unit], (n_rows, n_params)
+            weighted_reg = flatten_spectral_sens(weighted_all[:, :, n_lambda:])
+
+            # [weighted residual / param unit], data rows
+            weighted_sens = np.vstack((weighted_sp, weighted_reg))
         else:
-            raw_sens = self.sens_second
-            sens_tot = np.concatenate(raw_sens, axis=1)  # (n_par x n_times x n_states)
+            # [weighted residual / param unit]
+            weighted_sens = self._weight_sample_rows(
+                sens_spectra.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
+            # [weighted residual / param unit], (n_data, n_params)
+            weighted_sens = flatten_spectral_sens(weighted_sens)
 
-            sens_mcr = sens_tot[:, :, self.measured_ind['spectra']]
+        # [absorptivity unit]
+        absorptivity = self._mcr_evaluation['absorptivity']
+        # [weighted residual / param unit], (n_penalty, n_params)
+        penalty_sens = self._penalty_sensitivities(absorptivity,
+                                                   sens_absorptivity)
+        # [weighted residual / param unit], data then penalty rows
+        weighted_sens = np.vstack((weighted_sens, -penalty_sens))
 
-            # Variable projection derivative: n_par x n_times x n_lambda
-            sens_spectra = self.get_sens_projection(sens_states=sens_mcr,
-                                                    **self.projection_kwargs)
-
-            n_par, n_times, n_lambda = sens_spectra.shape
-            x_mask = self._residual_observation_mask()
-            if self.has_non:
-                sens_regular = sens_tot[:, :, self.measured_ind['non_spectra']]
-
-                # weighted_sens holds minus the residual derivative (it is
-                # negated below): the spectral residual is data minus
-                # prediction, the non-spectral one model minus data.
-                all_sens = np.concatenate((sens_spectra, -sens_regular),
-                                          axis=2)
-
-                # (n_par, n_times, n_columns); rows whitened like the
-                # residuals, unobserved entries zero.
-                weighted_all = self._weight_sample_rows(
-                    all_sens.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
-
-                weighted_sp = flatten_spectral_sens(weighted_all[:, :, :n_lambda])
-                weighted_reg = flatten_spectral_sens(weighted_all[:, :, n_lambda:])
-
-                weighted_sens = np.vstack((weighted_sp, weighted_reg))
-            else:
-                sens = sens_spectra
-
-                weighted_sens = self._weight_sample_rows(
-                    sens.transpose(1, 0, 2), x_mask).transpose(1, 0, 2)
-                weighted_sens = flatten_spectral_sens(weighted_sens)
-
+        # [weighted residual / param unit], (n_params, n_rows)
+        jacobian = -weighted_sens.T
         if out_array:
-            return -weighted_sens.T
+            return jacobian
         else:
-            return weighted_sens[0]
+            # [objective unit / parameter unit]
+            return jacobian @ self._mcr_evaluation['residuals']
 
-    def get_global_analysis(self, params):
+    def get_global_analysis(self, params: np.ndarray
+                            ) -> tuple[list, list, np.ndarray, np.ndarray]:
         """Resolve all experiments with one set of absorptivities.
 
         Parameters
@@ -4661,148 +5359,187 @@ class MultipleCurveResolution(ParameterEstimation):
             ``(n_data,)`` (see ``_weight_sample_rows``); unobserved entries
             are zero.
         absorptivity_pure : numpy.ndarray
-            Least-squares absorptivities, ``(n_spectral_states, n_lambda)``.
+            Least-squares absorptivities, ``(n_spectral_states, n_lambda)``,
+            in absorbance per model concentration unit.
 
         Raises
         ------
         ValueError
             If a callback output is not two-dimensional with one row per
             model-grid sample of its experiment.
+
+        Notes
+        -----
+        Stores the projection of the stacked concentrations in
+        ``_projection_blocks`` for the model-sensitivity Jacobian, and as
+        ``projection_kwargs`` (``c_target`` [concentration unit] and its
+        pseudo-inverse ``c_plus``), a legacy attribute that ``get_gradient``
+        no longer reads.
         """
-        c_runs = []
-        states_non = []
-        sens_states = []
+        c_runs, resid_non = self._evaluate_runs(params)
 
-        y_data_non = []
-        for ind in range(self.num_datasets):
-            result = self.function(params, self.x_model[ind],
-                                   reord_sens=False,
-                                   *self.args_fun[ind], **self.kwargs_fun[ind])
-
-            if isinstance(result, tuple):
-                states, sens_st = result
-                sens_states.append(sens_st)
-            else:
-                states = result
-
-            self._check_model_output(ind, states, two_dimensional=True)
-            conc_target = states[:, self.measured_ind['spectra']]
-
-            if self.has_non:
-                non_spectra = states[:, self.measured_ind['non_spectra']]
-
-                y_non = self.y_data[ind]['non_spectra'].copy()
-                x_mask = self.x_masks[ind]['non_spectra']
-                if x_mask is not None:
-                    y_non[~x_mask] = non_spectra[~x_mask]
-
-                states_non.append(non_spectra)
-                y_data_non.append(y_non)
-
-            c_runs.append(conc_target)
-
-        conc_tot = np.vstack(c_runs)
-
-        if self.has_non:
-            states_non = np.vstack(states_non)
-            y_data_non = np.vstack(y_data_non)
-
-            resid_non = states_non - y_data_non
-
-        else:
-            resid_non = []
+        conc_tot = np.vstack(c_runs)  # [conc unit], stacked rows
 
         # MCR
-        conc_plus = np.linalg.pinv(conc_tot)
+        conc_plus = np.linalg.pinv(conc_tot)  # [1/conc unit]
+        # [-/conc unit], absorbance per concentration
         absorptivity_pure = np.dot(conc_plus, self.spectra_tot)
 
-        spectra_pred = np.dot(conc_tot, absorptivity_pure)
+        spectra_pred = np.dot(conc_tot, absorptivity_pure)  # [-]
 
         self.projection_kwargs = {'c_target': conc_tot, 'c_plus': conc_plus}
+        self._projection_blocks = [
+            (0, conc_tot.shape[0], conc_tot, conc_plus, absorptivity_pure)]
 
-        if len(sens_states) > 0:
-            self.sens_second = sens_states
-
-        residuals = self.spectra_tot - spectra_pred
-        if self.has_non:
-            residuals = np.hstack((residuals, resid_non))
-
-        # Row-wise whitening: sigma_inv for fully observed rows, the
-        # marginal precision root for partially observed rows, zero for
-        # unobserved entries (ParameterEstimation._weight_sample_rows).
-        weighted_resid = self._weight_sample_rows(
-            residuals, self._residual_observation_mask())
-
-        trim_y = np.cumsum(self.len_spectra)[:-1]
-
-        y_runs = np.split(spectra_pred, trim_y, axis=0)
-        resid_runs = np.split(residuals, trim_y, axis=0)
-
-        weighted_resid = weighted_resid.T.ravel()
+        y_runs, resid_runs, weighted_resid = self._assemble_residuals(
+            spectra_pred, resid_non)
 
         return y_runs, resid_runs, weighted_resid, absorptivity_pure
 
-    def get_local_analysis(self, params):
-        y_runs = []
-        resid_runs = []
-        sens_runs = []
-        c_runs = []
-        epsilon_mcr = []
+    def get_local_analysis(self, params: np.ndarray
+                           ) -> tuple[list, list, np.ndarray, np.ndarray]:
+        """Resolve every experiment with its own absorptivities.
 
-        weighted_resid = []
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Full parameter vector in the model's units.
 
-        for ind in range(self.num_datasets):
-            result = self.function(params, self.x_fit[ind],
-                                   reorder=False,
-                                   *self.args_fun[ind], **self.kwargs_fun[ind])
+        Returns
+        -------
+        y_runs : list of numpy.ndarray
+            Predicted spectra per experiment, ``(n_times, n_lambda)`` [-].
+        resid_runs : list of numpy.ndarray
+            Raw residuals per experiment, ``(n_times, n_lambda + n_non)``,
+            as for ``get_global_analysis``.
+        weighted_resid : numpy.ndarray
+            Row-whitened residuals, shape ``(n_data,)``, in the layout,
+            weighting and observation masking of ``get_global_analysis``.
+        absorptivity_pure : numpy.ndarray
+            Least-squares absorptivities of each experiment, shape
+            ``(n_experiments, n_spectral_states, n_lambda)`` in ``x_data``
+            order, in absorbance per model concentration unit.
 
-            if isinstance(result, tuple):
-                conc_prof, sens_states = result
-            else:
-                conc_prof = result
-                sens_states = None
+        Raises
+        ------
+        ValueError
+            If a callback output is not two-dimensional with one row per
+            model-grid sample of its experiment.
 
-            conc_target = conc_prof[:, self.spectral_ind]
+        Notes
+        -----
+        Each experiment resolves its own pure-component spectra: its
+        absorptivities are the least-squares solution for its own spectra
+        and concentrations only, for example when the optical path or
+        instrument differs between experiments. Non-spectral residuals,
+        weights and masks are those of the global analysis, so only the
+        spectral prediction differs.
+        """
+        c_runs, resid_non = self._evaluate_runs(params)
 
-            # MCR
-            conc_plus = np.linalg.pinv(conc_target)
-            absorptivity_pure = np.dot(conc_plus, self.spectra[ind])
-            spectra_pred = np.dot(conc_target, absorptivity_pure)
+        # [-], first row of each experiment
+        row_bounds = np.concatenate(([0], np.cumsum(self.len_spectra)))
+        pred_runs = []  # [-], projected spectra per experiment
+        absorptivities = []  # [-/conc unit], per experiment
+        # Projection blocks, entries as in _projection_blocks.
+        blocks = []
+        for ind, conc_target in enumerate(c_runs):
+            start, stop = row_bounds[ind], row_bounds[ind + 1]
+            spectra = self.spectra_tot[start:stop]  # [-]
 
-            epsilon_mcr.append(absorptivity_pure)
+            # MCR of this experiment
+            conc_plus = np.linalg.pinv(conc_target)  # [1/conc unit]
+            absorptivity = np.dot(conc_plus, spectra)  # [-/conc unit]
+            pred_runs.append(np.dot(conc_target, absorptivity))
 
-            if sens_states is None:
-                args_merged = [self.x_data[ind],
-                               self.args_fun[ind], self.spectra[ind]]
+            absorptivities.append(absorptivity)
+            blocks.append((start, stop, conc_target, conc_plus,
+                           absorptivity))
 
-                sens = numerical_jac_data(self.func_aux, params, args_merged,
-                                          dx=self.dx_fd)[:, self.map_variable]
-            else:
-                sens = self.get_sens_projection(conc_target, conc_plus,
-                                                sens_states, spectra_pred)
+        self._projection_blocks = blocks
 
-            resid_run = spectra_pred - self.spectra[ind]
-            weighted_resid = np.dot(resid_run, self.sigma_inv)
+        y_runs, resid_runs, weighted_resid = self._assemble_residuals(
+            np.vstack(pred_runs), resid_non)
 
-            y_runs.append(spectra_pred.T.ravel())
-            resid_runs.append(resid_run)
-            sens_runs.append(sens)
+        return y_runs, resid_runs, weighted_resid, np.stack(absorptivities)
 
-        self.resid_runs = resid_runs
-        self.y_runs = y_runs
-        self.sens_runs = sens_runs
+    def get_objective(self, params: np.ndarray, out_array: bool = False,
+                      set_self: Optional[bool] = None, *,
+                      update_self: Optional[bool] = None
+                      ) -> Union[float, np.ndarray]:
+        """Evaluate the MCR residual vector or the scalar objective.
 
-        self.epsilon_mcr = epsilon_mcr
+        Parameters
+        ----------
+        params : array_like
+            Optimized parameters in the model's units; fixed parameters are
+            taken from ``param_seed``.
+        out_array : bool, optional
+            If True, return the residual vector minimized by least-squares
+            solvers; otherwise the scalar objective. The default is False.
+        set_self : bool, optional
+            If True, store the reporting state of this evaluation:
+            ``residuals``, ``y_runs``, ``resid_runs``, ``epsilon_mcr`` and
+            the ``params_iter``/``objfun_iter`` histories. The default is
+            True (None means True). ``assemble_solver_info`` passes False
+            to keep the state of the final solver callback.
+        update_self : bool, optional
+            Deprecated keyword alias of ``set_self``, the name of this
+            argument before #240.
 
-        weighted_resid = [elem.T.ravel() for elem in weighted_resid]
-        weighted_resid = np.concatenate(weighted_resid)
+        Returns
+        -------
+        float or numpy.ndarray
+            With ``out_array``, ``r = [r_data, r_pen]``: the row-whitened
+            data residuals of ``get_global_analysis`` or
+            ``get_local_analysis``, shape ``(n_data,)``, followed by the
+            penalty rows ``sqrt(2 * mult_penalty) * max(-eps, 0)``, one per
+            resolved absorptivity ``eps`` in ``epsilon_mcr`` C order, shape
+            ``(epsilon_mcr.size,)``. Otherwise the objective ``f = 1/2
+            r_data @ r_data + mult_penalty * sum(max(-eps, 0)**2)``, which
+            equals ``1/2 r @ r``. Spectral residuals are absorbance [-] and
+            non-spectral ones model units, both divided by the root of the
+            matching ``weight_matrix`` unit; ``f`` has their squared unit.
 
-        return y_runs, weighted_resid, absorptivity_pure  # TODO: I didn't work on this method
+        Raises
+        ------
+        ValueError
+            If a callback output is not two-dimensional with one row per
+            model-grid sample of its experiment.
+        TypeError
+            If ``set_self`` and ``update_self`` are both given and differ.
 
-    def get_objective(self, params, out_array=False, update_self=True):
+        Warns
+        -----
+        DeprecationWarning
+            If ``update_self`` is given without a conflicting ``set_self``.
 
-        # if type(self.params_iter) is list:
-        #     self.params_iter.append(params)
+        Notes
+        -----
+        The penalty rows exist only in the solver residual vector and its
+        Jacobian. Reported quantities use the data residuals only:
+        ``residuals`` (and ``objfun_iter``, the data sum of squares) are
+        the weighted data residuals; ``y_runs``, ``resid_runs`` and the
+        observation masks cover data entries only; ``optimize_fn`` moves the
+        penalty rows of the solver's ``fun`` and ``jac`` to
+        ``info['fun_penalty']`` and ``info['jac_penalty']``, so
+        ``info['fun']``, ``info['jac']``, the covariance and
+        ``StatisticsClass`` use ``n_data`` entries and ``num_data_total``
+        degrees of freedom. With nonnegative absorptivities the penalty rows
+        are zero.
+        """
+        if update_self is not None:
+            if set_self is not None and bool(set_self) != bool(update_self):
+                raise TypeError("set_self and update_self disagree; pass "
+                                "only set_self")
+            warnings.warn(
+                "update_self is deprecated; use set_self, its new name",
+                DeprecationWarning, stacklevel=2)
+            set_self = update_self
+        if set_self is None:
+            set_self = True
+
+        params_in = np.array(params, copy=True)  # [parameter units]
 
         # Reconstruct parameter set with fixed and non-fixed indexes
         params = self.reconstruct_params(params)
@@ -4814,9 +5551,18 @@ class MultipleCurveResolution(ParameterEstimation):
             out = self.get_local_analysis(params)
 
         y_runs, resid, weighted_resid, molar_abs = out
+        # [weighted residual unit], data then penalty rows
+        residuals_all = np.concatenate(
+            (weighted_resid, self._penalty_residuals(molar_abs)))
 
-        if update_self:
+        # Evaluation consumed by get_gradient's model-sensitivity branch.
+        self._params_mcr_eval = params_in
+        self._mcr_evaluation = {'residuals': residuals_all,
+                                'absorptivity': molar_abs}
+
+        if set_self:
             if type(self.objfun_iter) is list:
+                # [weighted residual unit**2], data rows only
                 objfun_val = np.linalg.norm(weighted_resid)**2
                 self.objfun_iter.append(objfun_val)
 
@@ -4830,8 +5576,129 @@ class MultipleCurveResolution(ParameterEstimation):
 
         # Return objective
         if out_array:
-            return weighted_resid
+            return residuals_all
         else:
+            # [objective unit]
             residual = 1/2 * np.dot(weighted_resid, weighted_resid)
+            # [objective unit]
             penalty = self.mult_penalty*(np.maximum(-molar_abs, 0)**2).sum()
             return residual + penalty
+
+    def _restore_fit_state(self, state: dict) -> None:
+        """Restore the saved fit and invalidate the evaluation cache.
+
+        Parameters
+        ----------
+        state : dict
+            Result of ``_fit_state``, including ``epsilon_mcr`` [absorptivity
+            units] and the projection buffers.
+
+        Notes
+        -----
+        The cache ``_params_mcr_eval``/``_mcr_evaluation`` that
+        ``get_gradient`` reuses describes the last trial evaluation, not the
+        restored fit, so it is cleared and the next gradient evaluates the
+        model again.
+        """
+        super()._restore_fit_state(state)
+        self._params_mcr_eval = None
+        self._mcr_evaluation = None
+
+    def _data_solver_info(self, info: dict) -> dict:
+        """Move the absorptivity-penalty rows out of the solver information.
+
+        Parameters
+        ----------
+        info : dict
+            Solver information at the accepted parameters, with ``fun`` the
+            residual vector of ``get_objective(out_array=True)`` and ``jac``
+            its Jacobian, shape ``(num_params, n_data + n_penalty)``.
+
+        Returns
+        -------
+        dict
+            Copy of ``info`` in which ``fun`` and ``jac`` hold the data rows
+            only, shapes ``(n_data,)`` and ``(num_params, n_data)``, and
+            ``fun_penalty`` and ``jac_penalty`` the penalty rows, shapes
+            ``(n_penalty,)`` and ``(num_params, n_penalty)``. Other entries,
+            such as the native SciPy diagnostics, still describe the full
+            residual vector.
+        """
+        # [-], one row per absorptivity
+        num_penalty = (len(self.measured_ind['spectra'])
+                       * self.spectra_tot.shape[1])  # [-]
+        if not self.global_analysis:
+            num_penalty *= self.num_datasets  # [-]
+
+        # [weighted residual unit], data then penalty rows
+        fun = np.asarray(info['fun'])
+        jac = np.asarray(info['jac'])  # [weighted residual / param unit]
+        num_data = fun.size - num_penalty  # [-]
+
+        reported = dict(info)
+        reported['fun'] = fun[:num_data]
+        reported['jac'] = jac[:, :num_data]
+        reported['fun_penalty'] = fun[num_data:]
+        reported['jac_penalty'] = jac[:, num_data:]
+        return reported
+
+    def _model_predictions(self) -> list:
+        """Return the curve-resolved predictions of the last evaluation.
+
+        Returns
+        -------
+        list of numpy.ndarray
+            One array per experiment in ``x_data`` order, shape ``(n_times,
+            n_lambda + n_non)``, in the column layout of ``resid_runs``: the
+            predicted absorbance ``C eps`` [-] of every spectral channel
+            (``y_runs``), then the model value of every non-spectral state
+            in its model unit. Entries without an observation are NaN, as
+            in ``ParameterEstimation``.
+
+        Notes
+        -----
+        Spectral residuals are data minus prediction, so ``resid_runs +
+        y_data`` would give ``2 data - prediction`` for them. Non-spectral
+        residuals are model minus data, so their predictions are
+        ``resid_runs + y_data`` as in ``ParameterEstimation``.
+        """
+        # [-] spectral, [model state units] non-spectral; one array per
+        # experiment
+        predictions = []
+        for ind in range(self.num_datasets):
+            # [-], (n_times, n_lambda), unobserved rows set to NaN below
+            spectra_pred = np.array(self.y_runs[ind], dtype=float)
+            x_mask = self.x_masks[ind]
+            if isinstance(x_mask, dict):
+                spectra_pred[~np.asarray(x_mask['spectra'], dtype=bool)] = (
+                    np.nan)
+            # Blocks: spectral [-], then non-spectral [model state units]
+            columns = [spectra_pred]
+            if self.has_non:
+                num_lambda = spectra_pred.shape[1]  # [-]
+                # [model units], model minus data plus data; NaN where the
+                # observation is NaN-padded (unobserved).
+                columns.append(self.resid_runs[ind][:, num_lambda:]
+                               + self.y_data[ind]['non_spectra'])
+            predictions.append(np.hstack(columns))
+
+        return predictions
+
+    def _residual_signs(self, ind: int) -> np.ndarray:
+        """Return the sign convention of one experiment's residual columns.
+
+        Parameters
+        ----------
+        ind : int
+            Experiment index in ``x_data`` order.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(n_lambda + n_non,)`` [-]: -1 for every spectral channel
+            (data minus prediction), +1 for every non-spectral state (model
+            minus data), in the column order of ``resid_runs``.
+        """
+        num_lambda = self.spectra_tot.shape[1]  # [-]
+        num_non = len(self.measured_ind.get('non_spectra', []))  # [-]
+        return np.concatenate((-np.ones(num_lambda), np.ones(num_non)))

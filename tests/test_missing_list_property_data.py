@@ -965,7 +965,11 @@ def test_viscosity_without_any_visc_liq_names_species_and_property(tmp_path):
 
 @pytest.mark.unit
 def test_diffusivity_rejects_species_without_data(liquid_path):
-    """Washing needs a diffusivity for every species."""
+    """Unweighted getDiffusivityPure needs a diffusivity for every species.
+
+    Washing passes presence weights (issue #425); without them every
+    species is evaluated.
+    """
     liquid = _liquid(liquid_path, INERT_ABSENT)
 
     with pytest.raises(MissingPropertyError, match=r"\['inert'\].*'diffusivity'"):
