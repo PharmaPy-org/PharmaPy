@@ -3682,10 +3682,12 @@ class ParameterEstimation:
         Parameters
         ----------
         raw_bounds : sequence
-            Either SciPy's ``(lower_bounds, upper_bounds)`` 2-tuple or a
-            sequence of ``num_params`` per-parameter ``(lower, upper)``
-            pairs (with ``None`` for an unbounded side, as returned by
-            ``CalibrationRecord.optimizer_inputs``), in parameter units.
+            Either SciPy's ``(lower_bounds, upper_bounds)`` 2-container (as
+            also returned by ``CalibrationRecord.optimizer_inputs`` for
+            ``'scipy'`` and ``'least_squares'`` records) or a sequence of
+            ``num_params`` per-parameter ``(lower, upper)`` pairs (when
+            ``num_params != 2`` or a bound side is ``None``), in parameter
+            units.
         num_params : int
             Number of optimized parameters [-].
 
@@ -3865,7 +3867,11 @@ class ParameterEstimation:
               ``TypeError``.
             * **Bounds**: When ``bounds`` is supplied (either via ``bounds=``
               or ``optim_options['bounds']``), it is forwarded as the
-              ``bounds`` keyword argument to ``optimizer``.
+              ``bounds`` keyword argument to ``optimizer``. When replaying a
+              recorded custom-optimizer fit through
+              ``CalibrationRecord.optimizer_inputs()`` or
+              ``CalibrationRecord.rerun()``, ``bounds`` is supplied as a list
+              of per-parameter ``(lower, upper)`` pairs.
             * **Accepted return forms**: ``optimizer`` may return (1) a
               mapping containing ``'x'`` (1-D array of shape
               ``(num_params,)``) plus optional diagnostic entries

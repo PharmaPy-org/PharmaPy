@@ -151,20 +151,35 @@ def custom_gauss_newton(
         Solved parameter vector and optional diagnostics in the requested
         return format.
     """
-    x_curr = np.array(seed, dtype=float, copy=True)  # [1/s]
-    lo_bound = -np.inf  # [1/s]
-    hi_bound = np.inf  # [1/s]
+    x_curr = np.array(
+        seed, dtype=float, copy=True
+    )  # [parameter units], e.g. [1/s] or [mol/L, 1/s]
+    lo_bound = -np.inf  # [parameter units]
+    hi_bound = np.inf  # [parameter units]
     if bounds is not None:
-        if (isinstance(bounds, list)
-                and len(bounds) == len(x_curr)
-                and all(isinstance(b, tuple) and len(b) == 2 for b in bounds)):
+        is_scipy_two_tuple = (
+            isinstance(bounds, np.ndarray)
+            or (
+                isinstance(bounds, tuple)
+                and len(bounds) == 2
+                and all(isinstance(b, (list, np.ndarray)) for b in bounds)
+            )
+        )
+        if (
+            not is_scipy_two_tuple
+            and isinstance(bounds, (list, tuple))
+            and len(bounds) == len(x_curr)
+            and all(isinstance(b, (list, tuple)) and len(b) == 2 for b in bounds)
+        ):
             lo_bound = np.array(
-                [-np.inf if b[0] is None else float(b[0]) for b in bounds])
+                [-np.inf if b[0] is None else float(b[0]) for b in bounds]
+            )  # [parameter units]
             hi_bound = np.array(
-                [np.inf if b[1] is None else float(b[1]) for b in bounds])
+                [np.inf if b[1] is None else float(b[1]) for b in bounds]
+            )  # [parameter units]
         elif isinstance(bounds, (list, tuple, np.ndarray)) and len(bounds) == 2:
-            lo_bound = np.asarray(bounds[0], dtype=float)
-            hi_bound = np.asarray(bounds[1], dtype=float)
+            lo_bound = np.asarray(bounds[0], dtype=float)  # [parameter units]
+            hi_bound = np.asarray(bounds[1], dtype=float)  # [parameter units]
 
     nfev = 0  # [-]
     njev = 0  # [-]
@@ -173,13 +188,15 @@ def custom_gauss_newton(
         nit = iteration
         resid = objective_fun(x_curr, out_array=True)  # [-]
         nfev += 1
-        jac = gradient_fun(x_curr, out_array=True)  # [s], shape (n_par, n_data)
+        jac = gradient_fun(
+            x_curr, out_array=True
+        )  # [1 / parameter units], shape (n_par, n_data)
         njev += 1
         # Gauss-Newton normal equations: (J @ J.T) * step = -J @ resid
-        hess_approx = jac @ jac.T  # [s**2]
-        grad_vec = jac @ resid  # [s]
-        step = np.linalg.solve(hess_approx, -grad_vec)  # [1/s]
-        x_next = np.clip(x_curr + step, lo_bound, hi_bound)  # [1/s]
+        hess_approx = jac @ jac.T  # [1 / (parameter units)**2]
+        grad_vec = jac @ resid  # [1 / parameter units]
+        step = np.linalg.solve(hess_approx, -grad_vec)  # [parameter units]
+        x_next = np.clip(x_curr + step, lo_bound, hi_bound)  # [parameter units]
         x_curr = x_next
         if float(np.linalg.norm(step)) <= tol:
             break
@@ -724,11 +741,17 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
         replayed_three.params_convg, opt_three, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
     )
 
-    # 3. Custom-optimizer capture and replay with both native tuple bounds
-    #    ([0.0, 0.05], [3.0, 2.0]) and per-parameter pair-list bounds [(0.0, 3.0), (0.05, 2.0)]
+    # 3. Custom-optimizer capture and replay across native SciPy 2-tuple,
+    #    pair-list, tuple-of-tuples, and list-of-lists bounds representations.
+    native_bounds = ([0.0, 0.05], [3.0, 2.0])  # ([mol/L, 1/s], [mol/L, 1/s])
+    pair_list_bounds = [(0.0, 3.0), (0.05, 2.0)]  # [(mol/L, mol/L), (1/s, 1/s)]
+    tuple_of_tuples_bounds = ((0.0, 3.0), (0.05, 2.0))  # ((mol/L, mol/L), (1/s, 1/s))
+    list_of_lists_bounds = [[0.0, 3.0], [0.05, 2.0]]  # [[mol/L, mol/L], [1/s, 1/s]]
     for label, custom_bounds in (
-        ('native_tuple', ([0.0, 0.05], [3.0, 2.0])),
-        ('pair_list', [(0.0, 3.0), (0.05, 2.0)]),
+        ('native_tuple', native_bounds),
+        ('pair_list', pair_list_bounds),
+        ('tuple_of_tuples', tuple_of_tuples_bounds),
+        ('list_of_lists', list_of_lists_bounds),
     ):
         est_cust = ParameterEstimation(
             first_order_decay,
@@ -767,3 +790,70 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
         np.testing.assert_allclose(
             replayed_cust.params_convg, opt_cust, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
         )
+
+    # 4. Constrained tuple-of-tuples ((0.5, 1.5), (0.2, 0.3)) where transposition
+    #    [(0.5, 0.2), (1.5, 0.3)] or ((0.0, 1.0), (2.0, 3.0)) -> [(0.0, 2.0), (1.0, 3.0)]
+    #    would alter the active constraints on a custom minimize-style solver.
+    def custom_lbfgsb(seed, objective_fun, gradient_fun, *, bounds=None):
+        """Solve constrained scalar objective with L-BFGS-B using pair bounds.
+
+        Parameters
+        ----------
+        seed : numpy.ndarray
+            Initial parameter vector, shape ``(num_params,)``, in ``[mol/L, 1/s]``.
+        objective_fun : callable
+            Scalar objective callback ``objective_fun(theta, out_array=False)`` [-].
+        gradient_fun : callable
+            Objective gradient callback ``gradient_fun(theta, out_array=False)``
+            in ``[1 / (mol/L), s]``.
+        bounds : sequence of tuple, optional
+            Per-parameter ``(lower, upper)`` pairs in ``[mol/L, 1/s]``.
+
+        Returns
+        -------
+        scipy.optimize.OptimizeResult
+            Converged L-BFGS-B result object.
+        """
+        return minimize(
+            lambda theta: float(objective_fun(theta, out_array=False)),
+            seed,
+            jac=lambda theta: np.asarray(gradient_fun(theta, out_array=False), dtype=float),
+            method='L-BFGS-B',
+            bounds=bounds,
+        )
+
+    active_pair_bounds = ((0.0, 1.5), (0.4, 1.0))  # ((mol/L, mol/L), (1/s, 1/s))
+    est_active = ParameterEstimation(
+        first_order_decay,
+        [1.0, 0.5],
+        experiments,
+        optimize_flags=[True, True],
+        name_params=['c_A0', 'k'],
+    )
+    opt_active, _, _ = est_active.optimize_fn(
+        method=custom_lbfgsb,
+        bounds=active_pair_bounds,
+        verbose=False,
+    )
+    assert opt_active[0] == pytest.approx(1.5, abs=1e-6)
+    assert opt_active[1] == pytest.approx(0.4, abs=1e-6)
+    rec_active = CalibrationRecord.from_estimation(
+        est_active,
+        experiments,
+        case='custom_active_tuple_of_tuples_bounds',
+        parameter_units={'c_A0': 'mol/L', 'k': '1/s'},
+        model=ModelRevision('first_order_decay', revision='v1'),
+        sources=[DataSource('synthetic_batch', 'synthetic', 'internal test')],
+    )
+    by_name_active = {p.name: p for p in rec_active.parameters}
+    assert (by_name_active['c_A0'].lower, by_name_active['c_A0'].upper) == (0.0, 1.5)
+    assert (by_name_active['k'].lower, by_name_active['k'].upper) == (0.4, 1.0)
+    replayed_active = rec_active.rerun(
+        first_order_decay,
+        optimizer=custom_lbfgsb,
+        rtol=ESTIMATE_RTOL,
+        atol=ESTIMATE_ATOL,
+    )
+    np.testing.assert_allclose(
+        replayed_active.params_convg, opt_active, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )

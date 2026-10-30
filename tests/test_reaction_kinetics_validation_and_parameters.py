@@ -707,3 +707,52 @@ def test_dh_rxn_alias_error_message_and_reformulated_k_ea_attributes():
             ea_params=ea_vals,
             params_r={"r1": {"C": 1.0}},
         )
+
+    # Custom kinetic models reject params_r at construction and in set_params
+    def custom_conc_term(conc, params_f):
+        """Evaluate a custom concentration term [mol/L].
+
+        Parameters
+        ----------
+        conc : numpy.ndarray
+            Species concentrations [mol/L].
+        params_f : numpy.ndarray
+            Custom model parameters [-].
+
+        Returns
+        -------
+        numpy.ndarray
+            Concentration-dependent rate factor [mol/L].
+        """
+        return np.atleast_1d(conc[..., 0] * params_f[0])
+
+    with pytest.raises(
+        ValueError,
+        match="params_r is only supported for elementary reversible kinetics",
+    ):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxn_list=["A --> B"],
+            k_params=[1.0],
+            ea_params=[0.0],
+            params_f=[1.0],
+            params_r=[1.0],
+            kinetic_model=custom_conc_term,
+        )
+
+    custom_kin = RxnKinetics(
+        path=str(DATABASE),
+        rxn_list=["A --> B"],
+        k_params=[1.0],
+        ea_params=[0.0],
+        params_f=[2.0],
+        kinetic_model=custom_conc_term,
+    )
+    with pytest.raises(
+        ValueError,
+        match="params_r is only supported for elementary reversible kinetics",
+    ):
+        custom_kin.set_params(
+            {"k_params": [1.0], "ea_params": [0.0], "params_f": [2.0], "params_r": [1.0]}
+        )
+    np.testing.assert_array_equal(custom_kin.params_f, [2.0])

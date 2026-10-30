@@ -2975,7 +2975,12 @@ def _weight_matrix_array(weight_matrix, names: list) -> np.ndarray:
 
 
 def _stored_bounds_to_pairs(
-        raw_bounds, num_optimized: int, method: str = 'scipy') -> list:
+        raw_bounds,
+        num_optimized: int,
+        method: str = 'scipy',
+        fitted_values: Optional[Sequence[float]] = None,
+        seed_values: Optional[Sequence[float]] = None,
+) -> list:
     """Convert stored optimizer bounds into ``(lower, upper)`` pairs.
 
     Parameters
@@ -2991,6 +2996,12 @@ def _stored_bounds_to_pairs(
     method : str, optional
         Optimization method identifier (``'scipy'``, ``'least_squares'``, or
         ``'custom'``).
+    fitted_values : sequence of float, optional
+        Accepted optimized parameter values in parameter units, used to
+        disambiguate 2x2 custom-optimizer bounds when needed.
+    seed_values : sequence of float, optional
+        Initial optimized parameter guesses in parameter units, used to
+        disambiguate 2x2 custom-optimizer bounds when needed.
 
     Returns
     -------
@@ -3027,24 +3038,47 @@ def _stored_bounds_to_pairs(
             for item in raw_bounds)
         has_none = all_pairs and any(
             item[0] is None or item[1] is None for item in raw_bounds)
-        is_custom_pair_list = (
-            method == 'custom'
-            and isinstance(raw_bounds, list)
-            and all_pairs
-            and all(
-                isinstance(item, tuple)
-                and (
-                    item[0] is None
-                    or item[1] is None
-                    or float(item[0]) <= float(item[1])
-                )
-                for item in raw_bounds
-            )
-        )
-        if all_pairs and (num_optimized != 2 or has_none or is_custom_pair_list):
+        if all_pairs and (num_optimized != 2 or has_none):
             return [
                 (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
                 for lo, hi in raw_bounds]
+        if all_pairs and method == 'custom' and num_optimized == 2:
+            pairs_rows = [
+                (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
+                for lo, hi in raw_bounds]
+            pairs_cols = [
+                (_bound_or_none(raw_bounds[0][idx], -1),
+                 _bound_or_none(raw_bounds[1][idx], 1))
+                for idx in range(2)]
+
+            def _intervals_valid(
+                pairs_cand: list[tuple[Optional[float], Optional[float]]],
+            ) -> bool:
+                """Check interval ordering and containment of seed/fitted vectors."""
+                for lo, hi in pairs_cand:
+                    if lo is not None and hi is not None and lo > hi:
+                        return False
+                for vec in (fitted_values, seed_values):
+                    if vec is not None and len(vec) == 2:
+                        for val, (lo, hi) in zip(vec, pairs_cand):
+                            fval = float(val)  # [parameter units]
+                            if lo is not None and fval < lo - 1e-12:
+                                return False
+                            if hi is not None and fval > hi + 1e-12:
+                                return False
+                return True
+
+            rows_ok = _intervals_valid(pairs_rows)
+            cols_ok = _intervals_valid(pairs_cols)
+            if rows_ok and not cols_ok:
+                return pairs_rows
+            if cols_ok and not rows_ok:
+                return pairs_cols
+            is_scipy_two_tuple = (
+                isinstance(raw_bounds, tuple)
+                and all(isinstance(item, (list, np.ndarray)) for item in raw_bounds)
+            )
+            return pairs_cols if is_scipy_two_tuple else pairs_rows
 
     if isinstance(raw_bounds, (list, tuple, np.ndarray)) and len(raw_bounds) == 2:
         lo_raw, hi_raw = raw_bounds[0], raw_bounds[1]
@@ -4659,7 +4693,12 @@ covariance_include_mse
             if (method in ('scipy', 'least_squares', 'custom')
                     and stored_bounds is not None):
                 bounds = _stored_bounds_to_pairs(
-                    stored_bounds, num_optimized, method=method)
+                    stored_bounds,
+                    num_optimized,
+                    method=method,
+                    fitted_values=np.asarray(estimator.params_convg, dtype=np.float64),
+                    seed_values=seeds[flags],
+                )
             else:
                 bounds = [(None, None)] * num_optimized
         bounds = list(_sequence(bounds, 'bounds'))  # [parameter units]

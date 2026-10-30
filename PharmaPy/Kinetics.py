@@ -966,20 +966,26 @@ class RxnKinetics:
         ----------
         params : dict or numpy.ndarray
             Dictionary with ``k_params`` in ``[mol/L]**(1-m)/time`` for total
-            order m [-], ``ea_params`` [J/mol], and optional ``params_f``
-            (orders [-] or custom model parameters). Alternatively, a flat
-            vector in ``concat_params`` order: all phi_1, all phi_2, then any
-            fitted concentration parameters. Without reformulation phi_1 and
-            phi_2 are k and Ea; reformulated logarithmic values are numerical
-            parameters [-] in the class's stated unit convention.
+            order m [-], ``ea_params`` [J/mol], optional ``params_f``
+            (forward orders [-] as sequence, 2-D array, or reaction-ID/species
+            mapping, or custom model parameters), and optional ``params_r``
+            (reverse orders [-] for elementary reversible kinetics, defaulting
+            to ``stoich_prod`` when ``keq_params`` is not ``None`` and zeros
+            otherwise). Alternatively, a flat vector in ``concat_params``
+            order: all phi_1, all phi_2, then any fitted concentration
+            parameters. Without reformulation phi_1 and phi_2 are k and Ea;
+            reformulated logarithmic values are numerical parameters [-] in
+            the class's stated unit convention.
 
         Raises
         ------
         RuntimeError
             If a dictionary omits parameters required by a custom model.
         ValueError
-            If reaction or species keys are mismatched, or if reversible
-            forward orders differ from raw reactant stoichiometry. Such an
+            If reaction or species keys are mismatched, if reversible forward
+            or reverse orders differ from raw reactant/product stoichiometry,
+            if non-zero ``params_r`` is supplied without ``keq_params``, or if
+            ``params_r`` is supplied for a custom kinetic model. Such an
             update leaves the existing parameters intact.
 
         Notes
@@ -1066,18 +1072,19 @@ class RxnKinetics:
                         param_name='params_r',
                     )  # [-]
             else:
+                raw_params_r = params.get('params_r', None)
+                if raw_params_r is not None:
+                    raise ValueError(
+                        "params_r is only supported for elementary reversible "
+                        "kinetics (with keq_params), not custom kinetic models."
+                    )
                 params_f = params.get('params_f', None)  # [custom model units]
                 if params_f is None:
                     raise RuntimeError("For user-defined kinetic function, "
                                        "argument 'params_f' is mandatory.")
                 params_f = np.asarray(params_f)
                 order_map = self.stoich_react > 0
-                raw_params_r = params.get('params_r', None)
-                params_r = (
-                    np.zeros_like(self.stoich_prod, dtype=np.float64)
-                    if raw_params_r is None
-                    else np.asarray(raw_params_r, dtype=np.float64)
-                )  # [-]
+                params_r = np.zeros_like(self.stoich_prod, dtype=np.float64)  # [-]
         else:
             phi_1, phi_2 = np.split(params[:self.num_paramsk], 2)  # [k units, J/mol] or [-]
             fit_paramsf = self.fit_paramsf
