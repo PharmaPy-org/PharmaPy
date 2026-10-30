@@ -11,3 +11,4 @@ remaining work. Consult its linked issues for current ownership and status, and
 
 - [Crystallizer concentration ownership (#312)](crystallizer_state_ownership.md)
 - [Crystal-grid inventory convergence (#391)](crystallizer_grid_conservation.md)
+- [Bioconjugation case selection, kinetic data provenance, and PAT observables (#357)](bioconjugation_case_selection.md)
