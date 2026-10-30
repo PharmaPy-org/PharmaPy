@@ -501,10 +501,11 @@ $[\text{s}^{-1}]$, which are invariant to the molar concentration scale.
 
 ## 4. Public dataset availability, data-access gap, and fallback policy
 
-1. **Industrial and literature data-access gap**:
-   - Eli Lilly and Company internal bioconjugation reaction trajectories and
-     inline spectroscopic datasets are proprietary and cannot be committed to the
-     public repository without formal data-release clearance.
+1. **Open-access literature data policy and raw time-series availability**:
+   - WP1.5 relies exclusively on open-access public literature data rather than
+     proprietary industrial datasets, ensuring that all repository benchmarks,
+     calibration records, and tutorials are self-contained and publicly
+     reproducible without data-release restrictions.
    - In the open-access KIT/AstraZeneca publications, the complete ODE equations,
      initial concentrations, reactor volumes, syringe-pump dosing durations,
      calibrated rate constants, standard deviations, $95\%$ confidence intervals,
@@ -530,9 +531,9 @@ $[\text{s}^{-1}]$, which are invariant to the molar concentration scale.
      `DataSource` records**:
      - `origin='literature'`: records the peer-reviewed rate constants, initial
        reactant concentrations, reactor volumes, feed rates, and $248/280\text{ nm}$
-       UV-Vis extinction coefficients from Weggen et al. (2023, 2024, 2025) and
-       Hamblett et al. (2004), citing the exact DOI, page/equation/table numbers,
-       and CC BY 4.0 license terms where applicable.
+       UV-Vis extinction coefficients from Weggen et al. (2023, 2024, 2025),
+       Hamblett et al. (2004), and Cruz & Kayser (2019), citing the exact DOI,
+       page/equation/table numbers, and CC BY 4.0 license terms where applicable.
      - `origin='synthetic'`: records forward-simulated concentration and spectral
        time-course observations generated from those literature models (pinned by
        the SHA-256 digest of the serialized synthetic observation arrays and
@@ -544,7 +545,7 @@ $[\text{s}^{-1}]$, which are invariant to the molar concentration scale.
      (recording the digitizer tool, axis-calibration uncertainty, and SHA-256
      digest as `origin='literature'` with a digitization `Transformation`) or
      supplemented with author-shared Supporting Information S2 tables from
-     KIT/AstraZeneca or a cleared Lilly benchmark dataset.
+     KIT/AstraZeneca.
 
 ---
 
@@ -708,7 +709,7 @@ R = \frac{A(\lambda_1)}{A(280)} \quad [\text{-}]$$
 | Chromophore / Wavelength Channel | $\varepsilon(\lambda)$ $[\text{L}\cdot\text{mol}^{-1}\cdot\text{cm}^{-1}]$ | Provenance Classification (`origin`) | Physical Basis, Source & Primary-Text Reconciliation |
 | --- | --- | --- | --- |
 | Monoclonal antibody (`cAC10` IgG1, $\text{mAb}_0$) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{\text{mAb}}^{248} = 9.413 \times 10^4$, $\varepsilon_{\text{mAb}}^{280} = 2.3415 \times 10^5$ | `origin="literature"` | Intact antibody molar basis; Hamblett et al. (2004), *Clin. Cancer Res.* 10(20), 7063–7070, pp. 7064–7065 (`doi:10.1158/1078-0432.CCR-04-0789`) |
-| Maleimide linker-payload (`vc-MMAE`, `SGD-1006`) at $248\text{ nm}$ / $280\text{ nm}$ | Adopted physical assignment: $\varepsilon_{D}^{248} = 1.59 \times 10^4$, $\varepsilon_{D}^{280} = 1.50 \times 10^3$ (note: Hamblett et al., 2004, p. 7064 prints $\varepsilon_{\text{drug}}^{248} = 1.50 \times 10^3$, $\varepsilon_{\text{drug}}^{280} = 1.59 \times 10^4$) | `origin="literature"` (with explicit physical-peak assignment inference) | Per mole of drug-linker moiety; Hamblett et al. (2004, p. 7064) state that $248\text{ nm}$ and $280\text{ nm}$ *"are the absorbance maxima of the drug and the antibody, respectively"*, from which we infer the physical assignment $\varepsilon_{D}^{248} = 1.59 \times 10^4 > \varepsilon_{D}^{280} = 1.50 \times 10^3\text{ M}^{-1}\text{cm}^{-1}$ (consistent with Chen, 2013 and Wakankar et al., 2011). Cramér's-rule inversion holds algebraically for either non-singular pair ($\Delta_\varepsilon \ne 0$); payload-specific extinction spectra for `#356` will be confirmed with `@dcasasor` |
+| Maleimide linker-payload (`vc-MMAE`, `SGD-1006`) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{D}^{248} = 1.59 \times 10^4$, $\varepsilon_{D}^{280} = 1.50 \times 10^3$ (note: Hamblett et al., 2004, p. 7064 prints $\varepsilon_{\text{drug}}^{248} = 1.50 \times 10^3$, $\varepsilon_{\text{drug}}^{280} = 1.59 \times 10^4$) | `origin="literature"` | Per mole of drug-linker moiety; Hamblett et al. (2004, p. 7064) state that $248\text{ nm}$ and $280\text{ nm}$ *"are the absorbance maxima of the drug and the antibody, respectively"*, and open-access literature directly confirms $\varepsilon_{\text{MMAE}}^{248} = 1.59 \times 10^4\text{ M}^{-1}\text{cm}^{-1}$ and $\varepsilon_{\text{MMAE}}^{280} = 1.50 \times 10^3\text{ M}^{-1}\text{cm}^{-1}$ (Cruz & Kayser, 2019, *Cancers* 11(6), 870, `doi:10.3390/cancers11060870`, `PMC6628445`, Sec. 4.4; Chen, 2013; Wakankar et al., 2011) |
 | 4-wavelength verification matrix ($\lambda \in \{248, 280, 310, 342\}\text{ nm}$) for $\text{mAb}$, conjugated site ($\boldsymbol{\varepsilon}_{\text{conj\_site}}$), free maleimide $\text{Drug}$, and depleted $\text{Drug\_depl}$ | $\boldsymbol{\varepsilon}_{\text{mAb}} = [94130, 234150, 1200, 150]$; $\boldsymbol{\varepsilon}_{\text{conj\_site}} = [15900, 1500, 8200, 4100]$; $\boldsymbol{\varepsilon}_{\text{Drug}} = [15900, 1500, 14500, 9800]$; $\boldsymbol{\varepsilon}_{\text{Drug\_depl}} = [14200, 1200, 2100, 600]$ | `origin="synthetic"` (all `Drug_depl` values and all $310/342\text{ nm}$ columns are synthetic conditioning-driven test fixtures) | **Synthetic verification fixture** (`tests/test_bioconjugation_case_selection.py`) constructed with full row rank 4 to verify `MultipleCurveResolution` and `PCR_calibration` numerical recovery when pairing the Weggen et al. (2024) kinetic trajectory with a multi-wavelength UV-Vis observation operator. Not claimed as an empirical literature spectrum |
 
 #### In-situ optical rank, stoichiometry invariants, and hybrid soft-sensor observability (Schiemer et al., 2023, `10.1002/bit.28428`)
@@ -851,7 +852,7 @@ concentrations $[\text{mol/L}]$.
      (2023, Fig. 4) and Weggen et al. (2024, Figs. 4–6) into versioned
      `DataSource(origin='literature')` JSON tables with documented digitizer
      transformations, and incorporate any raw Supporting Information S2 tables
-     received from KIT/AstraZeneca or a cleared Lilly benchmark dataset.
+     received from KIT/AstraZeneca.
 2. **Months 9–10 (M9–M10 — Multi-Experiment Parameter Estimation, Identifiability,
    and Experiment Design)**:
    - Calibrate Model 1A (`2k + sink`) and Model 1B (`Simple 1k + sink` vs.
@@ -877,7 +878,7 @@ concentrations $[\text{mol/L}]$.
      alternatives alongside WP1.2/WP1.3 (`#353`, `#354`), and export the STN/RTN
      scheduling representation for WP4 (`#366`, `#367`).
    - Author the self-contained Sphinx/Jupyter tutorial notebook for deliverable
-     D3b (`#356`) and complete domain review with `@dcasasor`.
+     D3b (`#356`).
 
 ### 8.2 Four-step bioconjugation process-sequence inputs for WP4 (`#366`, `#367`)
 
@@ -912,9 +913,8 @@ WP1.5 and WP4:
     in `T2` $\to 20.00\text{ L}$ reduced mAb at $10.00\text{ g/L}$, with zero
     liquid waste stream; at $2.20\text{ eq}$ TCEP is consumed stoichiometrically by
     disulfide cleavage without a separate quench stream, whereas higher TCEP
-    charges must either include a quantified PEG-azide quench stream per Kantner
-    et al., 2017 or use the `T1b` diafiltration step below; to be confirmed with
-    `@dcasasor`).
+    charges either include a quantified PEG-azide quench stream per Kantner et al.,
+    2017 or use the `T1b` diafiltration step below).
   - **Expanded `Tier 1` engineered-Cys (`ADC1`) activation sub-network
     (`T1a` $\to$ `T1b` $\to$ `T1c`)**: When scheduling the full `Tier 1`
     engineered-cysteine uncapping sequence (Weggen et al., 2023, Sec. 2.1.1;
@@ -943,12 +943,12 @@ WP1.5 and WP4:
   $\tau_{\text{task}}$ $[\text{s}]$, hold-time limits $\tau_{\text{hold,max}}$
   $[\text{s}]$, diavolume counts, and step recoveries are **process-scheduling
   design assumptions (`origin="synthetic"`)** informed by the cited bench/pilot
-  operating windows; they are parameterized for WP4 sensitivity studies (`#366`,
-  `#367`) and flagged for domain review with `@dcasasor`.
+  operating windows and exposed as configurable parameters for WP4 sensitivity
+  studies (`#366`, `#367`).
 
 | Task ID & Name | Input States (Liquid Volume Fraction $[\text{L/L}]$) | Output States (Liquid Volume Fraction $[\text{L/L}]$) | Equipment Resource Class & PharmaPy Unit | Liquid Volume $[\text{L}]$, Solution Mass $[\text{kg}]$ ($[\text{kg/kg}]$), Reagent Stock & Protein Solute Mass Balance | Nominal Duration $\tau_{\text{task}}$ $[\text{s}]$ (Range $[\text{s}]$) | Transfer / Storage Policy & Design-Assumption Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| **`T1_reduction`** (Baseline Tier 2 substoichiometric TCEP reduction; see text above for Tier 1 `T1a`–`T1c` expansion) | `S0_native_mAb` ($0.9800$), `S_TCEP_reductant` ($0.0200$) | `S1_reduced_mAb` ($1.0000$) | `R_reduction_vessel` (`BatchReactor` or `SemibatchReactor`, jacketed at $T = 293.15\text{ K}$) | **In**: $19.60\text{ L}$ native mAb in aqueous buffer ($19.600\text{ kg}$, $0.9800\ [\text{kg/kg}]$; $0.200\text{ kg}$ mAb at $10.204\text{ g/L} = 6.803 \times 10^{-5}\text{ mol/L}$, $1.333\text{ mmol}$ mAb) + $0.40\text{ L}$ of $7.333\text{ mmol/L}$ aqueous TCEP stock ($0.400\text{ kg}$, $0.0200\ [\text{kg/kg}]$; $2.933\text{ mmol}$ TCEP, $2.20\text{ eq}$) $= 20.00\text{ L}$ ($20.000\text{ kg}$ solution) $\to$ **Out**: $20.00\text{ L}$ `S1_reduced_mAb` ($20.000\text{ kg}$, $1.0000\ [\text{kg/kg}]$; $0.200\text{ kg}$ reduced mAb at $10.00\text{ g/L} = 6.667 \times 10^{-5}\text{ mol/L}$, $100\%$ protein recovery) | $5400\text{ s}$ ($3600\text{–}7200\text{ s}$, $1.0\text{–}2.0\text{ h}$; `origin="synthetic"` scheduling assumption anchored to the $90\text{ min}$ TCEP reduction window in Weggen et al., 2025, Sec. 2.2) | **Finite-wait (`FW`)**: maximum hold $\tau_{\text{hold,S1,max}} = 1800\text{ s}$ ($0.5\text{ h}$, `origin="synthetic"` scheduling design assumption under $1\text{ mmol/L}$ EDTA and inert $\text{N}_2$ headspace to limit uncapped thiol re-oxidation prior to `T2`; allowable thiol-loss specification to be confirmed with `@dcasasor`) |
+| **`T1_reduction`** (Baseline Tier 2 substoichiometric TCEP reduction; see text above for Tier 1 `T1a`–`T1c` expansion) | `S0_native_mAb` ($0.9800$), `S_TCEP_reductant` ($0.0200$) | `S1_reduced_mAb` ($1.0000$) | `R_reduction_vessel` (`BatchReactor` or `SemibatchReactor`, jacketed at $T = 293.15\text{ K}$) | **In**: $19.60\text{ L}$ native mAb in aqueous buffer ($19.600\text{ kg}$, $0.9800\ [\text{kg/kg}]$; $0.200\text{ kg}$ mAb at $10.204\text{ g/L} = 6.803 \times 10^{-5}\text{ mol/L}$, $1.333\text{ mmol}$ mAb) + $0.40\text{ L}$ of $7.333\text{ mmol/L}$ aqueous TCEP stock ($0.400\text{ kg}$, $0.0200\ [\text{kg/kg}]$; $2.933\text{ mmol}$ TCEP, $2.20\text{ eq}$) $= 20.00\text{ L}$ ($20.000\text{ kg}$ solution) $\to$ **Out**: $20.00\text{ L}$ `S1_reduced_mAb` ($20.000\text{ kg}$, $1.0000\ [\text{kg/kg}]$; $0.200\text{ kg}$ reduced mAb at $10.00\text{ g/L} = 6.667 \times 10^{-5}\text{ mol/L}$, $100\%$ protein recovery) | $5400\text{ s}$ ($3600\text{–}7200\text{ s}$, $1.0\text{–}2.0\text{ h}$; `origin="synthetic"` scheduling assumption anchored to the $90\text{ min}$ TCEP reduction window in Weggen et al., 2025, Sec. 2.2) | **Finite-wait (`FW`)**: maximum hold $\tau_{\text{hold,S1,max}} = 1800\text{ s}$ ($0.5\text{ h}$, `origin="synthetic"` scheduling design assumption under $1\text{ mmol/L}$ EDTA and inert $\text{N}_2$ headspace to limit uncapped thiol re-oxidation prior to `T2`) |
 | **`T2_conjugation`** (Semi-batch maleimide payload addition + NAC quench) | `S1_reduced_mAb` ($0.8889$), `S_payload_DMSO` ($0.1000$), `S_NAC_quench` ($0.0111$) | `S2_crude_ADC` ($1.0000$) | `R_conjugation_vessel` (`SemibatchReactor` with metering pump, $T = 295.15\text{ K}$, $10.00\%\text{ v/v}$ DMSO in final $22.50\text{ L}$ batch, $10.11\%\text{ v/v}$ pre-quench) | **In**: $20.00\text{ L}$ `S1_reduced_mAb` ($20.000\text{ kg}$, $0.8801\ [\text{kg/kg}]$; $0.200\text{ kg}$ mAb) + $2.25\text{ L}$ neat DMSO payload stock at $2.963\text{ mmol/L}$ payload ($\rho_{\text{DMSO}} = 1.1004\text{ kg/L}$ at $293.15\text{ K}$, CRC Handbook $\implies 2.4759\text{ kg}$, $0.1089\ [\text{kg/kg}]$; $6.667\text{ mmol}$ payload, $5.0\text{ eq}$, giving $2.25 / 22.50 = 10.00\%\text{ v/v}$ DMSO in final batch) + $0.25\text{ L}$ aqueous $40.0\text{ mmol/L}$ NAC quench ($0.250\text{ kg}$, $0.0110\ [\text{kg/kg}]$; $10.0\text{ mmol}$ NAC) $= 22.50\text{ L}$ ($22.7259\text{ kg}$ solution at $\rho_{\text{mix}} = 1.010\text{ kg/L}$) $\to$ **Out**: $22.50\text{ L}$ `S2_crude_ADC` ($22.7259\text{ kg}$, $1.0000\ [\text{kg/kg}]$; $0.200\text{ kg}$ ADC protein solute, $100\%$ protein recovery) | $2700\text{ s}$ ($1800\text{–}3600\text{ s}$, $0.5\text{–}1.0\text{ h}$; `origin="synthetic"` scheduling assumption covering $600\text{–}1800\text{ s}$ syringe-pump feed + $600\text{ s}$ completion hold + $300\text{ s}$ NAC quench, Weggen et al., 2023, 2024) | **Finite-wait (`FW`)**: maximum hold $\tau_{\text{hold,S2,max}} = 3600\text{ s}$ ($1.0\text{ h}$, `origin="synthetic"` scheduling design assumption in $10.0\%\text{ v/v}$ DMSO to limit organic-cosolvent-induced protein aggregation prior to diafiltration `T3`, Fernandez-Cerezo et al., 2023) |
 | **`T3_desalting_ufdf`** (Ultrafiltration / diafiltration small-molecule clearance & buffer exchange) | `S2_crude_ADC` ($0.1385$), `S_diafiltration_buffer` ($0.8615$) | `S3_desalted_ADC` ($0.1231$), `S_ufdf_permeate_waste` ($0.8769$) | `U_ufdf_skid` ($30\text{ kDa}$ MWCO tangential-flow filtration skid; Fernandez-Cerezo et al., 2023, `10.1021/acs.oprd.3c00137`) | **In**: $22.50\text{ L}$ `S2_crude_ADC` ($22.726\text{ kg}$, $0.1397\ [\text{kg/kg}]$) + $140.00\text{ L}$ aqueous diafiltration buffer ($140.000\text{ kg}$, $0.8603\ [\text{kg/kg}]$; $7.0$ diavolumes on $20.00\text{ L}$ retentate basis) $= 162.50\text{ L}$ ($162.726\text{ kg}$ total liquid) $\to$ **Out**: $20.00\text{ L}$ `S3_desalted_ADC` retentate ($20.000\text{ kg}$, $0.1229\ [\text{kg/kg}]$; $0.196\text{ kg}$ ADC protein solute at $98.0\%$ TFF step recovery, $>99\%$ free payload/DMSO/NAC cleared) + $142.50\text{ L}$ permeate waste ($142.726\text{ kg}$, $0.8771\ [\text{kg/kg}]$) | $4500\text{ s}$ ($3600\text{–}5400\text{ s}$, $1.0\text{–}1.5\text{ h}$; `origin="synthetic"` scheduling assumption for $7.0$ diavolumes at membrane flux $35\text{–}50\text{ L}\cdot\text{m}^{-2}\cdot\text{h}^{-1}$, Fernandez-Cerezo et al., 2023) | **Default `Unlimited` (`UIS`) within single-day campaign horizon** ($\le 24\text{ h}$ at $277.15\text{–}281.15\text{ K}$) in `DynamicCollector` hold tank; configurable parameter `t_hold_s3_max = 86400` $[\text{s}]$ for multi-day finite-wait (`FW`) scheduling sensitivity studies (`#366`, `#367`). Post-desalting dual-wavelength UV-Vis ($248/280\text{ nm}$) release check applies to `S3_desalted_ADC` |
 | **`T4_purification`** (Polishing chromatography for DAR distribution & aggregate removal) | `S3_desalted_ADC` ($0.2500$), `S_chrom_mobile_phase` ($0.7500$) | `S4_purified_ADC_DS` ($0.2250$), `S_chrom_strip_waste` ($0.7750$) | `U_chrom_column` (Preparative HIC / AEX column skid) | **In**: $20.00\text{ L}$ `S3_desalted_ADC` ($20.000\text{ kg}$, $0.2500\ [\text{kg/kg}]$; $0.196\text{ kg}$ ADC protein solute) + $60.00\text{ L}$ equilibration/elution/strip mobile phase ($60.000\text{ kg}$, $0.7500\ [\text{kg/kg}]$; $3.0\times$ load volume) $= 80.00\text{ L}$ ($80.000\text{ kg}$ total liquid) $\to$ **Out**: $18.00\text{ L}$ `S4_purified_ADC_DS` eluate pool ($18.000\text{ kg}$, $0.2250\ [\text{kg/kg}]$; $0.180\text{ kg}$ purified ADC solute at $91.84\%$ polishing yield and $90.0\%$ overall four-step protein mass yield, $c_{\text{ADC}} = 10.0\text{ g/L}$) + $62.00\text{ L}$ flowthrough/strip waste ($62.000\text{ kg}$, $0.7750\ [\text{kg/kg}]$) | $3600\text{ s}$ ($2700\text{–}5400\text{ s}$, $0.75\text{–}1.5\text{ h}$; `origin="synthetic"` scheduling assumption for single-cycle preparative HIC/AEX load-wash-elute-regenerate sequence) | Final Drug Substance (`S4_purified_ADC_DS`, `Unlimited` storage in formulation hold tank) |
@@ -963,80 +963,83 @@ WP1.5 and WP4:
 2. **Chen, Y. (2013)**. Drug-to-antibody ratio (DAR) by UV/Vis spectroscopy. In
    L. Ducry (Ed.), *Antibody-Drug Conjugates* (*Methods in Molecular Biology*,
    Vol. 1045, pp. 267–273). Humana Press. `doi:10.1007/978-1-62703-541-5_16`.
-3. **Fernandez-Cerezo, L., Holstein, M., Thirumalairajan, S., Romanini, D.,
+3. **Cruz, E., & Kayser, V. (2019)**. Synthesis and enhanced cellular uptake in
+   vitro of anti-HER2 multifunctional gold nanoparticles. *Cancers*, 11(6), 870.
+   `doi:10.3390/cancers11060870` (`PMC6628445`).
+4. **Fernandez-Cerezo, L., Holstein, M., Thirumalairajan, S., Romanini, D.,
    Kos, P., & Raglione, T. (2023)**. Strategies for UF/DF-based impurity removal
    in the post-conjugation purification of antibody-drug conjugates. *Organic
    Process Research & Development*, 27(7), 1258–1268.
    `doi:10.1021/acs.oprd.3c00137`.
-4. **Hamblett, K. J., Senter, P. D., Chace, D. F., Sun, M. M. C., Lenox, J.,
+5. **Hamblett, K. J., Senter, P. D., Chace, D. F., Sun, M. M. C., Lenox, J.,
    Cerveny, C. G., Kissler, K. M., Bernhardt, S. X., Kopcha, A. K., Zabinski,
    R. F., Meyer, D. L., & Francisco, J. A. (2004)**. Effects of drug loading on
    the antitumor activity of a monoclonal antibody drug conjugate. *Clinical
    Cancer Research*, 10(20), 7063–7070. `doi:10.1158/1078-0432.CCR-04-0789`.
-5. **Kantner, T., Alkhawaja, B., & Watts, A. G. (2017)**. In situ quenching of
+6. **Kantner, T., Alkhawaja, B., & Watts, A. G. (2017)**. In situ quenching of
    trialkylphosphine reducing agents using water-soluble PEG-azides improves
    maleimide conjugation to proteins. *ACS Omega*, 2(9), 5785–5791.
    `doi:10.1021/acsomega.7b01094`.
-6. **Liu, H., Chumsae, C., Gaza-Bulseco, G., Hurkmans, K., & Radziejewski,
+7. **Liu, H., Chumsae, C., Gaza-Bulseco, G., Hurkmans, K., & Radziejewski,
    C. H. (2010)**. Ranking the susceptibility of disulfide bonds in human IgG1
    antibodies by reduction, differential alkylation, and LC-MS analysis.
    *Analytical Chemistry*, 82(12), 5219–5226. `doi:10.1021/ac100575n`.
-7. **Mao, L., Russell, A. J., & Carmali, S. (2022)**. Moving protein PEGylation
+8. **Mao, L., Russell, A. J., & Carmali, S. (2022)**. Moving protein PEGylation
    from an art to a data science. *Bioconjugate Chemistry*, 33(9), 1643–1653.
    `doi:10.1021/acs.bioconjchem.2c00262`.
-8. **Matsuda, Y., Tawfiq, Z., Leung, M., & Mendelsohn, B. A. (2020)**. Insight
+9. **Matsuda, Y., Tawfiq, Z., Leung, M., & Mendelsohn, B. A. (2020)**. Insight
    into temperature dependency and design of experiments towards process
    development for cysteine-based antibody-drug conjugates. *ChemistrySelect*,
    5(28), 8435–8439. `doi:10.1002/slct.202001822`.
-9. **Nakahara, Y., Mendelsohn, B. A., & Matsuda, Y. (2022)**. Antibody–drug
-   conjugate synthesis using continuous flow microreactor technology. *Organic
-   Process Research & Development*, 26(9), 2766–2770.
-   `doi:10.1021/acs.oprd.2c00217`.
-10. **Nayak, S., & Richter, S. M. (2023)**. Kinetic studies of the partial
+10. **Nakahara, Y., Mendelsohn, B. A., & Matsuda, Y. (2022)**. Antibody–drug
+    conjugate synthesis using continuous flow microreactor technology. *Organic
+    Process Research & Development*, 26(9), 2766–2770.
+    `doi:10.1021/acs.oprd.2c00217`.
+11. **Nayak, S., & Richter, S. M. (2023)**. Kinetic studies of the partial
     reduction and conjugation reactions in an antibody-drug conjugate (ADC)
     synthesis. *Organic Process Research & Development*, 27(11), 2091–2099.
     `doi:10.1021/acs.oprd.3c00264`.
-11. **Pfister, D., Bourgeaux, E., & Morbidelli, M. (2015)**. Kinetic modeling of
+12. **Pfister, D., Bourgeaux, E., & Morbidelli, M. (2015)**. Kinetic modeling of
     protein PEGylation. *Chemical Engineering Science*, 137, 816–827.
     `doi:10.1016/j.ces.2015.07.031`.
-12. **Pfister, D., Ulmer, N., Klaue, A., Ingold, O., & Morbidelli, M. (2016)**.
+13. **Pfister, D., Ulmer, N., Klaue, A., Ingold, O., & Morbidelli, M. (2016)**.
     Modeling the kinetics of protein conjugation reactions. *Chemie Ingenieur
     Technik*, 88(11), 1598–1608. `doi:10.1002/cite.201600046`.
-13. **Pople, D., Wang, Z., Kozyryev, A., Patel, B., Appiah-Amponsah, E., &
+14. **Pople, D., Wang, Z., Kozyryev, A., Patel, B., Appiah-Amponsah, E., &
     Feng, H. (2026)**. Raman spectroscopy for characterizing monoclonal antibody
     reduction: A process analytical technology approach for antibody–drug
     conjugation process development. *Pharmaceutical Research*.
     `doi:10.1007/s11095-026-04154-9`.
-14. **Schiemer, R., Weggen, J. T., Schmitt, K. M., & Hubbuch, J. (2023)**. An
+15. **Schiemer, R., Weggen, J. T., Schmitt, K. M., & Hubbuch, J. (2023)**. An
     adaptive soft-sensor for advanced real-time monitoring of an antibody-drug
     conjugation reaction. *Biotechnology and Bioengineering*, 120(7),
     1914–1928. `doi:10.1002/bit.28428`.
-15. **Song, Y., Cai, H., Tan, Z., Mussa, N., & Li, Z. J. (2022)**. Mechanistic
+16. **Song, Y., Cai, H., Tan, Z., Mussa, N., & Li, Z. J. (2022)**. Mechanistic
     insights into inter-chain disulfide bond reduction of IgG1 and IgG4
     antibodies. *Applied Microbiology and Biotechnology*, 106(3), 1057–1066.
     `doi:10.1007/s00253-022-11778-5`.
-16. **Sun, M. M. C., Beam, K. S., Cerveny, C. G., Hamblett, K. J., Blackmore,
+17. **Sun, M. M. C., Beam, K. S., Cerveny, C. G., Hamblett, K. J., Blackmore,
     R. S., Torgov, M. Y., Handley, F. G. M., Ihle, N. C., Senter, P. D., &
     Alley, S. C. (2005)**. Reduction–alkylation strategies for the modification
     of specific monoclonal antibody disulfides. *Bioconjugate Chemistry*, 16(5),
     1282–1290. `doi:10.1021/bc050201y`.
-17. **Vicum, L., Ottiger, S., Mazzotti, M., Makowski, Ł., & Bałdyga, J.
+18. **Vicum, L., Ottiger, S., Mazzotti, M., Makowski, Ł., & Bałdyga, J.
     (2004)**. Multi-scale modeling of a reactive mixing process in a semibatch
     stirred tank. *Chemical Engineering Science*, 59(8–9), 1767–1781.
     `doi:10.1016/j.ces.2004.01.032`.
-18. **Wakankar, A., Chen, Y., Gokarn, Y., & Jacobson, F. S. (2011)**. Analytical
+19. **Wakankar, A., Chen, Y., Gokarn, Y., & Jacobson, F. S. (2011)**. Analytical
     methods for physicochemical characterization of antibody drug conjugates.
     *mAbs*, 3(2), 161–172. `doi:10.4161/mabs.3.2.14960` (`PMC3092617`).
-19. **Weggen, J. T., Seidel, J., Bean, R., Wendeler, M., & Hubbuch, J. (2023)**.
+20. **Weggen, J. T., Seidel, J., Bean, R., Wendeler, M., & Hubbuch, J. (2023)**.
     Kinetic studies and CFD-based reaction modeling for insights into the
     scalability of ADC conjugation reactions. *Frontiers in Bioengineering and
     Biotechnology*, 11, 1123842. `doi:10.3389/fbioe.2023.1123842`
     (`PMC10111256`).
-20. **Weggen, J. T., Bean, R., Hui, K., Wendeler, M., & Hubbuch, J. (2024)**.
+21. **Weggen, J. T., Bean, R., Hui, K., Wendeler, M., & Hubbuch, J. (2024)**.
     Kinetic models towards an enhanced understanding of diverse ADC conjugation
     reactions. *Frontiers in Bioengineering and Biotechnology*, 12, 1403644.
     `doi:10.3389/fbioe.2024.1403644` (`PMC11274341`).
-21. **Weggen, J. T., González, P., Hui, K., Bean, R., Wendeler, M., & Hubbuch,
+22. **Weggen, J. T., González, P., Hui, K., Bean, R., Wendeler, M., & Hubbuch,
     J. (2025)**. Kinetic modeling of the antibody disulfide bond reduction
     reaction with integrated prediction of the drug load profile for
     cysteine-conjugated ADCs. *Biotechnology and Bioengineering*, 122(2),

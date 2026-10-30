@@ -202,7 +202,7 @@ C_DRUG_FEED_PLUME = 1.0e-2  # [mol/L], 10 mM stock feed plume, Sec. 2.2.5
 # Dual-wavelength UV-Vis molar extinction coefficients at 248 nm and 280 nm
 # for cAC10 IgG1 mAb and vc-MMAE (SGD-1006) drug-linker (origin='literature':
 # Hamblett et al., 2004, Clin. Cancer Res. 10(20):7063-7070, p. 7064-7065;
-# physically assigned to the protein peak at 280 nm and drug peak at 248 nm).
+# Cruz & Kayser, 2019, Cancers 11(6):870, doi:10.3390/cancers11060870, Sec. 4.4).
 # SHORT_PATHLENGTH_CM = 0.10 cm represents a micro-volume / flow-cell optical
 # pathlength (e.g., Unchained Labs Stunner, Weggen et al., 2024, Sec. 2.1.4)
 # that keeps undiluted 5 g/L mAb absorbance inside the linear detector regime
@@ -212,8 +212,8 @@ SHORT_PATHLENGTH_CM = 0.10  # [cm], 1 mm micro-volume / inline UV flow cell
 MAX_LINEAR_ABSORBANCE_AU = 1.5  # [-], upper bound of linear photodiode regime
 EPS_MAB_248 = 9.413e4  # [L/(mol*cm)], Hamblett et al. (2004), p. 7064
 EPS_MAB_280 = 2.3415e5  # [L/(mol*cm)], Hamblett et al. (2004), p. 7064
-EPS_DRUG_248 = 1.59e4  # [L/(mol*cm)], Hamblett et al. (2004), p. 7064
-EPS_DRUG_280 = 1.50e3  # [L/(mol*cm)], Hamblett et al. (2004), p. 7064
+EPS_DRUG_248 = 1.59e4  # [L/(mol*cm)], Hamblett et al. (2004); Cruz & Kayser (2019)
+EPS_DRUG_280 = 1.50e3  # [L/(mol*cm)], Hamblett et al. (2004); Cruz & Kayser (2019)
 
 # Justified numerical tolerances:
 # - CLOSED_FORM_RTOL (1e-12): direct algebraic/matrix identity evaluations in
