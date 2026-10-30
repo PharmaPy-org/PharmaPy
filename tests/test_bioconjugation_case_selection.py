@@ -6,36 +6,44 @@ networks, unit conversions (both ``[L/(mmol*s)]`` and ``[L/(umol*s)]`` to
 Damkohler timescale scaling, dual-wavelength UV-Vis and multivariate spectral
 PAT contracts, multi-experiment (batch and fed-batch) parameter estimation,
 ``CalibrationRecord`` provenance round-trip, WP4 four-step STN/RTN process
-sequence balances, and native ``BatchReactor`` / ``SemibatchReactor`` execution
-plus blocker reproducers documented in
-``doc/review_notes/bioconjugation_case_selection.md``.
+sequence balances (both the 4-task Tier 2 baseline and the 3-sub-task Tier 1
+UF/DF-exchange + DHAA-reoxidation expansion), and native ``BatchReactor`` /
+``SemibatchReactor`` execution plus blocker reproducers (#486, #531) documented
+in ``doc/review_notes/bioconjugation_case_selection.md``.
 
 Data provenance:
 - ``origin='literature'``: kinetic rate constants, standard deviations, 95%
-  confidence intervals, initial concentrations, vessel mixing times, and
-  248/280 nm molar extinction coefficients from peer-reviewed literature
-  (Andris et al., 2019, doi:10.1016/j.jbiotec.2019.09.013; Weggen et al., 2023,
+  confidence intervals, initial concentrations, vessel mixing times, buffer
+  density and viscosity, and 248/280 nm molar extinction coefficients from
+  peer-reviewed literature (Andris et al., 2019,
+  doi:10.1016/j.jbiotec.2019.09.013; Weggen et al., 2023,
   doi:10.3389/fbioe.2023.1123842; Weggen et al., 2024,
   doi:10.3389/fbioe.2024.1403644; Weggen et al., 2025,
   doi:10.1002/bit.28899; Hamblett et al., 2004,
   doi:10.1158/1078-0432.CCR-04-0789; Schiemer et al., 2023,
-  doi:10.1002/bit.28428).
-- ``origin='synthetic'``: forward-simulated concentration time series, the
-  4-wavelength MCR/PCR verification absorptivities at 310/342 nm, schema
-  placeholder thermal properties (``cp_liq``, ``t_crit``), and WP4 scheduling
-  task durations and hold-time design parameters. These verify the model, PAT,
-  and scheduling interfaces and are not claimed as an empirical calibration
-  dataset.
+  doi:10.1002/bit.28428). Note that the kinetic benchmark uses ``ADC1`` with
+  ``NPM`` / ``Drug1`` (Weggen et al., 2023, 2024) whereas the dual-wavelength
+  UV-Vis benchmark uses ``cAC10`` with ``vc-MMAE`` (Hamblett et al., 2004).
+- ``origin='synthetic'``: forward-simulated concentration time series, the use
+  of published ``RMSE_CV`` (``1.863e-6 mol/L``) as a synthetic homoscedastic
+  measurement-weighting standard deviation, all 4-wavelength MCR/PCR
+  verification absorptivities beyond the two literature ``cAC10`` / ``vc-MMAE``
+  reference wavelengths (including the entire ``Drug_depl`` row and the
+  310/342 nm columns), schema placeholder thermal properties (``cp_liq``,
+  ``t_crit``), and WP4 scheduling task durations and hold-time design
+  parameters. These verify the model, PAT, and scheduling interfaces and are
+  not claimed as an empirical calibration dataset.
 
-Core unit tests run in milliseconds without Assimulo; the final integration
-test uses ``pytest.importorskip("assimulo")`` to exercise native
+Core unit tests run in under three seconds without Assimulo; the final
+integration test uses ``pytest.importorskip("assimulo")`` to exercise native
 ``BatchReactor`` and ``SemibatchReactor`` integration and reproduce the
-demonstrated solver/sensitivity blockers.
+demonstrated solver/sensitivity blockers (#486, #531).
 """
 
 import hashlib
 import json
 from pathlib import Path
+import re
 
 import numpy as np
 import pytest
@@ -103,18 +111,23 @@ MODEL_1A_PARTICIPATING = (
 
 # Representative pure-component property table for dilute aqueous ADC buffer
 # (10% v/v DMSO in 20 mM sodium phosphate buffer, rho_liq = 1010.5 kg/m**3,
-# Weggen et al., 2023, Sec. 2.2.2) with surrogate maleimide payload
-# N-(1-pyrenyl)maleimide (NPM, C20H11NO2, M = 297.31 g/mol, Weggen et al.,
-# 2023, Sec. 2.1.2). Molecular weights satisfy exact stoichiometric mass
+# mu = 1.06e-3 Pa*s, Weggen et al., 2023, Sec. 2.2.2) with surrogate maleimide
+# payload N-(1-pyrenyl)maleimide (NPM, C20H11NO2, M = 297.31 g/mol, Weggen et
+# al., 2023, Sec. 2.1.2). Molecular weights satisfy exact stoichiometric mass
 # conservation (stoich_matrix @ mw == 0) across R1, R2, and R3.
 # Note: cp_liq [J/(mol*K)] and t_crit [K] are synthetic schema-required
 # placeholders (origin='synthetic') that are not used by isothermal liquid
 # reactor integration (isothermal=True).
 BUFFER_DENSITY = 1010.5  # [kg/m**3], Weggen et al. (2023), Sec. 2.2.2
+DYNAMIC_VISC_BUFFER = 1.06e-3  # [Pa*s], 1.06 mPa*s, Weggen et al. (2023), Sec. 2.2.2
+KINEMATIC_VISC_BUFFER = (
+    DYNAMIC_VISC_BUFFER / BUFFER_DENSITY
+)  # [m**2/s], 1.049e-6 m**2/s
+DMSO_DENSITY = 1100.4  # [kg/m**3], neat DMSO liquid density at 295.15 K
 REACTION_TEMP = 295.15  # [K], 22 degC isothermal laboratory condition
 MAB_MW = 150000.0  # [g/mol], intact IgG1 molar mass, Weggen et al. (2023), Sec. 2.1.1
 NPM_MW = 297.31  # [g/mol], N-(1-pyrenyl)maleimide (C20H11NO2) molar mass
-BUFFER_MW = 19.70  # [g/mol], mole-fraction-weighted 90% v/v H2O + 10% v/v DMSO
+BUFFER_MW = 19.67  # [g/mol], mole-fraction-weighted 90% v/v H2O + 10% v/v DMSO
 BIOCONJUGATION_DATABASE = {
     "mAb": {
         "mw": MAB_MW,  # [g/mol]
@@ -147,7 +160,7 @@ BIOCONJUGATION_DATABASE = {
         "t_crit": 750.0,  # [K], synthetic placeholder
     },
     "buffer": {
-        "mw": BUFFER_MW,  # [g/mol], 19.70 g/mol
+        "mw": BUFFER_MW,  # [g/mol], 19.67 g/mol
         "rho_liq": BUFFER_DENSITY,  # [kg/m**3]
         "cp_liq": [78.0],  # [J/(mol*K)], synthetic placeholder
         "t_crit": 650.0,  # [K], synthetic placeholder
@@ -168,7 +181,7 @@ K_DRUG_DRUG1 = 1.0e-3  # [1/s], Weggen et al. (2024), Sec. 3.1
 
 # Mixing vessel 95% homogenization times, specific power inputs, and standard
 # reactant concentrations from Weggen et al. (2023, Table 1, Table 2,
-# Sec. 2.2.5, Sec. 2.2.8 & Sec. 3.2.1).
+# Sec. 2.2.2, Sec. 2.2.5, Sec. 2.2.8 & Sec. 3.2.1).
 TAU_MIX_TUBE = 0.5  # [s], internally stirred 1.5 mL reaction tube
 TAU_MIX_GST1 = 9.4  # [s], 300 mL lab glass stirred tank at 60 rpm
 TAU_MIX_SUM = 17.6  # [s], 25 L single-use mixer at 400 rpm
@@ -177,8 +190,6 @@ POWER_PER_VOL_GST1 = 3.81  # [W/m**3], Weggen et al. (2023), Table 1
 POWER_PER_VOL_SUM = 23.71  # [W/m**3], Weggen et al. (2023), Table 1
 POWER_PER_VOL_GST2 = 2.44  # [W/m**3], Weggen et al. (2023), Table 1
 ENGULFMENT_COEFF = 17.24  # [-], Baldyga-Bourne / Vicum et al. (2004), Eq. (5)
-KINEMATIC_VISC_WATER = 1.0e-6  # [m**2/s], dilute aqueous kinematic viscosity
-WATER_DENSITY_APPROX = 1000.0  # [kg/m**3], density basis for epsilon = (P/V)/rho
 MAB_MASS_CONC_STD = 5.0  # [g/L], Weggen et al. (2023), Table 2
 C_MAB_STD = MAB_MASS_CONC_STD / MAB_MW  # [mol/L], 3.333e-5 mol/L
 PAYLOAD_EXCESS_STD = 5.0  # [-], 5x molar payload excess, Table 2
@@ -187,7 +198,8 @@ C_DRUG_FEED_PLUME = 1.0e-2  # [mol/L], 10 mM stock feed plume, Sec. 2.2.5
 
 # Dual-wavelength UV-Vis molar extinction coefficients at 248 nm and 280 nm
 # for cAC10 IgG1 mAb and vc-MMAE (SGD-1006) drug-linker (origin='literature':
-# Hamblett et al., 2004, Clin. Cancer Res. 10(20):7063-7070, p. 7064).
+# Hamblett et al., 2004, Clin. Cancer Res. 10(20):7063-7070, p. 7064-7065;
+# physically assigned to the protein peak at 280 nm and drug peak at 248 nm).
 # SHORT_PATHLENGTH_CM = 0.10 cm represents a micro-volume / flow-cell optical
 # pathlength (e.g., Unchained Labs Stunner, Weggen et al., 2024, Sec. 2.1.4)
 # that keeps undiluted 5 g/L mAb absorbance inside the linear detector regime
@@ -244,11 +256,13 @@ def _solve_dar2_heavy_chain_experiment(
     feed_duration_s=0.0,
     c_drug_feed_mol_l=0.0,
 ):
-    """Integrate the Weggen et al. (2024) Simple 1k heavy-chain DAR 2 model.
+    """Integrate the mono-thiol sub-case of the Weggen et al. (2024) Simple 1k model.
 
-    Solves the isothermal batch or fed-batch material balance (Weggen et al.,
-    2024, Eqs. 1-7) for mono-thiol heavy chain ``H0_1``, conjugated heavy
-    chain ``H1_1``, free payload ``Drug``, and inactivated payload
+    Solves the isothermal batch or fed-batch material balance for the
+    homogeneous mono-thiol heavy-chain limiting sub-case
+    (``c_H0_0 = c_H0_2 = 0``) of the Simple ``1k + k_drug`` model (Weggen et
+    al., 2024, Eqs. 1-10) with mono-thiol heavy chain ``H0_1``, conjugated
+    heavy chain ``H1_1``, free payload ``Drug``, and inactivated payload
     ``Drug_depl``:
 
     - ``H0_1 + Drug --k1--> H1_1``
@@ -348,20 +362,21 @@ def _solve_dar2_heavy_chain_experiment(
         float(v0_l),
     ]  # [mol/L x 4, L]
     t_end_s = float(times[-1])  # [s]
+    switch_time_s = float(feed_duration_s)  # [s]
 
-    if feed_rate_l_s > 0.0 and 0.0 < feed_duration_s < t_end_s:
-        times_piece1 = times[times <= feed_duration_s]  # [s]
+    if feed_rate_l_s > 0.0 and 0.0 < switch_time_s < t_end_s:
+        times_piece1 = times[times <= switch_time_s]  # [s]
+        has_exact_switch = (
+            times_piece1.size > 0 and float(times_piece1[-1]) == switch_time_s
+        )
         eval_piece1 = (
             times_piece1
-            if (
-                times_piece1.size > 0
-                and np.isclose(times_piece1[-1], feed_duration_s)
-            )
-            else np.append(times_piece1, feed_duration_s)
+            if has_exact_switch
+            else np.append(times_piece1, switch_time_s)
         )  # [s]
         sol1 = solve_ivp(
             _make_rhs(float(feed_rate_l_s)),
-            (0.0, float(feed_duration_s)),
+            (0.0, switch_time_s),
             initial_state,
             t_eval=eval_piece1,
             method="RK45",
@@ -371,11 +386,11 @@ def _solve_dar2_heavy_chain_experiment(
         if not sol1.success:
             raise RuntimeError(f"Piece 1 ODE integration failed: {sol1.message}")
         state_at_switch = sol1.y[:, -1].tolist()  # [mol/L x 4, L]
-        times_piece2 = times[times > feed_duration_s]  # [s]
-        eval_piece2 = np.insert(times_piece2, 0, feed_duration_s)  # [s]
+        times_piece2 = times[times > switch_time_s]  # [s]
+        eval_piece2 = np.insert(times_piece2, 0, switch_time_s)  # [s]
         sol2 = solve_ivp(
             _make_rhs(0.0),
-            (float(feed_duration_s), t_end_s),
+            (switch_time_s, t_end_s),
             state_at_switch,
             t_eval=eval_piece2,
             method="RK45",
@@ -390,7 +405,7 @@ def _solve_dar2_heavy_chain_experiment(
 
     active_flow = (
         float(feed_rate_l_s)
-        if (feed_rate_l_s > 0.0 and feed_duration_s >= t_end_s)
+        if (feed_rate_l_s > 0.0 and switch_time_s >= t_end_s)
         else 0.0
     )  # [L/s]
     sol = solve_ivp(
@@ -411,7 +426,7 @@ def _dual_wavelength_uv_invert(absorbance_248_280, pathlength_cm=PATHLENGTH_CM):
     """Invert 248 nm and 280 nm UV absorbances to [c_mAb, c_Drug] and DAR.
 
     Implements the dual-wavelength Beer-Lambert inversion of Hamblett et al.
-    (2004, Clin. Cancer Res. 10(20):7063-7070, p. 7064).
+    (2004, Clin. Cancer Res. 10(20):7063-7070, p. 7064-7065).
 
     Parameters
     ----------
@@ -452,19 +467,34 @@ def _dual_wavelength_uv_invert(absorbance_248_280, pathlength_cm=PATHLENGTH_CM):
 @pytest.mark.unit
 def test_dar2_intact_kinetics_rates_jacobians_and_invariants(tmp_path):
     """Verify Model 1A stoichiometry, mass balance, rates, Jacobians, and unit conversions."""
-    # Verify both [L/(mmol*s)] and [L/(umol*s)] -> [L/(mol*s)] conversions (B1, B2).
+    # Verify both [L/(mmol*s)] and [L/(umol*s)] -> [L/(mol*s)] conversions.
     assert K1_MODEL_1A == pytest.approx(797.0, rel=CLOSED_FORM_RTOL)
     assert K2_MODEL_1A == pytest.approx(1476.0, rel=CLOSED_FORM_RTOL)
     assert K1_RED_TIER2 == pytest.approx(698.0, rel=CLOSED_FORM_RTOL)
     assert K3_RED_TIER2 == pytest.approx(68.1, rel=CLOSED_FORM_RTOL)
     assert K_RED_SEED_TIER2 == pytest.approx(100.0, rel=CLOSED_FORM_RTOL)
 
-    # Verify Weggen et al. (2024, Table 2) parameter SD vs 95% CI distinction (B2).
+    # Verify Weggen et al. (2024, Table 2) parameter SD vs 95% CI distinction.
     ci_low, ci_high = K1_DAR2_DRUG1_CI95_BOUNDS_MMOL  # [L/(mmol*s)]
     assert 0.5 * (ci_high - ci_low) == pytest.approx(
         K1_DAR2_DRUG1_CI95_HALF_MMOL, rel=CLOSED_FORM_RTOL
     )
     assert K1_DAR2_DRUG1_CI95_HALF_MMOL > K1_DAR2_DRUG1_SD_MMOL
+
+    # Verify the two distinct reduced thiol heterogeneity distributions in
+    # Section 3.2:
+    # 1. Weggen et al. (2024, Sec. 3.3.1) heavy-chain distribution (0.11 H0_0,
+    #    0.84 H0_1, 0.05 H0_2) -> intact-mAb DAR_max = 2 * (0.84 + 2*0.05) = 1.88.
+    # 2. Weggen et al. (2023, Sec. 2.2.5) intact-mAb distribution (88.59% 2-site,
+    #    8.60% 1-site, 2.81% 0-site) -> intact-mAb DAR_max = 1.8578.
+    hc_frac_2024 = np.array([0.11, 0.84, 0.05])  # [-], (f_H0_0, f_H0_1, f_H0_2)
+    mab_frac_2023 = np.array([0.8859, 0.0860, 0.0281])  # [-], (2-site, 1-site, 0-site)
+    assert float(np.sum(hc_frac_2024)) == pytest.approx(1.0, rel=CLOSED_FORM_RTOL)
+    assert float(np.sum(mab_frac_2023)) == pytest.approx(1.0, rel=CLOSED_FORM_RTOL)
+    dar_max_2024 = 2.0 * (hc_frac_2024[1] + 2.0 * hc_frac_2024[2])  # [-]
+    dar_max_2023 = 2.0 * mab_frac_2023[0] + 1.0 * mab_frac_2023[1]  # [-]
+    assert dar_max_2024 == pytest.approx(1.88, rel=CLOSED_FORM_RTOL)
+    assert dar_max_2023 == pytest.approx(1.8578, rel=CLOSED_FORM_RTOL)
 
     db_path = _write_bioconjugation_db(tmp_path)
     kinetics = RxnKinetics(
@@ -484,7 +514,7 @@ def test_dar2_intact_kinetics_rates_jacobians_and_invariants(tmp_path):
     )  # [-], shape (3 reactions, 5 participating species)
     np.testing.assert_array_equal(kinetics.stoich_matrix, expected_stoich)
 
-    # Exact stoichiometric mass conservation across R1, R2, and R3 (B5):
+    # Exact stoichiometric mass conservation across R1, R2, and R3:
     # stoich_matrix @ mw_participating == 0 [g/mol] within the IEEE 754 ULP
     # bound of subtracting 150000 g/mol from 150297.31 g/mol (~3.3e-11 g/mol).
     mw_partic = np.array(
@@ -617,7 +647,9 @@ def test_damkohler_scaling_distinguishes_bolus_plume_from_semibatch_bulk():
 
     # Verify Baldyga-Bourne / Vicum et al. (2004, Eq. 5) micromixing engulfment
     # time tau_E = 17.24 * sqrt(nu / epsilon) [s] and engulfment Damkohler
-    # number Da_E = tau_E / tau_R_plume [-] (Weggen et al., 2023, Eqs. 9-10).
+    # number Da_E = tau_E / tau_R_plume [-] using the conjugation buffer
+    # density (1010.5 kg/m**3) and viscosity (1.06e-3 Pa*s -> nu = 1.049e-6
+    # m**2/s, Weggen et al., 2023, Sec. 2.2.2 & Eqs. 9-10).
     vessel_power_per_vol = {
         "GST_1_300mL": POWER_PER_VOL_GST1,  # [W/m**3]
         "SUM_25L": POWER_PER_VOL_SUM,  # [W/m**3]
@@ -625,20 +657,20 @@ def test_damkohler_scaling_distinguishes_bolus_plume_from_semibatch_bulk():
     }
     tau_engulfment = {
         name: ENGULFMENT_COEFF
-        * np.sqrt(KINEMATIC_VISC_WATER / (p_per_v / WATER_DENSITY_APPROX))
+        * np.sqrt(KINEMATIC_VISC_BUFFER / (p_per_v / BUFFER_DENSITY))
         for name, p_per_v in vessel_power_per_vol.items()
     }  # [s]
     da_engulfment_plume = {
         name: tau_e / tau_rxn_plume for name, tau_e in tau_engulfment.items()
     }  # [-]
 
-    assert tau_engulfment["GST_1_300mL"] == pytest.approx(0.279, rel=1e-2)
-    assert tau_engulfment["SUM_25L"] == pytest.approx(0.112, rel=1e-2)
-    assert tau_engulfment["GST_2_22L"] == pytest.approx(0.349, rel=1e-2)
+    assert tau_engulfment["GST_1_300mL"] == pytest.approx(0.288, rel=1e-2)
+    assert tau_engulfment["SUM_25L"] == pytest.approx(0.115, rel=1e-2)
+    assert tau_engulfment["GST_2_22L"] == pytest.approx(0.359, rel=1e-2)
 
-    assert da_engulfment_plume["GST_1_300mL"] == pytest.approx(2.23, rel=1e-2)
-    assert da_engulfment_plume["SUM_25L"] == pytest.approx(0.896, rel=1e-2)
-    assert da_engulfment_plume["GST_2_22L"] == pytest.approx(2.79, rel=1e-2)
+    assert da_engulfment_plume["GST_1_300mL"] == pytest.approx(2.30, rel=1e-2)
+    assert da_engulfment_plume["SUM_25L"] == pytest.approx(0.922, rel=1e-2)
+    assert da_engulfment_plume["GST_2_22L"] == pytest.approx(2.87, rel=1e-2)
 
     # Monotone ordering of vessel blend Damkohler matches the CFD Delta-DAR
     # ranking reported in Weggen et al. (2023, Sec. 3.2.3: tube < GST-1 < SUM < GST-2).
@@ -659,7 +691,7 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
 
     # Forward Beer-Lambert absorbance prediction at 248 nm and 280 nm using a
     # short-pathlength (0.10 cm = 1 mm) micro-volume / flow cell so undiluted
-    # 5.25 g/L mAb stays within linear photodiode bounds (A_280 <= 1.5 AU) (B4).
+    # 5.25 g/L mAb stays within linear photodiode bounds (A_280 <= 1.5 AU).
     a_248_short = SHORT_PATHLENGTH_CM * (
         EPS_MAB_248 * c_mab_true + EPS_DRUG_248 * c_drug_conj_true
     )  # [-]
@@ -680,30 +712,77 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
     )
     np.testing.assert_allclose(dar_rec, dar_targets, rtol=CLOSED_FORM_RTOL, atol=1e-14)
 
-    # 1. Closed-batch aliasing theorem (Schiemer et al., 2023, doi:10.1002/bit.28428):
-    # if unconjugated and conjugated payload had identical extinction at 248 and
-    # 280 nm, closed-batch drug-moiety conservation keeps (A_248, A_280) constant
-    # across all reaction extents.
-    c_drug_total = 4.0 * c_mab_true  # [mol/L], fixed 4x initial payload charge
-    c_free_drug = c_drug_total - c_drug_conj_true[:4]  # [mol/L], for DAR 0..2
-    a_248_aliased = SHORT_PATHLENGTH_CM * (
-        EPS_MAB_248 * c_mab_true + EPS_DRUG_248 * (c_drug_conj_true[:4] + c_free_drug)
-    )  # [-]
+    # Integrate the 25-point closed-batch ODE trajectory (H0_1, H1_1, Drug,
+    # Drug_depl) across t in [0, 900] s.
+    times_s = np.linspace(0.0, 900.0, 25)  # [s]
+    c_h0_init = 6.0e-5  # [mol/L]
+    c_drug_init = 1.5e-4  # [mol/L]
+    traj_batch = _solve_dar2_heavy_chain_experiment(
+        (K1_DAR2_DRUG1, K_DRUG_DRUG1),
+        times_s,
+        c_h0_init_mol_l=c_h0_init,
+        c_drug_init_mol_l=c_drug_init,
+    )  # [mol/L], columns (H0_1, H1_1, Drug, Drug_depl)
+    assert traj_batch[-1, 1] > 0.85 * c_h0_init
+    assert traj_batch[-1, 3] > 0.35 * c_drug_init
+
+    # 1. Closed-batch spectral aliasing on the full 4-species ODE trajectory
+    # (Schiemer et al., 2023, doi:10.1002/bit.28428): when conjugated sites and
+    # inactivated payload have the same 248/280 nm extinction as free payload
+    # (eps_H1_1 = eps_H0_1 + eps_Drug and eps_Drug_depl = eps_Drug), the 25x2
+    # in-situ absorbance trajectory [A_248(t), A_280(t)] is strictly invariant
+    # across all 25 time points despite >85% heavy-chain conversion, and naive
+    # two-wavelength inversion returns the constant initial payload-to-chain
+    # charge ratio (2.50) instead of the true conjugated ratio H1_1(t)/c_h0_init.
+    eps_aliased_4x2 = np.array(
+        [
+            [EPS_MAB_248, EPS_MAB_280],
+            [EPS_MAB_248 + EPS_DRUG_248, EPS_MAB_280 + EPS_DRUG_280],
+            [EPS_DRUG_248, EPS_DRUG_280],
+            [EPS_DRUG_248, EPS_DRUG_280],
+        ]
+    )  # [L/(mol*cm)], shape (4 species, 2 wavelengths)
+    spectra_aliased_2wl = SHORT_PATHLENGTH_CM * (
+        traj_batch @ eps_aliased_4x2
+    )  # [-], shape (25, 2)
     np.testing.assert_allclose(
-        a_248_aliased, np.full(4, a_248_aliased[0]), rtol=CLOSED_FORM_RTOL
+        spectra_aliased_2wl,
+        np.broadcast_to(spectra_aliased_2wl[0], spectra_aliased_2wl.shape),
+        rtol=CLOSED_FORM_RTOL,
+    )
+    _c_h_aliased, _c_d_aliased, ratio_aliased = _dual_wavelength_uv_invert(
+        spectra_aliased_2wl, pathlength_cm=SHORT_PATHLENGTH_CM
+    )
+    np.testing.assert_allclose(
+        ratio_aliased,
+        np.full(times_s.size, c_drug_init / c_h0_init),
+        rtol=CLOSED_FORM_RTOL,
     )
 
     # 2. Optical rank theorem for intact species (mAb_0, mAb_1, mAb_2, Drug, Drug_depl):
     # Under additive bound-chromophore spectra (eps_mAb1 = eps_mAb + eps_conj_site,
     # eps_mAb2 = eps_mAb + 2 * eps_conj_site), 2 * eps_mAb1 == eps_mAb0 + eps_mAb2,
     # so the 5-species extinction matrix has column rank 4 (cannot separate mAb_1
-    # from 0.5*(mAb_0 + mAb_2) purely optically without the kinetic ODE observer),
-    # whereas the 4-coordinate basis (mAb_total, conj_sites, Drug, Drug_depl) has
-    # full rank 4 when Delta_eps_conj != 0 and Delta_eps_depl != 0 (B4).
+    # from 0.5*(mAb_0 + mAb_2) purely optically without the kinetic ODE observer).
+    # The 4-coordinate basis (mAb_total, conj_sites, Drug, Drug_depl) has full
+    # rank 4 if and only if [eps_mAb, eps_Drug, Delta_eps_conj, Delta_eps_depl]
+    # are linearly independent; if Delta_eps_depl is collinear with Delta_eps_conj,
+    # the 4-chromophore matrix drops to rank 3 even when both difference spectra
+    # are non-zero.
+    # Provenance: only the 248/280 nm entries of eps_mab, eps_conj_site, and
+    # eps_drug_free are origin='literature' (Hamblett et al., 2004, p. 7064);
+    # the entire eps_drug_depl row and all 310/342 nm entries are
+    # origin='synthetic' verification fixtures.
     eps_mab = np.array([EPS_MAB_248, EPS_MAB_280, 1.20e3, 0.15e3])  # [L/(mol*cm)]
-    eps_conj_site = np.array([EPS_DRUG_248, EPS_DRUG_280, 8.20e3, 4.10e3])  # [L/(mol*cm)]
-    eps_drug_free = np.array([EPS_DRUG_248, EPS_DRUG_280, 1.45e4, 9.80e3])  # [L/(mol*cm)]
-    eps_drug_depl = np.array([1.42e4, 1.20e3, 2.10e3, 0.60e3])  # [L/(mol*cm)]
+    eps_conj_site = np.array(
+        [EPS_DRUG_248, EPS_DRUG_280, 8.20e3, 4.10e3]
+    )  # [L/(mol*cm)]
+    eps_drug_free = np.array(
+        [EPS_DRUG_248, EPS_DRUG_280, 1.45e4, 9.80e3]
+    )  # [L/(mol*cm)]
+    eps_drug_depl = np.array(
+        [1.42e4, 1.20e3, 2.10e3, 0.60e3]
+    )  # [L/(mol*cm)], synthetic
 
     eps_5species = np.vstack(
         (
@@ -724,21 +803,28 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
         np.zeros(4),
         atol=1e-12,
     )
+    eps_drug_depl_collinear = eps_drug_free + 0.5 * (
+        eps_conj_site - eps_drug_free
+    )  # [L/(mol*cm)], collinear non-zero difference spectrum
+    assert np.linalg.norm(eps_drug_depl_collinear - eps_drug_free) > 0.0
+    assert (
+        np.linalg.matrix_rank(
+            np.vstack(
+                (eps_mab, eps_conj_site, eps_drug_free, eps_drug_depl_collinear)
+            )
+        )
+        == 3
+    )
 
     # 3. Multi-wavelength spectral resolution including Drug_depl across 4
-    # diagnostic wavelengths (248, 280, 310, 342 nm; origin='synthetic' at
-    # 310/342 nm): exercise MultipleCurveResolution (S = C @ A) and
-    # PCR_calibration on all 3 independent dynamic reaction species
-    # (H1_1, Drug, Drug_depl) after subtracting the constant total heavy-chain
-    # protein core background c_H_total * eps_H0 (B4).
-    times_s = np.linspace(0.0, 900.0, 25)  # [s]
-    traj = _solve_dar2_heavy_chain_experiment(
-        (K1_DAR2_DRUG1, K_DRUG_DRUG1),
-        times_s,
-        c_h0_init_mol_l=6.0e-5,
-        c_drug_init_mol_l=1.5e-4,
-    )  # [mol/L], columns (H0_1, H1_1, Drug, Drug_depl)
-    conc_three = traj[:, [1, 2, 3]]  # [mol/L], shape (25, 3): (H1_1, Drug, Drug_depl)
+    # diagnostic wavelengths (248, 280, 310, 342 nm; origin='synthetic' for
+    # Drug_depl and 310/342 nm): exercise MultipleCurveResolution (S = C @ A)
+    # on the batch trajectory and evaluate PCR_calibration out-of-sample on a
+    # held-out 600 s fed-batch trajectory after subtracting the known heavy-chain
+    # protein core background c_H_total(t) * eps_H0.
+    conc_three_batch = traj_batch[
+        :, [1, 2, 3]
+    ]  # [mol/L], shape (25, 3): (H1_1, Drug, Drug_depl)
     pure_absorptivities = np.vstack(
         (
             SHORT_PATHLENGTH_CM * eps_conj_site,
@@ -746,16 +832,18 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
             SHORT_PATHLENGTH_CM * eps_drug_depl,
         )
     )  # [L/mol], effective pathlength-scaled absorptivities (l * eps), shape (3, 4)
-    spectral_matrix = conc_three @ pure_absorptivities  # [-], shape (25, 4)
+    spectral_matrix_batch = (
+        conc_three_batch @ pure_absorptivities
+    )  # [-], shape (25, 4)
 
     mcr_true_params = np.array([K1_DAR2_DRUG1, K_DRUG_DRUG1])  # [L/(mol*s)], [1/s]
     mcr = MultipleCurveResolution(
         _solve_dar2_heavy_chain_experiment,
         param_seed=mcr_true_params,
         time_data=times_s,
-        y_spectra=spectral_matrix,
+        y_spectra=spectral_matrix_batch,
         measured_ind=[1, 2, 3],
-        kwargs_fun={"c_h0_init_mol_l": 6.0e-5, "c_drug_init_mol_l": 1.5e-4},
+        kwargs_fun={"c_h0_init_mol_l": c_h0_init, "c_drug_init_mol_l": c_drug_init},
     )
     mcr_obj = mcr.get_objective(mcr_true_params, out_array=False)
     assert mcr_obj == pytest.approx(0.0, abs=1e-20)
@@ -764,12 +852,58 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
         mcr_true_params
     )
     np.testing.assert_allclose(absorptivity_pure, pure_absorptivities, rtol=1e-9)
-    np.testing.assert_allclose(y_runs[0], spectral_matrix, rtol=1e-9)
+    np.testing.assert_allclose(y_runs[0], spectral_matrix_batch, rtol=1e-9)
 
-    pcr = PCR_calibration(spectral_matrix, num_comp=3, standardize=True, snv=False)
-    pcr.get_regression(conc_three, num_comp=3)
-    conc_pcr_pred = pcr.predict(spectral_matrix)  # [mol/L]
-    np.testing.assert_allclose(conc_pcr_pred, conc_three, rtol=1e-7, atol=1e-10)
+    # Train PCR_calibration on a two-level batch calibration set (c_drug_init =
+    # 1.0e-4 and 2.0e-4 mol/L, spanning all 3 degrees of freedom of (H1_1, Drug,
+    # Drug_depl) without the single-batch constant-sum constraint) and validate
+    # out-of-sample prediction on a held-out 25-point 600 s fed-batch trajectory.
+    traj_batch_low = _solve_dar2_heavy_chain_experiment(
+        (K1_DAR2_DRUG1, K_DRUG_DRUG1),
+        times_s,
+        c_h0_init_mol_l=c_h0_init,
+        c_drug_init_mol_l=1.0e-4,
+    )  # [mol/L], shape (25, 4)
+    traj_batch_high = _solve_dar2_heavy_chain_experiment(
+        (K1_DAR2_DRUG1, K_DRUG_DRUG1),
+        times_s,
+        c_h0_init_mol_l=c_h0_init,
+        c_drug_init_mol_l=2.0e-4,
+    )  # [mol/L], shape (25, 4)
+    conc_three_train = np.vstack(
+        (traj_batch_low[:, [1, 2, 3]], traj_batch_high[:, [1, 2, 3]])
+    )  # [mol/L], shape (50, 3)
+    spectral_matrix_train = (
+        conc_three_train @ pure_absorptivities
+    )  # [-], shape (50, 4)
+
+    traj_fedbatch = _solve_dar2_heavy_chain_experiment(
+        (K1_DAR2_DRUG1, K_DRUG_DRUG1),
+        times_s,
+        c_h0_init_mol_l=c_h0_init,
+        c_drug_init_mol_l=0.0,
+        v0_l=4.0e-3,
+        feed_rate_l_s=4.0e-4 / 600.0,
+        feed_duration_s=600.0,
+        c_drug_feed_mol_l=1.5e-3,
+    )  # [mol/L], held-out fed-batch trajectory, shape (25, 4)
+    conc_three_fedbatch = traj_fedbatch[:, [1, 2, 3]]  # [mol/L], shape (25, 3)
+    spectral_matrix_fedbatch = (
+        conc_three_fedbatch @ pure_absorptivities
+    )  # [-], held-out spectra, shape (25, 4)
+
+    pcr = PCR_calibration(
+        spectral_matrix_train, num_comp=3, standardize=True, snv=False
+    )
+    pcr.get_regression(conc_three_train, num_comp=3)
+    conc_pcr_train = pcr.predict(spectral_matrix_train)  # [mol/L]
+    conc_pcr_test = pcr.predict(spectral_matrix_fedbatch)  # [mol/L]
+    np.testing.assert_allclose(
+        conc_pcr_train, conc_three_train, rtol=1e-7, atol=1e-10
+    )
+    np.testing.assert_allclose(
+        conc_pcr_test, conc_three_fedbatch, rtol=1e-6, atol=1e-10
+    )
 
 
 @pytest.mark.unit
@@ -777,13 +911,18 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     tmp_path,
 ):
     """Fit the Weggen et al. (2024) Simple 1k + sink model and round-trip its record."""
-    # Experiment 1: 1.0 mL batch run (c_H0_1,0 = 6.0e-5 mol/L, c_Drug,0 = 1.5e-4 mol/L).
-    # Experiment 2: 4.0 mL fed-batch run with 600 s syringe-pump dosing of 1.5 mM
-    # payload stock at 6.667e-7 L/s (total 0.4 mL added = 6.0e-7 mol payload).
-    batch_times = np.array([0.0, 30.0, 60.0, 120.0, 240.0, 480.0, 900.0])  # [s]
+    # Equal observation budget (N_t = 8 sampling times per run, 3 species = 24
+    # observations per run, 48 total observations across two runs):
+    # - Experiment 1: 1.0 mL batch run (c_H0_1,0 = 6.0e-5 mol/L, c_Drug,0 = 1.5e-4 mol/L).
+    # - Experiment 2: 4.0 mL fed-batch run with 600 s syringe-pump dosing of 1.5 mM
+    #   payload stock at 6.667e-7 L/s (total 0.4 mL added = 6.0e-7 mol payload).
+    batch_times = np.array(
+        [0.0, 15.0, 30.0, 60.0, 120.0, 240.0, 480.0, 900.0]
+    )  # [s]
     fedbatch_times = np.array(
         [0.0, 60.0, 180.0, 300.0, 450.0, 600.0, 750.0, 900.0]
     )  # [s]
+    assert batch_times.size == fedbatch_times.size == 8
     true_params = np.array([K1_DAR2_DRUG1, K_DRUG_DRUG1])  # [L/(mol*s)], [1/s]
 
     batch_kwargs = {
@@ -812,7 +951,10 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
 
     output_names = ("H0_1", "H1_1", "Drug", "Drug_depl")
     measured_species = ("H0_1", "H1_1", "Drug")
-    uncertainty_mol_l = 1.863e-6  # [mol/L], RMSE_CV of Weggen et al. (2024), Table 2
+    # Synthetic homoscedastic measurement weighting assumption: set per-sample
+    # standard deviation sigma to the published cross-validation RMSE_CV
+    # (1.863e-6 mol/L, Weggen et al., 2024, Table 2).
+    uncertainty_mol_l = 1.863e-6  # [mol/L]
 
     experiments = {
         "batch_1mL": Experiment(
@@ -863,32 +1005,102 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     np.testing.assert_allclose(fitted, true_params, rtol=ODE_FIT_RTOL)
     assert covariance.shape == (2, 2)
     assert np.all(np.diag(covariance) >= 0.0)
-    intervals = estimator.get_confidence_intervals(verbose=False)
-    assert set(intervals) == {"k1", "k_drug"}
 
-    # Verify confidence-interval half-widths against independent Student-t
-    # calculation from covariance diagonal (NB2).
+    # 1. Propagated measurement-uncertainty covariance (include_mse=False):
+    # evaluates (J^T W J)^(-1) directly from the declared measurement
+    # standard deviation sigma = 1.863e-6 mol/L without multiplying by the
+    # noiseless residual MSE (~0), yielding strictly positive physical
+    # parameter standard deviations (~7.7 L/(mol*s) for k1, ~2.9e-5 1/s for k_drug).
+    cov_propagated = estimator.get_covariance(
+        include_mse=False
+    )  # [[L**2/(mol**2*s**2), L/(mol*s**2)], [L/(mol*s**2), 1/s**2]]
+    sd_propagated = np.sqrt(np.diag(cov_propagated))  # [L/(mol*s)], [1/s]
+    assert sd_propagated[0] > 5.0
+    assert sd_propagated[1] > 1.0e-5
+
+    # 2. Deterministic noisy estimation check: with realistic homoscedastic
+    # perturbations (0.15 * uncertainty_mol_l), residual MSE > 0 and
+    # get_confidence_intervals() produces non-zero half-widths that strictly
+    # bracket the true generating parameters (ci_low < true_param < ci_high).
+    rng = np.random.default_rng(357)
+    noise_scale = 0.15 * uncertainty_mol_l  # [mol/L]
+    batch_noisy = batch_obs[:, :3] + rng.normal(
+        0.0, noise_scale, size=batch_obs[:, :3].shape
+    )  # [mol/L]
+    fedbatch_noisy = fedbatch_obs[:, :3] + rng.normal(
+        0.0, noise_scale, size=fedbatch_obs[:, :3].shape
+    )  # [mol/L]
+    noisy_experiments = {
+        "batch_1mL": Experiment(
+            {
+                name: Measurement(
+                    name,
+                    batch_times,
+                    batch_noisy[:, idx],
+                    uncertainty=np.full(batch_times.size, uncertainty_mol_l),
+                    units="mol/L",
+                    basis="molar concentration",
+                    x_units="s",
+                )
+                for idx, name in enumerate(measured_species)
+            },
+            kwargs=batch_kwargs,
+        ),
+        "fedbatch_4mL_600s": Experiment(
+            {
+                name: Measurement(
+                    name,
+                    fedbatch_times,
+                    fedbatch_noisy[:, idx],
+                    uncertainty=np.full(fedbatch_times.size, uncertainty_mol_l),
+                    units="mol/L",
+                    basis="molar concentration",
+                    x_units="s",
+                )
+                for idx, name in enumerate(measured_species)
+            },
+            kwargs=fedbatch_kwargs,
+        ),
+    }
+    noisy_estimator = ParameterEstimation(
+        _solve_dar2_heavy_chain_experiment,
+        param_seed=param_seed,
+        x_data=noisy_experiments,
+        name_params=["k1", "k_drug"],
+        output_names=output_names,
+    )
+    noisy_fitted, noisy_cov, _noisy_info = noisy_estimator.estimate_parameters(
+        method="LM", verbose=False
+    )
+    noisy_intervals = noisy_estimator.get_confidence_intervals(verbose=False)
     n_obs_total = (batch_times.size + fedbatch_times.size) * len(measured_species)
     dof = n_obs_total - len(true_params)
     t_val = float(student_t.ppf(0.975, dof))  # [-]
-    expected_half_widths = t_val * np.sqrt(np.diag(covariance))  # [L/(mol*s)], [1/s]
+    expected_noisy_half_widths = t_val * np.sqrt(
+        np.diag(noisy_cov)
+    )  # [L/(mol*s)], [1/s]
+    assert expected_noisy_half_widths[0] > 1.0
+    assert expected_noisy_half_widths[1] > 1.0e-6
     for idx, pname in enumerate(("k1", "k_drug")):
-        low, high = intervals[pname]
-        assert 0.5 * (high + low) == pytest.approx(fitted[idx], rel=1e-10)
+        low, high = noisy_intervals[pname]
+        assert low < float(true_params[idx]) < high
+        assert 0.5 * (high + low) == pytest.approx(noisy_fitted[idx], rel=1e-10)
         assert 0.5 * (high - low) == pytest.approx(
-            expected_half_widths[idx], rel=1e-6, abs=1e-18
+            expected_noisy_half_widths[idx], rel=1e-6
         )
 
-    # Compare Fisher Information Matrix F = J^T W J across:
-    # (1) a single batch run,
-    # (2) a duplicated two-batch baseline (which scales F by 2x and det(F) by
-    #     2^2 = 4x while leaving the normalized off-diagonal parameter
-    #     collinearity |F_01| / sqrt(F_00 * F_11) unchanged), and
-    # (3) the combined batch + 600 s fed-batch design, which increases det(F)
-    #     over batch-only by >2.2x AND flips the sign of the cross-sensitivity
-    #     between k1 and k_drug (F_01 > 0 in batch vs F_01 < 0 in fed-batch),
-    #     reducing normalized parameter collinearity by >6x compared to a
-    #     duplicated two-batch design (Weggen et al., 2024, Sec. 3.3.2) (NB2).
+    # Compare Fisher Information Matrix F = J^T W J at equal sample budget
+    # (N_t = 8 per run, 48 total observations in two-run designs) across:
+    # (1) a single 8-point batch run (24 observations),
+    # (2) a duplicated two-batch baseline (48 observations, which scales F by
+    #     2x and det(F) by 2^2 = 4x while leaving normalized off-diagonal
+    #     parameter collinearity |F_01| / sqrt(F_00 * F_11) unchanged), and
+    # (3) the combined 8-point batch + 8-point 600 s fed-batch design (48
+    #     observations), which increases det(F) over batch-only by >2.0x AND
+    #     flips the sign of the cross-sensitivity between k1 and k_drug
+    #     (F_01 > 0 in batch vs F_01 < 0 in fed-batch), reducing normalized
+    #     parameter collinearity by >6x compared to the equal-budget two-batch
+    #     design (Weggen et al., 2024, Sec. 3.3.2).
     batch_only_est = ParameterEstimation(
         _solve_dar2_heavy_chain_experiment,
         param_seed=true_params,
@@ -906,16 +1118,35 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         name_params=["k1", "k_drug"],
         output_names=output_names,
     )
-    jac_batch = batch_only_est.get_gradient(true_params, out_array=True)
-    jac_two_batch = two_batch_est.get_gradient(true_params, out_array=True)
-    jac_combined = estimator.get_gradient(true_params, out_array=True)
-    fim_batch = jac_batch @ jac_batch.T
-    fim_two_batch = jac_two_batch @ jac_two_batch.T
-    fim_combined = jac_combined @ jac_combined.T
+    jac_batch = batch_only_est.get_gradient(
+        true_params, out_array=True
+    )  # [(mol*s)/L for row 0; s for row 1]
+    jac_two_batch = two_batch_est.get_gradient(
+        true_params, out_array=True
+    )  # [(mol*s)/L for row 0; s for row 1]
+    jac_combined = estimator.get_gradient(
+        true_params, out_array=True
+    )  # [(mol*s)/L for row 0; s for row 1]
+    fim_batch = (
+        jac_batch @ jac_batch.T
+    )  # [[(mol*s/L)**2, mol*s**2/L], [mol*s**2/L, s**2]]
+    fim_two_batch = (
+        jac_two_batch @ jac_two_batch.T
+    )  # [[(mol*s/L)**2, mol*s**2/L], [mol*s**2/L, s**2]]
+    fim_combined = (
+        jac_combined @ jac_combined.T
+    )  # [[(mol*s/L)**2, mol*s**2/L], [mol*s**2/L, s**2]]
+    np.testing.assert_allclose(
+        cov_propagated, np.linalg.inv(fim_combined), rtol=1e-5
+    )
     assert np.linalg.det(fim_two_batch) == pytest.approx(
         4.0 * np.linalg.det(fim_batch), rel=1e-10
     )
-    assert np.linalg.det(fim_combined) > 2.2 * np.linalg.det(fim_batch)
+    assert np.linalg.det(fim_combined) > 2.0 * np.linalg.det(fim_batch)
+    fim_fedbatch = (
+        fim_combined - fim_batch
+    )  # [[(mol*s/L)**2, mol*s**2/L], [mol*s**2/L, s**2]]
+    assert fim_batch[0, 1] > 0.0 and fim_fedbatch[0, 1] < 0.0
     collinearity_two_batch = abs(fim_two_batch[0, 1]) / np.sqrt(
         fim_two_batch[0, 0] * fim_two_batch[1, 1]
     )  # [-]
@@ -925,21 +1156,38 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     assert collinearity_combined < 0.2 * collinearity_two_batch
 
     # Capture CalibrationRecord with explicit literature + synthetic provenance.
-    # Pin the SHA-256 digest of the canonical JSON serialization of the
-    # generated synthetic observation payload on the synthetic DataSource (NB3).
+    # Pin the SHA-256 digest of the canonical JSON serialization of the full
+    # synthetic generator specification (operating kwargs, solver options,
+    # measurement-weighting assumption, sampling times, and observations).
     synthetic_payload_bytes = json.dumps(
         {
             "generator": "_solve_dar2_heavy_chain_experiment",
+            "model_subcase": (
+                "mono-thiol limiting sub-case (c_H0_0 = c_H0_2 = 0) of Weggen "
+                "et al. (2024) Simple 1k + k_drug model (Eqs. 1-10)"
+            ),
+            "solver_options": {
+                "method": "RK45",
+                "rtol": 1e-10,
+                "atol": 1e-13,
+                "piecewise_switch": "exact equality at feed_duration_s",
+            },
             "true_params": {
                 "k1_l_mol_s": float(true_params[0]),
                 "k_drug_1_s": float(true_params[1]),
             },
             "uncertainty_mol_l": uncertainty_mol_l,
+            "uncertainty_assumption": (
+                "synthetic homoscedastic sigma set to published RMSE_CV "
+                "(1.863e-6 mol/L, Weggen et al., 2024, Table 2)"
+            ),
             "batch_1mL": {
+                "kwargs": batch_kwargs,
                 "times_s": batch_times.tolist(),
                 "obs_mol_l": np.round(batch_obs, 15).tolist(),
             },
             "fedbatch_4mL_600s": {
+                "kwargs": fedbatch_kwargs,
                 "times_s": fedbatch_times.tolist(),
                 "obs_mol_l": np.round(fedbatch_obs, 15).tolist(),
             },
@@ -975,9 +1223,10 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
             "synthetic forward-simulated trajectories from published Weggen et al. "
             "(2024) parameters for M6 contract verification, not an empirical dataset",
             description=(
-                "Two-piece RK45 forward simulation of the Weggen et al. (2024) "
-                "Simple 1k + k_drug model for 1 mL batch and 4 mL 600 s "
-                "syringe-pump fed-batch experiments"
+                "Two-piece RK45 forward simulation of the mono-thiol limiting "
+                "sub-case (c_H0_0 = c_H0_2 = 0) of the Weggen et al. (2024) "
+                "Simple 1k + k_drug model for 8-point 1 mL batch and 8-point "
+                "4 mL 600 s syringe-pump fed-batch experiments"
             ),
             uri=REVIEW_NOTE.relative_to(REPO_ROOT).as_posix(),
             sha256=synthetic_sha256,
@@ -993,8 +1242,9 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         ),
         Transformation(
             "Evaluated H0_1, H1_1, and Drug molar concentrations [mol/L] on the "
-            "batch and fed-batch sampling grids with per-sample uncertainty set "
-            "to the published cross-validation RMSE (1.863e-6 mol/L)",
+            "8-point batch and 8-point fed-batch sampling grids with synthetic "
+            "homoscedastic per-sample uncertainty sigma set to the published "
+            "cross-validation RMSE (1.863e-6 mol/L)",
             fields=("H0_1", "H1_1", "Drug"),
             source="wp15_m6_synthetic_forward_trajectories",
         ),
@@ -1002,8 +1252,9 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     model = ModelRevision(
         "_solve_dar2_heavy_chain_experiment",
         description=(
-            "Isothermal batch and fed-batch heavy-chain DAR 2 Simple (1k + "
-            "k_drug) bioconjugation ODE model of Weggen et al. (2024), Eqs. 1-7"
+            "Isothermal batch and fed-batch mono-thiol limiting sub-case "
+            "(c_H0_0 = c_H0_2 = 0) of the heavy-chain DAR 2 Simple (1k + "
+            "k_drug) bioconjugation ODE model of Weggen et al. (2024), Eqs. 1-10"
         ),
     )
 
@@ -1017,9 +1268,9 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         transformations=transformations,
         description=(
             "WP1.5 M6 verification fit of the Weggen et al. (2024) DAR 2 "
-            "Simple (1k + k_drug) conjugation model across batch and fed-batch "
-            "operating modes; synthetic forward trajectory from published "
-            "parameters, not an empirical calibration"
+            "Simple (1k + k_drug) conjugation model (mono-thiol sub-case) "
+            "across batch and fed-batch operating modes; synthetic forward "
+            "trajectory from published parameters, not an empirical calibration"
         ),
     )
 
@@ -1042,15 +1293,37 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
 
 @pytest.mark.unit
 def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
-    """Verify WP4 STN/RTN four-step solution mass fractions, continuity, and hold policies (B3)."""
-    # Canonical WP4 four-task bioconjugation sequence from Section 8.2 of
-    # doc/review_notes/bioconjugation_case_selection.md (origin='synthetic'
-    # scheduling design parameters anchored to bench/pilot operating windows).
-    # Basis: total liquid solution mass fraction [kg/kg] at uniform dilute
-    # buffer density BUFFER_DENSITY = 1010.5 kg/m**3 (0.001 m**3/L).
+    """Verify WP4 STN/RTN balances, Tier 1 UF/DF+DHAA expansion, and review-note sync."""
+    # Densities [kg/L] for converting liquid volumes [L] to solution masses [kg]:
+    # - DMSO-free dilute aqueous phosphate buffer / reagent streams: 1.000 kg/L
+    # - Neat DMSO payload stock in T2: 1.1004 kg/L (DMSO_DENSITY)
+    # Combining 20.00 L aqueous mAb + 2.25 L neat DMSO + 0.25 L aqueous NAC in
+    # T2 yields 22.7259 kg in 22.50 L -> rho_mix = 1.01004 kg/L (~1010.5 kg/m**3).
+    rho_aq_kg_l = 1.000  # [kg/L], DMSO-free dilute aqueous phosphate buffer
+    rho_dmso_kg_l = DMSO_DENSITY * 1.0e-3  # [kg/L], 1.1004 kg/L
+
+    t2_m_s1_kg = 20.00 * rho_aq_kg_l  # [kg], 20.0000 kg
+    t2_m_dmso_kg = 2.25 * rho_dmso_kg_l  # [kg], 2.4759 kg (exact 10.00% v/v of 22.50 L)
+    t2_m_nac_kg = 0.25 * rho_aq_kg_l  # [kg], 0.2500 kg
+    t2_m_total_kg = t2_m_s1_kg + t2_m_dmso_kg + t2_m_nac_kg  # [kg], 22.7259 kg
+
+    t3_m_buffer_kg = 140.00 * rho_aq_kg_l  # [kg], 140.0000 kg
+    t3_m_total_kg = t2_m_total_kg + t3_m_buffer_kg  # [kg], 162.7259 kg
+    t3_m_s3_kg = 20.00 * rho_aq_kg_l  # [kg], 20.0000 kg
+    t3_m_waste_kg = t3_m_total_kg - t3_m_s3_kg  # [kg], 142.7259 kg
+
+    # 1. Canonical 4-task WP4 sequence (Tier 2 partial-TCEP baseline) from
+    # Section 8.2 of doc/review_notes/bioconjugation_case_selection.md.
     wp4_tasks = (
         {
             "task_id": "T1_reduction",
+            "inputs_vol_frac": {
+                "S0_native_mAb": 19.60 / 20.00,  # [L/L], 0.9800
+                "S_TCEP_reductant": 0.40 / 20.00,  # [L/L], 0.0200
+            },
+            "outputs_vol_frac": {
+                "S1_reduced_mAb": 1.0000,  # [L/L]
+            },
             "inputs_kg_kg": {
                 "S0_native_mAb": 19.60 / 20.00,  # [kg/kg], 0.9800
                 "S_TCEP_reductant": 0.40 / 20.00,  # [kg/kg], 0.0200
@@ -1061,26 +1334,40 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
             "vol_in_l": 20.00,  # [L]
             "vol_out_main_l": 20.00,  # [L]
             "vol_out_waste_l": 0.00,  # [L]
+            "mass_in_kg": 20.00 * rho_aq_kg_l,  # [kg], 20.000 kg
+            "mass_out_main_kg": 20.00 * rho_aq_kg_l,  # [kg], 20.000 kg
+            "mass_out_waste_kg": 0.00,  # [kg]
             "protein_in_kg": 0.200,  # [kg]
             "protein_out_kg": 0.200,  # [kg]
             "duration_s": 5400.0,  # [s]
             "duration_range_s": (3600.0, 7200.0),  # [s]
             "storage_policy": "FW",
-            "t_hold_max_s": 1800.0,  # [s]
+            "t_hold_max_s": 1800.0,  # [s], synthetic scheduling assumption
         },
         {
             "task_id": "T2_conjugation",
+            "inputs_vol_frac": {
+                "S1_reduced_mAb": 20.00 / 22.50,  # [L/L], 0.8889
+                "S_payload_DMSO": 2.25 / 22.50,  # [L/L], 0.1000 (exact 10.00% v/v DMSO)
+                "S_NAC_quench": 0.25 / 22.50,  # [L/L], 0.0111
+            },
+            "outputs_vol_frac": {
+                "S2_crude_ADC": 1.0000,  # [L/L]
+            },
             "inputs_kg_kg": {
-                "S1_reduced_mAb": 20.00 / 22.475,  # [kg/kg], 0.8899
-                "S_payload_DMSO": 2.25 / 22.475,  # [kg/kg], 0.1001 (10% v/v of 22.25 L rxn)
-                "S_NAC_quench": 0.225 / 22.475,  # [kg/kg], 0.0100
+                "S1_reduced_mAb": t2_m_s1_kg / t2_m_total_kg,  # [kg/kg], 0.8801
+                "S_payload_DMSO": t2_m_dmso_kg / t2_m_total_kg,  # [kg/kg], 0.1090
+                "S_NAC_quench": t2_m_nac_kg / t2_m_total_kg,  # [kg/kg], 0.0110
             },
             "outputs_kg_kg": {
                 "S2_crude_ADC": 1.0000,  # [kg/kg]
             },
-            "vol_in_l": 22.475,  # [L]
-            "vol_out_main_l": 22.475,  # [L]
+            "vol_in_l": 22.50,  # [L]
+            "vol_out_main_l": 22.50,  # [L]
             "vol_out_waste_l": 0.00,  # [L]
+            "mass_in_kg": t2_m_total_kg,  # [kg], 22.7259 kg
+            "mass_out_main_kg": t2_m_total_kg,  # [kg], 22.7259 kg
+            "mass_out_waste_kg": 0.00,  # [kg]
             "protein_in_kg": 0.200,  # [kg]
             "protein_out_kg": 0.200,  # [kg]
             "duration_s": 2700.0,  # [s]
@@ -1090,17 +1377,28 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         },
         {
             "task_id": "T3_desalting_ufdf",
+            "inputs_vol_frac": {
+                "S2_crude_ADC": 22.50 / 162.50,  # [L/L], 0.1385
+                "S_diafiltration_buffer": 140.00 / 162.50,  # [L/L], 0.8615 (7 diavolumes)
+            },
+            "outputs_vol_frac": {
+                "S3_desalted_ADC": 20.00 / 162.50,  # [L/L], 0.1231
+                "S_ufdf_permeate_waste": 142.50 / 162.50,  # [L/L], 0.8769
+            },
             "inputs_kg_kg": {
-                "S2_crude_ADC": 22.475 / 162.475,  # [kg/kg], 0.1383
-                "S_diafiltration_buffer": 140.00 / 162.475,  # [kg/kg], 0.8617 (7 diavolumes)
+                "S2_crude_ADC": t2_m_total_kg / t3_m_total_kg,  # [kg/kg], 0.1397
+                "S_diafiltration_buffer": t3_m_buffer_kg / t3_m_total_kg,  # [kg/kg], 0.8603
             },
             "outputs_kg_kg": {
-                "S3_desalted_ADC": 20.00 / 162.475,  # [kg/kg], 0.1231
-                "S_ufdf_permeate_waste": 142.475 / 162.475,  # [kg/kg], 0.8769
+                "S3_desalted_ADC": t3_m_s3_kg / t3_m_total_kg,  # [kg/kg], 0.1229
+                "S_ufdf_permeate_waste": t3_m_waste_kg / t3_m_total_kg,  # [kg/kg], 0.8771
             },
-            "vol_in_l": 162.475,  # [L]
+            "vol_in_l": 162.50,  # [L]
             "vol_out_main_l": 20.00,  # [L]
-            "vol_out_waste_l": 142.475,  # [L]
+            "vol_out_waste_l": 142.50,  # [L]
+            "mass_in_kg": t3_m_total_kg,  # [kg], 162.7259 kg
+            "mass_out_main_kg": t3_m_s3_kg,  # [kg], 20.0000 kg
+            "mass_out_waste_kg": t3_m_waste_kg,  # [kg], 142.7259 kg
             "protein_in_kg": 0.200,  # [kg]
             "protein_out_kg": 0.196,  # [kg], 98.0% TFF retentate step recovery
             "duration_s": 4500.0,  # [s]
@@ -1110,6 +1408,14 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         },
         {
             "task_id": "T4_purification",
+            "inputs_vol_frac": {
+                "S3_desalted_ADC": 20.00 / 80.00,  # [L/L], 0.2500
+                "S_chrom_mobile_phase": 60.00 / 80.00,  # [L/L], 0.7500
+            },
+            "outputs_vol_frac": {
+                "S4_purified_ADC_DS": 18.00 / 80.00,  # [L/L], 0.2250
+                "S_chrom_strip_waste": 62.00 / 80.00,  # [L/L], 0.7750
+            },
             "inputs_kg_kg": {
                 "S3_desalted_ADC": 20.00 / 80.00,  # [kg/kg], 0.2500
                 "S_chrom_mobile_phase": 60.00 / 80.00,  # [kg/kg], 0.7500
@@ -1121,6 +1427,9 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
             "vol_in_l": 80.00,  # [L]
             "vol_out_main_l": 18.00,  # [L]
             "vol_out_waste_l": 62.00,  # [L]
+            "mass_in_kg": 80.00 * rho_aq_kg_l,  # [kg], 80.000 kg
+            "mass_out_main_kg": 18.00 * rho_aq_kg_l,  # [kg], 18.000 kg
+            "mass_out_waste_kg": 62.00 * rho_aq_kg_l,  # [kg], 62.000 kg
             "protein_in_kg": 0.196,  # [kg]
             "protein_out_kg": 0.180,  # [kg], 90.0% overall four-step protein yield
             "duration_s": 3600.0,  # [s]
@@ -1131,6 +1440,12 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
     )
 
     for task in wp4_tasks:
+        assert sum(task["inputs_vol_frac"].values()) == pytest.approx(
+            1.0, abs=CLOSED_FORM_RTOL
+        )
+        assert sum(task["outputs_vol_frac"].values()) == pytest.approx(
+            1.0, abs=CLOSED_FORM_RTOL
+        )
         assert sum(task["inputs_kg_kg"].values()) == pytest.approx(
             1.0, abs=CLOSED_FORM_RTOL
         )
@@ -1140,25 +1455,28 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         assert (
             task["vol_out_main_l"] + task["vol_out_waste_l"]
         ) == pytest.approx(task["vol_in_l"], rel=CLOSED_FORM_RTOL)
+        assert (
+            task["mass_out_main_kg"] + task["mass_out_waste_kg"]
+        ) == pytest.approx(task["mass_in_kg"], rel=CLOSED_FORM_RTOL)
         low_s, high_s = task["duration_range_s"]
         assert low_s <= task["duration_s"] <= high_s
         assert task["storage_policy"] in {"FW", "UIS"}
 
-    # Verify inter-task state continuity of main intermediate liquid streams
-    # and protein solute mass across T1 -> T2 -> T3 -> T4.
-    assert wp4_tasks[0]["vol_out_main_l"] == pytest.approx(
-        wp4_tasks[1]["vol_in_l"] * wp4_tasks[1]["inputs_kg_kg"]["S1_reduced_mAb"],
-        rel=CLOSED_FORM_RTOL,
-    )
-    assert wp4_tasks[1]["vol_out_main_l"] == pytest.approx(
-        wp4_tasks[2]["vol_in_l"] * wp4_tasks[2]["inputs_kg_kg"]["S2_crude_ADC"],
-        rel=CLOSED_FORM_RTOL,
-    )
-    assert wp4_tasks[2]["vol_out_main_l"] == pytest.approx(
-        wp4_tasks[3]["vol_in_l"] * wp4_tasks[3]["inputs_kg_kg"]["S3_desalted_ADC"],
-        rel=CLOSED_FORM_RTOL,
-    )
-    for idx in range(len(wp4_tasks) - 1):
+    # Verify inter-task continuity of both liquid volumes [L] and solution
+    # masses [kg] across T1 -> T2 -> T3 -> T4.
+    for idx, state_key in enumerate(
+        ("S1_reduced_mAb", "S2_crude_ADC", "S3_desalted_ADC")
+    ):
+        assert wp4_tasks[idx]["vol_out_main_l"] == pytest.approx(
+            wp4_tasks[idx + 1]["vol_in_l"]
+            * wp4_tasks[idx + 1]["inputs_vol_frac"][state_key],
+            rel=CLOSED_FORM_RTOL,
+        )
+        assert wp4_tasks[idx]["mass_out_main_kg"] == pytest.approx(
+            wp4_tasks[idx + 1]["mass_in_kg"]
+            * wp4_tasks[idx + 1]["inputs_kg_kg"][state_key],
+            rel=CLOSED_FORM_RTOL,
+        )
         assert wp4_tasks[idx]["protein_out_kg"] == pytest.approx(
             wp4_tasks[idx + 1]["protein_in_kg"], rel=CLOSED_FORM_RTOL
         )
@@ -1167,11 +1485,94 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
     )  # [-]
     assert overall_protein_yield == pytest.approx(0.90, rel=CLOSED_FORM_RTOL)
 
+    # 2. Verify Tier 1 3-sub-task expansion (T1a_tcep_decap -> T1b_decap_ufdf
+    # -> T1c_dhaa_reox) that explicitly tracks the 100.00 L intermediate UF/DF
+    # exchange buffer input, 100.40 L TCEP-permeate waste output on U_ufdf_skid,
+    # and 0.40 L DHAA reoxidation addition before T2_conjugation.
+    tier1_t1_subtasks = (
+        {
+            "task_id": "T1a_tcep_decap",
+            "vol_in_l": 20.00,  # [L], 19.60 L S0 + 0.40 L TCEP (15 eq)
+            "vol_out_main_l": 20.00,  # [L], S1a_decapped_mAb
+            "vol_out_waste_l": 0.00,  # [L]
+            "duration_s": 3600.0,  # [s]
+        },
+        {
+            "task_id": "T1b_decap_ufdf",
+            "vol_in_l": 120.00,  # [L], 20.00 L S1a + 100.00 L exchange buffer (5 DV)
+            "vol_out_main_l": 19.60,  # [L], S1b_exchanged_mAb
+            "vol_out_waste_l": 100.40,  # [L], S_t1b_permeate_waste
+            "duration_s": 3600.0,  # [s]
+        },
+        {
+            "task_id": "T1c_dhaa_reox",
+            "vol_in_l": 20.00,  # [L], 19.60 L S1b + 0.40 L DHAA (4.5 eq)
+            "vol_out_main_l": 20.00,  # [L], S1_reduced_mAb delivered to T2
+            "vol_out_waste_l": 0.00,  # [L]
+            "duration_s": 3600.0,  # [s]
+        },
+    )
+    for subtask in tier1_t1_subtasks:
+        assert (
+            subtask["vol_out_main_l"] + subtask["vol_out_waste_l"]
+        ) == pytest.approx(subtask["vol_in_l"], rel=CLOSED_FORM_RTOL)
+    assert tier1_t1_subtasks[-1]["vol_out_main_l"] == pytest.approx(
+        wp4_tasks[0]["vol_out_main_l"], rel=CLOSED_FORM_RTOL
+    )
+
+    # 3. Verify reagent stock molar charges against the 1.333e-3 mol mAb basis
+    # (0.200 kg / 150 kg/mol = 1.333333e-3 mol mAb).
+    moles_mab_batch = 200.0 / MAB_MW  # [mol], 1.333333e-3 mol
+    moles_tcep_tier2 = 0.40 * 20.0e-3  # [mol], 8.00e-3 mol (6.0 eq)
+    moles_tcep_tier1 = 0.40 * 50.0e-3  # [mol], 20.00e-3 mol (15.0 eq)
+    moles_dhaa_tier1 = 0.40 * 15.0e-3  # [mol], 6.00e-3 mol (4.5 eq)
+    moles_payload_t2 = 2.25 * (5.0 * moles_mab_batch / 2.25)  # [mol], 6.667e-3 mol (5.0 eq)
+    moles_nac_t2 = 0.25 * 40.0e-3  # [mol], 10.00e-3 mol (1.5 eq per payload)
+    assert moles_tcep_tier2 / moles_mab_batch == pytest.approx(6.0, rel=CLOSED_FORM_RTOL)
+    assert moles_tcep_tier1 / moles_mab_batch == pytest.approx(15.0, rel=CLOSED_FORM_RTOL)
+    assert moles_dhaa_tier1 / moles_mab_batch == pytest.approx(4.5, rel=CLOSED_FORM_RTOL)
+    assert moles_payload_t2 / moles_mab_batch == pytest.approx(5.0, rel=CLOSED_FORM_RTOL)
+    assert moles_nac_t2 / moles_payload_t2 == pytest.approx(1.5, rel=CLOSED_FORM_RTOL)
+
+    # 4. Direct synchronization check against doc/review_notes/bioconjugation_case_selection.md:
+    # verify that all WP4 task IDs, key Section 8.2 proportions, and all Section 7.1
+    # test file paths referenced in the review note match the repository.
+    note_text = REVIEW_NOTE.read_text(encoding="utf-8")
+    for required_token in (
+        "T1_reduction",
+        "T2_conjugation",
+        "T3_desalting_ufdf",
+        "T4_purification",
+        "T1a_tcep_decap",
+        "T1b_decap_ufdf",
+        "T1c_dhaa_reox",
+        "22.50",
+        "22.726",
+        "162.50",
+        "162.726",
+        "100.40",
+        "0.8801",
+        "0.1090",
+        "0.0110",
+    ):
+        assert required_token in note_text, (
+            f"Expected WP4 Section 8.2 token {required_token!r} in {REVIEW_NOTE}"
+        )
+
+    referenced_test_paths = sorted(
+        set(re.findall(r"tests/test_[A-Za-z0-9_]+\.py", note_text))
+    )
+    assert len(referenced_test_paths) >= 14
+    for rel_test_path in referenced_test_paths:
+        assert (REPO_ROOT / rel_test_path).is_file(), (
+            f"Non-existent test path {rel_test_path!r} cited in {REVIEW_NOTE}"
+        )
+
 
 @pytest.mark.assimulo
 @pytest.mark.integration
 def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
-    """Run native BatchReactor and SemibatchReactor solves and reproduce Section 7.2 blockers (B6)."""
+    """Run native BatchReactor and SemibatchReactor solves and reproduce Section 7.2 blockers (#486, #531)."""
     pytest.importorskip("assimulo")
     db_path = _write_bioconjugation_db(tmp_path)
 
@@ -1189,9 +1590,13 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
     ]  # [mol/L], mAb, mAb_1Drug, mAb_2Drug, Drug, Drug_depl, buffer
     time_grid = np.linspace(0.0, 300.0, 31)  # [s]
 
-    # 1a. Reproduce Section 7.2 blocker: default CVode tolerance (atol = 1e-6
-    # mol/L) on micromolar antibody states (~3.33e-5 mol/L) allows O(1e-6)
-    # mol/L negative-concentration undershoot and unphysical DAR > 2 overshoot.
+    # 1a. Reproduce Section 7.2 blocker (tracked in #531): default CVode
+    # tolerance (atol = 1e-6 mol/L) on micromolar antibody states (~3.33e-5
+    # mol/L) allows O(1e-6) mol/L negative-concentration undershoot and
+    # unphysical DAR > 2 overshoot. Provisional assertion while #531 is open:
+    # once #531 scales default tolerances to the initial state magnitude or
+    # enforces non-negativity, update this block to assert prof_default >= 0
+    # and dar_default_final <= 2.0 without custom sundials_opts.
     batch_default_atol = BatchReactor(isothermal=True)
     batch_default_atol.Kinetics = RxnKinetics(
         db_path,
@@ -1237,7 +1642,10 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
         mole_conc=batch_conc_init,
         name_solv="buffer",
     )
-    micromolar_sundials_opts = {"rtol": 1e-8, "atol": 1e-11}
+    micromolar_sundials_opts = {
+        "rtol": 1e-8,  # [-], relative CVode integration tolerance
+        "atol": 1e-11,  # [mol/L], absolute CVode state tolerance for micromolar mAb
+    }
     _time_out, _states_out, sensit_out = batch_reactor.solve_unit(
         time_grid=time_grid,
         eval_sens=True,
@@ -1259,7 +1667,7 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
 
     # Verify BatchReactor forward sensitivity output (eval_sens=True) is
     # populated on batch_reactor.sensit (and returned as sensit_out), finite,
-    # and non-zero with respect to k1, k2, k3 (B6).
+    # and non-zero with respect to k1, k2, k3.
     assert hasattr(batch_reactor, "sensit")
     sens = np.asarray(batch_reactor.sensit, dtype=float)
     np.testing.assert_array_equal(sens, np.asarray(sensit_out, dtype=float))
@@ -1278,8 +1686,10 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
     total_drug_moles = gst1_vol_l * C_DRUG_BULK_STD  # [mol]
     feed_drug_conc = total_drug_moles / feed_vol_l  # [mol/L], 10 mM stock
 
-    # 2a. Reproduce Section 7.2 blocker (#486): SemibatchReactor.solve_unit
-    # raises NotImplementedError when eval_sens=True is requested.
+    # 2a. Reproduce Section 7.2 blocker (tracked in #486): SemibatchReactor.solve_unit
+    # raises NotImplementedError when eval_sens=True is requested. Provisional
+    # assertion while #486 is open: once #486 implements fed-batch forward
+    # sensitivities, replace this raises check with a finite sensitivity assertion.
     semibatch_sens_blocker = SemibatchReactor(
         vol_tank=tank_capacity_m3, isothermal=True
     )
@@ -1303,7 +1713,7 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
         mole_conc=[0.0, 0.0, 0.0, feed_drug_conc, 0.0, 0.0],
         name_solv="buffer",
     )
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(NotImplementedError, match="sensitivity.*not supported"):
         semibatch_sens_blocker.solve_unit(
             runtime=feed_time_s,
             eval_sens=True,

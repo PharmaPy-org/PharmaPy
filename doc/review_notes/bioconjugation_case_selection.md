@@ -136,7 +136,7 @@ practice:
        $T_{\text{ref}} = 293.15\text{ K}$ (paired with 8 Arrhenius activation
        energies $E_a$ initialized from $E_{a,0} = 20\text{ kJ/mol}$ and
        $k_{T_{\text{ref}},0} = 1.0 \times 10^{-4}\text{ L}\cdot\mu\text{mol}^{-1}\cdot\text{s}^{-1} = 100.0\text{ L}\cdot\text{mol}^{-1}\cdot\text{s}^{-1}$,
-       Sec. 2.3.3):
+       Sec. 2.4):
        1. **3 fragment-specific inter-HL disulfide reduction rates** (for
           $\text{Intact}/\text{IntactR}$, $\text{HHL}/\text{HHLR}$, and $\text{HL}$),
           which decrease sequentially from $6.98 \times 10^{-4}$ to
@@ -180,9 +180,9 @@ practice:
      (`doi:10.1021/acs.bioconjchem.2c00262`).
    - *Chemistry & modeling limits*: Activated $N$-hydroxysuccinimide (NHS)
      esters react with surface-accessible $\varepsilon$-amines across $80+$
-     lysine residues in parallel with aqueous NHS-ester hydrolysis (illustrative
-     first-order hydrolysis range $k_{\text{hyd}} \sim 10^{-3}\text{–}10^{-2}\text{ s}^{-1}$
-     at $\text{pH } 7.5\text{–}8.5$, Pfister et al., 2015, 2016). Because
+     lysine residues in parallel with aqueous NHS-ester hydrolysis (comparative
+     engineering scale $k_{\text{hyd}} \sim 10^{-3}\text{–}10^{-2}\text{ s}^{-1}$
+     at $\text{pH } 7.5\text{–}8.5$, `origin="synthetic"`). Because
      $2^{N_{\text{sites}}}$ positional isomers are lumping-dependent and
      site-specific rate constants are unidentifiable without peptide-mapping time
      courses, stochastic lysine conjugation is less suited than cysteine
@@ -205,15 +205,19 @@ practice:
      hydrolysis, or (b) reactive species $A$ and $B$ form conjugate $C$
      (`coupling: A + B --> C`) while $C$ undergoes a unimolecular ring-opening,
      thiosuccinimide hydrolysis, or retro-Michael deconjugation reaction
-     (`iso: C --> I`, tracked in `#339`). For cysteine–maleimide ADCs at
-     $\text{pH } 7.0$ and $22\ ^\circ\text{C}$, thiosuccinimide ring-opening
-     hydrolysis and retro-Michael deconjugation have half-lives of
-     $t_{1/2} \sim 24\text{–}120\text{ h}$ ($k_{\text{iso}} \sim 1.6 \times 10^{-6}\text{–}8.0 \times 10^{-6}\text{ s}^{-1}$,
-     Shen et al., 2012; Tumey et al., 2014), which is three orders of magnitude
-     slower than the $0.5\text{–}1.0\text{ h}$ conjugation reactor horizon
-     (which is why Weggen et al., 2024, Sec. 2.2.1.2 treat conjugation as
-     irreversible during the $1\text{ h}$ reaction and explicitly model free-payload
-     depletion $D \xrightarrow{k_{\text{drug}}} D_{\text{depl}}$ instead). When
+     (`iso: C --> I`, tracked in `#339`). Under the plasma and buffer
+     stabilization conditions studied by Shen et al. (2012) and Tumey et al.
+     (2014), thiosuccinimide ring-opening hydrolysis and retro-Michael
+     deconjugation exhibit half-lives of $t_{1/2} \sim 24\text{–}120\text{ h}$
+     ($k_{\text{iso}} \sim 1.6 \times 10^{-6}\text{–}8.0 \times 10^{-6}\text{ s}^{-1}$),
+     which is one to two orders of magnitude ($24\text{–}240\times$) longer than
+     the $0.5\text{–}1.0\text{ h}$ conjugation reactor horizon (corresponding to
+     at most $1 - 2^{-1/24} \approx 2.85\%$ first-order conversion over $1.0\text{ h}$).
+     Weggen et al. (2024, Sec. 2.2.1.2) therefore treat thiol–maleimide addition
+     as irreversible during the $\le 1\text{ h}$ reaction window ($< 3\%$
+     kinetic-truncation assumption, flagged for domain confirmation with
+     `@dcasasor`) and explicitly model free-payload depletion
+     $D \xrightarrow{k_{\text{drug}}} D_{\text{depl}}$ instead. When
      high-$\text{pH}$ ($\text{pH } 8.0\text{–}9.0$) post-conjugation succinimide
      ring stabilization is modeled, `iso: mAb_2Drug --> mAb_2Drug_stabilized` can
      be appended directly as a fourth elementary reaction.
@@ -221,9 +225,9 @@ practice:
 | Modality | Representative network | Bimolecular rate $k$ $[\text{L}\cdot\text{mol}^{-1}\cdot\text{s}^{-1}]$ | Competing side reaction | Nominal $\tau_R = 1/(k\,c_{\text{tot}})$ $[\text{s}]$ at $c_{\text{tot}} = 10^{-4}\text{ mol/L}$ | Public kinetic parameter & error tables |
 | --- | --- | --- | --- | --- | --- |
 | Site-specific Cys–maleimide ($\text{DAR } 2$) | $\text{mAb}_0 + D \xrightarrow{k_1} \text{mAb}_1$, $\text{mAb}_1 + D \xrightarrow{k_2} \text{mAb}_2$, $D \xrightarrow{k_3} D_{\text{depl}}$ | $2.51 \times 10^2\text{–}4.84 \times 10^3$ (literature) | First-order maleimide depletion ($k_3 = 1.0 \times 10^{-3}\text{–}4.1 \times 10^{-2}\text{ s}^{-1}$) | $2.1\text{–}39.8$ | Yes: Andris et al. (2019); Weggen et al. (2023, 2024) |
-| Interchain TCEP reduction + Cys–maleimide ($\text{DAR } 4\text{–}8$) | Step 1: 8-rate `WithInt + ReOx` TCEP disulfide cleavage + HL reoxidation; Step 2: $L_0 \to L_1$ and $H_0 \to H_1 \to H_2 \to H_3 \to H_4$ + $D \to D_{\text{depl}}$ | Reduction: $6.81 \times 10^1\text{–}6.98 \times 10^2$ (HL, literal $\mu\text{mol}$ conversion); Conjugation: $1.22 \times 10^3\text{–}5.12 \times 10^3$ | Inter-HL disulfide re-oxidation (3 fragment rates); payload depletion | Reduction: $14.3\text{–}147$ (at literal $\text{s}^{-1}$; $300\text{–}14400\text{ s}$ CGE window); Conjugation: $2.0\text{–}8.2$ | Yes: Weggen et al. (2024, 2025); Nayak & Richter (2023) |
-| Stochastic Lys–NHS amide coupling | $\text{mAb}_{k} + L \xrightarrow{k_k} \text{mAb}_{k+1}$, $L \xrightarrow{k_{\text{hyd}}} L_{\text{hyd}}$ ($k = 0,\dots,N$) | $10^1\text{–}10^2$ (illustrative lumped range, Pfister et al., 2015) | Aqueous NHS-ester hydrolysis ($10^{-3}\text{–}10^{-2}\text{ s}^{-1}$, illustrative) | $100\text{–}1000$ | Partial (PEGylation in Pfister et al., 2015) |
-| Lilly coupling + isomerization prototype (`#339`) | `coupling`: $A + B \xrightarrow{k_c} C$; `iso`: $C \xrightarrow{k_{\text{iso}}} I$ | $10^2\text{–}10^3$ (illustrative design range, `#339`) | Unimolecular isomerization/ring-opening ($10^{-6}\text{–}10^{-2}\text{ s}^{-1}$, illustrative) | $10\text{–}100$ | Synthetic design specification (`#339`) |
+| Interchain TCEP reduction + Cys–maleimide ($\text{DAR } 4\text{–}8$) | Step 1: 8-rate `WithInt + ReOx` TCEP disulfide cleavage + HL reoxidation; Step 2: $L_0 \to L_1$ and $H_0 \to H_1 \to H_2 \to H_3 \to H_4$ + $D \to D_{\text{depl}}$ | Reduction: $6.81 \times 10^1\text{–}6.98 \times 10^2$ (inter-HL, converted via $\times 10^6\ \mu\text{mol/mol}$); Conjugation: $1.22 \times 10^3\text{–}5.12 \times 10^3$ | Inter-HL disulfide re-oxidation (3 fragment rates); payload depletion | Reduction: $14.3\text{–}147$ (bimolecular scale; $300\text{–}14400\text{ s}$ CGE assay window); Conjugation: $2.0\text{–}8.2$ | Yes: Weggen et al. (2024, 2025); Nayak & Richter (2023) |
+| Stochastic Lys–NHS amide coupling | $\text{mAb}_{k} + L \xrightarrow{k_k} \text{mAb}_{k+1}$, $L \xrightarrow{k_{\text{hyd}}} L_{\text{hyd}}$ ($k = 0,\dots,N$) | $10^1\text{–}10^2$ (`origin="synthetic"` comparative engineering scale; model structure in Pfister et al., 2015) | Aqueous NHS-ester hydrolysis ($10^{-3}\text{–}10^{-2}\text{ s}^{-1}$, `origin="synthetic"` comparative scale) | $100\text{–}1000$ | Partial (PEGylation structure in Pfister et al., 2015) |
+| Lilly coupling + isomerization prototype (`#339`) | `coupling`: $A + B \xrightarrow{k_c} C$; `iso`: $C \xrightarrow{k_{\text{iso}}} I$ | $10^2\text{–}10^3$ (`origin="synthetic"` design range, `#339`) | Unimolecular isomerization/ring-opening ($10^{-6}\text{–}10^{-2}\text{ s}^{-1}$, `origin="synthetic"`) | $10\text{–}100$ | Synthetic design specification (`#339`) |
 
 ### 2.2 Selected representative case architecture for WP1.5
 
@@ -291,7 +295,7 @@ $T = 295.15\text{ K}$, Weggen et al., 2023, Sec. 2.2.2).
 | $H_2^2$ | `H2_2` | $5.059462 \times 10^4$ | Heavy chain with 2 payloads bound and 0 remaining reactive cysteines ($M_H + 2\,M_{\text{Drug}}$) | $0.0$ |
 | $D$ | `Drug` | $2.9731 \times 10^2$ | Reactive maleimide-functionalized payload ($N$-(1-pyrenyl)maleimide, $\text{C}_{20}\text{H}_{11}\text{NO}_2$, $M_{\text{NPM}} = 297.31\text{ g/mol}$ in Model 1A; for vc-MMAE linker-payload, $M_D \approx 1316.6\text{ g/mol}$) | Batch: $3.0 \times 10^{-5}\text{–}3.3 \times 10^{-4}$; Fed-batch feed: $1.0 \times 10^{-3}\text{–}1.0 \times 10^{-2}$ |
 | $D_{\text{depl}}$ | `Drug_depl` | $2.9731 \times 10^2$ | Inactivated/depleted payload sink ($M_{\text{Drug\_depl}} = M_{\text{Drug}} = 297.31\text{ g/mol}$ so first-order payload inactivation $D \to D_{\text{depl}}$ in Andris et al., 2019 / Weggen et al., 2023 Eq. 5 & Weggen et al., 2024 Sec. 3.1 is strictly mass-conserving without solvent consumption) | $0.0$ |
-| $\text{Solv}$ | `buffer` | $1.970 \times 10^1$ | Aqueous phosphate/EDTA buffer with $10\%\text{ v/v}$ DMSO cosolvent (volume-weighted mean molar mass of $90\%\text{ v/v}$ $\text{H}_2\text{O}$ at $18.015\text{ g/mol}$, $55.5\text{ mol/L}$ and $10\%\text{ v/v}$ DMSO at $78.13\text{ g/mol}$, $14.1\text{ mol/L}$: $M_{\text{solv}} = 1010.5\text{ g/L} / 51.3\text{ mol/L} = 19.70\text{ g/mol}$) | Completed by `LiquidPhase` volume closure ($\approx 51.2\text{ mol/L}$) |
+| $\text{Solv}$ | `buffer` | $1.967 \times 10^1$ | Aqueous phosphate/EDTA buffer with $10\%\text{ v/v}$ DMSO cosolvent (mole-fraction-weighted average molar mass of $90\%\text{ v/v}$ $\text{H}_2\text{O}$ at $18.015\text{ g/mol}$, $0.90 \times 55.5 = 49.95\text{ mol/L}$ and $10\%\text{ v/v}$ DMSO at $78.13\text{ g/mol}$, $0.10 \times 14.1 = 1.41\text{ mol/L}$: $M_{\text{solv}} = 1010.5\text{ g/L} / 51.36\text{ mol/L} = 19.67\text{ g/mol}$) | Completed by `LiquidPhase` volume closure ($\approx 51.3\text{ mol/L}$) |
 
 *Note on schema-required physical properties in `BIOCONJUGATION_DATABASE`*:
 PharmaPy's `LiquidPhase` JSON schema requires liquid density `rho_liq`
@@ -331,18 +335,22 @@ factor of $2$**:
   reflecting **positive hydrophobic cooperativity** in the hinge region after the
   first payload attaches.
 - In Model 1B (Weggen et al., 2024, Sec. 2.1.3 & 4.2.1), DTT disulfide reduction
-  prior to RP-UHPLC cleaves the antibody into heavy and light chains, eliminating
-  information about whether the partner heavy chain already carries a payload and
-  lumping both hinge conjugation steps into a single empirical heavy-chain rate
-  constant ($k_1 = 0.251\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$ for
-  `ADC1 + Drug1`; $k_1 = 4.840\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$
-  for `ADC1 + NPM` in Dataset 2). Likewise, the 2024 NPM depletion assay in
-  $1.5\text{ mL}$ polypropylene microcentrifuge tubes on a tube rotator (Weggen
-  et al., 2024, Sec. 2.1.4, 3.1 & 4.1.1) exhibited much faster surface
-  chemisorption/precipitation ($k_{\text{drug,NPM}} = 0.041\text{ s}^{-1}$) than
-  the 2019 glass reactor campaign ($k_3 = 1.55 \times 10^{-3}\text{ s}^{-1}$).
+  prior to RP-UHPLC cleaves the antibody into heavy and light chains ($k_1 = 0.251\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$
+  for `ADC1 + Drug1`; $k_1 = 4.840\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$
+  for `ADC1 + NPM` in Dataset 2). Note that in Model 1A the instantaneous
+  per-thiol consumption rate $(k_1 c_{\text{mAb}_0} + k_2 c_{\text{mAb}_1}) / (2 c_{\text{mAb}_0} + c_{\text{mAb}_1})$
+  is bounded strictly within $[k_1/2, k_2] = [0.399, 1.476]\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$,
+  so the $3.3\text{–}12\times$ higher heavy-chain estimate
+  $k_1 = 4.840\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$ in Dataset 2 of
+  Weggen et al. (2024, Table 2) **cannot** be explained by intact-versus-heavy-chain
+  basis lumping alone; it reflects inter-campaign material, tube-mixing, or
+  analytical differences between the 2019 glass-vessel campaign and the 2024
+  $1.5\text{ mL}$ polypropylene microcentrifuge-tube campaign (alongside the
+  much faster NPM loss rate $k_{\text{drug,NPM}} = 0.041\text{ s}^{-1}$ vs.
+  $k_3 = 1.55 \times 10^{-3}\text{ s}^{-1}$, Weggen et al., 2024, Sec. 4.1.1).
   Each model must therefore be used with its own calibrated parameter set and
-  analytical observable.
+  analytical observable, and the inter-study `ADC1 + NPM` rate discrepancy is
+  flagged for domain review with `@dcasasor` during `#356`.
 
 ### 3.2 Stoichiometry and elementary rate laws
 
@@ -556,11 +564,18 @@ reactor model (`BatchReactor` or `SemibatchReactor`) is sufficient:
 1. **Micromixing engulfment Damköhler number** $\text{Da}_{E,i}$ $[-]$
    (Bałdyga & Bourne, 1999; Vicum et al., 2004, Eq. 5; Weggen et al., 2023,
    Sec. 2.2.8, Eqs. 9–10), which compares the turbulent engulfment time
-   $\tau_E = 17.24 \left(\nu / \varepsilon\right)^{1/2}$ $[\text{s}]$ (with
-   kinematic viscosity $\nu \approx 1.0 \times 10^{-6}\text{ m}^2/\text{s}$ and
-   mean specific power dissipation $\varepsilon = (P/V)/\rho$
-   $[\text{m}^2/\text{s}^3]$) against $\tau_{R,i}$:
+   $\tau_E = 17.24 \left(\nu / \varepsilon\right)^{1/2}$ $[\text{s}]$ (evaluated
+   with the measured conjugation buffer kinematic viscosity
+   $\nu = \mu_{\text{liq}} / \rho_{\text{liq}} = (1.06 \times 10^{-3}\text{ Pa}\cdot\text{s}) / (1010.5\text{ kg/m}^3) = 1.049 \times 10^{-6}\text{ m}^2/\text{s}$,
+   Weggen et al., 2023, Sec. 2.2.2, and vessel-mean specific power dissipation
+   $\varepsilon = (P/V)/\rho_{\text{liq}}$ $[\text{m}^2/\text{s}^3]$) against
+   $\tau_{R,i}$:
    $$\text{Da}_{E,i} = \frac{\tau_E}{\tau_{R,i}} = 17.24 \left(\frac{\nu}{\varepsilon}\right)^{1/2} k_i \left(\tilde{c}_1 + \tilde{c}_2\right) \quad [\text{-}]$$
+   Note that in surface-dosed stirred tanks, local turbulent energy dissipation
+   $\varepsilon_{\text{local}}$ at the liquid surface feed point is substantially
+   lower than the vessel-mean $(P/V)/\rho_{\text{liq}}$ (which is concentrated near
+   the impeller), so vessel-mean $\tau_E$ is a lower bound on the local feed-zone
+   micromixing time.
 2. **Macromixing vessel-blend screening index** $\text{Da}_{\text{blend},i}$
    $[-]$ (conservative vessel-scale upper bound using the global $95\%$
    homogenization time $\tau_{\text{mix,95}}$ $[\text{s}]$ reported in Weggen
@@ -576,16 +591,16 @@ and concentrated feed stock $c_{\text{Drug,feed}} = 10.0\text{ mmol/L} = 1.00 \t
 
 - **Bulk well-mixed reaction timescale**:
   $$\tau_{R,1}^{\text{bulk}} = \frac{1}{797.0 \times \left(3.333 \times 10^{-5} + 1.667 \times 10^{-4}\right)} = 6.274\text{ s}$$
-- **Unmixed bolus feed-plume reaction timescale** ($\tilde{c}_{\text{Drug}} = c_{\text{Drug,feed}} = 1.00 \times 10^{-2}\text{ mol/L}$):
+- **Unmixed bolus feed-plume reaction timescale** (upper-bound screening scale combining undiluted feed-nozzle payload $\tilde{c}_{\text{Drug}} = c_{\text{Drug,feed}} = 1.00 \times 10^{-2}\text{ mol/L}$ with bulk $\tilde{c}_{\text{mAb}} = 3.333 \times 10^{-5}\text{ mol/L}$ at the initial contact interface):
   $$\tau_{R,1}^{\text{plume}} = \frac{1}{797.0 \times \left(3.333 \times 10^{-5} + 1.00 \times 10^{-2}\right)} = 0.1251\text{ s}$$
 
-| Vessel / Reactor Configuration | Liquid Volume $V$ $[\text{L}]$ | Blend Time $\tau_{\text{mix,95}}$ $[\text{s}]$ | Engulfment Time $\tau_E$ $[\text{s}]$ | Bulk $\text{Da}_{\text{blend},1}^{\text{bulk}}$ $[-]$ | Plume $\text{Da}_{\text{blend},1}^{\text{plume}}$ $[-]$ (bolus) | Plume $\text{Da}_{E,1}^{\text{plume}}$ $[-]$ (micromixing) | Max $\|\Delta\text{DAR}(t)\|$ (0D vs. 3D CFD) | PharmaPy Unit-Operation Mapping & Assumption |
+| Vessel / Reactor Configuration | Liquid Volume $V$ $[\text{L}]$ | Blend Time $\tau_{\text{mix,95}}$ $[\text{s}]$ | Vessel-Mean Engulfment Time $\tau_E$ $[\text{s}]$ | Bulk $\text{Da}_{\text{blend},1}^{\text{bulk}}$ $[-]$ | Plume $\text{Da}_{\text{blend},1}^{\text{plume}}$ $[-]$ (bolus) | Plume $\text{Da}_{E,1}^{\text{plume}}$ $[-]$ (vessel-mean $\varepsilon$) | Max $\|\Delta\text{DAR}(t)\|$ (0D vs. 3D CFD) | PharmaPy Unit-Operation Mapping & Assumption |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Internally stirred $1.5\text{ mL}$ tube / cuvette | $1.0 \times 10^{-3}\text{–}4.0 \times 10^{-3}$ | $\approx 0.5$ | $\approx 0.02$ | $0.080$ | $4.00$ | $0.16$ | $< 0.002$ | `BatchReactor` or `SemibatchReactor` (ideal 0D well-mixed assumption valid; $\text{Da}_{\text{blend},1}^{\text{bulk}} \ll 1$) |
-| Lab-scale glass stirred tank (`GST-1`, $60\text{ rpm}$, $P/V = 3.81\text{ W/m}^3$) | $0.300$ | $9.4$ | $0.279$ | $1.50$ | $75.2$ | $2.23$ | $0.0035$ ($60\text{ s}$ feed) | `SemibatchReactor` with $t_{\text{add}} \ge 60\text{ s}$ (ideal 0D model agrees with 3D CFD to $R^2 = 0.979$) |
-| Large-scale single-use mixer (`SUM`, $400\text{ rpm}$, $P/V = 23.71\text{ W/m}^3$) | $25.0$ | $17.6$ | $0.112$ | $2.81$ | $141$ | $0.896$ | $0.035$ ($60\text{ s}$ feed) | `SemibatchReactor` with subsurface payload dosing ($t_{\text{add}} = 60\text{–}300\text{ s}$) |
-| Large-scale glass stirred tank (`GST-2`, $60\text{ rpm}$, $P/V = 2.44\text{ W/m}^3$) | $22.0$ | $32.2$ | $0.349$ | $5.13$ | $257$ | $2.79$ | $0.20$ (bolus, $t_{\text{add}}=0\text{ s}$); $0.08$ ($60\text{ s}$); $< 0.01$ ($300\text{ s}$) | **Mixing-sensitive under bolus addition** ($\text{Da}_{\text{blend},1}^{\text{plume}} \gg 1$, $\text{Da}_{E,1}^{\text{plume}} > 1$); requires `SemibatchReactor` controlled addition ($t_{\text{add}} \ge 300\text{ s}$) to restore 0D validity |
-| Continuous flow microreactor / static mixer (Nakahara et al., 2022, `10.1021/acs.oprd.2c00217`) | $1.0 \times 10^{-3}\text{–}1.0 \times 10^{-2}$ | $< 0.05$ | $< 0.005$ | $< 0.008$ | $< 0.40$ | $< 0.04$ | Negligible | `Mixer` + `PlugFlowReactor` (plug-flow axial transport with rapid radial micromixing) |
+| Internally stirred $1\text{–}4\text{ mL}$ tube / cuvette (`origin="synthetic"` engineering bound) | $1.0 \times 10^{-3}\text{–}4.0 \times 10^{-3}$ | $\approx 0.5$ (bound) | $\approx 0.02$ (bound) | $0.080$ | $4.00$ | $0.16$ | $< 0.002$ (bound) | `BatchReactor` or `SemibatchReactor` (ideal 0D well-mixed assumption valid; $\text{Da}_{\text{blend},1}^{\text{bulk}} \ll 1$) |
+| Lab-scale glass stirred tank (`GST-1`, $60\text{ rpm}$, $P/V = 3.81\text{ W/m}^3$, Table 1) | $0.300$ | $9.4$ | $0.288$ | $1.50$ | $75.2$ | $2.30$ | $0.0035$ ($60\text{ s}$ feed, Sec. 3.2.3) | `SemibatchReactor` with $t_{\text{add}} \ge 60\text{ s}$ (ideal 0D model agrees with experimental DAR time course to $R^2 = 0.979$, Sec. 3.2.2) |
+| Large-scale single-use mixer (`SUM`, $400\text{ rpm}$, $P/V = 23.71\text{ W/m}^3$, Table 1) | $25.0$ | $17.6$ | $0.115$ | $2.81$ | $141$ | $0.922$ | $0.035$ ($60\text{ s}$ feed, Sec. 3.2.3; surface dosing experiences lower local $\varepsilon$ than vessel-mean $P/V$) | `SemibatchReactor` with subsurface payload dosing ($t_{\text{add}} = 60\text{–}300\text{ s}$) |
+| Large-scale glass stirred tank (`GST-2`, $60\text{ rpm}$, $P/V = 2.44\text{ W/m}^3$, Table 1) | $22.0$ | $32.2$ | $0.359$ | $5.13$ | $257$ | $2.87$ | $0.20$ (bolus, $t_{\text{add}}=0\text{ s}$); $0.08$ ($60\text{ s}$); $< 0.01$ ($300\text{ s}$) | **Mixing-sensitive under bolus addition** ($\text{Da}_{\text{blend},1}^{\text{plume}} \gg 1$, $\text{Da}_{E,1}^{\text{plume}} > 1$); requires `SemibatchReactor` controlled addition ($t_{\text{add}} \ge 300\text{ s}$) to restore 0D validity |
+| Continuous flow microreactor / static mixer (Nakahara et al., 2022, `10.1021/acs.oprd.2c00217`; `origin="synthetic"` engineering bound) | $1.0 \times 10^{-3}\text{–}1.0 \times 10^{-2}$ | $< 0.05$ (bound) | $< 0.005$ (bound) | $< 0.008$ | $< 0.40$ | $< 0.04$ | Negligible (bound) | `Mixer` + `PlugFlowReactor` (plug-flow axial transport with rapid radial micromixing) |
 
 **Key modeling conclusion for WP1.5**:
 1. In small-scale kinetic tubes ($1\text{–}4\text{ mL}$) and in pilot/commercial
@@ -690,11 +705,11 @@ R = \frac{A(\lambda_1)}{A(280)} \quad [\text{-}]$$
 
 #### Provenance separation of literature vs. synthetic test extinction coefficients
 
-| Chromophore / Wavelength Channel | $\varepsilon(\lambda)$ $[\text{L}\cdot\text{mol}^{-1}\cdot\text{cm}^{-1}]$ | Provenance Classification (`origin`) | Physical Basis & Source |
+| Chromophore / Wavelength Channel | $\varepsilon(\lambda)$ $[\text{L}\cdot\text{mol}^{-1}\cdot\text{cm}^{-1}]$ | Provenance Classification (`origin`) | Physical Basis, Source & Primary-Text Reconciliation |
 | --- | --- | --- | --- |
-| Monoclonal antibody (`cAC10` IgG1, $\text{mAb}_0$) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{\text{mAb}}^{248} = 9.413 \times 10^4$, $\varepsilon_{\text{mAb}}^{280} = 2.3415 \times 10^5$ | `origin="literature"` | Intact antibody molar basis; Hamblett et al. (2004), *Clin. Cancer Res.* 10(20), 7063–7070, p. 7064 (`doi:10.1158/1078-0432.CCR-04-0789`) |
-| Maleimide linker-payload (`vc-MMAE`, `SGD-1006`) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{D}^{248} = 1.59 \times 10^4$, $\varepsilon_{D}^{280} = 1.50 \times 10^3$ | `origin="literature"` | Per mole of drug-linker moiety; Hamblett et al. (2004), p. 7064 |
-| 4-wavelength verification matrix ($\lambda \in \{248, 280, 310, 342\}\text{ nm}$) for $\text{mAb}$, conjugated site ($\Delta\varepsilon_{\text{conj\_site}}$), free maleimide $\text{Drug}$, and hydrolyzed $\text{Drug\_depl}$ | $\boldsymbol{\varepsilon}_{\text{mAb}} = [94130, 234150, 1200, 150]$; $\boldsymbol{\varepsilon}_{\text{conj\_site}} = [15900, 1500, 8200, 4100]$; $\boldsymbol{\varepsilon}_{\text{Drug}} = [15900, 1500, 14500, 9800]$; $\boldsymbol{\varepsilon}_{\text{Drug\_depl}} = [14200, 1200, 2100, 600]$ | `origin="synthetic"` at $310/342\text{ nm}$ (anchored to Hamblett et al., 2004 at $248/280\text{ nm}$) | **Synthetic verification fixture** (`tests/test_bioconjugation_case_selection.py`) representing the near-UV maleimide $\pi \to \pi^*$ band ($300\text{–}350\text{ nm}$) attenuation upon thiol–maleimide addition or hydrolysis. Not claimed as an empirical literature spectrum |
+| Monoclonal antibody (`cAC10` IgG1, $\text{mAb}_0$) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{\text{mAb}}^{248} = 9.413 \times 10^4$, $\varepsilon_{\text{mAb}}^{280} = 2.3415 \times 10^5$ | `origin="literature"` | Intact antibody molar basis; Hamblett et al. (2004), *Clin. Cancer Res.* 10(20), 7063–7070, pp. 7064–7065 (`doi:10.1158/1078-0432.CCR-04-0789`) |
+| Maleimide linker-payload (`vc-MMAE`, `SGD-1006`) at $248\text{ nm}$ / $280\text{ nm}$ | Physical assignment: $\varepsilon_{D}^{248} = 1.59 \times 10^4$, $\varepsilon_{D}^{280} = 1.50 \times 10^3$ (printed on p. 7065 with wavelength labels transposed as $\varepsilon_{\text{drug}}^{248} = 1.50 \times 10^3$, $\varepsilon_{\text{drug}}^{280} = 1.59 \times 10^4$) | `origin="literature"` (with documented primary-text label transposition) | Per mole of drug-linker moiety; Hamblett et al. (2004, p. 7064) explicitly state that $248\text{ nm}$ and $280\text{ nm}$ *"are the absorbance maxima of the drug and the antibody, respectively"*, which requires $\varepsilon_{D}^{248} > \varepsilon_{D}^{280}$ ($1.59 \times 10^4 > 1.50 \times 10^3\text{ M}^{-1}\text{cm}^{-1}$; see also Chen, 2013). Cramér's-rule inversion holds algebraically for either non-singular pair ($\Delta_\varepsilon \ne 0$); payload-specific extinction spectra for `#356` will be confirmed with `@dcasasor` |
+| 4-wavelength verification matrix ($\lambda \in \{248, 280, 310, 342\}\text{ nm}$) for $\text{mAb}$, conjugated site ($\boldsymbol{\varepsilon}_{\text{conj\_site}}$), free maleimide $\text{Drug}$, and depleted $\text{Drug\_depl}$ | $\boldsymbol{\varepsilon}_{\text{mAb}} = [94130, 234150, 1200, 150]$; $\boldsymbol{\varepsilon}_{\text{conj\_site}} = [15900, 1500, 8200, 4100]$; $\boldsymbol{\varepsilon}_{\text{Drug}} = [15900, 1500, 14500, 9800]$; $\boldsymbol{\varepsilon}_{\text{Drug\_depl}} = [14200, 1200, 2100, 600]$ | `origin="synthetic"` (all `Drug_depl` values and all $310/342\text{ nm}$ columns are synthetic conditioning-driven test fixtures) | **Synthetic verification fixture** (`tests/test_bioconjugation_case_selection.py`) constructed with full row rank 4 to verify `MultipleCurveResolution` and `PCR_calibration` numerical recovery when pairing the Weggen et al. (2024) kinetic trajectory with a multi-wavelength UV-Vis observation operator. Not claimed as an empirical literature spectrum |
 
 #### In-situ optical rank, stoichiometry invariants, and hybrid soft-sensor observability (Schiemer et al., 2023, `10.1002/bit.28428`)
 
@@ -711,7 +726,7 @@ $$\boldsymbol{\varepsilon}_{\text{mAb\_1Drug}}(\lambda) = \boldsymbol{\varepsilo
 
 creates two exact linear algebraic constraints on in-situ UV-Vis spectroscopy:
 
-1. **Condition for reaction progress to be optically observable in a closed batch**:
+1. **Linear-independence condition for reaction progress to be optically observable in a closed batch**:
    Using the antibody conservation invariant
    $c_{\text{mAb,total}} = c_{\text{mAb}}(t) + c_{\text{mAb\_1Drug}}(t) + c_{\text{mAb\_2Drug}}(t)$
    and drug-moiety conservation invariant
@@ -719,23 +734,31 @@ creates two exact linear algebraic constraints on in-situ UV-Vis spectroscopy:
    where $c_{\text{conj\_sites}}(t) = c_{\text{mAb\_1Drug}}(t) + 2\,c_{\text{mAb\_2Drug}}(t)$
    $[\text{mol/L}]$, the mixture spectrum in a closed batch reactor reduces to:
    $$\frac{\mathbf{S}(t, \lambda)}{\ell} = c_{\text{mAb,total}}\,\boldsymbol{\varepsilon}_{\text{mAb}}(\lambda) + c_{\text{Drug,total}}\,\boldsymbol{\varepsilon}_{\text{Drug}}(\lambda) + c_{\text{conj\_sites}}(t)\underbrace{\left[\boldsymbol{\varepsilon}_{\text{conj\_site}}(\lambda) - \boldsymbol{\varepsilon}_{\text{Drug}}(\lambda)\right]}_{\Delta\boldsymbol{\varepsilon}_{\text{conj}}(\lambda)} + c_{\text{Drug\_depl}}(t)\underbrace{\left[\boldsymbol{\varepsilon}_{\text{Drug\_depl}}(\lambda) - \boldsymbol{\varepsilon}_{\text{Drug}}(\lambda)\right]}_{\Delta\boldsymbol{\varepsilon}_{\text{depl}}(\lambda)}$$
-   Therefore, if $\Delta\boldsymbol{\varepsilon}_{\text{conj}}(\lambda) = \mathbf{0}$
-   and $\Delta\boldsymbol{\varepsilon}_{\text{depl}}(\lambda) = \mathbf{0}$ at the
-   monitored wavelengths (e.g., if conjugated and free drug have identical
-   extinction coefficients at $248\text{ nm}$ and $280\text{ nm}$), the closed-batch
-   spectrum is **strictly time-invariant** ($\partial \mathbf{S}/\partial t = \mathbf{0}$),
-   and unassisted post-desalting dual-wavelength UV-Vis cannot track the closed-batch
-   reaction in situ. Conversely, when thiol addition across the maleimide
-   $\text{C}=\text{C}$ double bond (forming a succinimidyl thioether) and/or ring
-   hydrolysis alters the near-UV maleimide $\pi \to \pi^*$ band
-   ($\Delta\boldsymbol{\varepsilon}_{\text{conj}}(\lambda) \ne \mathbf{0}$,
-   $\Delta\boldsymbol{\varepsilon}_{\text{depl}}(\lambda) \ne \mathbf{0}$ across
-   $240\text{–}350\text{ nm}$), multivariate chemometrics (`PCR_calibration` in
-   `PharmaPy.Calibration` or `MultipleCurveResolution` in `PharmaPy.ParamEstim`,
-   with PLS expansion in [#352](https://github.com/PharmaPy-org/PharmaPy/issues/352))
-   directly observes the four chromophore coordinates
-   $\left(c_{\text{mAb,total}}(t),\, c_{\text{conj\_sites}}(t),\, c_{\text{Drug}}(t),\, c_{\text{Drug\_depl}}(t)\right)$
-   and hence $\text{DAR}(t) = c_{\text{conj\_sites}}(t) / c_{\text{mAb,total}}(t)$.
+   Therefore:
+   - If $\Delta\boldsymbol{\varepsilon}_{\text{conj}}(\lambda) = \mathbf{0}$
+     and $\Delta\boldsymbol{\varepsilon}_{\text{depl}}(\lambda) = \mathbf{0}$ at the
+     monitored wavelengths (e.g., if conjugated and free drug have identical
+     extinction coefficients at $248\text{ nm}$ and $280\text{ nm}$), the closed-batch
+     spectrum is **strictly time-invariant** ($\partial \mathbf{S}/\partial t = \mathbf{0}$),
+     and unassisted post-desalting dual-wavelength UV-Vis cannot track the closed-batch
+     reaction in situ.
+   - To resolve the two time-varying reaction extents $c_{\text{conj\_sites}}(t)$ and
+     $c_{\text{Drug\_depl}}(t)$ alongside the background coordinates
+     $(c_{\text{mAb,total}}, c_{\text{Drug,total}})$ from spectra alone, it is not
+     sufficient that $\Delta\boldsymbol{\varepsilon}_{\text{conj}}(\lambda) \ne \mathbf{0}$
+     and $\Delta\boldsymbol{\varepsilon}_{\text{depl}}(\lambda) \ne \mathbf{0}$: the four
+     pure-component row vectors of $\mathbf{E}_{4 \times N_\lambda}$
+     ($[\boldsymbol{\varepsilon}_{\text{mAb}},\, \boldsymbol{\varepsilon}_{\text{conj\_site}},\, \boldsymbol{\varepsilon}_{\text{Drug}},\, \boldsymbol{\varepsilon}_{\text{Drug\_depl}}]^\top$,
+     or equivalently $[\boldsymbol{\varepsilon}_{\text{mAb}},\, \boldsymbol{\varepsilon}_{\text{Drug}},\, \Delta\boldsymbol{\varepsilon}_{\text{conj}},\, \Delta\boldsymbol{\varepsilon}_{\text{depl}}]^\top$)
+     must be **linearly independent** ($\operatorname{rank}(\mathbf{E}_{4 \times N_\lambda}) = 4$
+     with well-conditioned singular values across $N_\lambda \ge 4$ wavelengths). If
+     $\Delta\boldsymbol{\varepsilon}_{\text{conj}}(\lambda)$ and
+     $\Delta\boldsymbol{\varepsilon}_{\text{depl}}(\lambda)$ are nonzero but collinear
+     (e.g., if both conjugation and hydrolysis only eliminate the same maleimide
+     ring transition), pure optical deconvolution can only observe the combined
+     consumed maleimide $c_{\text{conj\_sites}}(t) + c_{\text{Drug\_depl}}(t)$ and
+     requires the kinetic rate ratio $k_1 c_{\text{SH}} / k_3$ to separate bound
+     drug from hydrolyzed drug.
 2. **Optical rank-4 limitation for individual intact species ($\text{mAb}_0$, $\text{mAb}_1$, $\text{mAb}_2$) and hybrid kinetic-model resolution**:
    Because $\boldsymbol{\varepsilon}_{\text{mAb\_1Drug}} = \frac{1}{2}\left(\boldsymbol{\varepsilon}_{\text{mAb}} + \boldsymbol{\varepsilon}_{\text{mAb\_2Drug}}\right)$,
    two moles of $\text{mAb}_1$ have the exact same UV-Vis spectrum as one mole of
@@ -743,15 +766,17 @@ creates two exact linear algebraic constraints on in-situ UV-Vis spectroscopy:
    $\mathbf{E} \in \mathbb{R}^{5 \times N_\lambda}$ for
    $[\text{mAb}_0, \text{mAb}_1, \text{mAb}_2, \text{Drug}, \text{Drug\_depl}]$
    therefore has **maximum column rank 4** regardless of $N_\lambda$: pure optical
-   deconvolution can recover $c_{\text{mAb,total}}(t)$ and $c_{\text{conj\_sites}}(t)$,
+   deconvolution can recover $c_{\text{mAb,total}}(t)$ and $c_{\text{conj\_sites}}(t)$
+   (when $\operatorname{rank}(\mathbf{E}_{4 \times N_\lambda}) = 4$),
    but cannot algebraically separate $c_{\text{mAb\_1Drug}}(t)$ from
    $c_{\text{mAb\_2Drug}}(t)$ without a separation step (RP-UHPLC/HIC) or a kinetic
-   model. Coupling the spectroscopically observed $c_{\text{conj\_sites}}(t)$ and
-   $c_{\text{Drug}}(t)$ trajectories with the consecutive kinetic ODE model
-   (`BatchReactor` / `SemibatchReactor`, $k_1, k_2, k_3$) in a hybrid soft sensor
-   (Schiemer et al., 2023, *Biotechnol. Bioeng.* 120(7), 1914–1928,
-   `doi:10.1002/bit.28428`) uniquely reconstructs the individual intact conjugate
-   species $c_{\text{mAb}}(t)$, $c_{\text{mAb\_1Drug}}(t)$, and
+   model. In the adaptive soft-sensor architecture of Schiemer et al. (2023,
+   *Biotechnol. Bioeng.* 120(7), 1914–1928, `doi:10.1002/bit.28428`), UV-Vis
+   absorbance spectra are calibrated via chemometric/data-driven regression to
+   predict the optically observable bound-drug/reaction coordinate and fused with
+   the pre-calibrated consecutive kinetic ODE model (`BatchReactor` /
+   `SemibatchReactor`, $k_1, k_2, k_3$) to reconstruct the individual intact
+   conjugate species $c_{\text{mAb}}(t)$, $c_{\text{mAb\_1Drug}}(t)$, and
    $c_{\text{mAb\_2Drug}}(t)$ in real time.
 
 ### 6.3 Channel 3 — In-line Raman spectroscopy for Stage 1 disulfide reduction (and prospective Stage 2 monitoring)
@@ -762,7 +787,8 @@ monoclonal antibody disulfide reduction** by Pople et al. (2026, *Pharm. Res.*,
 stretching ($500\text{–}550\text{ cm}^{-1}$) and conformational amide/aromatic
 markers during TCEP reduction. Extending in-line Raman to **Stage 2
 thiol–maleimide conjugation**—via thiol $\nu(\text{S–H})$ stretching
-($2550\text{–}2600\text{ cm}^{-1}$) and maleimide $\nu(\text{C}=\text{C})$ /
+($2550\text{–}2600\text{ cm}^{-1}$), maleimide alkene $\nu(\text{C}=\text{C})$
+stretching ($1580\text{–}1600\text{ cm}^{-1}$), and imide carbonyl
 $\nu(\text{C}=\text{O})$ bands ($1700\text{–}1770\text{ cm}^{-1}$)—is a
 **prospective PAT extension** for WP1.5 rather than an established primary claim
 of Pople et al. (2026) (because micromolar protein thiol concentrations in
@@ -781,12 +807,12 @@ concentrations $[\text{mol/L}]$.
 
 | Capability | PharmaPy Class / Module | Status on `master` (`3194efd0`) & Verification Evidence |
 | --- | --- | --- |
-| Elementary & custom reaction kinetics and Jacobians | `RxnKinetics` (`PharmaPy/Kinetics.py`) | Ready: parses `rxn_list`, computes $\mathbf{r}_{\text{species}}$ $[\text{mol}\cdot\text{L}^{-1}\cdot\text{s}^{-1}]$, analytical state Jacobian $\partial \mathbf{r}/\partial \mathbf{c}$, and parameter Jacobian $\partial \mathbf{r}/\partial \boldsymbol{\theta}$ (`tests/test_bioconjugation_case_selection.py`, `tests/unit/test_kinetics.py`) |
-| Batch, fed-batch, and plug-flow reactor simulation & sensitivities | `BatchReactor`, `SemibatchReactor`, `PlugFlowReactor` (`PharmaPy/Reactors.py`) | Ready for state integration across `BatchReactor`, `SemibatchReactor`, and `PlugFlowReactor` (`tests/test_reactor_modes.py`, `tests/integration/test_SimulationExec.py`, `tests/test_bioconjugation_case_selection.py`). Forward sensitivity integration (`eval_sens=True`, stored on `batch_reactor.sensit` and returned by `solve_unit`) is ready on `BatchReactor` (`#55` closed), whereas `SemibatchReactor.solve_unit(eval_sens=True)` currently raises `NotImplementedError` (`PharmaPy/Reactors.py:3064`, tracked in [#486](https://github.com/PharmaPy-org/PharmaPy/issues/486) and Section 7.2) |
-| Mixing and hold-tank unit operations | `Mixer`, `DynamicCollector` (`PharmaPy/Containers.py`) | Ready for inline dilution/mixing (`Mixer`) and dynamic hold/pooling (`DynamicCollector`), verified in `tests/integration/test_Mixer.py` and `tests/integration/test_DynamicCollector.py` |
-| Structured experiment & measurement containers | `Experiment`, `Measurement`, `ParameterEstimation` (`PharmaPy/ParamEstim.py`) | Ready (`#484`, `#236`, `#238`, `#239`, `#252` closed): handles multi-experiment batch + fed-batch fits, missing observations (`NaN`), per-sample uncertainty weighting, `estimate_parameters`, and `get_confidence_intervals` (`tests/test_bioconjugation_case_selection.py`) |
-| Calibration provenance & deterministic replay | `CalibrationRecord`, `DataSource`, `Transformation`, `ModelRevision` (`PharmaPy/Records.py`) | Ready (`#351` / `#480` closed): JSON round-trip, SHA-256 source pinning, `origin='literature'` / `'synthetic'`, and `CalibrationRecord.rerun` (`tests/test_bioconjugation_case_selection.py`) |
-| Chemometric & self-modeling spectral calibration | `MultipleCurveResolution` (`PharmaPy/ParamEstim.py`), `PCR_calibration` (`PharmaPy/Calibration.py`) | Ready (`#138`, `#240`, `#253`, `#254` closed): MCR bilinear $S = C A$ decomposition and PCR `get_regression`/`predict` with SNV preprocessing (`tests/test_bioconjugation_case_selection.py`) |
+| Elementary & custom reaction kinetics and Jacobians | `RxnKinetics` (`PharmaPy/Kinetics.py`) | Ready: parses `rxn_list`, computes $\mathbf{r}_{\text{species}}$ $[\text{mol}\cdot\text{L}^{-1}\cdot\text{s}^{-1}]$, analytical state Jacobian $\partial \mathbf{r}/\partial \mathbf{c}$, and parameter Jacobian $\partial \mathbf{r}/\partial \boldsymbol{\theta}$ (`tests/test_bioconjugation_case_selection.py`, `tests/test_kinetics_custom_and_equilibrium.py`, `tests/test_reaction_kinetics_validation_and_parameters.py`) |
+| Batch, fed-batch, and plug-flow reactor simulation & sensitivities | `BatchReactor`, `SemibatchReactor`, `PlugFlowReactor` (`PharmaPy/Reactors.py`) | Ready for state integration across `BatchReactor`, `SemibatchReactor`, and `PlugFlowReactor` (`tests/test_reactor_modes.py`, `tests/test_reactor_correctness.py`, `tests/test_reactor_sensitivity_jacobian.py`, `tests/test_bioconjugation_case_selection.py`). Forward sensitivity integration (`eval_sens=True`, stored on `batch_reactor.sensit` and returned by `solve_unit`) is ready on `BatchReactor` (`#55` closed), whereas `SemibatchReactor.solve_unit(eval_sens=True)` currently raises `NotImplementedError` (`PharmaPy/Reactors.py:3064`, tracked in [#486](https://github.com/PharmaPy-org/PharmaPy/issues/486) and Section 7.2) |
+| Mixing and hold-tank unit operations | `Mixer`, `DynamicCollector` (`PharmaPy/Containers.py`) | Ready for inline dilution/mixing (`Mixer`) and dynamic hold/pooling (`DynamicCollector`), verified in `tests/test_mixer_container_balances.py`, `tests/test_dynamic_collector_inventory_balance.py`, and `tests/test_dynamic_collector_state_ordering.py` |
+| Structured experiment & measurement containers | `Experiment`, `Measurement`, `ParameterEstimation` (`PharmaPy/ParamEstim.py`) | Ready (`#484`, `#236`, `#238`, `#239`, `#252` closed): handles multi-experiment batch + fed-batch fits, missing observations (`NaN`), per-sample uncertainty weighting, `estimate_parameters`, and `get_confidence_intervals` (`tests/test_paramestim_experiment_objects.py`, `tests/test_simexec_experiment_alignment.py`, `tests/test_bioconjugation_case_selection.py`) |
+| Calibration provenance & deterministic replay | `CalibrationRecord`, `DataSource`, `Transformation`, `ModelRevision` (`PharmaPy/Records.py`) | Ready (PR [#480](https://github.com/PharmaPy-org/PharmaPy/pull/480) merged under open WP1.1 issue [#351](https://github.com/PharmaPy-org/PharmaPy/issues/351)): JSON round-trip, SHA-256 source pinning, `origin='literature'` / `'synthetic'`, and `CalibrationRecord.rerun` (`tests/test_calibration_records_guide.py`, `tests/test_records_simexec_capture.py`, `tests/test_bioconjugation_case_selection.py`) |
+| Chemometric & self-modeling spectral calibration | `MultipleCurveResolution` (`PharmaPy/ParamEstim.py`), `PCR_calibration` (`PharmaPy/Calibration.py`) | Ready (`#138`, `#240`, `#253`, `#254` closed): MCR bilinear $S = C A$ decomposition and PCR `get_regression`/`predict` with SNV preprocessing (`tests/test_calibration_snv_prediction.py`, `tests/test_calibration_prediction_diagnostics.py`, `tests/test_bioconjugation_case_selection.py`) |
 
 ### 7.2 Demonstrated open blockers and workarounds for `#356`
 
@@ -797,9 +823,9 @@ concentrations $[\text{mol/L}]$.
 | [#338](https://github.com/PharmaPy-org/PharmaPy/issues/338), [#341](https://github.com/PharmaPy-org/PharmaPy/issues/341) | Named dictionary composition inputs on `LiquidPhase`/`LiquidStream` (`#338`) and dictionary indexing on `DynamicResult.retrieve_state` (`#341`) | Ergonomic API improvements tracked under the workflow epic [#337](https://github.com/PharmaPy-org/PharmaPy/issues/337) | Use database-ordered arrays and `output_names` tuple mapping on `master` until `#338`/`#341` land |
 | [#283](https://github.com/PharmaPy-org/PharmaPy/issues/283), [#287](https://github.com/PharmaPy-org/PharmaPy/issues/287), [#290](https://github.com/PharmaPy-org/PharmaPy/issues/290) | Custom reaction-order species indexing (`#283`), reversible negative-concentration flooring (`#287`), and repeated species in one reaction string (`#290`) | Selected bioconjugation reactions are irreversible elementary reactions with distinct reactant/product tokens, so `#283`, `#287`, and `#290` are not triggered by Models 1A/1B | Avoid writing buffer/catalyst on both sides of a reaction string (`#290`) unless `#290` is merged |
 | [#440](https://github.com/PharmaPy-org/PharmaPy/issues/440) | `Reactors`: result retrieval re-completes the solvent after a volume-changing reaction | In dilute aqueous bioconjugation ($c_{\text{mAb}} \le 10^{-4}\text{ mol/L}$, $c_{\text{Drug}} \le 10^{-3}\text{ mol/L}$), reaction volume change is $< 10^{-4}$, and `paramest_wrapper` reads integrated solute columns directly | Track `#440` for concentrated non-ideal liquid mixtures; negligible effect on dilute aqueous bioconjugation solute columns |
-| [#355](https://github.com/PharmaPy-org/PharmaPy/issues/355), [#353](https://github.com/PharmaPy-org/PharmaPy/issues/353) | `[WP1.3][M6] Shared model-based experiment-design interface` (`#355`) and `[WP1.4] Batch-to-flow reaction translation` (`#353`) | Shared MBDoE API (`D`/`A`/`E`-optimality ranking across candidate feed durations $t_{\text{add}}$ and initial payload excesses, `#355`) and batch-to-flow translation (`#353`) will be consumed by `#356` | Weighted sensitivity Jacobians $\mathbf{J}$ and Fisher Information Matrix $\mathbf{F} = \mathbf{J}^\top\mathbf{W}\mathbf{J}$ are already computable from `ParameterEstimation.get_gradient(params, out_array=True)` on `master`; adopt shared `#355` and `#353` interfaces in M9–M12 once merged |
+| [#352](https://github.com/PharmaPy-org/PharmaPy/issues/352), [#353](https://github.com/PharmaPy-org/PharmaPy/issues/353), [#354](https://github.com/PharmaPy-org/PharmaPy/issues/354), [#355](https://github.com/PharmaPy-org/PharmaPy/issues/355) | `[WP1.3/WP1.4][M6] Validate shared calibration, sensitivities and uncertainty` (`#352`), `[WP1.2] Property and thermodynamics interface for the PAT cases` (`#353`), `[WP1.3] Flowsheet-aware calibration and identifiability demonstration` (`#354`), and `[WP1.3][M6] Shared model-based experiment-design interface` (`#355`) | Shared calibration/uncertainty (`#352`), property interfaces (`#353`), flowsheet identifiability (`#354`), and MBDoE (`D`/`A`/`E`-optimality ranking across candidate feed durations $t_{\text{add}}$ and initial payload excesses, `#355`) will be consumed by `#356` | Weighted sensitivity Jacobians $\mathbf{J}$ and Fisher Information Matrix $\mathbf{F} = \mathbf{J}\mathbf{J}^\top$ are already computable from `ParameterEstimation.get_gradient(params, out_array=True)` on `master`; adopt shared `#352`–`#355` interfaces in M7–M12 once merged |
 | [#486](https://github.com/PharmaPy-org/PharmaPy/issues/486) (`SemibatchReactor` forward sensitivities `eval_sens=True`) | `BatchReactor.solve_unit(eval_sens=True)` supports forward CVode sensitivity integration (`#55`), whereas `SemibatchReactor.solve_unit(eval_sens=True)` raises `NotImplementedError` (`PharmaPy/Reactors.py:3064`, reproduced in `tests/test_bioconjugation_case_selection.py` and `tests/test_reactor_modes.py`) | Fed-batch parameter estimation (`Weggen et al., 2024`, $10\text{–}30\text{ min}$ syringe-pump feed runs) cannot use `eval_sens=True` on `SemibatchReactor` | Run `SemibatchReactor` with `eval_sens=False` so `ParameterEstimation` uses finite-difference sensitivities (`dx_finitediff`), or land `#486` during M7–M8 (`#356`) |
-| Micromolar CVode `atol` scaling (`BatchReactor` / `SemibatchReactor`) | Assimulo CVode's default absolute tolerance is `atol = 1e-6` $[\text{mol/L}]$, which is $3\%$ of a $3.33 \times 10^{-5}\text{ mol/L}$ ($5\text{ g/L}$) antibody concentration and produces $O(10^{-6})\text{ mol/L}$ negative-concentration undershoot on $\text{mAb}_0/\text{mAb}_1$ and unphysical $\text{DAR} > 2.0$ overshoot (reproduced in `tests/test_bioconjugation_case_selection.py`) | Directly affects all micromolar $[\text{mol/L}]$ bioconjugation reactor solves and parameter estimation wrappers | Always pass `sundials_opts={'rtol': 1e-8, 'atol': 1e-11}` (or `atol <= 1e-10` $[\text{mol/L}]$) to `solve_unit` and `run_args={'sundials_opts': {'rtol': 1e-8, 'atol': 1e-11}}` in `Experiment` / `SetParamEstimation` |
+| [#531](https://github.com/PharmaPy-org/PharmaPy/issues/531) (Micromolar CVode `atol` scaling on `BatchReactor` / `SemibatchReactor`) | Assimulo CVode's default absolute tolerance is `atol = 1e-6` $[\text{mol/L}]$, which is $3\%$ of a $3.33 \times 10^{-5}\text{ mol/L}$ ($5\text{ g/L}$) antibody concentration and produces $O(10^{-6})\text{ mol/L}$ negative-concentration undershoot on $\text{mAb}_0/\text{mAb}_1$ and unphysical $\text{DAR} > 2.0$ overshoot (reproduced in `tests/test_bioconjugation_case_selection.py` and tracked in [#531](https://github.com/PharmaPy-org/PharmaPy/issues/531)) | Directly affects all micromolar $[\text{mol/L}]$ bioconjugation reactor solves and parameter estimation wrappers | Always pass `sundials_opts={'rtol': 1e-8, 'atol': 1e-11}` (or `atol <= 1e-10` $[\text{mol/L}]$) to `solve_unit` and `run_args={'sundials_opts': {'rtol': 1e-8, 'atol': 1e-11}}` in `Experiment` / `SetParamEstimation` until `#531` is fixed |
 
 ---
 
@@ -839,17 +865,17 @@ concentrations $[\text{mol/L}]$.
    - Execute a model-based experiment design (MBDoE, `#355`) ranking candidate
      fed-batch payload addition times ($t_{\text{add}} \in \{60, 600, 1200, 1800\}\text{ s}$)
      and molar payload ratios ($[2.5, 5.0, 7.5]\times$) by $D$-optimality
-     ($\det \mathbf{F}$) to maximize identifiability of consecutive conjugation
-     vs. payload depletion.
+     ($\det \mathbf{F}$) and parameter collinearity to maximize identifiability of
+     consecutive conjugation vs. payload depletion.
    - Export and archive the fitted `CalibrationRecord` JSON with verified
-     `DataSource` provenance (`#351`).
+     `DataSource` provenance (`#351`, `#480`).
 3. **Months 11–12 (M11–M12 — End-to-End 4-Step Flowsheet, WP4 Scheduling Export,
    and D3b Notebook Delivery)**:
    - Assemble the four-step bioconjugation manufacturing sequence
      (Reduction/Activation $\to$ Conjugation $\to$ Desalting/UF-DF $\to$
-     Purification), coordinate continuous-flow microreactor comparisons with
-     WP1.4 (`#353`), and export the STN/RTN scheduling representation for WP4
-     (`#366`, `#367`).
+     Purification), evaluate continuous-flow `Mixer` + `PlugFlowReactor`
+     alternatives alongside WP1.2/WP1.3 (`#353`, `#354`), and export the STN/RTN
+     scheduling representation for WP4 (`#366`, `#367`).
    - Author the self-contained Sphinx/Jupyter tutorial notebook for deliverable
      D3b (`#356`) and complete domain review with `@dcasasor`.
 
@@ -862,41 +888,63 @@ scheduling models. To ensure an unambiguous, mass-conservative contract between
 WP1.5 and WP4:
 
 - **Explicit physical basis of STN/RTN material proportions**: Every input and
-  output state proportion $p_{s,t}$ $[-]$ in the table below is defined on a
-  **total liquid solution mass fraction basis $[\text{kg/kg}]$** (which is
-  numerically equal to the liquid volume fraction $[\text{L/L}]$ at the uniform
-  dilute aqueous buffer density $\rho_{\text{liq}} = 1010.5\text{ kg/m}^3$), so
-  that $\sum_{s \in \text{In}(t)} p_{s,t} = 1.0000$ and
+  output state proportion $p_{s,t}$ $[-]$ in the canonical four-task table below
+  is defined on an **exact liquid volume fraction basis $[\text{L/L}]$** so that
+  $\sum_{s \in \text{In}(t)} p_{s,t} = 1.0000$ and
   $\sum_{s \in \text{Out}(t)} p_{s,t} = 1.0000$ hold identically for each task
-  $t \in \{\text{T1}, \text{T2}, \text{T3}, \text{T4}\}$. Protein active
-  pharmaceutical ingredient (mAb/ADC solute) mass $[\text{kg}]$ is tracked
-  alongside total liquid solution mass/volume in the fifth column.
-- **Alignment of `T1` chemistry across Tier 1 and Tier 2**:
-  - In **Tier 1 (engineered Cys-mAb, `ADC1`, DAR 2)**, native `ADC1` is capped
-    as mixed disulfides with cysteine/glutathione during cell culture and requires
-    a composite **TCEP decapping + spin/UF buffer exchange + DHAA inter-chain
-    disulfide re-oxidation** activation task (`T1` composite Tier 1 mode,
-    Weggen et al., 2023, Sec. 2.1.1; Weggen et al., 2024, Sec. 2.1.1).
-  - In **Tier 2 (wild-type IgG1 partial reduction, DAR 4/8)**, `T1` represents
-    **direct stoichiometric TCEP partial reduction** ($2.1\text{–}6.0$ molar
-    eq TCEP at $20\ ^\circ\text{C}$, Weggen et al., 2025, Sec. 2.2), where TCEP
-    is either consumed stoichiometrically before payload addition or quenched in
-    situ with a water-soluble PEG-azide (Kantner et al., 2017,
-    `doi:10.1021/acsomega.7b01094`) prior to `T2_conjugation` so residual
-    phosphine cannot cleave the maleimide payload.
+  $t \in \{\text{T1}, \text{T2}, \text{T3}, \text{T4}\}$. Because neat DMSO in
+  `T2_conjugation` has a higher liquid density ($\rho_{\text{DMSO}} = 1.1004\text{ kg/L}$)
+  than dilute aqueous phosphate buffer ($\rho_{\text{buffer}} = 1.000\text{ kg/L}$,
+  or $\rho_{\text{mix}} = 1.0105\text{ kg/L}$ at $10\%\text{ v/v}$ DMSO, Weggen et
+  al., 2023, Sec. 2.2.2), both the exact liquid volumes $[\text{L}]$, total
+  solution masses $[\text{kg}]$ (and mass fractions $[\text{kg/kg}]$), reagent
+  stock concentrations $[\text{mol/L}]$, and protein active pharmaceutical
+  ingredient (mAb/ADC solute) masses $[\text{kg}]$ are reported explicitly in the
+  fifth column.
+- **Canonical 4-task baseline (`Tier 2` direct TCEP partial reduction) vs.
+  expanded `Tier 1` activation sub-tasks**:
+  - **Canonical 4-task baseline (`T1`–`T4` in table below)**: `T1_reduction`
+    models **single-step stoichiometric TCEP partial reduction** (`Tier 2`,
+    Weggen et al., 2025, Sec. 2.2: $19.60\text{ L}$ native mAb at $10.204\text{ g/L}$
+    $= 0.200\text{ kg}$ mAb, $1.333\text{ mmol}$ mAb + $0.40\text{ L}$ of
+    $20.0\text{ mmol/L}$ aqueous TCEP stock $= 8.00\text{ mmol}$ TCEP, $6.0\text{ eq}$
+    per mAb $\to 20.00\text{ L}$ reduced mAb at $10.00\text{ g/L}$, with zero
+    liquid waste stream; any trace unreacted TCEP is quenched in situ with
+    water-soluble PEG-azide per Kantner et al., 2017 prior to `T2`).
+  - **Expanded `Tier 1` engineered-Cys (`ADC1`) activation sub-network
+    (`T1a` $\to$ `T1b` $\to$ `T1c`)**: When scheduling the full `Tier 1`
+    engineered-cysteine uncapping sequence (Weggen et al., 2023, Sec. 2.1.1;
+    Weggen et al., 2024, Sec. 2.1.1), `T1_reduction` expands into three
+    mass-balanced sub-tasks sharing `R_reduction_vessel` and `U_ufdf_skid`:
+    1. `T1a_tcep_decap` on `R_reduction_vessel` ($\tau = 3600\text{ s}$):
+       $19.60\text{ L}$ capped `ADC1` ($0.200\text{ kg}$) + $0.40\text{ L}$ of
+       $50.0\text{ mmol/L}$ TCEP stock ($20.0\text{ mmol}$ TCEP, $15\text{ eq}$)
+       $\to 20.00\text{ L}$ decapped mAb (`S1a_decapped_mAb`,proportion $1.0000$).
+    2. `T1b_decap_ufdf` on `U_ufdf_skid` ($\tau = 3600\text{ s}$, $5.0$
+       diavolumes): $20.00\text{ L}$ `S1a_decapped_mAb` ($0.1667\ [\text{L/L}]$)
+       + $100.00\text{ L}$ diafiltration buffer ($0.8333\ [\text{L/L}]$) $\to$
+       $19.60\text{ L}$ TCEP-free retentate (`S1b_exchanged_mAb`,
+       $0.1633\ [\text{L/L}]$, $0.200\text{ kg}$ mAb) + $100.40\text{ L}$ TCEP/Cys
+       permeate waste (`S_t1b_permeate_waste`, $0.8367\ [\text{L/L}]$).
+    3. `T1c_dhaa_reox` on `R_reduction_vessel` ($\tau = 3600\text{ s}$):
+       $19.60\text{ L}$ `S1b_exchanged_mAb` ($0.9800\ [\text{L/L}]$) + $0.40\text{ L}$
+       of $15.0\text{ mmol/L}$ dehydroascorbic acid (DHAA) stock ($6.00\text{ mmol}$
+       DHAA, $4.5\text{ eq}$, $0.0200\ [\text{L/L}]$) $\to 20.00\text{ L}$
+       re-oxidized `S1_reduced_mAb` ($1.0000\ [\text{L/L}]$, $0.200\text{ kg}$
+       activated `ADC1` with 2 free engineered hinge thiols).
 - **Provenance of scheduling durations and hold-time limits**: Task durations
   $\tau_{\text{task}}$ $[\text{s}]$, hold-time limits $\tau_{\text{hold,max}}$
   $[\text{s}]$, diavolume counts, and step recoveries are **process-scheduling
   design assumptions (`origin="synthetic"`)** informed by the cited bench/pilot
   operating windows; they are parameterized for WP4 sensitivity studies (`#366`,
-  `#367`).
+  `#367`) and flagged for domain review with `@dcasasor`.
 
-| Task ID & Name | Input States (Solution Mass Fraction $[\text{kg/kg}]$) | Output States (Solution Mass Fraction $[\text{kg/kg}]$) | Equipment Resource Class & PharmaPy Unit | Liquid Volume, Solution Mass & Protein Solute Mass Balance | Nominal Duration $\tau_{\text{task}}$ $[\text{s}]$ (Range $[\text{s}]$) | Transfer / Storage Policy & Quantitative Hold Basis |
+| Task ID & Name | Input States (Liquid Volume Fraction $[\text{L/L}]$) | Output States (Liquid Volume Fraction $[\text{L/L}]$) | Equipment Resource Class & PharmaPy Unit | Liquid Volume $[\text{L}]$, Solution Mass $[\text{kg}]$ ($[\text{kg/kg}]$), Reagent Stock & Protein Solute Mass Balance | Nominal Duration $\tau_{\text{task}}$ $[\text{s}]$ (Range $[\text{s}]$) | Transfer / Storage Policy & Design-Assumption Rationale |
 | --- | --- | --- | --- | --- | --- | --- |
-| **`T1_reduction`** (Tier 1 composite Cys decapping/DHAA activation or Tier 2 stoichiometric TCEP reduction) | `S0_native_mAb` ($0.9800$), `S_TCEP_reductant` ($0.0200$) | `S1_reduced_mAb` ($1.0000$) | `R_reduction_vessel` (`BatchReactor` or `SemibatchReactor`, jacketed at $T = 293.15\text{ K}$) | **In**: $19.60\text{ L}$ mAb feed + $0.40\text{ L}$ TCEP/activation stock $= 20.00\text{ L}$ ($20.210\text{ kg}$ solution; $0.200\text{ kg}$ mAb solute at $c_{\text{mAb},0} = 10.0\text{ g/L} = 6.667 \times 10^{-5}\text{ mol/L}$) $\to$ **Out**: $20.00\text{ L}$ ($20.210\text{ kg}$ solution; $0.200\text{ kg}$ activated mAb, $100\%$ protein recovery) | $5400\text{ s}$ ($3600\text{–}7200\text{ s}$, $1.0\text{–}2.0\text{ h}$; design assumption anchored to $90\text{ min}$ TCEP reduction window in Weggen et al., 2025, Sec. 2.2) | **Finite-wait (`FW`)**: maximum hold $\tau_{\text{hold,S1,max}} = 1800\text{ s}$ ($0.5\text{ h}$). Under the Weggen et al. (2025) `WithInt + ReOx` `8k-model` inter-HL re-oxidation rate $k_{\text{reox}} \sim 36.5\text{ L}\cdot\text{mol}^{-1}\cdot\text{s}^{-1}$ ($3.65 \times 10^{-5}\text{ L}\cdot\mu\text{mol}^{-1}\cdot\text{s}^{-1}$) at $c_{\text{SH}} \approx 1.33 \times 10^{-4}\text{ mol/L}$, uncapped inter-chain thiols re-oxidize on a timescale $1/(k_{\text{reox}} c_{\text{SH}}) \approx 205\text{ s}$ unless held under inert $\text{N}_2$/EDTA or transferred promptly to `T2` |
-| **`T2_conjugation`** (Semi-batch maleimide payload addition + NAC quench) | `S1_reduced_mAb` ($0.8899$), `S_payload_DMSO` ($0.1001$), `S_NAC_quench` ($0.0100$) | `S2_crude_ADC` ($1.0000$) | `R_conjugation_vessel` (`SemibatchReactor` with metering pump, $T = 295.15\text{ K}$, $10.0\%\text{ v/v}$ DMSO after payload feed) | **In**: $20.00\text{ L}$ `S1_reduced_mAb` + $2.25\text{ L}$ DMSO payload stock ($10.0\%\text{ v/v}$ of $22.25\text{ L}$ reaction mixture) + $0.225\text{ L}$ aqueous NAC quench $= 22.475\text{ L}$ ($22.711\text{ kg}$ solution; $0.200\text{ kg}$ ADC protein solute) $\to$ **Out**: $22.475\text{ L}$ ($22.711\text{ kg}$ crude ADC solution; $0.200\text{ kg}$ ADC solute, $100\%$ protein recovery) | $2700\text{ s}$ ($1800\text{–}3600\text{ s}$, $0.5\text{–}1.0\text{ h}$; design assumption covering $600\text{–}1800\text{ s}$ syringe-pump feed + $600\text{ s}$ completion hold + $300\text{ s}$ NAC quench, Weggen et al., 2023, 2024) | **Finite-wait (`FW`)**: maximum hold $\tau_{\text{hold,S2,max}} = 3600\text{ s}$ ($1.0\text{ h}$) in $10\%\text{ v/v}$ DMSO to limit organic-cosolvent-induced protein aggregation prior to diafiltration (`T3`, Fernandez-Cerezo et al., 2023) |
-| **`T3_desalting_ufdf`** (Ultrafiltration / diafiltration small-molecule clearance & buffer exchange) | `S2_crude_ADC` ($0.1383$), `S_diafiltration_buffer` ($0.8617$) | `S3_desalted_ADC` ($0.1231$), `S_ufdf_permeate_waste` ($0.8769$) | `U_ufdf_skid` ($30\text{ kDa}$ MWCO tangential-flow filtration skid; Fernandez-Cerezo et al., 2023, `10.1021/acs.oprd.3c00137`) | **In**: $22.475\text{ L}$ `S2_crude_ADC` ($22.711\text{ kg}$) + $140.00\text{ L}$ diafiltration buffer ($141.470\text{ kg}$, $7.0$ diavolumes on $20.00\text{ L}$ retentate basis) $= 162.475\text{ L}$ ($164.181\text{ kg}$ total liquid) $\to$ **Out**: $20.00\text{ L}$ `S3_desalted_ADC` retentate ($20.210\text{ kg}$ solution; $0.196\text{ kg}$ ADC protein solute at $98.0\%$ TFF step recovery, $>99\%$ free payload/DMSO/NAC cleared) + $142.475\text{ L}$ permeate waste ($143.971\text{ kg}$) | $4500\text{ s}$ ($3600\text{–}5400\text{ s}$, $1.0\text{–}1.5\text{ h}$; design assumption for $7.0$ diavolumes at membrane flux $35\text{–}50\text{ L}\cdot\text{m}^{-2}\cdot\text{h}^{-1}$, Fernandez-Cerezo et al., 2023) | **Default `Unlimited` (`UIS`) within single-day campaign horizon** ($\le 24\text{ h}$ at $277.15\text{–}281.15\text{ K}$) in `DynamicCollector` hold tank; configurable parameter `t_hold_s3_max = 86400` $[\text{s}]$ for multi-day finite-wait (`FW`) scheduling sensitivity studies (`#366`, `#367`). Post-desalting dual-wavelength UV-Vis ($248/280\text{ nm}$) release check applies to `S3_desalted_ADC` |
-| **`T4_purification`** (Polishing chromatography for DAR distribution & aggregate removal) | `S3_desalted_ADC` ($0.2500$), `S_chrom_mobile_phase` ($0.7500$) | `S4_purified_ADC_DS` ($0.2250$), `S_chrom_strip_waste` ($0.7750$) | `U_chrom_column` (Preparative HIC / AEX column skid) | **In**: $20.00\text{ L}$ `S3_desalted_ADC` ($20.210\text{ kg}$ solution; $0.196\text{ kg}$ ADC protein solute) + $60.00\text{ L}$ equilibration/elution/strip mobile phase ($60.630\text{ kg}$, $3.0\times$ load volume) $= 80.00\text{ L}$ ($80.840\text{ kg}$ total liquid) $\to$ **Out**: $18.00\text{ L}$ `S4_purified_ADC_DS` eluate pool ($18.189\text{ kg}$ solution; $0.180\text{ kg}$ purified ADC solute at $91.84\%$ polishing yield and $90.0\%$ overall four-step protein mass yield, $c_{\text{ADC}} = 10.0\text{ g/L}$) + $62.00\text{ L}$ flowthrough/strip waste ($62.651\text{ kg}$) | $3600\text{ s}$ ($2700\text{–}5400\text{ s}$, $0.75\text{–}1.5\text{ h}$; design assumption for single-cycle preparative HIC/AEX load-wash-elute-regenerate sequence) | Final Drug Substance (`S4_purified_ADC_DS`, `Unlimited` storage in formulation hold tank) |
+| **`T1_reduction`** (Baseline Tier 2 stoichiometric TCEP reduction; see text above for Tier 1 `T1a`–`T1c` expansion) | `S0_native_mAb` ($0.9800$), `S_TCEP_reductant` ($0.0200$) | `S1_reduced_mAb` ($1.0000$) | `R_reduction_vessel` (`BatchReactor` or `SemibatchReactor`, jacketed at $T = 293.15\text{ K}$) | **In**: $19.60\text{ L}$ native mAb in aqueous buffer ($19.600\text{ kg}$, $0.9800\ [\text{kg/kg}]$; $0.200\text{ kg}$ mAb at $10.204\text{ g/L} = 6.803 \times 10^{-5}\text{ mol/L}$, $1.333\text{ mmol}$ mAb) + $0.40\text{ L}$ of $20.0\text{ mmol/L}$ aqueous TCEP stock ($0.400\text{ kg}$, $0.0200\ [\text{kg/kg}]$; $8.00\text{ mmol}$ TCEP, $6.0\text{ eq}$) $= 20.00\text{ L}$ ($20.000\text{ kg}$ solution) $\to$ **Out**: $20.00\text{ L}$ `S1_reduced_mAb` ($20.000\text{ kg}$, $1.0000\ [\text{kg/kg}]$; $0.200\text{ kg}$ reduced mAb at $10.00\text{ g/L} = 6.667 \times 10^{-5}\text{ mol/L}$, $100\%$ protein recovery) | $5400\text{ s}$ ($3600\text{–}7200\text{ s}$, $1.0\text{–}2.0\text{ h}$; `origin="synthetic"` scheduling assumption anchored to the $90\text{ min}$ TCEP reduction window in Weggen et al., 2025, Sec. 2.2) | **Finite-wait (`FW`)**: maximum hold $\tau_{\text{hold,S1,max}} = 1800\text{ s}$ ($0.5\text{ h}$, `origin="synthetic"` scheduling design assumption under $1\text{ mmol/L}$ EDTA and inert $\text{N}_2$ headspace to limit uncapped thiol re-oxidation prior to `T2`; allowable thiol-loss specification to be confirmed with `@dcasasor`) |
+| **`T2_conjugation`** (Semi-batch maleimide payload addition + NAC quench) | `S1_reduced_mAb` ($0.8889$), `S_payload_DMSO` ($0.1000$), `S_NAC_quench` ($0.0111$) | `S2_crude_ADC` ($1.0000$) | `R_conjugation_vessel` (`SemibatchReactor` with metering pump, $T = 295.15\text{ K}$, $10.00\%\text{ v/v}$ DMSO in final $22.50\text{ L}$ batch, $10.11\%\text{ v/v}$ pre-quench) | **In**: $20.00\text{ L}$ `S1_reduced_mAb` ($20.000\text{ kg}$, $0.8801\ [\text{kg/kg}]$; $0.200\text{ kg}$ mAb) + $2.25\text{ L}$ neat DMSO payload stock at $2.963\text{ mmol/L}$ payload ($\rho_{\text{DMSO}} = 1.1004\text{ kg/L} \implies 2.476\text{ kg}$, $0.1090\ [\text{kg/kg}]$; $6.667\text{ mmol}$ payload, $5.0\text{ eq}$, giving $2.25 / 22.50 = 10.00\%\text{ v/v}$ DMSO in final batch) + $0.25\text{ L}$ aqueous $40.0\text{ mmol/L}$ NAC quench ($0.250\text{ kg}$, $0.0110\ [\text{kg/kg}]$; $10.0\text{ mmol}$ NAC) $= 22.50\text{ L}$ ($22.726\text{ kg}$ solution at $\rho_{\text{mix}} = 1.010\text{ kg/L}$) $\to$ **Out**: $22.50\text{ L}$ `S2_crude_ADC` ($22.726\text{ kg}$, $1.0000\ [\text{kg/kg}]$; $0.200\text{ kg}$ ADC protein solute, $100\%$ protein recovery) | $2700\text{ s}$ ($1800\text{–}3600\text{ s}$, $0.5\text{–}1.0\text{ h}$; `origin="synthetic"` scheduling assumption covering $600\text{–}1800\text{ s}$ syringe-pump feed + $600\text{ s}$ completion hold + $300\text{ s}$ NAC quench, Weggen et al., 2023, 2024) | **Finite-wait (`FW`)**: maximum hold $\tau_{\text{hold,S2,max}} = 3600\text{ s}$ ($1.0\text{ h}$, `origin="synthetic"` scheduling design assumption in $10.0\%\text{ v/v}$ DMSO to limit organic-cosolvent-induced protein aggregation prior to diafiltration `T3`, Fernandez-Cerezo et al., 2023) |
+| **`T3_desalting_ufdf`** (Ultrafiltration / diafiltration small-molecule clearance & buffer exchange) | `S2_crude_ADC` ($0.1385$), `S_diafiltration_buffer` ($0.8615$) | `S3_desalted_ADC` ($0.1231$), `S_ufdf_permeate_waste` ($0.8769$) | `U_ufdf_skid` ($30\text{ kDa}$ MWCO tangential-flow filtration skid; Fernandez-Cerezo et al., 2023, `10.1021/acs.oprd.3c00137`) | **In**: $22.50\text{ L}$ `S2_crude_ADC` ($22.726\text{ kg}$, $0.1397\ [\text{kg/kg}]$) + $140.00\text{ L}$ aqueous diafiltration buffer ($140.000\text{ kg}$, $0.8603\ [\text{kg/kg}]$; $7.0$ diavolumes on $20.00\text{ L}$ retentate basis) $= 162.50\text{ L}$ ($162.726\text{ kg}$ total liquid) $\to$ **Out**: $20.00\text{ L}$ `S3_desalted_ADC` retentate ($20.000\text{ kg}$, $0.1229\ [\text{kg/kg}]$; $0.196\text{ kg}$ ADC protein solute at $98.0\%$ TFF step recovery, $>99\%$ free payload/DMSO/NAC cleared) + $142.50\text{ L}$ permeate waste ($142.726\text{ kg}$, $0.8771\ [\text{kg/kg}]$) | $4500\text{ s}$ ($3600\text{–}5400\text{ s}$, $1.0\text{–}1.5\text{ h}$; `origin="synthetic"` scheduling assumption for $7.0$ diavolumes at membrane flux $35\text{–}50\text{ L}\cdot\text{m}^{-2}\cdot\text{h}^{-1}$, Fernandez-Cerezo et al., 2023) | **Default `Unlimited` (`UIS`) within single-day campaign horizon** ($\le 24\text{ h}$ at $277.15\text{–}281.15\text{ K}$) in `DynamicCollector` hold tank; configurable parameter `t_hold_s3_max = 86400` $[\text{s}]$ for multi-day finite-wait (`FW`) scheduling sensitivity studies (`#366`, `#367`). Post-desalting dual-wavelength UV-Vis ($248/280\text{ nm}$) release check applies to `S3_desalted_ADC` |
+| **`T4_purification`** (Polishing chromatography for DAR distribution & aggregate removal) | `S3_desalted_ADC` ($0.2500$), `S_chrom_mobile_phase` ($0.7500$) | `S4_purified_ADC_DS` ($0.2250$), `S_chrom_strip_waste` ($0.7750$) | `U_chrom_column` (Preparative HIC / AEX column skid) | **In**: $20.00\text{ L}$ `S3_desalted_ADC` ($20.000\text{ kg}$, $0.2500\ [\text{kg/kg}]$; $0.196\text{ kg}$ ADC protein solute) + $60.00\text{ L}$ equilibration/elution/strip mobile phase ($60.000\text{ kg}$, $0.7500\ [\text{kg/kg}]$; $3.0\times$ load volume) $= 80.00\text{ L}$ ($80.000\text{ kg}$ total liquid) $\to$ **Out**: $18.00\text{ L}$ `S4_purified_ADC_DS` eluate pool ($18.000\text{ kg}$, $0.2250\ [\text{kg/kg}]$; $0.180\text{ kg}$ purified ADC solute at $91.84\%$ polishing yield and $90.0\%$ overall four-step protein mass yield, $c_{\text{ADC}} = 10.0\text{ g/L}$) + $62.00\text{ L}$ flowthrough/strip waste ($62.000\text{ kg}$, $0.7750\ [\text{kg/kg}]$) | $3600\text{ s}$ ($2700\text{–}5400\text{ s}$, $0.75\text{–}1.5\text{ h}$; `origin="synthetic"` scheduling assumption for single-cycle preparative HIC/AEX load-wash-elute-regenerate sequence) | Final Drug Substance (`S4_purified_ADC_DS`, `Unlimited` storage in formulation hold tank) |
 
 ---
 
