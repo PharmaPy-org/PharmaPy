@@ -1119,10 +1119,12 @@ class SimulationExec:
         ``[0.0]`` or ``[0.0, 0.0]``, is not integrated: its rows are the
         charged state, with exactly zero sensitivities, since the charged
         state does not depend on the kinetic parameters (issue #418).
-        Crystallizer callbacks still return the solver rows, which
-        include the charge time, until issue #328 is fixed: their grids
-        must start at the charge time (0 s) without replicates there; add
-        0 s to one measurement with a NaN value as a workaround.
+        The default crystallizer callbacks (moments and finite-volume
+        methods, without a custom ``param_wrapper``) also return one row
+        per requested sample time, with sensitivities on the same rows, so
+        their experiments need not sample the charge time either (issue
+        #328). A crystallizer experiment sampled only at the charge time
+        raises ``NotImplementedError`` (not supported yet, issue #537).
 
         In a multi-unit flowsheet only the ``pick_unit`` unit is fitted, in
         isolation from its neighbours: its callback starts from the unit's

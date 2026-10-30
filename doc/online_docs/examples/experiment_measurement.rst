@@ -548,16 +548,35 @@ on the kinetic parameters. Such an experiment observes the charge but carries
 no kinetic information, and the reactor's ``result`` is None after it is
 evaluated. Earlier releases failed inside CVode with ``IndexError``
 (`issue #418 <https://github.com/PharmaPy-org/PharmaPy/issues/418>`__).
-Crystallizer callbacks still return the solver rows, which
-include the charge time, until
-`issue #328 <https://github.com/PharmaPy-org/PharmaPy/issues/328>`__ is
-fixed: their experiment grids must start at the charge time (0 s) without
-replicates there. As a workaround, add 0 s to one measurement's ``x`` with a
-NaN value, which is unobserved and adds no residual.
+
+The default crystallizer callbacks (``paramest_wrapper`` of the batch, MSMPR
+and semibatch crystallizers with the moments or finite-volume method and no
+custom ``param_wrapper``) also return exactly one row per requested sample
+time, in request order with replicates repeated, and the moments
+sensitivities hold the same rows for every parameter. Experiments therefore
+need not sample the charge time (0 s), and endpoint-only measurements are
+supported. The crystallizer's ``result`` and heat duty still cover the whole
+integration from the charge. A requested time absent from the solver output,
+for example after a terminating state event, raises ``ValueError`` naming
+it, as for reactors. Unlike reactors, an experiment sampled only at the
+charge time raises ``NotImplementedError``; support is tracked in
+`issue #537 <https://github.com/PharmaPy-org/PharmaPy/issues/537>`__. With
+the moments method, a custom ``param_wrapper`` receives the complete result,
+including the charge row, and selects its own rows; a custom
+``param_wrapper`` with the finite-volume method is not supported yet
+(`issue #494 <https://github.com/PharmaPy-org/PharmaPy/issues/494>`__).
+Earlier releases returned every solver row, so a grid starting after
+the charge time gained an extra charge row: the estimator rejected the
+output shape, or, in releases before that check, a single sample was
+broadcast against both rows and gave a false nonzero residual
+(`issue #328 <https://github.com/PharmaPy-org/PharmaPy/issues/328>`__).
+The earlier workaround of adding 0 s with a NaN value to one measurement's
+``x`` remains valid but is no longer needed.
 
 In its default (non-continuous) output mode CVode can omit requested sample
 times that fall inside its last internal step before the end time; the
-reactor callback then raises ``ValueError`` naming the missing time rather
+reactor and crystallizer callbacks then raise ``ValueError`` naming the
+missing time rather
 than returning misaligned rows. Pass
 ``wrapper_kwargs={'sundials_opts': {'report_continuously': True}}`` (or a
 ``maxh`` below the sample spacing) in that case; tightening ``rtol`` and

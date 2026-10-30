@@ -11,7 +11,9 @@ from PharmaPy.Commons import (reorder_sens, plot_sens, trapezoidal_rule,
                               upwind_fvm, high_resolution_fvm,
                               eval_state_events, handle_events,
                               unpack_states, complete_dict_states,
-                              flatten_states)
+                              flatten_states, _requested_rows,
+                              _charge_time_only)
+from PharmaPy.Errors import PharmaPyNonImplementedError
 
 from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 
@@ -1868,7 +1870,8 @@ class _BaseCryst(StructuralPresenceMixin):
             Kinetic parameters in the attached kinetics model's order and
             units, including any configured parameter transformations.
         t_vals : array-like
-            Evaluation times [s], shape ``(num_times,)``.
+            Requested sample times [s] after the charge, which is at 0 s,
+            shape ``(num_times,)``, non-decreasing, replicates allowed.
         modify_phase : dict, optional
             Phase-update dictionaries keyed by ``Liquid`` and/or ``Solid``.
             Liquid fractions are dimensionless, concentrations use [mol/L] or
@@ -1896,10 +1899,18 @@ class _BaseCryst(StructuralPresenceMixin):
         Returns
         -------
         result : numpy.ndarray, tuple, or object
-            With no custom wrapper, return the time-by-state array, plus
-            sensitivities for the moments method. State units and ordering
-            follow ``solve_unit``; sensitivity units are state units per kinetic
-            parameter unit. With a custom moments wrapper, return its result.
+            With no custom wrapper, the states, shape
+            ``(num_times, num_states)``, one row per requested time in
+            ``t_vals`` order with replicates repeated; for the moments
+            method, the tuple of these states and their sensitivities.
+            State units and column order follow ``solve_unit``; sensitivity
+            units are state units per kinetic parameter unit. Sensitivities
+            hold the same rows as the states, in the layout of
+            ``reorder_sens`` (shape ``(num_states * num_times,
+            num_params)``, state-major) if ``reord_sens`` is True, otherwise
+            shape ``(num_params, num_times, num_states)``; ``num_params``
+            counts the parameters selected by ``mask_params``. With a custom
+            moments wrapper, return its result.
 
         Raises
         ------
@@ -1913,7 +1924,20 @@ class _BaseCryst(StructuralPresenceMixin):
             an entry has keys other than ``fun``, ``args`` and ``kwargs``;
             raised before the crystallizer is reset or integrated.
             Also if a nonempty phase modifier names neither ``Liquid`` nor
-            ``Solid``.
+            ``Solid``. With no custom wrapper, also if a requested time is
+            absent from the solver output: the integration ended early (a
+            terminating state event), the grid decreases, or, in CVode's
+            default (non-continuous) output mode of the finite-volume
+            method, a requested point fell inside the last internal step
+            (pass ``run_args={'sundials_opts': {'report_continuously':
+            True}}`` or a ``maxh`` below the sample spacing).
+        PharmaPyNonImplementedError
+            A subclass of ``NotImplementedError``: if every requested time
+            is the charge time (0 s), for example ``[0.0]`` or
+            ``[0.0, 0.0]``, for every method and also with a custom
+            ``param_wrapper``. Such a grid has zero integration duration
+            and is not supported yet (issue #537). Raised before the
+            crystallizer is reset or integrated.
 
         Notes
         -----
@@ -1935,6 +1959,20 @@ class _BaseCryst(StructuralPresenceMixin):
         This wrapper owns the estimation reset: solve_unit's reset_states flag
         is temporarily disabled so it preserves these modifiers, then restored
         even if the solve raises an exception.
+        CVode also reports the charged state at 0 s and merges replicates of
+        the initial time, so the solver rows need not be the requested
+        times. With no custom wrapper, the states and every parameter
+        sensitivity block are reduced to one row per requested time,
+        matched exactly (``Commons._requested_rows``), before sensitivity
+        reordering (issue #328). Only the returned arrays are reduced: the
+        stored ``result``, heat duty and solve history keep every solver
+        row, including the charge. Earlier releases returned all solver
+        rows, so a grid starting after 0 s gained an extra charge row.
+        With the moments method, a custom ``param_wrapper`` receives the
+        complete ``result`` and the sensitivities of every solver row,
+        including the charge row at 0 s; selecting the rows of ``t_vals``
+        is its responsibility. A custom ``param_wrapper`` with the
+        finite-volume method is not supported yet (issue #494).
         A custom moments callback receives SI ``DynamicResult`` moments
         [m**n] or [m**n/m**3], while its sensitivity dictionary retains raw
         solver moments [um**n] or [um**n/m**3] per parameter unit. The callback
@@ -1945,6 +1983,17 @@ class _BaseCryst(StructuralPresenceMixin):
         # Validate and build this call's controls before changing any state.
         experiment_controls = apply_control_modifier(
             self.controls, modify_controls, 'crystallizer')
+
+        # The wrapper's charge is at 0 s; a grid of charge times only would
+        # make CVode integrate over zero duration.
+        if _charge_time_only(t_vals, 0.0):
+            raise PharmaPyNonImplementedError(
+                "Every requested time is the charge time (0 s), so the "
+                "crystallizer experiment has zero integration duration, which "
+                "paramest_wrapper does not support yet (issue #537). Add a "
+                "sample time after 0 s; the charged state does not depend on "
+                "the kinetic parameters, so charge-only samples carry no "
+                "kinetic information")
 
         self.reset()
 
@@ -1981,6 +2030,12 @@ class _BaseCryst(StructuralPresenceMixin):
                                                            verbose=False,
                                                            **run_args)
 
+                    # One row per requested time, the same in every
+                    # parameter block (issue #328).
+                    rows = _requested_rows(t_prof, t_vals, 'crystallizer')
+                    states = states[rows]  # mixed units of solve_unit
+                    sens = [block[rows] for block in sens]  # [state unit/param unit]
+
                     if reord_sens:
                         sens = reorder_sens(sens, separate_sens=False)
                     else:
@@ -1993,7 +2048,9 @@ class _BaseCryst(StructuralPresenceMixin):
                                                          verbose=False,
                                                          **run_args)
 
-                    result = states_out
+                    # One row per requested time (issue #328).
+                    result = states_out[_requested_rows(
+                        t_prof, t_vals, 'crystallizer')]  # mixed units of solve_unit
 
             elif callable(self.param_wrapper):
                 if self.method == 'moments':
