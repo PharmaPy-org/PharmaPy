@@ -7,8 +7,6 @@ components satisfy the physical, numerical, and API contracts established by
 the legacy reactor, crystallizer, phase, stream, utility, and flowsheet test
 suites and open issue audit:
 
-- Drop-in class aliases (``SemibatchReactor``, ``CSTR``, ``BatchCryst``,
-  ``SemibatchCryst``, ``MSMPR``).
 - Heat-transfer mode validation (#169) and utility heat-transfer rate / dynamic
   ``CoolingWater`` controls (#279, #409).
 - Reaction enthalpy stoichiometry normalization (#22) and reversible reaction
@@ -36,12 +34,9 @@ import pytest
 from PharmaPy.Connections import Connection
 from PharmaPy.Containers import DynamicCollector
 from PharmaPy.Crystallizers_Refactored import (
-    BatchCryst,
     BatchCrystallizer,
     ContinuousCrystallizer,
-    MSMPR,
     SemiBatchCrystallizer,
-    SemibatchCryst,
 )
 from PharmaPy.DataClasses import OperatingKey, PhaseRef, StateEvent, StateKey
 from PharmaPy.IntegratorBackends import ScipyBackend
@@ -60,10 +55,8 @@ from PharmaPy.ProcessControl import DynamicInput
 from PharmaPy.ProcessControl_Refactored import Controller
 from PharmaPy.Reactors_Refactored import (
     BatchReactor,
-    CSTR,
     ContinuousReactor,
     SemiBatchReactor,
-    SemibatchReactor,
 )
 from PharmaPy.SimExec import SimulationExec
 from PharmaPy.Streams import SolidStream as LegacySolidStream
@@ -123,15 +116,6 @@ def _scipy_lsoda():
         Configured SciPy LSODA integrator backend.
     """
     return ScipyBackend(method="LSODA")
-
-
-def test_drop_in_class_aliases_match_refactored_vessels():
-    """Legacy class names in Reactors_Refactored and Crystallizers_Refactored alias refactored classes."""
-    assert SemibatchReactor is SemiBatchReactor
-    assert CSTR is ContinuousReactor
-    assert BatchCryst is BatchCrystallizer
-    assert SemibatchCryst is SemiBatchCrystallizer
-    assert MSMPR is ContinuousCrystallizer
 
 
 @pytest.mark.parametrize(

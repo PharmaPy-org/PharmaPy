@@ -282,9 +282,3 @@ class ContinuousCrystallizer(_BaseCrystallizer):
                 phase_mappings=mappings
             )
         ]
-
-
-# Legacy-compatible class aliases for drop-in replacement of PharmaPy.Crystallizers
-BatchCryst = BatchCrystallizer
-SemibatchCryst = SemiBatchCrystallizer
-MSMPR = ContinuousCrystallizer

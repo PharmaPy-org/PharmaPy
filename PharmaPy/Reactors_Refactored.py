@@ -121,8 +121,3 @@ class ContinuousReactor(_BaseReactor):
                 phase_mappings=mappings,
             )
         ]
-
-
-# Legacy-compatible class aliases for drop-in replacement of PharmaPy.Reactors
-SemibatchReactor = SemiBatchReactor
-CSTR = ContinuousReactor
