@@ -333,6 +333,120 @@ plot labels (:code:`name_params_plot`) now brace the index, e.g.
 (earlier :code:`$\theta_10$` rendered as theta_1 followed by 0); single-digit
 labels render as before.
 
+Parameter uncertainty and identifiability
+-----------------------------------------
+
+:code:`ParameterEstimation.get_identifiability(alpha=0.95, include_mse=True,
+jacobian_rtol=None, output_rtol=1e-6, param_scale=None)` returns an
+immutable, picklable :code:`StatsModule.IdentifiabilityReport` of an
+accepted fit (issue #352). It is built from :code:`info_opt['jac']`,
+:code:`info_opt['fun']`, :code:`params_convg`, the observations and the
+weights only: nothing is refitted and the
+estimator, including :code:`covar_params`, is not modified.
+:code:`MultipleCurveResolution` inherits it. The report contains:
+
+- :code:`noise_model` (:code:`'declared_uncertainty'`,
+  :code:`'weight_matrix'` or :code:`'identity'`) and
+  :code:`noise_assumption`, a statement built from the estimator: independent
+  (or, with a :code:`weight_matrix`, correlated) zero-mean Gaussian
+  measurement errors; declared uncertainties treated as relative weights
+  rescaled by the residual mean square (:code:`include_mse=True`, like
+  :code:`scipy.optimize.curve_fit(..., absolute_sigma=False)`) or as
+  absolute (:code:`include_mse=False`); a supplied identity
+  :code:`weight_matrix` as errors of standard deviation 1 in each measured
+  unit; for no weighting of measurements in different declared units, that
+  the covariance depends on the unit choice and is not a physical
+  covariance; and that the analysis is local and linearized (Gauss-Newton)
+  at the accepted parameters, assuming a correct model, an interior optimum
+  and parameter-independent weights.
+- :code:`information_matrix` (:code:`J @ J.T`) and
+  :code:`fisher_information` (divided by the residual mean square when the
+  scale is estimated), the hand-off to experiment design (issue #355).
+- The covariance, correlation, standard errors, relative standard errors and
+  Student-t intervals of :code:`get_covariance` and
+  :code:`get_confidence_intervals`, bit for bit; :code:`t_ratios` and
+  :code:`significant`, a test of each estimate against zero, which is not an
+  identifiability test. When the variance scale cannot be estimated (a zero
+  or non-finite residual mean square with :code:`include_mse=True`, e.g.
+  noise-free synthetic data) or the covariance overflows or underflows to
+  a non-positive variance, these are NaN and
+  :code:`covariance_diagnostic` says why; :code:`get_covariance` itself keeps
+  its earlier behaviour.
+- :code:`active_bounds`, the parameters at an active bound of
+  :code:`scipy.optimize.least_squares` (:code:`info_opt['active_mask']`),
+  whose intervals and significance are not reported because the linearized
+  analysis assumes an interior optimum; None for Levenberg-Marquardt, which
+  ignores bounds (#533), and IPOPT, which stores no active set.
+- The singular values of the Jacobi-scaled Jacobian :code:`D J` (unit row
+  norms, as in the #532 test), the scaled condition number and the
+  collinearity index :code:`1 / s_min` of Brun, Reichert and Kuensch (2001,
+  Water Resources Research 37(4), 1015-1030, doi:10.1029/2000WR900350),
+  reported without a threshold; the :code:`weakest_direction`; the
+  parameters with zero information; and the :code:`unresolved_directions`.
+- :code:`convergence`, the optimizer's :code:`success`, :code:`message` and
+  :code:`tolerances`.
+
+Whether the data resolve a direction depends on how accurate the
+sensitivities are. In the row-normalized coordinates of :code:`D J`, the
+error bound of row :code:`i` (:code:`sensitivity_error_bounds`) is
+:code:`jacobian_rtol_i`, plus, for finite-difference Jacobians only,
+:code:`2 * output_error_norm / (h_i * ||J_i||)`. :code:`jacobian_rtol` (one
+value, or one per parameter) is the accuracy of each sensitivity row
+relative to itself: machine epsilon by default for model-returned
+sensitivities and :code:`jac_fun` (pass the solver :code:`rtol` for
+sensitivities integrated by an ODE solver, which is how CVODES controls
+their error), and the relative forward-difference step :code:`h_i /
+scale_i` by default for finite differences, the truncation term of Nocedal
+and Wright (*Numerical Optimization*, 2nd ed., Springer, 2006, Sec. 8.1,
+eq. 8.5) under a well-scaled curvature; it does not depend on additive
+offsets of the outputs. :code:`scale_i` is :code:`|estimate|`, or
+:code:`param_scale`, which that default needs for an estimate at exactly
+zero. The second term is the rounding term of the same equation: the
+forward difference subtracts two model outputs, each accurate to
+:code:`output_rtol * |y|`, so their difference may be wrong by twice that,
+divided by the step :code:`h_i`. :code:`output_rtol` defaults to
+:code:`jac_module.DEFAULT_OUTPUT_RTOL` (1e-6, CVode's default rtol), the
+accuracy the default step :code:`sqrt(1e-6) * |p|` is designed for;
+closed-form models can pass machine epsilon and ODE models their solver
+:code:`rtol`. :code:`output_error_norm` whitens those output errors:
+exactly, :code:`output_rtol * ||W |y|||` with :code:`y` the accepted model
+outputs, for diagonal weights (declared
+uncertainties, a diagonal or identity :code:`weight_matrix`), and through
+the bound :code:`output_rtol * ||W||_2 * ||y||` for a correlated
+:code:`weight_matrix`, with :code:`||W||_2` the largest singular value of
+the whitening factors used, because whitening can amplify errors in
+directions the predictions do not occupy. Norms are computed scaled, so
+magnitudes near the floating-point limits neither overflow nor underflow.
+
+A row whose error bound is at least 1 (its error may be as large as the row
+itself) is consistent with a zero row under the declared accuracy: that
+parameter is listed in :code:`unresolved_parameters` (distinct from the
+exactly zero rows of :code:`zero_information`), reported as its own
+unresolved direction, and set aside from the analysis of the other rows. By
+Weyl's inequality (Golub and Van Loan, *Matrix Computations*, 4th ed., 2013,
+Cor. 8.6.2) the singular values of the remaining rows of :code:`D J` move
+by at most the Frobenius norm of their bounds, the
+:code:`resolution_floor`; a direction whose singular value is at or below
+it, or which makes the covariance undefined (#532), is unresolved.
+:code:`identifiable` is True only when the covariance is not undefined
+(#532) and no direction or parameter is unresolved; otherwise the standard
+errors and intervals are NaN (undefined covariance) or kept but flagged as
+not precise. :code:`summary()` starts with any
+non-convergence, then the noise assumption, active bounds, the verdict and
+directions, and a parameter table; :code:`to_frame()` returns the
+per-parameter table as a :code:`pandas.DataFrame`, with an
+:code:`unresolved` column (unresolved and zero-information parameters and
+those carried by an unresolved direction, whose :code:`significant` entry
+is missing) and :code:`identifiable` and :code:`covariance_diagnostic` in
+:code:`DataFrame.attrs`.
+
+.. code-block:: python
+
+    estimator.optimize_fn()
+    report = estimator.get_identifiability()
+    print(report.summary())
+    table = report.to_frame()
+
 Liquid heat capacity
 ====================
 

@@ -7,13 +7,20 @@ Created on Thu Nov 14 15:10:19 2019
 """
 
 import copy
+import dataclasses
+import numbers
+from types import MappingProxyType
+from typing import Mapping, NamedTuple, Optional, Sequence, Union
 
 import numpy as np
+import numpy.typing as npt
 from scipy import stats
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Rectangle
 import pandas as pd
 from itertools import combinations
+
+from PharmaPy.jac_module import DEFAULT_OUTPUT_RTOL
 import time
 import warnings
 
@@ -74,6 +81,36 @@ _UNIDENTIFIABLE_REMEDY = (
     "refit")
 
 
+def _sign_normalized(vector: np.ndarray) -> np.ndarray:
+    """Fix the sign of a parameter-space direction for stable reporting.
+
+    Parameters
+    ----------
+    vector : numpy.ndarray
+        Unit singular vector of the Jacobi-scaled Jacobian, shape
+        ``(n,)`` [-] (see ``_information_inverse``).
+
+    Returns
+    -------
+    numpy.ndarray
+        ``vector`` or ``-vector``, shape ``(n,)`` [-], chosen so that the
+        first component that does not round to zero at
+        ``_DIRECTION_DECIMALS`` decimals is positive; ``vector`` itself when
+        every component rounds to zero.
+
+    Notes
+    -----
+    A singular vector is defined up to its sign. The sign is fixed by the
+    first component shown in the diagnostics, which round-off cannot flip,
+    so messages and reports do not change between platforms.
+    """
+    rounded = np.round(vector, _DIRECTION_DECIMALS)  # [-]
+    nonzero = np.flatnonzero(rounded)
+    if nonzero.size and rounded[nonzero[0]] < 0:
+        return -vector
+    return vector
+
+
 def _format_direction(vector: np.ndarray, names: list) -> str:
     """Write a parameter-space direction as a linear combination of names.
 
@@ -93,12 +130,9 @@ def _format_direction(vector: np.ndarray, names: list) -> str:
         so that the first nonzero rounded component is positive; components
         that round to zero are omitted.
     """
-    rounded = np.round(vector, _DIRECTION_DECIMALS)  # [-]
-    nonzero = np.flatnonzero(rounded)
-    # An eigenvector is defined up to its sign; fix it by the first shown
-    # component, which round-off cannot flip, for a stable message.
-    if nonzero.size and rounded[nonzero[0]] < 0:
-        rounded = -rounded
+    # [-]; round(-x) == -round(x), so this is the rounded vector with the
+    # sign of _sign_normalized.
+    rounded = np.round(_sign_normalized(vector), _DIRECTION_DECIMALS)
     terms = []
     for coefficient, name in zip(rounded, names):
         if coefficient == 0:
@@ -110,6 +144,56 @@ def _format_direction(vector: np.ndarray, names: list) -> str:
             terms.append(('+ ' if coefficient > 0 else '- ') + magnitude)
 
     return ' '.join(terms)
+
+
+def _jacobi_scaled_rows(jac: np.ndarray) -> tuple:
+    """Scale the informed rows of a weighted Jacobian to unit norm.
+
+    Parameters
+    ----------
+    jac : numpy.ndarray
+        Finite weighted residual Jacobian ``J``, shape ``(num_params,
+        n_entries)``; entry ``(i, k)`` in [weighted residual k unit /
+        parameter i unit].
+
+    Returns
+    -------
+    no_effect : numpy.ndarray
+        Boolean mask, shape ``(num_params,)``, of the exactly zero rows
+        (parameters with zero information, ``A_ii = 0`` for ``A = J J^T``).
+    informed : numpy.ndarray
+        Indices of the other rows, in parameter order, shape
+        ``(num_informed,)``.
+    scaled_jac : numpy.ndarray
+        ``D J`` restricted to the informed rows, ``D = diag(A_ii**-0.5)``:
+        every row has unit Euclidean norm, so entries are [-]. Shape
+        ``(num_informed, max(n_entries, num_informed))``: when ``J`` has
+        fewer columns than informed rows, zero columns are appended so that
+        the SVD returns the zero singular values of the short matrix.
+
+    Notes
+    -----
+    Each row is divided by its largest magnitude before it is normalized,
+    so the squares inside ``numpy.linalg.norm``, and the division by the
+    norm, are free of overflow and underflow. This is the scaling of the
+    #532 singularity test (``_information_inverse``) and of
+    ``IdentifiabilityReport``.
+    """
+    no_effect = ~jac.any(axis=1)  # exactly zero rows, A_ii = 0
+    informed = np.flatnonzero(~no_effect)
+    num_informed = len(informed)  # [-]
+    rows = jac[informed].astype(float)  # [r_k/p_i]
+    if num_informed:
+        # [-], largest magnitude 1 per row
+        rows = rows / np.abs(rows).max(axis=1, keepdims=True)
+        rows = rows / np.linalg.norm(rows, axis=1, keepdims=True)
+    scaled_jac = rows  # [-], unit row norms
+    if scaled_jac.shape[1] < num_informed:
+        # Zero columns add the zero singular values of a short J.
+        scaled_jac = np.hstack((scaled_jac, np.zeros(
+            (num_informed, num_informed - scaled_jac.shape[1]))))
+
+    return no_effect, informed, scaled_jac
 
 
 def _information_inverse(jac, param_names) -> tuple:
@@ -214,23 +298,8 @@ def _information_inverse(jac, param_names) -> tuple:
             "its sensitivities at the accepted parameters")
 
     a_matrix = np.dot(jac, jac.T)  # [r**2/(p_i*p_j)], information matrix
-    no_effect = ~jac.any(axis=1)  # exactly zero rows, A_ii = 0
-    informed = np.flatnonzero(~no_effect)
-    # Jacobi scaling D J, D = diag(A_ii**-0.5): unit row norms. Dividing
-    # each row by its largest magnitude first keeps the squares inside
-    # np.linalg.norm, and the division by the norm, free of overflow and
-    # underflow.
+    no_effect, informed, scaled_jac = _jacobi_scaled_rows(jac)
     num_informed = len(informed)  # [-]
-    rows = jac[informed].astype(float)  # [r_k/p_i]
-    if num_informed:
-        # [-], largest magnitude 1 per row
-        rows = rows / np.abs(rows).max(axis=1, keepdims=True)
-        rows = rows / np.linalg.norm(rows, axis=1, keepdims=True)
-    scaled_jac = rows  # [-], unit row norms
-    if scaled_jac.shape[1] < num_informed:
-        # Zero columns add the zero singular values of a short J.
-        scaled_jac = np.hstack((scaled_jac, np.zeros(
-            (num_informed, num_informed - scaled_jac.shape[1]))))
     if num_informed:
         # [-]; columns of directions are eigenvectors of A_s, descending
         directions, singular, _ = np.linalg.svd(scaled_jac,
@@ -293,6 +362,69 @@ def _information_inverse(jac, param_names) -> tuple:
                  "intervals are not available.")
 
     return undefined, ' '.join(parts)
+
+
+def _linearized_covariance(jac, residuals, dof, param_names,
+                           include_mse: bool) -> tuple:
+    """Compute the linearized parameter covariance of an accepted fit.
+
+    This is the computation of ``ParameterEstimation.get_covariance``,
+    without its warning and without storing anything, so that
+    ``IdentifiabilityReport`` reproduces it bit for bit.
+
+    Parameters
+    ----------
+    jac : numpy.ndarray
+        Weighted residual Jacobian ``J``, shape ``(num_params,
+        n_entries)``; entry ``(i, k)`` in [weighted residual k unit /
+        parameter i unit]. Unobserved entries are zero columns.
+    residuals : numpy.ndarray
+        Weighted residuals ``r`` at the accepted parameters, shape
+        ``(n_entries,)`` [weighted residual unit]; zero where unobserved.
+    dof : int
+        Degrees of freedom ``num_data_total - num_params`` [-], with
+        ``num_data_total`` the number of observed entries; positive.
+    param_names : sequence of str
+        Parameter names in the row order of ``J``, used in the diagnostic.
+    include_mse : bool
+        If True, scale ``inv(J @ J.T)`` by the residual mean square.
+
+    Returns
+    -------
+    covariance : numpy.ndarray
+        ``s2 * inv(J @ J.T)`` [p_i*p_j] if ``include_mse``, otherwise
+        ``inv(J @ J.T)`` [p_i*p_j / weighted residual unit**2]; shape
+        ``(num_params, num_params)``. All NaN when undefined.
+    correlation : numpy.ndarray
+        Matching correlation matrix [-], same shape; all NaN when the
+        covariance is undefined.
+    mse : float
+        Residual mean square ``s2 = r @ r / dof`` [weighted residual
+        unit**2].
+    diagnostic : str or None
+        None when the covariance is defined, otherwise the message of
+        ``_information_inverse`` stating why it is not.
+    """
+    mse = 1 / dof * np.dot(residuals.T, residuals)  # [r**2]
+
+    # inv(J @ J.T) [p_i*p_j/r**2], computed as before #532 when defined;
+    # NaN when the covariance is undefined.
+    inverse, diagnostic = _information_inverse(jac, param_names)
+    if diagnostic is not None:
+        # All NaN, in the unit of the requested form: [p_i*p_j] with
+        # include_mse, [p_i*p_j/r**2] without.
+        covar = inverse
+        correlation = np.full_like(inverse, np.nan)  # [-]
+    else:
+        if include_mse:
+            covar = mse * inverse  # [p_i*p_j], scaled by s2
+        else:
+            covar = inverse  # [p_i*p_j/r**2]
+        sigma = np.sqrt(covar.diagonal())  # [p_i] or [p_i/r]
+        d_matrix = np.diag(1/sigma)
+        correlation = d_matrix.dot(covar).dot(d_matrix)  # [-]
+
+    return covar, correlation, mse, diagnostic
 
 
 def _require_defined_covariance(covar_params, consumer: str) -> None:
@@ -1710,3 +1842,1430 @@ class StatisticsClass:
             fig.delaxes(axis)
 
         return fig, axes_flat[:num_plots], samples
+
+
+# Finite choices of IdentifiabilityReport.noise_model; see its docstring.
+_NOISE_MODELS = ('declared_uncertainty', 'weight_matrix', 'identity')
+# Finite choices of IdentifiabilityReport.jacobian_source, with the
+# description used in the noise assumption.
+_JACOBIAN_SOURCES = {
+    'model': 'sensitivities returned by the model callback',
+    'jac_fun': 'the user-supplied jac_fun',
+    'finite_difference': "the estimator's forward differences",
+}
+
+
+def _open_unit_fraction(value, name: str) -> float:
+    """Return a real number strictly between 0 and 1, or raise.
+
+    Parameters
+    ----------
+    value : float
+        Candidate value [-].
+    name : str
+        Argument name for the error message.
+
+    Returns
+    -------
+    float
+        ``value`` as a Python ``float`` [-].
+
+    Raises
+    ------
+    TypeError
+        If ``value`` is not a real number (booleans and complex excluded).
+    ValueError
+        If ``value`` is not finite or not in the open interval ``(0, 1)``.
+    """
+    if (isinstance(value, bool) or not isinstance(value, numbers.Real)):
+        raise TypeError(
+            f"{name} must be a real number in (0, 1); got "
+            f"{type(value).__name__}")
+    number = float(value)  # [-]
+    if not np.isfinite(number) or not 0.0 < number < 1.0:
+        raise ValueError(
+            f"{name} must be strictly between 0 and 1; got {value!r}")
+
+    return number
+
+
+def _per_parameter_fractions(value, name: str,
+                             num_params: int) -> np.ndarray:
+    """Return one fraction in ``(0, 1)`` per parameter, or raise.
+
+    Parameters
+    ----------
+    value : float or array_like
+        A real number for every parameter, or one per parameter, shape
+        ``(num_params,)`` [-].
+    name : str
+        Argument name for the error message.
+    num_params : int
+        Number of parameters [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        Shape ``(num_params,)`` [-], each entry finite in ``(0, 1)``.
+
+    Raises
+    ------
+    TypeError
+        If ``value`` is not real (booleans and complex excluded).
+    ValueError
+        If the shape is neither scalar nor ``(num_params,)`` or an entry is
+        not finite or not strictly between 0 and 1.
+    """
+    if np.ndim(value) == 0:
+        return np.full(num_params, _open_unit_fraction(value, name))
+    array = np.asarray(value)
+    if array.dtype.kind not in 'iuf':
+        raise TypeError(f"{name} must hold real numbers in (0, 1); got "
+                        f"dtype {array.dtype}")
+    if array.shape != (num_params,):
+        raise ValueError(f"{name} must be a scalar or have shape "
+                         f"({num_params},), one entry per parameter; got "
+                         f"{array.shape}")
+    array = array.astype(float)  # [-]
+    if not (np.isfinite(array).all() and (array > 0).all()
+            and (array < 1).all()):
+        raise ValueError(f"{name} entries must be strictly between 0 and "
+                         f"1; got {array.tolist()}")
+
+    return array
+
+
+def _parameter_scale(estimates: np.ndarray, param_scale,
+                     names: Sequence) -> np.ndarray:
+    """Return the magnitude scale of each parameter, or raise.
+
+    Parameters
+    ----------
+    estimates : numpy.ndarray
+        Accepted parameters, shape ``(n,)``, each in its own unit.
+    param_scale : float, array_like or None
+        Positive finite scale of every parameter, or one per parameter,
+        shape ``(n,)``, in the parameter units. None uses ``|estimates|``.
+    names : sequence of str
+        Parameter names, used in the messages.
+
+    Returns
+    -------
+    numpy.ndarray
+        Scale of each parameter, shape ``(n,)``, in its unit.
+
+    Raises
+    ------
+    TypeError
+        If ``param_scale`` is not real.
+    ValueError
+        If ``param_scale`` has the wrong shape or an entry that is not
+        positive and finite, or, when it is None, an estimate is exactly
+        zero or not finite: a magnitude is not invented for it.
+    """
+    num_params = len(estimates)  # [-]
+    if param_scale is None:
+        scale = np.abs(estimates)  # [p_i]
+        bad = [name for name, value in zip(names, scale)
+               if not (np.isfinite(value) and value > 0)]
+        if bad:
+            raise ValueError(
+                "The parameter magnitude is undefined for the parameters at "
+                f"zero or not finite ({', '.join(bad)}); pass param_scale, "
+                "the typical magnitude of each parameter in its units")
+        return scale
+    if isinstance(param_scale, bool):
+        raise TypeError("param_scale must be real; got bool")
+    array = np.asarray(param_scale)
+    if array.dtype.kind not in 'iuf':
+        raise TypeError("param_scale must hold real numbers; got dtype "
+                        f"{array.dtype}")
+    if array.ndim == 0:
+        array = np.full(num_params, float(array))
+    if array.shape != (num_params,):
+        raise ValueError(f"param_scale must be a scalar or have shape "
+                         f"({num_params},); got {array.shape}")
+    array = array.astype(float)  # [p_i]
+    if not (np.isfinite(array).all() and (array > 0).all()):
+        raise ValueError("param_scale entries must be positive and finite; "
+                         f"got {array.tolist()}")
+
+    return array
+
+
+def _read_only(array) -> np.ndarray:
+    """Return a read-only float copy of an array.
+
+    Parameters
+    ----------
+    array : array_like
+        Values in any unit; the unit is preserved.
+
+    Returns
+    -------
+    numpy.ndarray
+        Copy that cannot be written in place, so a frozen report cannot be
+        changed through its arrays.
+    """
+    copied = np.array(array, dtype=float, copy=True)  # [unit of array]
+    copied.setflags(write=False)
+    return copied
+
+
+def _read_only_bool(array) -> np.ndarray:
+    """Return a read-only boolean copy of an array.
+
+    Parameters
+    ----------
+    array : array_like
+        Boolean flags.
+
+    Returns
+    -------
+    numpy.ndarray
+        Boolean copy that cannot be written in place.
+    """
+    copied = np.array(array, dtype=bool, copy=True)
+    copied.setflags(write=False)
+    return copied
+
+
+def _read_only_mapping(value):
+    """Return a deep read-only copy of a mapping, recursively.
+
+    Parameters
+    ----------
+    value : object
+        A mapping (copied into ``MappingProxyType``, values recursively) or
+        any other value (deep-copied).
+
+    Returns
+    -------
+    object
+        The read-only copy.
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _read_only_mapping(item)
+                                 for key, item in value.items()})
+    return copy.deepcopy(value)
+
+
+def _plain(value):
+    """Return a picklable copy of a report field value.
+
+    Parameters
+    ----------
+    value : object
+        Field value; read-only mappings become dicts, recursively.
+
+    Returns
+    -------
+    object
+        ``value`` with every ``Mapping`` replaced by a ``dict``.
+    """
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
+
+
+def _scaled_norm(values) -> float:
+    """Return the Euclidean norm of a vector without overflow or underflow.
+
+    Parameters
+    ----------
+    values : array_like
+        Finite values in one unit.
+
+    Returns
+    -------
+    float
+        ``||values||`` in that unit, computed as ``m * ||values / m||``
+        with ``m`` the largest magnitude, so entries near the floating-point
+        limits neither overflow nor underflow; 0 for an empty or all-zero
+        vector.
+    """
+    array = np.ravel(np.asarray(values, dtype=float))  # [unit]
+    largest = float(np.max(np.abs(array))) if array.size else 0.0  # [unit]
+    if largest == 0 or not np.isfinite(largest):
+        return largest
+    return largest * float(np.linalg.norm(array / largest))
+
+
+def _row_norms(jac: np.ndarray) -> np.ndarray:
+    """Return the Euclidean norm of each row without overflow.
+
+    Parameters
+    ----------
+    jac : numpy.ndarray
+        Finite matrix, shape ``(n, m)``; row ``i`` in its own unit.
+
+    Returns
+    -------
+    numpy.ndarray
+        Norm of each row, shape ``(n,)``, in that row's unit; zero for zero
+        rows.
+    """
+    largest = np.abs(jac).max(axis=1) if jac.shape[1] else np.zeros(
+        jac.shape[0])  # [row unit]
+    norms = np.zeros(jac.shape[0])  # [row unit]
+    nonzero = largest > 0
+    norms[nonzero] = largest[nonzero] * np.linalg.norm(
+        jac[nonzero] / largest[nonzero, np.newaxis], axis=1)
+    return norms
+
+
+def _units_statement(measurement_units: Optional[Mapping]) -> str:
+    """Describe the measurement units behind an identity weighting.
+
+    Parameters
+    ----------
+    measurement_units : mapping or None
+        Measurement column name -> declared unit (str) or None when that
+        measurement declares none. None when the data layout records no
+        measurement names (``MultipleCurveResolution``, nested
+        ``'spectra'`` dictionaries).
+
+    Returns
+    -------
+    str
+        Sentence stating whether residuals in different units are summed
+        and what that implies for the covariance.
+    """
+    caveat = ("the covariance depends on the unit chosen for each "
+              "measurement and is not a physical covariance")
+    if measurement_units is None:
+        return (" The measurement units are not recorded for this data "
+                "layout, so it cannot be checked whether residuals in "
+                f"different units are summed; if they are, {caveat}.")
+    names = list(measurement_units)
+    declared = {name: unit for name, unit in measurement_units.items()
+                if unit is not None}
+    undeclared = [name for name in names if name not in declared]
+    if len(names) == 1:
+        unit = declared.get(names[0])
+        label = f"[{unit}]" if unit is not None else "(units undeclared)"
+        return f" One measured field, {names[0]} {label}."
+    if len(set(declared.values())) > 1:
+        listing = ', '.join(f"{name} [{unit}]"
+                            for name, unit in declared.items())
+        statement = (f" The measured fields have different declared units "
+                     f"({listing}); identity weighting sums their residuals "
+                     f"as plain numbers, so {caveat}. Declare measurement "
+                     "uncertainties, or a weight_matrix of error variances, "
+                     "for a dimensionless weighting.")
+        if undeclared:
+            statement += (" Undeclared units: "
+                          f"{', '.join(undeclared)}.")
+        return statement
+    if undeclared:
+        return (f" The units of {', '.join(undeclared)} are undeclared, so "
+                "it cannot be checked whether residuals in different units "
+                f"are summed; if they are, {caveat}.")
+    unit = next(iter(declared.values()))
+    return f" Every measured field is in [{unit}]."
+
+
+def _format_per_parameter(values: np.ndarray, names: Sequence) -> str:
+    """Write per-parameter values compactly.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        One value per parameter, shape ``(n,)``.
+    names : sequence of str
+        Parameter names.
+
+    Returns
+    -------
+    str
+        The common value if all are equal, otherwise ``'name: value'``
+        pairs.
+    """
+    if np.all(values == values[0]):
+        return f"{values[0]:.3g}"
+    return '(' + ', '.join(f"{name}: {value:.3g}"
+                           for name, value in zip(names, values)) + ')'
+
+
+def _noise_assumption(noise_model: str, include_mse: bool, mse: float,
+                      measurement_units: Optional[Mapping],
+                      jacobian_source: str, jacobian_rtol: np.ndarray,
+                      names: Sequence, weight_matrix_is_identity: bool,
+                      output_rtol: float) -> str:
+    """Write the explicit noise and linearization assumptions of a report.
+
+    Parameters
+    ----------
+    noise_model : {'declared_uncertainty', 'weight_matrix', 'identity'}
+        Weighting of the fit (see ``IdentifiabilityReport``).
+    include_mse : bool
+        Whether the common variance scale is re-estimated from ``mse``.
+    mse : float
+        Residual mean square [weighted residual unit**2].
+    measurement_units : mapping or None
+        Measurement name -> declared unit or None (see
+        ``_units_statement``); read only for ``'identity'``.
+    jacobian_source : {'model', 'jac_fun', 'finite_difference'}
+        Origin of the weighted residual Jacobian.
+    jacobian_rtol : numpy.ndarray
+        Row-relative accuracy [-] of the sensitivities, per parameter,
+        shape ``(n,)``.
+    names : sequence of str
+        Parameter names.
+    weight_matrix_is_identity : bool
+        Whether a supplied ``weight_matrix`` is the identity; read only for
+        ``'weight_matrix'``.
+    output_rtol : float
+        Relative accuracy [-] of the model outputs; stated only for
+        finite-difference Jacobians.
+
+    Returns
+    -------
+    str
+        The assumptions, in sentences, built from the arguments.
+    """
+    check = (f"the residual mean square s2 = {mse:.4g} is reported as a "
+             "check: its expected value is 1 under this assumption")
+    if noise_model == 'declared_uncertainty':
+        text = ("Measurement errors are assumed independent, zero-mean and "
+                "Gaussian, with the standard deviations declared by the "
+                "measurements (Measurement.uncertainty); the weighted "
+                "residuals (model - data) / sigma are dimensionless [-].")
+        if include_mse:
+            text += (" The declared standard deviations are treated as "
+                     "relative weights: their common scale is re-estimated "
+                     f"from the residual mean square s2 = {mse:.4g} [-] "
+                     "(reduced chi-square) and the covariance is "
+                     "s2 * inv(J J^T), like scipy.optimize.curve_fit with "
+                     "absolute_sigma=False.")
+        else:
+            text += (" The declared standard deviations are treated as "
+                     "absolute: the covariance is inv(J J^T), like "
+                     "scipy.optimize.curve_fit with absolute_sigma=True; "
+                     f"{check}.")
+    elif noise_model == 'weight_matrix':
+        text = ("The measurement errors of the measured columns of a sample "
+                "are assumed zero-mean and Gaussian, correlated with a "
+                "covariance proportional to weight_matrix (its marginal "
+                "block for partially observed samples), and independent "
+                "between samples.")
+        if weight_matrix_is_identity:
+            text += (" The supplied weight_matrix is the identity: "
+                     "independent errors with a standard deviation of 1 in "
+                     "each measured unit.")
+        if include_mse:
+            text += (" weight_matrix is treated as relative: the common "
+                     "scale is re-estimated from the residual mean square "
+                     f"s2 = {mse:.4g} (dimensionless when weight_matrix "
+                     "holds error variances in squared measurement units) "
+                     "and the covariance is s2 * inv(J J^T).")
+        else:
+            text += (" weight_matrix is treated as the absolute "
+                     "measurement-error covariance: the covariance is "
+                     f"inv(J J^T); {check}.")
+    else:
+        text = ("No measurement uncertainty or weight_matrix was given: "
+                "the measurement errors are assumed independent, zero-mean "
+                "and Gaussian, with one common variance for every observed "
+                "entry in its measurement unit.")
+        if include_mse:
+            text += (" That variance is estimated by the residual mean "
+                     f"square s2 = {mse:.4g} [measurement unit**2] and the "
+                     "covariance is s2 * inv(J J^T).")
+        else:
+            text += (" include_mse=False takes that variance as 1 in the "
+                     "measurement units: the covariance inv(J J^T) is "
+                     "meaningful only if the errors have unit variance in "
+                     f"those units; {check}.")
+        text += _units_statement(measurement_units)
+
+    text += (" This is a local linearized (Gauss-Newton) analysis at the "
+             "accepted parameters: it assumes a correct model, an interior "
+             "optimum (no active parameter bounds) and weights that do not "
+             "depend on the parameters. The Jacobian comes from "
+             f"{_JACOBIAN_SOURCES[jacobian_source]}; each sensitivity row is "
+             "taken as accurate to a relative jacobian_rtol = "
+             f"{_format_per_parameter(jacobian_rtol, names)} of itself"
+             + (", plus the difference of two model outputs, each accurate "
+                f"to a relative output_rtol = {output_rtol:.3g}, over the "
+                "forward-difference step"
+                if jacobian_source == 'finite_difference' else "")
+             + " (see sensitivity_error_bounds).")
+    return text
+
+
+class ParameterDirection(NamedTuple):
+    """A direction in the Jacobi-scaled parameter space of a fit.
+
+    Attributes
+    ----------
+    parameter_names : tuple of str
+        Parameter names, in the order of ``components``.
+    components : tuple of float
+        Components [-] of a unit vector. They refer to the scaled
+        parameters ``u_i = dp_i * sqrt(A_ii)`` with ``A = J J^T``: each
+        parameter change in units of that parameter's standard error when
+        the others are held fixed (see ``_information_inverse``). The sign
+        is fixed so that the first component that does not round to zero
+        at three decimals is positive.
+    singular_value : float
+        Singular value [-] of the Jacobi-scaled Jacobian ``D J`` for this
+        direction: the norm of the change of the weighted residuals,
+        relative to the per-parameter norms, along the direction.
+    """
+
+    parameter_names: tuple
+    components: tuple
+    singular_value: float
+
+    def as_dict(self) -> dict:
+        """Return the components by parameter name.
+
+        Returns
+        -------
+        dict
+            Parameter name -> component [-], in parameter order.
+        """
+        return dict(zip(self.parameter_names, self.components))
+
+
+@dataclasses.dataclass(frozen=True, eq=False)
+class IdentifiabilityReport:
+    """Parameter uncertainty and practical identifiability of a fit.
+
+    Built by ``ParameterEstimation.get_identifiability`` from an accepted
+    fit only: the weighted residual Jacobian ``J = info_opt['jac']``, the
+    weighted residuals ``r = info_opt['fun']``, a bound on the whitened
+    output errors, the finite-difference steps, the accepted parameters
+    and the number of observed entries. Nothing is refitted and the
+    estimator is not modified. All quantities are local and linearized
+    (Gauss-Newton) at the accepted parameters; ``noise_assumption`` states
+    the assumptions that give them a statistical meaning. The report is
+    immutable (its arrays are read-only, its mappings read-only views) and
+    can be pickled and deep copied.
+
+    ``information_matrix`` and the sensitivity quantities
+    (``singular_values``, ``unresolved_directions``) are the documented
+    hand-off to model-based experiment design (issue #355).
+
+    Attributes
+    ----------
+    parameter_names : tuple of str
+        Optimized parameter names (unique), in ``name_params`` order; the
+        order of every per-parameter array and of the matrix rows and
+        columns.
+    estimates : numpy.ndarray
+        Accepted parameters, shape ``(n,)``, each in its own unit.
+    noise_model : {'declared_uncertainty', 'weight_matrix', 'identity'}
+        Weighting of the fit: measurements declared uncertainties (residuals
+        divided by their standard deviations), a supplied ``weight_matrix``
+        (correlated measurement-error covariance, possibly the identity),
+        or no weighting.
+    noise_assumption : str
+        Explicit statement, built from the estimator state, of the assumed
+        measurement-error model, whether the declared uncertainties are
+        relative or absolute (``include_mse``), the unit caveat of an
+        identity weighting, and the linearization assumptions.
+    variance_scale_estimated : bool
+        ``include_mse``: True if the common variance scale is re-estimated
+        from ``residual_mean_square`` (relative weights).
+    residual_mean_square : float
+        ``s2 = r @ r / degrees_of_freedom`` [weighted residual unit**2]:
+        [-] (reduced chi-square) with declared uncertainties, or with a
+        ``weight_matrix`` of error variances in squared measurement units;
+        the measurement unit squared with identity weighting of one unit.
+    degrees_of_freedom : int
+        ``num_data_total - num_params`` [-], counting observed entries only.
+    information_matrix : numpy.ndarray
+        ``J @ J.T`` of the weighted Jacobian, shape ``(n, n)``; entry
+        ``(i, j)`` in [weighted residual unit**2 / (p_i * p_j)]. Under the
+        noise assumption it is the Gauss-Newton (Fisher) information
+        multiplied by the error variance scale (``residual_mean_square``
+        when ``variance_scale_estimated``, 1 for absolute weights);
+        ``fisher_information`` removes that scale.
+    covariance : numpy.ndarray
+        Linearized parameter covariance, shape ``(n, n)``:
+        ``s2 * inv(J J^T)`` [p_i * p_j] if ``variance_scale_estimated``,
+        else ``inv(J J^T)`` [p_i * p_j / weighted residual unit**2], which
+        is [p_i * p_j] for dimensionless weighted residuals. Bit for bit
+        ``ParameterEstimation.get_covariance(include_mse)`` when that is
+        finite; all NaN when it is undefined, and also, unlike
+        ``get_covariance``, when ``s2`` is zero or not finite with
+        ``variance_scale_estimated`` or the result is not finite (see
+        ``covariance_diagnostic``).
+    covariance_diagnostic : str or None
+        None when the covariance is available. Otherwise why it is not:
+        the message ``get_covariance`` warns with (undefined covariance),
+        or that the variance scale cannot be estimated (``s2`` zero or not
+        finite), or that the covariance overflows.
+    standard_errors : numpy.ndarray
+        ``sqrt(diag(covariance))``, shape ``(n,)``, in the unit of each
+        parameter (divided by the weighted residual unit for the absolute
+        form with unit-bearing residuals). NaN when unavailable.
+    relative_standard_errors : numpy.ndarray
+        ``standard_errors / |estimates|`` [-], shape ``(n,)``; NaN where
+        the estimate is exactly zero or the covariance is unavailable.
+    correlation : numpy.ndarray
+        Parameter correlation matrix [-], shape ``(n, n)``; NaN when the
+        covariance is unavailable.
+    alpha : float
+        Confidence level [-] of ``confidence_intervals`` and
+        ``significant``.
+    confidence_intervals : numpy.ndarray
+        Two-sided Student-t intervals, shape ``(n, 2)`` (lower, upper) in
+        each parameter's unit: ``estimates -/+ t * standard_errors`` with
+        ``t`` the ``(1 + alpha) / 2`` quantile of Student's t with
+        ``degrees_of_freedom``, as ``get_confidence_intervals``. NaN when
+        the covariance is unavailable and for parameters at an active
+        bound.
+    t_ratios : numpy.ndarray
+        ``|estimates| / standard_errors`` [-], shape ``(n,)``; NaN when
+        unavailable and for parameters at an active bound.
+    significant : numpy.ndarray
+        Boolean, shape ``(n,)``: ``t_ratios`` above that Student-t quantile,
+        i.e. the estimate is distinguishable from zero at confidence
+        ``alpha``. This is a significance test against zero, not an
+        identifiability test, and it is not meaningful for parameters whose
+        zero is not a natural reference (for example log-transformed
+        parameters). False where ``t_ratios`` is NaN.
+    active_bounds : tuple of str or None
+        Parameters at an active bound (``info_opt['active_mask']`` of
+        ``scipy.optimize.least_squares``), for which the linearized
+        intervals do not hold; empty when none is active; None when the
+        optimizer does not report it (Levenberg-Marquardt ignores bounds,
+        #533; IPOPT fits store no active set).
+    jacobian_source : {'model', 'jac_fun', 'finite_difference'}
+        Origin of ``J``: sensitivities returned by the model callback, the
+        user's ``jac_fun``, or the estimator's forward differences.
+    jacobian_rtol : numpy.ndarray
+        Row-relative accuracy [-] of the sensitivities, shape ``(n,)``:
+        ``||dJ_i|| <= jacobian_rtol_i * ||J_i||`` (see Notes and
+        ``ParameterEstimation.get_identifiability``).
+    output_rtol : float
+        Relative accuracy [-] of the model outputs, entering the bounds
+        only for finite-difference Jacobians (rounding term, see Notes).
+    output_error_norm : float
+        Bound [weighted residual unit] on the norm of the whitened output
+        errors when each raw output ``y_j`` is accurate to ``output_rtol *
+        |y_j|``: ``output_rtol * ||W |y|||`` (exact) for diagonal weights,
+        ``output_rtol * ||W||_2 * ||y||`` for a correlated
+        ``weight_matrix`` (see ``ParameterEstimation._output_error_scale``).
+        NaN when not supplied (Jacobians other than finite differences).
+    finite_difference_steps : numpy.ndarray or None
+        Forward-difference step ``h_i`` of each parameter, shape ``(n,)``,
+        in its unit; None unless ``jacobian_source`` is
+        ``'finite_difference'``.
+    sensitivity_error_bounds : numpy.ndarray
+        Error bound ``||dJ_i|| / ||J_i||`` [-] of each row of the
+        Jacobi-scaled Jacobian ``D J``, shape ``(n,)``: ``jacobian_rtol_i``,
+        plus ``2 * output_error_norm / (h_i * ||J_i||)`` for finite
+        differences; NaN for zero-information rows. A bound of at least 1
+        makes the parameter unresolved (see ``unresolved_parameters``).
+    resolution_floor : float
+        ``sqrt(sum(sensitivity_error_bounds**2))`` [-] over the resolved
+        rows (neither zero-information nor unresolved parameters): a bound
+        on ``||D E||_2`` for the Jacobian error ``E`` of those rows;
+        singular values at or below it are not resolved. 0 when no row
+        remains, NaN when ``J`` is not finite.
+    singular_values : numpy.ndarray
+        Shape ``(n,)`` [-]: the singular values of ``D J``, ``D =
+        diag(A_ii**-0.5)`` (unit row norms, the scaling of the #532
+        singularity test), restricted to the resolved rows, in descending
+        order; then NaN for each of ``unresolved_parameters`` (their rows
+        are indistinguishable from zero, so no singular value is assigned)
+        and 0 for each of ``zero_information``. All NaN when ``J`` is not
+        finite.
+    condition_number : float
+        ``(s_max / s_min)**2 = cond(D J J^T D)`` [-] of the resolved rows;
+        infinite when ``s_min = 0`` or any parameter is unresolved or has
+        zero information, NaN when ``J`` is not finite.
+    collinearity_index : float
+        ``1 / s_min`` [-] of the resolved rows, the collinearity index of
+        Brun, Reichert and Kuensch (2001); infinite in the same cases as
+        ``condition_number``, NaN when ``J`` is not finite. No flagging
+        threshold is applied.
+    unresolved_directions : tuple of ParameterDirection
+        Directions of the resolved rows of ``D J`` whose singular value
+        ``s`` satisfies ``s <= resolution_floor``, or ``s**2 <= eps *
+        s_max**2`` (the #532 criterion that makes the covariance
+        undefined), in descending order of ``s``; then the unit vector of
+        each unresolved parameter (``s`` NaN) and of each zero-information
+        parameter (``s = 0``). Empty when ``J`` is not finite.
+    weakest_direction : ParameterDirection or None
+        The last direction in the order of ``singular_values``: that of the
+        smallest resolved singular value, or of the last unresolved or
+        zero-information parameter when there is one. Reported even when
+        the parameters are identifiable; None when ``J`` is not finite.
+    unresolved_parameters : tuple of str
+        Parameters with a nonzero row of ``J`` whose error bound is at
+        least the row's norm (``sensitivity_error_bounds >= 1``): under the
+        declared accuracy the row is consistent with a zero row, so the
+        parameter is not resolved by the data and is set aside from the
+        direction analysis of the others.
+    zero_information : tuple of str
+        Parameters whose row of ``J`` is exactly zero: they change no
+        observed weighted residual.
+    identifiable : bool
+        True only if ``J @ J.T`` passes the #532 test (the covariance is
+        not undefined) and ``unresolved_directions`` is empty (so also no
+        unresolved or zero-information parameter). It does not
+        depend on ``s2``: with an unestimable variance scale the parameters
+        may be identifiable while their uncertainty is unavailable. When
+        False and the covariance is defined (only the resolution floor
+        fired), the standard errors and intervals are kept but are not
+        precise along the unresolved directions.
+    convergence : collections.abc.Mapping or None
+        Read-only ``{'success', 'message', 'tolerances'}`` copied from
+        ``info_opt`` (None entries where absent; ``'tolerances'`` is a
+        read-only copy), or None when the optimizer reported no
+        ``'success'``.
+
+    Notes
+    -----
+    Sensitivity error model, in the row-normalized coordinates of ``D J``
+    (row ``i`` divided by ``||J_i||``)::
+
+        e_i = jacobian_rtol_i
+              + [finite differences] 2 * output_error_norm / (h_i * ||J_i||)
+
+    The first term is the accuracy of the sensitivity row relative to
+    itself: machine epsilon for model-returned sensitivities and
+    ``jac_fun`` by default (an ODE solver's sensitivity ``rtol`` when
+    passed), and for finite differences the truncation error ``(h_i / 2)
+    |d2y/dp_i2|`` of Nocedal and Wright (*Numerical Optimization*, 2nd
+    ed., 2006, Sec. 8.1, eq. 8.5, first term), at most about the relative
+    step ``h_i / scale_i`` under the well-scaled-curvature assumption
+    ``scale_i |d2y/dp_i2| <~ |dy/dp_i|``. It does not depend on additive
+    offsets of the outputs. The second term is the rounding term of the
+    same equation, ``2 u L_f / h``: the forward difference subtracts two
+    outputs, at ``p`` and ``p + h_i``, each accurate to ``output_rtol *
+    |y|`` (whitened as in ``output_error_norm``), so the difference may be
+    wrong by twice that, divided by the step ``h_i``. Row
+    scaling amplifies the errors of small rows, which a normwise bound on
+    ``J`` would miss.
+
+    Unresolved parameters: a row with ``e_i >= ||J_i||`` may be entirely
+    error; a zero row is consistent with it under the declared accuracy.
+    Such a parameter is reported as unresolved and its row is set aside,
+    like a zero-information row, so that its error does not enter the
+    bound of the other rows.
+
+    Singular-value criterion: by Weyl's inequality for singular values
+    (Golub and Van Loan, *Matrix Computations*, 4th ed., 2013, Cor. 8.6.2),
+    a perturbation ``D E`` of the resolved rows changes every singular
+    value of their ``D J`` by at most ``||D E||_2 <= ||D E||_F =
+    resolution_floor``. A singular value at or below that floor is
+    therefore not distinguishable from zero, so the data, seen through
+    this Jacobian, do not resolve its direction. The bound is still
+    conservative: the Frobenius norm of all resolved rows bounds every
+    direction.
+
+    The collinearity index is that of Brun, R., Reichert, P. and Kuensch,
+    H. R. (2001), "Practical identifiability analysis of large
+    environmental simulation models", Water Resources Research 37(4),
+    1015-1030, doi:10.1029/2000WR900350: ``1 / sqrt(lambda_min)`` of the
+    cross-product of the sensitivity vectors normalized to unit length.
+    The parameters' sensitivity vectors are the rows of ``D J``, so it is
+    ``1 / s_min``. It is reported for comparison only; no threshold is
+    adopted.
+
+    The Jacobi scaling makes ``singular_values``, ``condition_number``,
+    ``collinearity_index``, ``sensitivity_error_bounds``,
+    ``resolution_floor`` and the directions independent of the units
+    chosen for the parameters (the products ``h_i * ||J_i||`` and
+    ``h_i / scale_i`` are unit-free).
+    """
+
+    parameter_names: tuple
+    estimates: np.ndarray
+    noise_model: str
+    noise_assumption: str
+    variance_scale_estimated: bool
+    residual_mean_square: float
+    degrees_of_freedom: int
+    information_matrix: np.ndarray
+    covariance: np.ndarray
+    covariance_diagnostic: Optional[str]
+    standard_errors: np.ndarray
+    relative_standard_errors: np.ndarray
+    correlation: np.ndarray
+    alpha: float
+    confidence_intervals: np.ndarray
+    t_ratios: np.ndarray
+    significant: np.ndarray
+    active_bounds: Optional[tuple]
+    jacobian_source: str
+    jacobian_rtol: np.ndarray
+    output_rtol: float
+    output_error_norm: float
+    finite_difference_steps: Optional[np.ndarray]
+    sensitivity_error_bounds: np.ndarray
+    resolution_floor: float
+    singular_values: np.ndarray
+    condition_number: float
+    collinearity_index: float
+    unresolved_directions: tuple
+    weakest_direction: Optional[ParameterDirection]
+    unresolved_parameters: tuple
+    zero_information: tuple
+    identifiable: bool
+    convergence: Optional[Mapping]
+
+    #: Float array fields, frozen as read-only copies by __post_init__.
+    _ARRAY_FIELDS = ('estimates', 'information_matrix',
+                     'covariance', 'standard_errors',
+                     'relative_standard_errors', 'correlation',
+                     'confidence_intervals', 't_ratios', 'jacobian_rtol',
+                     'sensitivity_error_bounds', 'singular_values')
+
+    def __post_init__(self) -> None:
+        """Freeze the array and mapping fields.
+
+        Returns
+        -------
+        None
+
+        Notes
+        -----
+        Arrays are replaced by read-only copies and ``convergence`` by a
+        deep read-only copy, also after unpickling (see ``__reduce__``).
+        """
+        for name in self._ARRAY_FIELDS:
+            object.__setattr__(self, name, _read_only(getattr(self, name)))
+        object.__setattr__(self, 'significant',
+                           _read_only_bool(self.significant))
+        if self.finite_difference_steps is not None:
+            object.__setattr__(self, 'finite_difference_steps',
+                               _read_only(self.finite_difference_steps))
+        object.__setattr__(self, 'parameter_names',
+                           tuple(self.parameter_names))
+        if self.convergence is not None:
+            object.__setattr__(self, 'convergence',
+                               _read_only_mapping(self.convergence))
+
+    def __reduce__(self) -> tuple:
+        """Support pickling and deep copying.
+
+        Returns
+        -------
+        tuple
+            ``(IdentifiabilityReport, field values)`` with read-only
+            mappings as dicts; the constructor freezes them again.
+        """
+        return (type(self), tuple(_plain(getattr(self, field.name))
+                                  for field in dataclasses.fields(self)))
+
+    @classmethod
+    def from_fit(cls, jac: npt.ArrayLike, residuals: npt.ArrayLike,
+                 estimates: npt.ArrayLike, parameter_names: Sequence[str],
+                 num_data_total: int, *, noise_model: str,
+                 measurement_units: Optional[Mapping[str, Optional[str]]],
+                 jacobian_source: str,
+                 jacobian_rtol: Union[float, npt.ArrayLike],
+                 output_rtol: float = DEFAULT_OUTPUT_RTOL,
+                 output_error_scale: Optional[float] = None,
+                 finite_difference_steps: Optional[npt.ArrayLike] = None,
+                 alpha: float = 0.95, include_mse: bool = True,
+                 active_bounds: Optional[Sequence[str]] = None,
+                 weight_matrix_is_identity: bool = False,
+                 convergence: Optional[Mapping] = None
+                 ) -> 'IdentifiabilityReport':
+        """Build the report from the quantities of an accepted fit.
+
+        Parameters
+        ----------
+        jac : array_like
+            Weighted residual Jacobian ``J``, shape ``(n, n_entries)``;
+            entry ``(i, k)`` in [weighted residual k unit / parameter i
+            unit]. Unobserved entries are zero columns.
+        residuals : array_like
+            Weighted residuals at the accepted parameters, shape
+            ``(n_entries,)`` [weighted residual unit].
+        estimates : array_like
+            Accepted parameters, shape ``(n,)``, each in its own unit.
+        parameter_names : sequence of str
+            Unique parameter names in the row order of ``J``.
+        num_data_total : int
+            Number of observed entries [-].
+        noise_model : {'declared_uncertainty', 'weight_matrix', 'identity'}
+            Weighting of the fit.
+        measurement_units : mapping or None
+            Measurement column name -> declared unit or None; None when the
+            data layout records no measurement names.
+        jacobian_source : {'model', 'jac_fun', 'finite_difference'}
+            Origin of ``J``.
+        jacobian_rtol : float or array_like
+            Row-relative accuracy [-] of the sensitivities, in ``(0, 1)``:
+            one value for every parameter or one per parameter, shape
+            ``(n,)``.
+        output_rtol : float, optional
+            Relative accuracy [-] of the model outputs, in ``(0, 1)``; read
+            for finite-difference Jacobians. The default is
+            ``jac_module.DEFAULT_OUTPUT_RTOL``.
+        output_error_scale : float, optional
+            Bound [weighted residual unit] on the whitened output errors per
+            unit relative output error (``ParameterEstimation.
+            _output_error_scale``), finite and non-negative. Required for
+            finite-difference Jacobians; the default None stores NaN.
+        finite_difference_steps : array_like, optional
+            Forward-difference step of each parameter, shape ``(n,)``,
+            positive and finite, in the parameter units. Required for
+            finite-difference Jacobians, ignored otherwise.
+        alpha : float, optional
+            Confidence level [-] in ``(0, 1)``. The default is 0.95.
+        include_mse : bool, optional
+            If True (the default), the covariance is scaled by the residual
+            mean square (relative weights); if False the weights are
+            absolute.
+        active_bounds : sequence of str, optional
+            Names of the parameters at an active bound; the default None
+            means not reported.
+        weight_matrix_is_identity : bool, optional
+            Whether the supplied ``weight_matrix`` is the identity (read
+            for ``noise_model='weight_matrix'``). The default is False.
+        convergence : mapping, optional
+            ``{'success', 'message', 'tolerances'}`` of the optimizer; the
+            default None means not reported.
+
+        Returns
+        -------
+        IdentifiabilityReport
+            The immutable report.
+
+        Raises
+        ------
+        TypeError
+            If ``alpha``, ``jacobian_rtol`` or ``output_rtol`` is not real,
+            or ``include_mse`` is not a bool.
+        ValueError
+            If ``alpha``, ``output_rtol`` or an entry of ``jacobian_rtol``
+            is not finite and strictly between 0 and 1; ``noise_model`` or
+            ``jacobian_source`` is not one of its choices; there are no
+            parameters, or duplicate or unknown (``active_bounds``)
+            parameter names; the shapes of ``jac``, ``residuals``,
+            ``estimates``, ``parameter_names``, ``jacobian_rtol`` or
+            ``finite_difference_steps`` disagree; a finite-difference
+            Jacobian lacks positive finite steps or a finite non-negative
+            ``output_error_scale``; or ``num_data_total`` does not exceed
+            the number of parameters.
+        """
+        alpha = _open_unit_fraction(alpha, 'alpha')  # [-]
+        output_rtol = _open_unit_fraction(output_rtol, 'output_rtol')  # [-]
+        if not isinstance(include_mse, bool):
+            raise TypeError("include_mse must be a bool; got "
+                            f"{type(include_mse).__name__}")
+        if noise_model not in _NOISE_MODELS:
+            raise ValueError(f"noise_model must be one of {_NOISE_MODELS}; "
+                             f"got {noise_model!r}")
+        if jacobian_source not in _JACOBIAN_SOURCES:
+            raise ValueError(
+                f"jacobian_source must be one of {tuple(_JACOBIAN_SOURCES)};"
+                f" got {jacobian_source!r}")
+
+        jac = np.asarray(jac, dtype=float)  # [r_k/p_i], shape (n, m)
+        residuals = np.asarray(residuals, dtype=float)  # [r], shape (m,)
+        estimates = np.asarray(estimates, dtype=float)  # [p_i], shape (n,)
+        names = tuple(parameter_names)
+        num_params = len(names)  # [-]
+        if num_params == 0:
+            raise ValueError("The fit has no optimized parameters")
+        duplicates = sorted({name for name in names
+                             if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                "Parameter names must be unique to label directions and "
+                f"table rows; repeated: {', '.join(map(str, duplicates))}")
+        if (jac.ndim != 2 or jac.shape[0] != num_params
+                or estimates.shape != (num_params,)
+                or residuals.shape != (jac.shape[1],)):
+            raise ValueError(
+                "jac must have shape (n, n_entries), residuals "
+                "(n_entries,) and estimates (n,) for the n = "
+                f"{num_params} parameters; got {jac.shape}, "
+                f"{residuals.shape} and {estimates.shape}")
+        dof = int(num_data_total) - num_params  # [-]
+        if dof <= 0:
+            raise ValueError(
+                "The identifiability report requires more observed entries "
+                f"than optimized parameters (num_data_total="
+                f"{int(num_data_total)}, num_params={num_params})")
+        rtol = _per_parameter_fractions(jacobian_rtol, 'jacobian_rtol',
+                                        num_params)  # [-]
+        output_error_norm = np.nan  # [r], not supplied
+        if output_error_scale is not None:
+            error_scale = float(output_error_scale)  # [r]
+            if not (np.isfinite(error_scale) and error_scale >= 0):
+                raise ValueError("output_error_scale must be finite and "
+                                 f"non-negative; got {output_error_scale!r}")
+            output_error_norm = output_rtol * error_scale  # [r]
+        steps = None  # [p_i]
+        if jacobian_source == 'finite_difference':
+            if finite_difference_steps is None or output_error_scale is None:
+                raise ValueError(
+                    "A finite-difference Jacobian needs "
+                    "finite_difference_steps and output_error_scale for its "
+                    "rounding error bound")
+            steps = np.abs(np.asarray(finite_difference_steps,
+                                      dtype=float))  # [p_i]
+            if steps.shape != (num_params,) or not (
+                    np.isfinite(steps).all() and (steps > 0).all()):
+                raise ValueError(
+                    "finite_difference_steps must hold one positive finite "
+                    f"step per parameter, shape ({num_params},); got "
+                    f"{np.asarray(finite_difference_steps).tolist()}")
+        if active_bounds is not None:
+            unknown = [name for name in active_bounds if name not in names]
+            if unknown:
+                raise ValueError("active_bounds names unknown parameters: "
+                                 f"{', '.join(map(str, unknown))}")
+            active_bounds = tuple(name for name in names
+                                  if name in set(active_bounds))
+
+        # Overflow, underflow, zero or non-finite s2 are handled below; no
+        # stray NumPy warnings.
+        with np.errstate(all='ignore'):
+            # [p_i*p_j] or [p_i*p_j/r**2]; [-]; [r**2]
+            covariance, correlation, mse, diagnostic = (
+                _linearized_covariance(jac, residuals, dof, list(names),
+                                       include_mse))
+            information = np.dot(jac, jac.T)  # [r**2/(p_i*p_j)]
+        undefined = diagnostic is not None  # #532: J J^T not invertible
+        if not undefined:
+            if include_mse and not (np.isfinite(mse) and mse > 0):
+                diagnostic = (
+                    "The variance scale cannot be estimated: the residual "
+                    f"mean square s2 = {float(mse)!r} is zero or not finite "
+                    "(for example noise-free synthetic data, or residuals "
+                    "that overflow), so the covariance, standard errors, "
+                    "intervals and t ratios are not available. Declare the "
+                    "absolute measurement uncertainties (Measurement."
+                    "uncertainty or weight_matrix) and pass "
+                    "include_mse=False, or check the residuals")
+            elif not np.isfinite(covariance).all():
+                diagnostic = (
+                    "The linearized covariance is not finite (overflow in "
+                    "forming it), so the covariance, standard errors, "
+                    "intervals and t ratios are not available. Rescale the "
+                    "parameters or the measurements to moderate units")
+            elif not (np.diag(covariance) > 0).all():
+                diagnostic = (
+                    "The linearized covariance has variances that are not "
+                    "positive (underflow in forming it, e.g. sensitivities "
+                    "near the floating-point limits), so the covariance, "
+                    "standard errors, intervals and t ratios are not "
+                    "available. Rescale the parameters or the measurements "
+                    "to moderate units")
+            if diagnostic is not None:
+                covariance = np.full((num_params, num_params), np.nan)
+                correlation = np.full((num_params, num_params), np.nan)
+
+        standard_errors = np.sqrt(np.diag(covariance))  # [p_i]
+        # Same expression as StatisticsClass.get_intervals.
+        t_quantile = stats.t.ppf((1 + alpha)/2, dof)  # [-]
+        half_width = standard_errors * t_quantile  # [p_i]
+        intervals = np.column_stack((estimates - half_width,
+                                     estimates + half_width))  # [p_i]
+        relative = np.full(num_params, np.nan)  # [-]
+        nonzero = estimates != 0
+        relative[nonzero] = (standard_errors[nonzero]
+                             / np.abs(estimates[nonzero]))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            t_ratios = np.abs(estimates) / standard_errors  # [-]
+        if active_bounds:
+            # The linearized intervals assume an interior optimum.
+            at_bound = np.array([name in active_bounds for name in names])
+            intervals[at_bound] = np.nan
+            t_ratios[at_bound] = np.nan
+        significant = t_ratios > t_quantile  # False where NaN
+
+        sensitivity = _scaled_sensitivity(jac, names, rtol,
+                                          output_error_norm, steps)
+
+        return cls(
+            parameter_names=names,
+            estimates=estimates,
+            noise_model=noise_model,
+            noise_assumption=_noise_assumption(
+                noise_model, include_mse, mse, measurement_units,
+                jacobian_source, rtol, names, weight_matrix_is_identity,
+                output_rtol),
+            variance_scale_estimated=include_mse,
+            residual_mean_square=float(mse),
+            degrees_of_freedom=dof,
+            information_matrix=information,
+            covariance=covariance,
+            covariance_diagnostic=diagnostic,
+            standard_errors=standard_errors,
+            relative_standard_errors=relative,
+            correlation=correlation,
+            alpha=alpha,
+            confidence_intervals=intervals,
+            t_ratios=t_ratios,
+            significant=significant,
+            active_bounds=active_bounds,
+            jacobian_source=jacobian_source,
+            jacobian_rtol=rtol,
+            output_rtol=output_rtol,
+            output_error_norm=float(output_error_norm),
+            finite_difference_steps=steps,
+            sensitivity_error_bounds=sensitivity['error_bounds'],
+            resolution_floor=sensitivity['floor'],
+            singular_values=sensitivity['singular_values'],
+            condition_number=sensitivity['condition_number'],
+            collinearity_index=sensitivity['collinearity_index'],
+            unresolved_directions=sensitivity['unresolved'],
+            weakest_direction=sensitivity['weakest'],
+            unresolved_parameters=sensitivity['unresolved_parameters'],
+            zero_information=sensitivity['zero_information'],
+            identifiable=not undefined and not sensitivity['unresolved'],
+            convergence=None if convergence is None else {
+                'success': convergence.get('success'),
+                'message': convergence.get('message'),
+                'tolerances': convergence.get('tolerances')},
+        )
+
+    @property
+    def fisher_information(self) -> np.ndarray:
+        """Return the Fisher information under the noise assumption.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``information_matrix / residual_mean_square`` when
+            ``variance_scale_estimated`` (the error variance scale is
+            ``s2``), all NaN if ``s2`` is zero or not finite; else
+            ``information_matrix`` itself (absolute weights). Shape ``(n,
+            n)``, entry ``(i, j)`` in [1 / (p_i * p_j)] for dimensionless
+            weighted residuals or the estimated-scale form. When the
+            covariance is available it equals ``inv(covariance)`` up to
+            rounding. A new read-only array.
+        """
+        if not self.variance_scale_estimated:
+            return _read_only(self.information_matrix)
+        scale = self.residual_mean_square  # [r**2]
+        if not (np.isfinite(scale) and scale > 0):
+            return _read_only(np.full(self.information_matrix.shape,
+                                      np.nan))
+        with np.errstate(over='ignore'):
+            return _read_only(self.information_matrix / scale)
+
+    def summary(self) -> str:
+        """Return a human-readable account of the report.
+
+        Returns
+        -------
+        str
+            Lines in this order: a non-convergence warning first when the
+            fit did not converge; the noise assumption; the convergence
+            status; parameters at active bounds; the identifiability verdict
+            with the unavailable-covariance diagnostic, the unresolved
+            directions and the zero-information parameters; the weakest
+            direction with the collinearity index, condition number and
+            resolution floor; then a parameter table (estimate, standard
+            error, relative standard error, interval, t ratio,
+            significance).
+        """
+        lines = []
+        success = (None if self.convergence is None
+                   else self.convergence['success'])
+        message = (None if self.convergence is None
+                   else self.convergence['message'])
+        if success is False:
+            lines.append(
+                f"FIT DID NOT CONVERGE ({message}): every quantity below "
+                "describes the last accepted iterate, not a converged "
+                "estimate.")
+        lines.append(f"Noise assumption: {self.noise_assumption}")
+        if success is None:
+            lines.append("Convergence: not reported by the optimizer.")
+        else:
+            state = 'converged' if success else 'NOT converged'
+            lines.append(f"Convergence: {state} ({message}).")
+        if self.active_bounds:
+            lines.append(
+                "ACTIVE BOUNDS: "
+                f"{', '.join(self.active_bounds)} at a bound. The "
+                "linearized analysis assumes an interior optimum, so their "
+                "intervals and significance are not reported (NaN / "
+                "False) and their standard errors are not valid.")
+
+        names = list(self.parameter_names)
+        floor = (f"resolution floor {self.resolution_floor:.3g}"
+                 if np.isfinite(self.resolution_floor)
+                 else "resolution floor unavailable")
+        if self.identifiable:
+            lines.append(
+                "Identifiability: the parameters are locally identifiable "
+                f"from the observed data ({floor}).")
+            if self.covariance_diagnostic is not None:
+                lines.append("  Uncertainty unavailable: "
+                             f"{self.covariance_diagnostic}")
+        else:
+            lines.append(
+                "Identifiability: NOT IDENTIFIABLE. The standard errors and "
+                "intervals below are not precise estimates of the "
+                "parameter uncertainty.")
+            if self.covariance_diagnostic is not None:
+                lines.append(f"  Covariance unavailable: "
+                             f"{self.covariance_diagnostic}")
+            for direction in self.unresolved_directions:
+                vector = np.array(direction.components)  # [-]
+                if np.isnan(direction.singular_value):
+                    reason = "unresolved parameter"
+                elif direction.singular_value == 0 and np.count_nonzero(
+                        vector) == 1:
+                    reason = "zero information"
+                else:
+                    reason = (f"singular value "
+                              f"{direction.singular_value:.3g} <= {floor}, "
+                              "or s**2 <= eps * s_max**2")
+                lines.append(
+                    f"  Unresolved direction ({reason}): "
+                    f"{_format_direction(vector, names)}")
+        if self.unresolved_parameters:
+            lines.append(
+                "  Unresolved parameters (sensitivity error bound >= the "
+                "sensitivity itself, consistent with no effect): "
+                f"{', '.join(self.unresolved_parameters)}")
+        if self.zero_information:
+            lines.append("  Zero information (no effect on any observed "
+                         f"entry): {', '.join(self.zero_information)}")
+        if self.weakest_direction is not None:
+            weakest = self.weakest_direction
+            vector = np.array(weakest.components)  # [-]
+            value = ("unresolved parameter, no singular value assigned"
+                     if np.isnan(weakest.singular_value) else
+                     f"smallest singular value {weakest.singular_value:.3g} "
+                     "of the scaled Jacobian")
+            lines.append(
+                f"Weakest direction ({value}): "
+                f"{_format_direction(vector, names)}; collinearity index "
+                f"(Brun et al., 2001) {self.collinearity_index:.3g}, scaled "
+                f"condition number {self.condition_number:.3g}, {floor}.")
+
+        alpha_pct = 100 * self.alpha  # [%]
+        lines.append(
+            f"{'parameter':<14} {'estimate':>12} {'std error':>12} "
+            f"{'rel. SE':>10} {f'{alpha_pct:g}% CI lower':>14} "
+            f"{f'{alpha_pct:g}% CI upper':>14} {'t ratio':>10} "
+            f"{'signif.':>8}")
+        for ind, name in enumerate(names):
+            mark = ('n/a' if np.isnan(self.t_ratios[ind])
+                    else 'yes' if self.significant[ind] else 'no')
+            lines.append(
+                f"{name:<14} {self.estimates[ind]:>12.5g} "
+                f"{self.standard_errors[ind]:>12.4g} "
+                f"{self.relative_standard_errors[ind]:>10.3g} "
+                f"{self.confidence_intervals[ind, 0]:>14.5g} "
+                f"{self.confidence_intervals[ind, 1]:>14.5g} "
+                f"{self.t_ratios[ind]:>10.3g} {mark:>8}")
+
+        return '\n'.join(lines)
+
+    def unresolved_flags(self) -> np.ndarray:
+        """Return which parameters the data do not resolve.
+
+        Returns
+        -------
+        numpy.ndarray
+            Boolean, shape ``(n,)``, in ``parameter_names`` order: True for
+            the parameters in ``unresolved_parameters`` or
+            ``zero_information`` and for every parameter whose component in
+            an unresolved direction does not round to zero at the three
+            decimals of the printed directions; False otherwise. All False
+            when ``J`` is not finite (no direction analysis).
+        """
+        flags = np.array([name in self.unresolved_parameters
+                          or name in self.zero_information
+                          for name in self.parameter_names])
+        for direction in self.unresolved_directions:
+            flags |= np.round(np.array(direction.components),
+                              _DIRECTION_DECIMALS) != 0
+        return flags
+
+    def to_frame(self) -> pd.DataFrame:
+        """Return the per-parameter quantities as a table.
+
+        Returns
+        -------
+        pandas.DataFrame
+            Indexed by parameter name, in ``parameter_names`` order, with
+            columns ``estimate`` and ``standard_error`` (parameter units),
+            ``relative_standard_error`` [-], ``ci_lower`` and ``ci_upper``
+            (parameter units, confidence ``alpha``), ``t_ratio`` [-],
+            ``significant`` (nullable ``boolean``: missing where
+            ``t_ratio`` is NaN and for unresolved parameters),
+            ``unresolved`` (bool, ``unresolved_flags``),
+            ``zero_information`` (bool) and ``active_bound`` (nullable
+            ``boolean``: missing when the optimizer does not report active
+            bounds). ``DataFrame.attrs`` holds ``'identifiable'`` (bool) and
+            ``'covariance_diagnostic'`` (str or None).
+        """
+        unresolved = self.unresolved_flags()
+        significant = pd.array(
+            [None if np.isnan(ratio) or loose else bool(flag)
+             for ratio, flag, loose in zip(self.t_ratios, self.significant,
+                                           unresolved)],
+            dtype='boolean')
+        active = pd.array(
+            [None if self.active_bounds is None
+             else name in self.active_bounds
+             for name in self.parameter_names], dtype='boolean')
+        frame = pd.DataFrame(
+            {'estimate': self.estimates,
+             'standard_error': self.standard_errors,
+             'relative_standard_error': self.relative_standard_errors,
+             'ci_lower': self.confidence_intervals[:, 0],
+             'ci_upper': self.confidence_intervals[:, 1],
+             't_ratio': self.t_ratios,
+             'significant': significant,
+             'unresolved': unresolved,
+             'zero_information': [name in self.zero_information
+                                  for name in self.parameter_names],
+             'active_bound': active},
+            index=pd.Index(self.parameter_names, name='parameter'))
+        frame.attrs['identifiable'] = bool(self.identifiable)
+        frame.attrs['covariance_diagnostic'] = self.covariance_diagnostic
+        return frame
+
+
+def _scaled_sensitivity(jac: np.ndarray, names: tuple,
+                        jacobian_rtol: np.ndarray, output_error_norm: float,
+                        steps: Optional[np.ndarray]) -> dict:
+    """Analyze the Jacobi-scaled Jacobian of an accepted fit.
+
+    Parameters
+    ----------
+    jac : numpy.ndarray
+        Weighted residual Jacobian ``J``, shape ``(n, n_entries)``; entry
+        ``(i, k)`` in [weighted residual k unit / parameter i unit].
+    names : tuple of str
+        Unique parameter names in the row order of ``J``.
+    jacobian_rtol : numpy.ndarray
+        Row-relative accuracy [-] of each sensitivity row, shape ``(n,)``.
+    output_error_norm : float
+        Bound on the whitened output errors [weighted residual unit]; read
+        when ``steps`` is given.
+    steps : numpy.ndarray or None
+        Forward-difference steps, shape ``(n,)`` [parameter units], for a
+        finite-difference Jacobian; None otherwise.
+
+    Returns
+    -------
+    dict
+        ``'error_bounds'``: ``jacobian_rtol_i`` plus, with ``steps``,
+        ``2 * output_error_norm / (h_i * ||J_i||)`` [-] for the nonzero rows,
+        NaN for zero rows; ``'unresolved_parameters'``: names of the nonzero
+        rows with ``e_i / ||J_i|| >= 1``; ``'zero_information'``: names of
+        the exactly zero rows; ``'singular_values'``, shape ``(n,)`` [-]:
+        those of ``D J`` restricted to the remaining (resolved) rows,
+        descending, then NaN for each unresolved parameter and 0 for each
+        zero-information parameter (all NaN when ``J`` is not finite);
+        ``'floor'``: root sum of squares of the remaining rows' bounds [-];
+        ``'condition_number'`` ``(s_max / s_min)**2`` and
+        ``'collinearity_index'`` ``1 / s_min`` [-] (infinite when any
+        parameter is unresolved or has zero information); ``'unresolved'``:
+        tuple of ``ParameterDirection``, the directions of the remaining
+        rows with ``s <= floor`` or ``s**2 <= eps * s_max**2``, then the
+        unit directions of the unresolved and zero-information parameters;
+        ``'weakest'``: the last direction in that order (None when ``J`` is
+        not finite).
+
+    Notes
+    -----
+    A row whose error bound is at least its own norm is consistent with a
+    zero row under the declared accuracy, so it is set aside like a
+    zero-information row: each such parameter is its own unit direction,
+    and the remaining rows are decomposed and bounded by Weyl's inequality
+    without it, so its error does not raise the floor of the others.
+    """
+    num_params = len(names)  # [-]
+    zero_rows = ~jac.any(axis=1)  # NaN entries count as nonzero
+    zero_information = tuple(names[ind] for ind in np.flatnonzero(zero_rows))
+    if not np.isfinite(jac).all():
+        return {'singular_values': np.full(num_params, np.nan),
+                'condition_number': np.nan, 'collinearity_index': np.nan,
+                'error_bounds': np.full(num_params, np.nan),
+                'floor': np.nan, 'unresolved': (), 'weakest': None,
+                'unresolved_parameters': (),
+                'zero_information': zero_information}
+
+    nonzero = np.flatnonzero(~zero_rows)
+    error_bounds = np.full(num_params, np.nan)  # [-]
+    error_bounds[nonzero] = jacobian_rtol[nonzero]  # [-], first term
+    if steps is not None and nonzero.size:
+        # [-]; two outputs, each with an error up to output_error_norm,
+        # are differenced (Nocedal & Wright eq. 8.5, 2 u L_f / h). Divide
+        # the norms before the steps so that magnitudes near the
+        # floating-point limits cancel first (inf means unresolved).
+        with np.errstate(over='ignore', divide='ignore', invalid='ignore'):
+            rounding = (2 * (output_error_norm / _row_norms(jac[nonzero]))
+                        / steps[nonzero])
+        error_bounds[nonzero] += np.nan_to_num(rounding, nan=np.inf)
+    # Rows whose error may be as large as the row itself [-]
+    swamped = np.zeros(num_params, dtype=bool)
+    swamped[nonzero] = error_bounds[nonzero] >= 1
+    kept = ~zero_rows & ~swamped
+    unresolved_parameters = tuple(names[ind]
+                                  for ind in np.flatnonzero(swamped))
+
+    # The kept rows, with the set-aside rows zeroed, so that
+    # _jacobi_scaled_rows treats both like zero rows.
+    kept_jac = np.where(kept[:, np.newaxis], jac, 0.0)  # [r_k/p_i]
+    _, informed, scaled_jac = _jacobi_scaled_rows(kept_jac)
+    num_informed = len(informed)  # [-]
+    floor = _scaled_norm(error_bounds[informed])  # [-], 0 when empty
+    directions = np.zeros((num_params, num_params))  # [-], columns
+    singular = np.zeros(num_params)  # [-]
+    if num_informed:
+        # [-]; left singular vectors of D J are parameter-space directions
+        left, singular_informed, _ = np.linalg.svd(scaled_jac,
+                                                   full_matrices=False)
+        directions[np.ix_(informed, np.arange(num_informed))] = left
+        singular[:num_informed] = singular_informed
+    set_aside = np.concatenate((np.flatnonzero(swamped),
+                                np.flatnonzero(zero_rows)))
+    for offset, ind in enumerate(set_aside):
+        directions[ind, num_informed + offset] = 1.0
+    num_swamped = int(swamped.sum())  # [-]
+    singular[num_informed:num_informed + num_swamped] = np.nan
+
+    largest = singular[0] if num_informed else 0.0  # [-]
+    resolved = singular[:num_informed]  # [-]
+    if set_aside.size or not num_informed or resolved[-1] == 0:
+        condition, collinearity = np.inf, np.inf  # [-]
+    else:
+        condition = (largest / resolved[-1]) ** 2  # [-]
+        collinearity = 1 / resolved[-1]  # [-]
+    unresolved_mask = np.ones(num_params, dtype=bool)
+    unresolved_mask[:num_informed] = (
+        (resolved <= floor) | (resolved ** 2 <= _FLOAT_EPS * largest ** 2))
+
+    def direction(column: int) -> ParameterDirection:
+        """Return the sign-normalized direction of one column.
+
+        Parameters
+        ----------
+        column : int
+            Column of ``directions``: resolved rows in descending
+            singular-value order, then the set-aside parameters.
+
+        Returns
+        -------
+        ParameterDirection
+            Components [-] in parameter order and the singular value [-]
+            (NaN for an unresolved parameter, 0 for zero information).
+        """
+        vector = _sign_normalized(directions[:, column])  # [-]
+        return ParameterDirection(tuple(names), tuple(vector.tolist()),
+                                  float(singular[column]))
+
+    return {'singular_values': singular,
+            'condition_number': float(condition),
+            'collinearity_index': float(collinearity),
+            'error_bounds': error_bounds, 'floor': floor,
+            'unresolved': tuple(direction(column) for column
+                                in np.flatnonzero(unresolved_mask)),
+            'weakest': direction(num_params - 1),
+            'unresolved_parameters': unresolved_parameters,
+            'zero_information': zero_information}

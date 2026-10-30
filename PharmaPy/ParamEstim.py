@@ -25,13 +25,15 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 import pandas as pd
 from PharmaPy.jac_module import (numerical_jac_data, dx_jac_p, numerical_jac,
+                                 DEFAULT_OUTPUT_RTOL,
                                  PARAMETER_MAGNITUDE_FLOOR)
 from PharmaPy import Gaussians as gs
 
 from PharmaPy.LevMarq import levenberg_marquardt
 from PharmaPy.Commons import plot_sens, reorder_sens
-from PharmaPy.StatsModule import (StatisticsClass, _information_inverse,
-                                  _require_defined_covariance)
+from PharmaPy.StatsModule import (IdentifiabilityReport, StatisticsClass,
+                                  _linearized_covariance, _parameter_scale,
+                                  _require_defined_covariance, _scaled_norm)
 
 try:
     from cyipopt import minimize_ipopt
@@ -1412,6 +1414,9 @@ class _CompiledExperiments(NamedTuple):
         Callback keywords per experiment.
     num_data : list of int
         Observed entries per experiment.
+    measurement_units : list of str or None
+        Declared unit of each measurement column (``Measurement.units``),
+        None where no measurement of that name declares one.
     """
 
     measurement_names: list
@@ -1423,6 +1428,7 @@ class _CompiledExperiments(NamedTuple):
     args_fun: list
     kwargs_fun: list
     num_data: list
+    measurement_units: list
 
 
 def _validate_output_names(output_names) -> Optional[tuple]:
@@ -1784,7 +1790,9 @@ def _compile_experiments(experiments: dict,
         fields=[column_fields[name][0] for name in measurement_names],
         x_model=x_model, x_masks=x_masks, y_data=y_data,
         residual_std=residual_std if with_std else None,
-        args_fun=args_fun, kwargs_fun=kwargs_fun, num_data=num_data)
+        args_fun=args_fun, kwargs_fun=kwargs_fun, num_data=num_data,
+        measurement_units=[declared.get(('units', 'name', name), (None,))[0]
+                           for name in measurement_names])
 
 
 def _holds_measurements(x_data) -> bool:
@@ -2685,12 +2693,10 @@ class ParameterEstimation:
             param_seed = param_seed[np.newaxis]
 
         if dx_finitediff is None:
-            # Relative accuracy assumed for the model outputs [-]: the
-            # default rtol of Assimulo's CVode (1e-6 in Assimulo 3.4), the
-            # integrator of PharmaPy's ODE unit models unless sundials
-            # options override it. The relative step is its square root,
-            # 1e-3, as in the CVODES parameter increment (dx_jac_p Notes).
-            rel_tol = 1e-6
+            # Relative accuracy assumed for the model outputs [-]; the
+            # relative step is its square root, 1e-3 (rationale at
+            # jac_module.DEFAULT_OUTPUT_RTOL).
+            rel_tol = DEFAULT_OUTPUT_RTOL
             # Parameter magnitude below which the step stops shrinking
             # [parameter units], 1e-6; its rationale is documented at
             # jac_module.PARAMETER_MAGNITUDE_FLOOR. Every |p| >= 1e-6 keeps
@@ -2891,6 +2897,10 @@ class ParameterEstimation:
         # Compiled layout; None for the analyze_data layout.
         self._measurement_names = (None if compiled is None
                                    else list(compiled.measurement_names))
+        # Declared unit (str) or None per measurement column, read by
+        # get_identifiability; None for the analyze_data layout.
+        self._measurement_units = (None if compiled is None
+                                   else list(compiled.measurement_units))
         self._measured_fields = (None if compiled is None
                                  else list(compiled.fields))
         # Legacy input with one measured column ignores its field for
@@ -2935,6 +2945,9 @@ class ParameterEstimation:
 
         num_columns = (len(self.measured_ind) if compiled is None
                        else len(self._measured_fields))  # [-]
+        # Whether the caller supplied weight_matrix (even the identity);
+        # read by get_identifiability to state the noise model.
+        self._weight_matrix_given = weight_matrix is not None
         if weight_matrix is None:
             weight_matrix = np.eye(num_columns)  # [-]
 
@@ -4594,34 +4607,420 @@ class ParameterEstimation:
         jac = self.info_opt['jac']
         resid = self.info_opt['fun']
 
-        dof = self.num_data_total - self.num_params
-        mse = 1 / dof * np.dot(resid.T, resid)
-
-        # inv(J @ J.T) [p_i*p_j/r**2], computed as before #532 when defined;
-        # NaN when the covariance is undefined.
-        inverse, diagnostic = _information_inverse(jac, self.name_params)
+        dof = self.num_data_total - self.num_params  # [-]
+        # [p_i*p_j] with include_mse, [p_i*p_j/r**2] without; correlation
+        # [-]. Both all NaN, with a diagnostic, when undefined.
+        covar, correlation, _, diagnostic = _linearized_covariance(
+            jac, resid, dof, self.name_params, include_mse)
         if diagnostic is not None:
             warnings.warn(diagnostic, RuntimeWarning,
                           stacklevel=_user_stacklevel())
-            # All NaN, in the unit of the requested form: [p_i*p_j] with
-            # include_mse, [p_i*p_j/r**2] without.
-            covar = inverse
-            correlation = np.full_like(inverse, np.nan)  # [-]
-        else:
-            if include_mse:
-                covar = mse * inverse  # [p_i*p_j], scaled by s2
-
-            else:
-                covar = inverse  # [p_i*p_j/r**2]
-            # Correlation matrix
-            sigma = np.sqrt(covar.diagonal())
-            d_matrix = np.diag(1/sigma)
-            correlation = d_matrix.dot(covar).dot(d_matrix)
 
         self.covar_params = covar
         self.correl_params = correlation
 
         return covar
+
+    def _noise_model(self) -> str:
+        """Return the measurement-error weighting of this estimator.
+
+        Returns
+        -------
+        {'declared_uncertainty', 'weight_matrix', 'identity'}
+            ``'declared_uncertainty'`` when measurements declare standard
+            deviations (``_residual_std`` is not None), ``'weight_matrix'``
+            when ``weight_matrix`` was supplied, also the identity (a
+            statement that the errors have standard deviation 1 in each
+            measured unit), and ``'identity'`` for the unweighted fit.
+
+        Notes
+        -----
+        Reads ``_weight_matrix_given``, which every estimator built by this
+        version stores at construction.
+        """
+        if self._residual_std is not None:
+            return 'declared_uncertainty'
+        return 'weight_matrix' if self._weight_matrix_given else 'identity'
+
+    def _jacobian_source(self) -> str:
+        """Return the origin of the weighted residual Jacobian.
+
+        Returns
+        -------
+        {'model', 'jac_fun', 'finite_difference'}
+            ``'model'`` when the model callback returns sensitivities with
+            its outputs (``sens_second`` is stored), ``'jac_fun'`` when a
+            Jacobian callback was given, ``'finite_difference'`` otherwise;
+            the precedence of ``get_gradient``.
+        """
+        if self.sens_second is not None:
+            return 'model'
+        if self.jac_fun is not None:
+            return 'jac_fun'
+        return 'finite_difference'
+
+    def _finite_difference_steps(self) -> np.ndarray:
+        """Return the forward-difference steps of the optimized parameters.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``|dx_finitediff|`` evaluated, as ``get_gradient`` does, at the
+            full parameter vector of the accepted fit, for the optimized
+            parameters, shape ``(num_params,)`` [parameter units].
+        """
+        # [parameter units], the vector at which get_gradient evaluates
+        # dx_finitediff
+        params_full = np.asarray(self.reconstruct_params(self.params_convg),
+                                 dtype=float)
+        # [parameter units], one step per entry of params_full
+        steps = (self.dx_fd(params_full) if callable(self.dx_fd)
+                 else np.ones_like(params_full) * self.dx_fd)
+        # [parameter units], steps of the optimized parameters
+        return np.abs(np.asarray(steps, dtype=float)[self.map_variable])
+
+    def _default_jacobian_rtol(self, source: str,
+                               steps: Optional[np.ndarray],
+                               param_scale) -> np.ndarray:
+        """Return the default row-relative accuracy of the sensitivities.
+
+        Parameters
+        ----------
+        source : {'model', 'jac_fun', 'finite_difference'}
+            Origin of the Jacobian (``_jacobian_source``).
+        steps : numpy.ndarray or None
+            Forward-difference steps ``h_i`` of the optimized parameters,
+            shape ``(num_params,)`` [parameter units]; read for
+            ``'finite_difference'``.
+        param_scale : float, array_like or None
+            Typical magnitude of the parameters [parameter units]; None uses
+            ``|params_convg|``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(num_params,)`` [-]: machine epsilon for ``'model'`` and
+            ``'jac_fun'`` (derivatives exact to rounding); for
+            ``'finite_difference'`` the relative steps ``h_i / scale_i``,
+            the truncation error of a forward difference relative to the
+            derivative (see Notes).
+
+        Raises
+        ------
+        ValueError
+            If a finite-difference relative step is undefined (a parameter
+            at zero without ``param_scale``), not finite or not in ``(0,
+            1)``; pass ``param_scale`` or ``jacobian_rtol`` explicitly then.
+
+        Notes
+        -----
+        The forward difference ``(f(p + h) - f(p)) / h`` has the truncation
+        error ``(h / 2) |f''|`` (Nocedal and Wright, *Numerical
+        Optimization*, 2nd ed., Springer, 2006, Sec. 8.1, eq. 8.5, first
+        term). Under the well-scaled-curvature assumption ``scale |f''| <~
+        |f'|``, that error relative to the derivative is at most about
+        ``h / scale``, independent of any additive offset of ``f``. The
+        rounding term of eq. 8.5 enters ``IdentifiabilityReport`` through
+        ``output_rtol``.
+        """
+        num_params = int(self.num_params)  # [-]
+        if source != 'finite_difference':
+            return np.full(num_params, float(np.finfo(float).eps))
+        try:
+            scale = _parameter_scale(
+                np.asarray(self.params_convg, dtype=float), param_scale,
+                list(self.name_params))  # [parameter units]
+        except ValueError as error:
+            raise ValueError(
+                f"{error}. It sets the relative step |dx| / scale, the "
+                "default jacobian_rtol of a finite-difference Jacobian; "
+                "alternatively pass jacobian_rtol") from error
+        relative_steps = steps / scale  # [-]
+        if not (np.isfinite(relative_steps).all()
+                and (relative_steps > 0).all() and (relative_steps < 1).all()):
+            raise ValueError(
+                "The default jacobian_rtol of the finite-difference "
+                "Jacobian, the relative steps |dx| / scale = "
+                f"{relative_steps.tolist()} of {list(self.name_params)}, is "
+                "not in (0, 1); pass jacobian_rtol explicitly")
+        return relative_steps
+
+    def _weighted_predictions(self) -> np.ndarray:
+        """Return the accepted model outputs weighted like the residuals.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(len(info_opt['fun']),)`` [weighted residual unit]: the
+            model outputs of each experiment at the accepted parameters
+            (``y_runs``, which ``optimize_fn`` refreshes there for every
+            method) passed through ``_weight_sample_rows`` (declared
+            standard deviations or the ``weight_matrix`` roots), zero where
+            unobserved, in the residual layout (experiment, measurement
+            column, sample).
+
+        Notes
+        -----
+        The raw outputs are used directly rather than residuals plus
+        observations, whose sum cancels when the predictions are far below
+        the data. ``y_runs`` describes the last ``get_objective``
+        evaluation with ``set_self=True``: an explicit evaluation after the
+        fit replaces it.
+        """
+        parts = []
+        for outputs, x_mask, std in zip(self.y_runs, self.x_masks,
+                                        self._residual_std_runs()):
+            # [model state units]; unobserved entries are not read
+            predictions = np.asarray(outputs, dtype=float)
+            weighted = self._weight_sample_rows(predictions, x_mask, std)
+            parts.append(weighted.T.ravel())
+        return np.concatenate(parts)
+
+    def _residual_blocks(self, values: np.ndarray) -> list:
+        """Split a vector in the residual layout into sample-row blocks.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            Shape ``(len(info_opt['fun']),)``, in the layout of the weighted
+            residuals [weighted residual unit].
+
+        Returns
+        -------
+        list of tuple
+            Per experiment ``(rows, x_mask)``: ``rows`` of shape ``(n_times,
+            n_columns)`` (sample rows, measurement columns) and the
+            observation mask (None when every entry is observed).
+        """
+        blocks = []
+        start = 0  # [-]
+        for observations, x_mask in zip(self.y_data, self.x_masks):
+            num_times, num_columns = np.shape(observations)  # [-]
+            stop = start + num_times * num_columns  # [-]
+            # [weighted residual unit], (n_times, n_columns)
+            blocks.append((values[start:stop].reshape(num_columns,
+                                                      num_times).T, x_mask))
+            start = stop
+        return blocks
+
+    def _diagonal_weighting(self) -> bool:
+        """Return whether the residual whitening is entry by entry.
+
+        Returns
+        -------
+        bool
+            True for declared standard deviations and for a diagonal
+            ``weight_matrix`` (including the identity default); False for a
+            correlated ``weight_matrix``.
+        """
+        if self._residual_std is not None:
+            return True
+        covariance = self._measurement_covariance  # [u_i * u_j]
+        return not np.count_nonzero(covariance - np.diag(np.diag(covariance)))
+
+    def _output_error_scale(self, weighted_predictions: np.ndarray) -> float:
+        """Bound the whitened effect of a relative output error.
+
+        Parameters
+        ----------
+        weighted_predictions : numpy.ndarray
+            Weighted model predictions in the residual layout, shape
+            ``(len(info_opt['fun']),)`` [weighted residual unit].
+
+        Returns
+        -------
+        float
+            Upper bound [weighted residual unit] on the norm of the whitened
+            output errors per unit relative output error: errors of at most
+            ``r * |y_j|`` in each raw prediction ``y_j`` give whitened errors
+            of norm at most ``r`` times this value. For diagonal weighting it
+            is ``||W |y|||``, which equals ``||y_w||`` (exact). For a
+            correlated ``weight_matrix`` it is ``||W||_2 * ||y||`` over the
+            observed entries, with ``||W||_2`` the largest singular value of
+            the whitening factors used (``sigma_inv`` for fully observed
+            sample rows, the marginal roots for partially observed ones),
+            because whitening may amplify errors in directions that the
+            predictions themselves do not occupy.
+
+        Notes
+        -----
+        Norms are computed scaled, free of overflow and underflow
+        (``StatsModule._scaled_norm``). No state is modified: marginal roots
+        are computed afresh rather than cached.
+        """
+        if self._diagonal_weighting():
+            return _scaled_norm(weighted_predictions)
+
+        largest_gain = 0.0  # [1/u], largest singular value of the roots
+        raw_parts = []  # [measurement units], observed raw predictions
+        for rows, x_mask in self._residual_blocks(weighted_predictions):
+            observed = (np.ones(rows.shape, dtype=bool) if x_mask is None
+                        else np.asarray(x_mask, dtype=bool))
+            patterns, pattern_of_row = np.unique(observed, axis=0,
+                                                 return_inverse=True)
+            for pattern_index, pattern in enumerate(patterns):
+                if not pattern.any():
+                    continue
+                root = (self.sigma_inv if pattern.all()
+                        else _measurement_precision_root(
+                            self._measurement_covariance[
+                                np.ix_(pattern, pattern)]))  # [1/u_i]
+                largest_gain = max(largest_gain,
+                                   float(np.linalg.norm(root, 2)))
+                selected = pattern_of_row.ravel() == pattern_index
+                # [measurement units]: rows_w = raw @ root, solved for raw
+                raw = np.linalg.solve(root.T, rows[selected][:, pattern].T)
+                raw_parts.append(raw.ravel())
+        return largest_gain * _scaled_norm(np.concatenate(raw_parts))
+
+    def get_identifiability(
+            self, alpha: float = 0.95, include_mse: bool = True,
+            jacobian_rtol: Optional[Union[float, Sequence[float],
+                                          np.ndarray]] = None,
+            output_rtol: float = DEFAULT_OUTPUT_RTOL,
+            param_scale: Optional[Union[float, Sequence[float],
+                                        np.ndarray]] = None
+    ) -> IdentifiabilityReport:
+        """Report parameter uncertainty and practical identifiability.
+
+        Builds an ``IdentifiabilityReport`` from the accepted fit only
+        (``info_opt['jac']``, ``info_opt['fun']``, ``params_convg``,
+        ``name_params``, ``num_data_total``, the observations and the
+        weights): the explicit noise assumption, the information matrix
+        (the hand-off to experiment design, #355), the covariance, standard
+        errors, correlations and Student-t intervals of ``get_covariance``
+        and ``get_confidence_intervals``, the singular values, condition
+        number and collinearity index of the Jacobi-scaled Jacobian, the
+        parameters and directions the data do not resolve given the
+        accuracy of the sensitivities, the parameters at active bounds and
+        the optimizer's convergence outcome. Nothing is refitted, no model
+        is evaluated, and the estimator (``covar_params``,
+        ``correl_params``, ``params_convg``, ``info_opt``, ...) is not
+        modified.
+
+        Parameters
+        ----------
+        alpha : float, optional
+            Confidence level [-] in ``(0, 1)`` of the intervals and of the
+            significance test. The default is 0.95.
+        include_mse : bool, optional
+            If True (the default), declared uncertainties or the
+            ``weight_matrix`` are relative weights whose common scale is
+            re-estimated from the residual mean square; if False they are
+            absolute (see ``get_covariance``).
+        jacobian_rtol : float or array_like, optional
+            Row-relative accuracy [-] of the sensitivities, in ``(0, 1)``,
+            for every parameter or one per optimized parameter:
+            ``||dJ_i|| <= jacobian_rtol_i * ||J_i||``. The default None uses
+            machine epsilon for model-returned sensitivities and
+            ``jac_fun`` (exact to rounding; for sensitivities integrated by
+            an ODE solver pass its ``rtol``, which is how CVODES controls
+            the sensitivity error) and the relative forward-difference step
+            ``h_i / scale_i`` for finite differences (truncation term).
+        output_rtol : float, optional
+            Relative accuracy [-] of the model outputs, in ``(0, 1)``,
+            used only for finite-difference Jacobians (rounding term). The
+            default ``jac_module.DEFAULT_OUTPUT_RTOL`` (1e-6, CVode's default
+            rtol) is the accuracy the default step ``sqrt(1e-6) * |p|`` is
+            designed for; closed-form models can pass machine epsilon and
+            ODE models their solver ``rtol``.
+        param_scale : float or array_like, optional
+            Positive finite typical magnitude of every optimized parameter,
+            or one per parameter, in the parameter units, for the default
+            finite-difference ``jacobian_rtol``. The default None uses
+            ``|params_convg|``; it is required when an estimate is exactly
+            zero and that default is used.
+
+        Returns
+        -------
+        IdentifiabilityReport
+            Immutable report; its attributes document units, shapes and
+            meaning. ``identifiable`` is False when the covariance is
+            undefined (its numbers are then NaN), any parameter or
+            direction is unresolved (its numbers are then kept but not
+            precise).
+
+        Raises
+        ------
+        AttributeError
+            If no fit has been run, so ``info_opt`` does not exist.
+        TypeError
+            If ``alpha``, ``jacobian_rtol``, ``output_rtol`` or
+            ``param_scale`` is not real, or ``include_mse`` is not a bool.
+        ValueError
+            If ``alpha``, ``output_rtol`` or ``jacobian_rtol`` is not finite
+            and strictly between 0 and 1 or has the wrong shape;
+            ``param_scale`` is not positive and finite or has the wrong
+            shape; the default finite-difference ``jacobian_rtol`` is
+            undefined (an estimate at exactly zero without ``param_scale``)
+            or not in ``(0, 1)`` (a relative step of at least 1); parameter
+            names repeat; or the number of observed entries does not exceed
+            ``num_params``.
+
+        Notes
+        -----
+        The weighted predictions are the accepted model outputs
+        (``y_runs``) weighted like the residuals
+        (``_weighted_predictions``); ``MultipleCurveResolution`` weights its
+        curve-resolved spectra and non-spectral predictions in its residual
+        sign convention, which leaves the norms unchanged.
+        ``_output_error_scale`` turns them into the whitened output-error
+        bound (exact for diagonal weights, an operator-norm bound for
+        correlated ones), and the forward difference of two such outputs
+        is wrong by at most twice it.
+
+        Active bounds are read from ``info_opt['active_mask']`` of
+        ``scipy.optimize.least_squares``; Levenberg-Marquardt ignores
+        bounds (#533) and IPOPT fits store no active set, so for them
+        ``active_bounds`` is None.
+
+        No warning is issued for an unavailable covariance: the report
+        carries the reason in ``covariance_diagnostic``. Unlike
+        ``get_covariance``, which keeps its earlier behaviour, the report
+        does not present a covariance computed with a zero or non-finite
+        residual mean square (``include_mse=True``), one that is not
+        finite, or one with a variance that is not positive.
+        """
+        info = self.info_opt
+        names = list(self.name_params)
+        estimates = np.asarray(self.params_convg, dtype=float)  # [p_i]
+        if param_scale is not None:
+            _parameter_scale(estimates, param_scale, names)  # validation
+        source = self._jacobian_source()
+        steps = (self._finite_difference_steps()
+                 if source == 'finite_difference' else None)  # [p_i]
+        if jacobian_rtol is None:
+            jacobian_rtol = self._default_jacobian_rtol(
+                source, steps, param_scale)  # [-]
+        # [weighted residual unit], weighted model predictions
+        predictions = self._weighted_predictions()
+        # [weighted residual unit] per unit relative output error
+        error_scale = self._output_error_scale(predictions)
+        units = self._measurement_units
+        columns = self._measurement_names
+        measurement_units = (None if columns is None or units is None
+                             else dict(zip(columns, units)))
+        noise_model = self._noise_model()
+        weight_identity = noise_model == 'weight_matrix' and np.array_equal(
+            self._measurement_covariance,
+            np.eye(self._measurement_covariance.shape[0]))
+        active_mask = info.get('active_mask')
+        active_bounds = (None if active_mask is None else
+                         [name for name, flag in zip(names, active_mask)
+                          if flag != 0])
+        convergence = ({'success': info.get('success'),
+                        'message': info.get('message'),
+                        'tolerances': info.get('tolerances')}
+                       if 'success' in info else None)
+        return IdentifiabilityReport.from_fit(
+            info['jac'], info['fun'], estimates, names, self.num_data_total,
+            noise_model=noise_model, measurement_units=measurement_units,
+            jacobian_source=source, jacobian_rtol=jacobian_rtol,
+            output_rtol=output_rtol, output_error_scale=error_scale,
+            finite_difference_steps=steps, alpha=alpha,
+            include_mse=include_mse, active_bounds=active_bounds,
+            weight_matrix_is_identity=weight_identity,
+            convergence=convergence)
 
     def plot_data_model(self, **fig_kwargs):
 
@@ -5165,6 +5564,72 @@ class MultipleCurveResolution(ParameterEstimation):
         self._params_mcr_eval = None
         self._mcr_evaluation = None
         self.mult_penalty = mult_penalty  # [objective unit / eps unit**2]
+
+    def _jacobian_source(self) -> str:
+        """Return the origin of the weighted residual Jacobian.
+
+        Returns
+        -------
+        {'model', 'finite_difference'}
+            ``'model'`` when the model callback returns sensitivities with
+            its outputs (``sens_second`` is stored), otherwise
+            ``'finite_difference'``: ``get_gradient`` of this class does not
+            call ``jac_fun``.
+        """
+        if self.sens_second is not None:
+            return 'model'
+        return 'finite_difference'
+
+    def _weighted_predictions(self) -> np.ndarray:
+        """Return the accepted MCR predictions weighted like the residuals.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape ``(len(info_opt['fun']),)`` [weighted residual unit]: the
+            stacked predictions of ``_model_predictions`` (curve-resolved
+            spectra ``C eps`` [-] from ``y_runs``, then the non-spectral
+            model values [model units]; zero where unobserved), each column
+            multiplied by its residual sign (``_residual_signs``: -1
+            spectral, +1 non-spectral) and whitened by
+            ``_weight_sample_rows``, flattened column-major like
+            ``_assemble_residuals``.
+
+        Notes
+        -----
+        The spectral predictions are the raw ``y_runs``. The non-spectral
+        model values are not stored separately: ``_model_predictions``
+        rebuilds them as residuals plus observations, which loses accuracy
+        when they are far below the data.
+        """
+        # [-] spectral, [model units] non-spectral; NaN where unobserved
+        predictions = np.vstack(self._model_predictions())
+        signed = (np.nan_to_num(predictions)
+                  * self._residual_signs(0))  # [-] / [model units]
+        # [weighted residual unit]
+        weighted = self._weight_sample_rows(
+            signed, self._residual_observation_mask())
+        return weighted.T.ravel()
+
+    def _residual_blocks(self, values: np.ndarray) -> list:
+        """Split a vector in the MCR residual layout into sample rows.
+
+        Parameters
+        ----------
+        values : numpy.ndarray
+            Shape ``(len(info_opt['fun']),)``, flattened column-major over
+            the stacked model-grid rows of all experiments, as in
+            ``_assemble_residuals`` [weighted residual unit].
+
+        Returns
+        -------
+        list of tuple
+            One ``(rows, mask)``: ``rows`` of shape ``(sum(len_spectra),
+            n_lambda + n_non)`` and ``_residual_observation_mask()``.
+        """
+        num_rows = int(sum(self.len_spectra))  # [-]
+        rows = values.reshape(-1, num_rows).T  # [weighted residual unit]
+        return [(rows, self._residual_observation_mask())]
 
     def _residual_observation_mask(self) -> Optional[np.ndarray]:
         """Return the observation mask of the stacked MCR residual columns.

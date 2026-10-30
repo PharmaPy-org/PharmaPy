@@ -26,6 +26,15 @@ eps = np.sqrt(np.finfo(float).eps)
 #: including at zero. Pass explicit steps for parameters of smaller scale.
 PARAMETER_MAGNITUDE_FLOOR = 1e-6
 
+#: Relative accuracy assumed for model outputs by the default
+#: finite-difference step of ``ParameterEstimation`` [-]: the default rtol
+#: of Assimulo's CVode (1e-6 in Assimulo 3.4), the integrator of PharmaPy's
+#: ODE unit models unless sundials options override it. The default
+#: relative step is its square root, 1e-3, as in the CVODES parameter
+#: increment (``dx_jac_p`` Notes). ``IdentifiabilityReport`` uses it as the
+#: default ``output_rtol`` of finite-difference Jacobians.
+DEFAULT_OUTPUT_RTOL = 1e-6
+
 
 def dx_jac_x(x, abstol, reltol, eps):
     sigma_zero = 1
