@@ -97,7 +97,7 @@ FIELD_KINDS = ('state', 'algebraic', 'quality_attribute',
 SOURCE_ORIGINS = ('experimental', 'literature', 'synthetic', 'simulation',
                   'unknown')
 #: Optimization methods implemented by ``ParameterEstimation.optimize_fn``.
-OPTIMIZATION_METHODS = ('LM', 'IPOPT')
+OPTIMIZATION_METHODS = ('LM', 'IPOPT', 'scipy', 'least_squares', 'custom')
 #: Sources of the parameter sensitivities of a fit, in the precedence of
 #: ``ParameterEstimation.get_gradient``: sensitivities returned by the model
 #: callback, a user ``jac_fun``, or finite differences.
@@ -138,7 +138,10 @@ _MAX_FLOAT_ITEMSIZE = 8
 #: ``optim_options`` (issue #476): they are not user settings and are set
 #: again on every call, so records omit them.
 _INJECTED_OPTIONS = {'LM': ('full_output', 'verbose'),
-                     'IPOPT': ('print_level',)}
+                     'IPOPT': ('print_level',),
+                     'scipy': ('verbose', 'bounds'),
+                     'least_squares': ('verbose', 'bounds'),
+                     'custom': ('bounds', 'optimizer')}
 #: Parameters of ``levenberg_marquardt`` that are not tunable options: the
 #: start point, the residual and Jacobian callbacks, and the callback
 #: arguments that ``optimize_fn`` passes itself (``args=(True,)``). The
@@ -2971,6 +2974,64 @@ def _weight_matrix_array(weight_matrix, names: list) -> np.ndarray:
     return symmetric
 
 
+def _stored_bounds_to_pairs(raw_bounds, num_optimized: int) -> list:
+    """Convert stored optimizer bounds into ``(lower, upper)`` pairs.
+
+    Parameters
+    ----------
+    raw_bounds : sequence
+        Either SciPy's ``(lower_bounds, upper_bounds)`` 2-tuple or a sequence
+        of ``num_optimized`` per-parameter ``(lower, upper)`` pairs in
+        parameter units. ``-np.inf``, ``np.inf`` and ``None`` represent an
+        unbounded side.
+    num_optimized : int
+        Number of optimized parameters [-].
+
+    Returns
+    -------
+    list of tuple
+        One ``(lower, upper)`` pair per optimized parameter in parameter
+        units, with ``None`` for an unbounded side.
+    """
+    def _bound_or_none(val, infinite_sign: int) -> Optional[float]:
+        """Map an unbounded sentinel (None or +/-inf) to None."""
+        if val is None:
+            return None
+        num = float(val)  # [parameter units]
+        if np.isinf(num) and np.sign(num) == infinite_sign:
+            return None
+        return num
+
+    if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == num_optimized:
+        all_pairs = all(
+            isinstance(item, (list, tuple)) and len(item) == 2
+            for item in raw_bounds)
+        has_none = all_pairs and any(
+            item[0] is None or item[1] is None for item in raw_bounds)
+        is_pair_list = (
+            all_pairs
+            and isinstance(raw_bounds, list)
+            and all(isinstance(item, tuple) for item in raw_bounds))
+        if all_pairs and (num_optimized != 2 or has_none or is_pair_list):
+            return [
+                (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
+                for lo, hi in raw_bounds]
+
+    if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == 2:
+        lo_raw, hi_raw = raw_bounds
+        lo_arr = np.broadcast_to(
+            np.asarray(lo_raw, dtype=object), (num_optimized,))
+        hi_arr = np.broadcast_to(
+            np.asarray(hi_raw, dtype=object), (num_optimized,))
+        return [
+            (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
+            for lo, hi in zip(lo_arr, hi_arr)]
+
+    return [
+        (_bound_or_none(pair[0], -1), _bound_or_none(pair[1], 1))
+        for pair in raw_bounds]
+
+
 def _effective_options(options: Mapping, method: str) -> dict:
     """Return the options left in ``optim_options``, as recordable entries.
 
@@ -3433,7 +3494,7 @@ class CalibrationRecord(_ImmutableRecord):
     __slots__ = ('_case', '_description', '_experiments', '_output_names',
                  '_parameters', '_sources', '_transformations', '_model',
                  '_solver', '_fields', '_weight_matrix', '_covariance',
-                 '_covariance_include_mse')
+                 '_covariance_include_mse', '_custom_optimizer')
 
     def __init__(self, case: str, experiments: Mapping,
                  parameters: Sequence, sources: Sequence,
@@ -3458,6 +3519,7 @@ covariance_include_mse
         TypeError, ValueError
             See the class docstring.
         """
+        self._set('_custom_optimizer', None)
         self._set('_case', _text(case, 'CalibrationRecord case'))
         self._set('_description', _text(description,
                                         'CalibrationRecord description',
@@ -4246,7 +4308,7 @@ covariance_include_mse
         return difference
 
     def rerun(self, func, *, rtol: float, atol: float,
-              **estimator_options) -> ParameterEstimation:
+              optimizer=None, **estimator_options) -> ParameterEstimation:
         """Rebuild the estimation, refit it and check the fitted values.
 
         Parameters
@@ -4257,6 +4319,11 @@ covariance_include_mse
             Relative tolerance [-] of ``check_rerun``.
         atol : float
             Absolute tolerance of ``check_rerun``, in parameter units.
+        optimizer : callable, optional
+            Custom optimizer callable ``optimizer(seed, objective_fun,
+            gradient_fun, **options)`` when ``solver.method == 'custom'``.
+            If None, falls back to the in-memory optimizer captured by
+            ``from_estimation`` when available.
         **estimator_options
             Further ``ParameterEstimation`` arguments that a record cannot
             hold because they are callables: ``jac_fun`` and a callable
@@ -4273,8 +4340,9 @@ covariance_include_mse
         ------
         TypeError, ValueError
             See ``optimizer_inputs`` and ``check_rerun``; also ValueError
-            if the record says ``jac_fun`` or a callable ``dx_finitediff``
-            was used and ``estimator_options`` does not supply it.
+            if the record says ``jac_fun``, a callable ``dx_finitediff``,
+            or a custom ``optimizer`` was used and the corresponding
+            callable is not supplied.
             Tolerances and derivative inputs are validated before any model
             evaluation.
         RerunMismatchError
@@ -4300,10 +4368,25 @@ covariance_include_mse
                     f"Record {self._case!r} was fitted with a callable "
                     "dx_finitediff, which a record cannot hold; pass it as "
                     "rerun(..., dx_finitediff=...)")
+        opt_inputs = self.optimizer_inputs()
+        if self._solver is not None and self._solver.method == 'custom':
+            custom_opt = (
+                optimizer if optimizer is not None
+                else getattr(self, '_custom_optimizer', None))
+            if custom_opt is None:
+                raise ValueError(
+                    f"Record {self._case!r} was fitted with a custom "
+                    "optimizer callable, which a record cannot hold; pass "
+                    "it as rerun(..., optimizer=...)")
+            if not callable(custom_opt):
+                raise TypeError(
+                    f"optimizer must be a callable; got "
+                    f"{type(custom_opt).__name__}")
+            opt_inputs['method'] = custom_opt
         inputs = self.estimation_inputs()
         inputs.update(estimator_options)
         estimator = ParameterEstimation(func, **inputs)
-        estimator.optimize_fn(verbose=False, **self.optimizer_inputs())
+        estimator.optimize_fn(verbose=False, **opt_inputs)
         self.check_rerun(estimator, rtol=rtol, atol=atol)
         return estimator
 
@@ -4527,13 +4610,19 @@ covariance_include_mse
                                  f"parameter {names!r}")
         method = estimator.opt_method
         num_optimized = sum(flags)  # [-]
+        stored_optim_options = getattr(estimator, 'optim_options', {}) or {}
+        stored_bounds = stored_optim_options.get('bounds')
         if bounds is _UNSET:
             if method == 'IPOPT':
                 raise ValueError(
                     "bounds is required for IPOPT fits: pass the bounds "
                     "given to optimize_fn ((None, None) pairs for unbounded "
                     "parameters); optimize_fn does not store them")
-            bounds = [(None, None)] * num_optimized
+            if (method in ('scipy', 'least_squares', 'custom')
+                    and stored_bounds is not None):
+                bounds = _stored_bounds_to_pairs(stored_bounds, num_optimized)
+            else:
+                bounds = [(None, None)] * num_optimized
         bounds = list(_sequence(bounds, 'bounds'))  # [parameter units]
         if len(bounds) != num_optimized:
             raise ValueError(f"bounds needs one (lower, upper) pair per "
@@ -4549,6 +4638,14 @@ covariance_include_mse
                 raise ValueError(f"bounds of {name!r} must be a (lower, "
                                  f"upper) pair; got {pair!r}")
             lower, upper = pair  # [parameter units]
+            if (isinstance(lower, numbers.Real)
+                    and not isinstance(lower, (bool, np.bool_))
+                    and np.isneginf(float(lower))):
+                lower = None
+            if (isinstance(upper, numbers.Real)
+                    and not isinstance(upper, (bool, np.bool_))
+                    and np.isposinf(float(upper))):
+                upper = None
             parameters.append(ParameterRecord(
                 name, unit, seed, lower=lower, upper=upper, optimized=flag,
                 fitted=next(fitted) if flag else None))
@@ -4557,7 +4654,17 @@ covariance_include_mse
         outcome = {key: (str(info[key]) if key == 'stop_criterion'
                          else int(info[key]))
                    for key in ('stop_criterion', 'num_iter', 'num_fun_eval')
-                   if key in info}
+                   if key in info and info[key] is not None}
+        for key in ('status', 'nfev', 'njev', 'nit'):
+            if key in info and info[key] is not None:
+                outcome[key] = int(info[key])
+        if 'success' in info and info['success'] is not None:
+            outcome['success'] = bool(info['success'])
+        if 'message' in info and info['message'] is not None:
+            msg = info['message']
+            if isinstance(msg, bytes):
+                msg = msg.decode('utf-8', errors='replace')
+            outcome['message'] = str(msg)
         # Weighted residuals: [-] with declared uncertainties, otherwise the
         # measurement units divided by the root of the weight units.
         residuals = np.asarray(info['fun'], dtype=np.float64)
@@ -4619,14 +4726,17 @@ covariance_include_mse
                     x_model, np.asarray(y_run)[:, column],
                     x_units=x_units, experiment=experiment_name))
 
-        return cls(case, effective, parameters, sources, model,
-                   description=description,
-                   output_names=estimator.output_names,
-                   transformations=transformations, solver=solver,
-                   fields=tuple(_sequence(fields, 'fields'))
-                   + tuple(predictions),
-                   weight_matrix=weight_matrix, covariance=covariance,
-                   covariance_include_mse=covariance_include_mse)
+        record = cls(case, effective, parameters, sources, model,
+                     description=description,
+                     output_names=estimator.output_names,
+                     transformations=transformations, solver=solver,
+                     fields=tuple(_sequence(fields, 'fields'))
+                     + tuple(predictions),
+                     weight_matrix=weight_matrix, covariance=covariance,
+                     covariance_include_mse=covariance_include_mse)
+        record._set('_custom_optimizer',
+                    getattr(estimator, '_custom_optimizer', None))
+        return record
 
     def __repr__(self) -> str:
         """Return a short representation.
