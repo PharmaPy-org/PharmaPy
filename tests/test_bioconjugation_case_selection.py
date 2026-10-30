@@ -41,6 +41,7 @@ demonstrated solver/sensitivity blockers (#486, #531).
 """
 
 import hashlib
+import inspect
 import json
 from pathlib import Path
 import re
@@ -123,7 +124,9 @@ DYNAMIC_VISC_BUFFER = 1.06e-3  # [Pa*s], 1.06 mPa*s, Weggen et al. (2023), Sec. 
 KINEMATIC_VISC_BUFFER = (
     DYNAMIC_VISC_BUFFER / BUFFER_DENSITY
 )  # [m**2/s], 1.049e-6 m**2/s
-DMSO_DENSITY = 1100.4  # [kg/m**3], neat DMSO liquid density at 295.15 K
+DMSO_DENSITY = (
+    1100.4  # [kg/m**3], neat DMSO liquid density at 293.15 K, CRC Handbook
+)
 REACTION_TEMP = 295.15  # [K], 22 degC isothermal laboratory condition
 MAB_MW = 150000.0  # [g/mol], intact IgG1 molar mass, Weggen et al. (2023), Sec. 2.1.1
 NPM_MW = 297.31  # [g/mol], N-(1-pyrenyl)maleimide (C20H11NO2) molar mass
@@ -496,6 +499,30 @@ def test_dar2_intact_kinetics_rates_jacobians_and_invariants(tmp_path):
     assert dar_max_2024 == pytest.approx(1.88, rel=CLOSED_FORM_RTOL)
     assert dar_max_2023 == pytest.approx(1.8578, rel=CLOSED_FORM_RTOL)
 
+    # Verify the 6-species heavy-chain population conservation and intact-mAb
+    # DAR projection formula (Section 6.1, Weggen et al., 2024, Eqs. 1-11) on an
+    # asymmetric intermediate heavy-chain state (H0_0, H0_1, H0_2, H1_1, H1_2, H2_2).
+    c_hc_total = 6.0e-5  # [mol/L], total heavy-chain molar concentration (2 * c_mAb)
+    c_hc_state = c_hc_total * np.array(
+        [0.11, 0.24, 0.01, 0.60, 0.015, 0.025]
+    )  # [mol/L], (H0_0, H0_1, H0_2, H1_1, H1_2, H2_2)
+    assert c_hc_state[0] == pytest.approx(
+        hc_frac_2024[0] * c_hc_total, rel=CLOSED_FORM_RTOL
+    )
+    assert (c_hc_state[1] + c_hc_state[3]) == pytest.approx(
+        hc_frac_2024[1] * c_hc_total, rel=CLOSED_FORM_RTOL
+    )
+    assert (c_hc_state[2] + c_hc_state[4] + c_hc_state[5]) == pytest.approx(
+        hc_frac_2024[2] * c_hc_total, rel=CLOSED_FORM_RTOL
+    )
+    dar_hc_proj = (
+        2.0 * (c_hc_state[3] + c_hc_state[4] + 2.0 * c_hc_state[5]) / c_hc_total
+    )  # [-]
+    assert dar_hc_proj == pytest.approx(
+        2.0 * (0.60 + 0.015 + 2.0 * 0.025), rel=CLOSED_FORM_RTOL
+    )
+    assert 0.0 < dar_hc_proj < dar_max_2024
+
     db_path = _write_bioconjugation_db(tmp_path)
     kinetics = RxnKinetics(
         db_path,
@@ -756,6 +783,70 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
     np.testing.assert_allclose(
         ratio_aliased,
         np.full(times_s.size, c_drug_init / c_h0_init),
+        rtol=CLOSED_FORM_RTOL,
+    )
+
+    # Also verify closed-batch 2-wavelength (248, 280 nm) spectral aliasing on
+    # the 5-species intact-antibody Model 1A trajectory (mAb, mAb_1Drug,
+    # mAb_2Drug, Drug, Drug_depl) across t in [0, 300] s.
+    def _model_1a_batch_rhs(_time_s, state):
+        """Evaluate Model 1A closed-batch ODEs for 5-species spectral aliasing.
+
+        Parameters
+        ----------
+        _time_s : float
+            Current integration time [s].
+        state : sequence of float
+            ``(c_mab, c_mab1, c_mab2, c_drug, c_depl)`` [mol/L].
+
+        Returns
+        -------
+        list of float
+            Time derivatives ``[dc_mab, dc_mab1, dc_mab2, dc_drug, dc_depl]``
+            [mol/(L*s)].
+        """
+        c_m0, c_m1, _c_m2, c_d, _c_dep = state  # [mol/L]
+        r1 = K1_MODEL_1A * c_m0 * c_d  # [mol/(L*s)]
+        r2 = K2_MODEL_1A * c_m1 * c_d  # [mol/(L*s)]
+        r3 = K3_MODEL_1A * c_d  # [mol/(L*s)]
+        return [-r1, r1 - r2, r2, -r1 - r2 - r3, r3]
+
+    times_1a_s = np.linspace(0.0, 300.0, 25)  # [s]
+    sol_1a = solve_ivp(
+        _model_1a_batch_rhs,
+        (0.0, 300.0),
+        [C_MAB_STD, 0.0, 0.0, C_DRUG_BULK_STD, 0.0],
+        t_eval=times_1a_s,
+        method="RK45",
+        rtol=1e-10,
+        atol=1e-13,
+    )
+    assert sol_1a.success
+    traj_1a = sol_1a.y.T  # [mol/L], shape (25, 5)
+    assert traj_1a[-1, 2] > 0.98 * C_MAB_STD
+    eps_aliased_5x2 = np.array(
+        [
+            [EPS_MAB_248, EPS_MAB_280],
+            [EPS_MAB_248 + EPS_DRUG_248, EPS_MAB_280 + EPS_DRUG_280],
+            [EPS_MAB_248 + 2.0 * EPS_DRUG_248, EPS_MAB_280 + 2.0 * EPS_DRUG_280],
+            [EPS_DRUG_248, EPS_DRUG_280],
+            [EPS_DRUG_248, EPS_DRUG_280],
+        ]
+    )  # [L/(mol*cm)], shape (5 species, 2 wavelengths)
+    spectra_1a_aliased = SHORT_PATHLENGTH_CM * (
+        traj_1a @ eps_aliased_5x2
+    )  # [-], shape (25, 2)
+    np.testing.assert_allclose(
+        spectra_1a_aliased,
+        np.broadcast_to(spectra_1a_aliased[0], spectra_1a_aliased.shape),
+        rtol=CLOSED_FORM_RTOL,
+    )
+    _c_m1a_aliased, _c_d1a_aliased, dar_1a_aliased = _dual_wavelength_uv_invert(
+        spectra_1a_aliased, pathlength_cm=SHORT_PATHLENGTH_CM
+    )
+    np.testing.assert_allclose(
+        dar_1a_aliased,
+        np.full(times_1a_s.size, PAYLOAD_EXCESS_STD),
         rtol=CLOSED_FORM_RTOL,
     )
 
@@ -1069,15 +1160,26 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         name_params=["k1", "k_drug"],
         output_names=output_names,
     )
-    noisy_fitted, noisy_cov, _noisy_info = noisy_estimator.estimate_parameters(
+    noisy_fitted, noisy_cov, noisy_info = noisy_estimator.estimate_parameters(
         method="LM", verbose=False
     )
     noisy_intervals = noisy_estimator.get_confidence_intervals(verbose=False)
     n_obs_total = (batch_times.size + fedbatch_times.size) * len(measured_species)
     dof = n_obs_total - len(true_params)
     t_val = float(student_t.ppf(0.975, dof))  # [-]
+    # Derive expected noisy covariance and confidence-interval half-widths
+    # independently from the weighted residual vector noisy_info["fun"] and the
+    # sensitivity Jacobian at noisy_fitted rather than reusing noisy_cov.
+    jac_noisy_indep = noisy_estimator.get_gradient(
+        noisy_fitted, out_array=True
+    )  # [(mol*s)/L for row 0; s for row 1]
+    mse_noisy_indep = float(np.sum(np.square(noisy_info["fun"])) / dof)  # [-]
+    cov_noisy_indep = mse_noisy_indep * np.linalg.inv(
+        jac_noisy_indep @ jac_noisy_indep.T
+    )  # [[L**2/(mol**2*s**2), L/(mol*s**2)], [L/(mol*s**2), 1/s**2]]
+    np.testing.assert_allclose(noisy_cov, cov_noisy_indep, rtol=1e-5)
     expected_noisy_half_widths = t_val * np.sqrt(
-        np.diag(noisy_cov)
+        np.diag(cov_noisy_indep)
     )  # [L/(mol*s)], [1/s]
     assert expected_noisy_half_widths[0] > 1.0
     assert expected_noisy_half_widths[1] > 1.0e-6
@@ -1086,7 +1188,7 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         assert low < float(true_params[idx]) < high
         assert 0.5 * (high + low) == pytest.approx(noisy_fitted[idx], rel=1e-10)
         assert 0.5 * (high - low) == pytest.approx(
-            expected_noisy_half_widths[idx], rel=1e-6
+            expected_noisy_half_widths[idx], rel=1e-5
         )
 
     # Compare Fisher Information Matrix F = J^T W J at equal sample budget
@@ -1096,11 +1198,14 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     #     2x and det(F) by 2^2 = 4x while leaving normalized off-diagonal
     #     parameter collinearity |F_01| / sqrt(F_00 * F_11) unchanged), and
     # (3) the combined 8-point batch + 8-point 600 s fed-batch design (48
-    #     observations), which increases det(F) over batch-only by >2.0x AND
-    #     flips the sign of the cross-sensitivity between k1 and k_drug
-    #     (F_01 > 0 in batch vs F_01 < 0 in fed-batch), reducing normalized
-    #     parameter collinearity by >6x compared to the equal-budget two-batch
-    #     design (Weggen et al., 2024, Sec. 3.3.2).
+    #     observations): at equal sample budget, the duplicated two-batch design
+    #     has the larger raw determinant (det(F_combined) / det(F_two_batch) =
+    #     0.5136, det(F_combined) / det(F_batch) = 2.054), whereas the fed-batch
+    #     run flips the sign of the cross-sensitivity between k1 and k_drug
+    #     (F_01 > 0 in batch vs F_01 < 0 in fed-batch) so their combination
+    #     cancels off-diagonal correlation and reduces normalized parameter
+    #     collinearity by >30x compared to the equal-budget two-batch design
+    #     (Weggen et al., 2024, Sec. 3.3.2).
     batch_only_est = ParameterEstimation(
         _solve_dar2_heavy_chain_experiment,
         param_seed=true_params,
@@ -1142,7 +1247,12 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     assert np.linalg.det(fim_two_batch) == pytest.approx(
         4.0 * np.linalg.det(fim_batch), rel=1e-10
     )
-    assert np.linalg.det(fim_combined) > 2.0 * np.linalg.det(fim_batch)
+    assert np.linalg.det(fim_combined) / np.linalg.det(fim_batch) == pytest.approx(
+        2.054, rel=1e-2
+    )
+    assert np.linalg.det(fim_combined) / np.linalg.det(
+        fim_two_batch
+    ) == pytest.approx(0.5136, rel=1e-2)
     fim_fedbatch = (
         fim_combined - fim_batch
     )  # [[(mol*s/L)**2, mol*s**2/L], [mol*s**2/L, s**2]]
@@ -1153,15 +1263,27 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     collinearity_combined = abs(fim_combined[0, 1]) / np.sqrt(
         fim_combined[0, 0] * fim_combined[1, 1]
     )  # [-]
-    assert collinearity_combined < 0.2 * collinearity_two_batch
+    assert collinearity_combined < 0.035 * collinearity_two_batch
 
     # Capture CalibrationRecord with explicit literature + synthetic provenance.
     # Pin the SHA-256 digest of the canonical JSON serialization of the full
-    # synthetic generator specification (operating kwargs, solver options,
-    # measurement-weighting assumption, sampling times, and observations).
+    # synthetic generator specification (generator source SHA-256, path/base
+    # revision, operating kwargs, solver options, measurement-weighting
+    # assumption, sampling times, and observations).
+    generator_rel_path = Path(__file__).resolve().relative_to(REPO_ROOT).as_posix()
+    generator_source_sha256 = hashlib.sha256(
+        inspect.getsource(_solve_dar2_heavy_chain_experiment).encode("utf-8")
+    ).hexdigest()
+    generator_revision = (
+        f"{generator_rel_path}:_solve_dar2_heavy_chain_experiment"
+        f"@sha256:{generator_source_sha256[:16]}"
+    )
     synthetic_payload_bytes = json.dumps(
         {
             "generator": "_solve_dar2_heavy_chain_experiment",
+            "generator_path": generator_rel_path,
+            "generator_source_sha256": generator_source_sha256,
+            "generator_revision": generator_revision,
             "model_subcase": (
                 "mono-thiol limiting sub-case (c_H0_0 = c_H0_2 = 0) of Weggen "
                 "et al. (2024) Simple 1k + k_drug model (Eqs. 1-10)"
@@ -1213,6 +1335,7 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
             ),
             citation="Weggen et al. (2024), Front. Bioeng. Biotechnol. 12:1403644",
             uri="https://doi.org/10.3389/fbioe.2024.1403644",
+            revision="2024-v1-table2",
             role="literature parameters",
         ),
         DataSource(
@@ -1229,6 +1352,7 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
                 "4 mL 600 s syringe-pump fed-batch experiments"
             ),
             uri=REVIEW_NOTE.relative_to(REPO_ROOT).as_posix(),
+            revision=generator_revision,
             sha256=synthetic_sha256,
             role="calibration",
         ),
@@ -1251,6 +1375,7 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     ]
     model = ModelRevision(
         "_solve_dar2_heavy_chain_experiment",
+        revision=generator_revision,
         description=(
             "Isothermal batch and fed-batch mono-thiol limiting sub-case "
             "(c_H0_0 = c_H0_2 = 0) of the heavy-chain DAR 2 Simple (1k + "
@@ -1356,7 +1481,7 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
             },
             "inputs_kg_kg": {
                 "S1_reduced_mAb": t2_m_s1_kg / t2_m_total_kg,  # [kg/kg], 0.8801
-                "S_payload_DMSO": t2_m_dmso_kg / t2_m_total_kg,  # [kg/kg], 0.1090
+                "S_payload_DMSO": t2_m_dmso_kg / t2_m_total_kg,  # [kg/kg], 0.1089
                 "S_NAC_quench": t2_m_nac_kg / t2_m_total_kg,  # [kg/kg], 0.0110
             },
             "outputs_kg_kg": {
@@ -1520,24 +1645,32 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         wp4_tasks[0]["vol_out_main_l"], rel=CLOSED_FORM_RTOL
     )
 
-    # 3. Verify reagent stock molar charges against the 1.333e-3 mol mAb basis
+    # 3. Verify reagent stock molar charges and constant-volume diafiltration
+    # small-molecule clearance against the 1.333e-3 mol mAb basis
     # (0.200 kg / 150 kg/mol = 1.333333e-3 mol mAb).
     moles_mab_batch = 200.0 / MAB_MW  # [mol], 1.333333e-3 mol
-    moles_tcep_tier2 = 0.40 * 20.0e-3  # [mol], 8.00e-3 mol (6.0 eq)
+    moles_tcep_tier2 = 0.40 * (2.20 * moles_mab_batch / 0.40)  # [mol], 2.933e-3 mol (2.20 eq)
     moles_tcep_tier1 = 0.40 * 50.0e-3  # [mol], 20.00e-3 mol (15.0 eq)
     moles_dhaa_tier1 = 0.40 * 15.0e-3  # [mol], 6.00e-3 mol (4.5 eq)
     moles_payload_t2 = 2.25 * (5.0 * moles_mab_batch / 2.25)  # [mol], 6.667e-3 mol (5.0 eq)
     moles_nac_t2 = 0.25 * 40.0e-3  # [mol], 10.00e-3 mol (1.5 eq per payload)
-    assert moles_tcep_tier2 / moles_mab_batch == pytest.approx(6.0, rel=CLOSED_FORM_RTOL)
+    assert moles_tcep_tier2 / moles_mab_batch == pytest.approx(2.20, rel=CLOSED_FORM_RTOL)
     assert moles_tcep_tier1 / moles_mab_batch == pytest.approx(15.0, rel=CLOSED_FORM_RTOL)
     assert moles_dhaa_tier1 / moles_mab_batch == pytest.approx(4.5, rel=CLOSED_FORM_RTOL)
     assert moles_payload_t2 / moles_mab_batch == pytest.approx(5.0, rel=CLOSED_FORM_RTOL)
     assert moles_nac_t2 / moles_payload_t2 == pytest.approx(1.5, rel=CLOSED_FORM_RTOL)
+    diavolumes_t1b = 100.00 / 20.00  # [-], 5.0 diavolumes in T1b
+    diavolumes_t3 = 140.00 / 20.00  # [-], 7.0 diavolumes in T3
+    assert diavolumes_t1b == pytest.approx(5.0, rel=CLOSED_FORM_RTOL)
+    assert diavolumes_t3 == pytest.approx(7.0, rel=CLOSED_FORM_RTOL)
+    assert float(np.exp(-diavolumes_t1b)) < 0.01  # <1% residual TCEP after 5 DV
+    assert float(np.exp(-diavolumes_t3)) < 0.001  # <0.1% residual small molecules after 7 DV
 
     # 4. Direct synchronization check against doc/review_notes/bioconjugation_case_selection.md:
     # verify that all WP4 task IDs, key Section 8.2 proportions, and all Section 7.1
     # test file paths referenced in the review note match the repository.
     note_text = REVIEW_NOTE.read_text(encoding="utf-8")
+    assert round(wp4_tasks[1]["inputs_kg_kg"]["S_payload_DMSO"], 4) == 0.1089
     for required_token in (
         "T1_reduction",
         "T2_conjugation",
@@ -1547,12 +1680,12 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         "T1b_decap_ufdf",
         "T1c_dhaa_reox",
         "22.50",
-        "22.726",
+        "22.7259",
         "162.50",
         "162.726",
         "100.40",
         "0.8801",
-        "0.1090",
+        "0.1089",
         "0.0110",
     ):
         assert required_token in note_text, (
@@ -1560,7 +1693,7 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         )
 
     referenced_test_paths = sorted(
-        set(re.findall(r"tests/test_[A-Za-z0-9_]+\.py", note_text))
+        set(re.findall(r"tests/[A-Za-z0-9_/]+\.py", note_text))
     )
     assert len(referenced_test_paths) >= 14
     for rel_test_path in referenced_test_paths:
@@ -1592,11 +1725,12 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
 
     # 1a. Reproduce Section 7.2 blocker (tracked in #531): default CVode
     # tolerance (atol = 1e-6 mol/L) on micromolar antibody states (~3.33e-5
-    # mol/L) allows O(1e-6) mol/L negative-concentration undershoot and
-    # unphysical DAR > 2 overshoot. Provisional assertion while #531 is open:
-    # once #531 scales default tolerances to the initial state magnitude or
-    # enforces non-negativity, update this block to assert prof_default >= 0
-    # and dar_default_final <= 2.0 without custom sundials_opts.
+    # mol/L) allows -1.25e-5 mol/L (38% of c_mAb) negative-concentration
+    # undershoot and unphysical DAR(300 s) = 2.57 > 2.0 overshoot. Provisional
+    # assertion while #531 is open: once #531 scales default tolerances to the
+    # initial state magnitude or enforces non-negativity, update this block to
+    # assert prof_default >= 0 and dar_default_final <= 2.0 without custom
+    # sundials_opts.
     batch_default_atol = BatchReactor(isothermal=True)
     batch_default_atol.Kinetics = RxnKinetics(
         db_path,
@@ -1622,8 +1756,8 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
     ) / (
         prof_default[-1, 0] + prof_default[-1, 1] + prof_default[-1, 2]
     )  # [-]
-    assert np.min(prof_default[:, :3]) < -1.0e-7
-    assert dar_default_final > 2.01
+    assert np.min(prof_default[:, :3]) == pytest.approx(-1.25e-5, rel=0.05)
+    assert dar_default_final == pytest.approx(2.57, rel=0.05)
 
     # 1b. Verified workaround with micromolar-scaled tolerances (atol = 1e-11
     # mol/L) and forward sensitivity integration (eval_sens=True).
