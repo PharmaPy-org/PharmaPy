@@ -30,7 +30,11 @@ def cryst_mechanism(sup_sat, moms, temp, temp_ref, params, reformulate, kv,
         phi_1, phi_2, exp, s_2 = params
         sec = True
     else:
-        phi_1, phi_2, exp = params[:3] #for size dependent growth, len(params) is 5 but the last 2 are used in the fvm_method code
+        # A five-entry growth law carries alpha and beta after these three.
+        # Only the refactored OneDFVMMechanism applies that size factor; the
+        # moment closure and the legacy crystallizers refuse such a law
+        # (CrystKinetics.has_size_dependent_growth) rather than ignore it.
+        phi_1, phi_2, exp = params[:3]
         
 
     # absup = np.maximum(eps, sup_sat)
@@ -1787,6 +1791,31 @@ class CrystKinetics:
         ddiss_dpar = dmech_dparam(self.dissol, d_par, not growing)
 
         return dbp_dpar, dbs_dpar, dgr_dpar, ddiss_dpar, conc_sat
+
+    def has_size_dependent_growth(self):
+        """Whether the growth law carries a size factor that is not one.
+
+        Returns
+        -------
+        bool
+            True when the growth parameters hold alpha and beta and both are
+            nonzero, so the size factor ``(1 + beta*L)**alpha`` differs from
+            one. With either of them zero the factor is exactly one and the
+            growth rate is size independent, as it is for a three-entry law.
+
+        Notes
+        -----
+        Growth entries past the first three are alpha [-] and beta [1/um],
+        applied by the refactored ``OneDFVMMechanism`` only. The moment
+        closure (``MomentsPopulationBalance``) and the legacy crystallizers
+        evaluate a size-independent growth rate, so both refuse kinetics for
+        which this returns True instead of dropping the two entries.
+        """
+        size_factor = np.asarray(self.params['growth'],
+                                 dtype=float)[3:5]  # alpha [-], beta [1/um]
+
+        return bool(size_factor.size and np.all(size_factor != 0))
+
     def supports(self, mechanism):
         if not isinstance(mechanism,list):
             mechanism = [mechanism]
