@@ -2406,8 +2406,9 @@ class ThermoPhysicalManager:
         Raises
         ------
         IndexError
-            If ``conc`` is two-dimensional and ``solvent_ind`` or
-            ``solv_mass_frac`` is not ``None``.
+            If ``conc`` is two-dimensional and an integer ``solvent_ind`` is
+            not ``None`` (``solv_mass_frac`` supports both 1-D and 2-D
+            ``conc`` arrays).
         ValueError
             If a species mapping contains unknown species or invalid solvent
             fractions.
@@ -2544,9 +2545,9 @@ class ThermoPhysicalManager:
         Raises
         ------
         IndexError
-            If ``conc`` is two-dimensional and ``solvent_ind`` or
-            ``solv_mass_frac`` is not ``None``, for the same reason as in
-            :meth:`conc_to_frac`.
+            If ``conc`` is two-dimensional and an integer ``solvent_ind`` is
+            not ``None`` (``solv_mass_frac`` supports both 1-D and 2-D
+            ``conc`` arrays), for the same reason as in :meth:`conc_to_frac`.
         ValueError
             If a species mapping contains unknown species or invalid solvent
             fractions.

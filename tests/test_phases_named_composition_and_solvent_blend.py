@@ -2,8 +2,9 @@
 
 Covers:
 - Species-keyed composition mappings (`mass_frac`, `mole_frac`, `mass_conc`,
-  `mole_conc`) on `LiquidPhase`, `SolidPhase`, `VaporPhase`, `LiquidStream`,
-  `SolidStream`, and `VaporStream` (`__init__` and `updatePhase`).
+  `mole_conc`) on `LiquidPhase`, `VaporPhase`, `LiquidStream`, and
+  `VaporStream`, and intensive fraction mappings (`mass_frac`, `mole_frac`) on
+  `SolidPhase` and `SolidStream` (`__init__` and `updatePhase`).
 - Solute concentration (`mole_conc` or `mass_conc`) combined with a
   solute-free solvent-blend `mass_frac` mapping (#336), including the analytical
   benchmark from #336 and the single-solvent `rawlings_9-5.ipynb` pattern.

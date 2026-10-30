@@ -664,3 +664,46 @@ def test_dh_rxn_alias_error_message_and_reformulated_k_ea_attributes():
     kin_ref.set_params(updated_flat)
     np.testing.assert_allclose(kin_ref.k_params, [2.4, 0.8], rtol=1e-12)
     np.testing.assert_allclose(kin_ref.ea_params, [25000.0, 35000.0], rtol=1e-12)
+
+    # params_r supports reaction-ID and species-keyed mappings for reversible mass action
+    rev_kin = RxnKinetics(
+        path=str(DATABASE),
+        rxns={"r1": "A + B <--> C", "r2": "A <--> B"},
+        k_params={"r1": 1.2, "r2": 0.4},
+        ea_params=0.0,
+        keq_params={"r1": 2.0, "r2": 0.5},
+        params_r={"r2": {"B": 1.0}, "r1": {"C": 1.0}},
+    )
+    np.testing.assert_array_equal(rev_kin.params_r, rev_kin.stoich_prod)
+
+    with pytest.raises(ValueError, match="params_r keys must match reaction identifiers"):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns={"r1": "A + B <--> C", "r2": "A <--> B"},
+            k_params={"r1": 1.2, "r2": 0.4},
+            ea_params=0.0,
+            keq_params={"r1": 2.0, "r2": 0.5},
+            params_r={"wrong": {"C": 1.0}},
+        )
+
+    with pytest.raises(
+        ValueError,
+        match="params_r reverse orders must equal the raw product stoichiometric",
+    ):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns={"r1": "A + B <--> C", "r2": "A <--> B"},
+            k_params={"r1": 1.2, "r2": 0.4},
+            ea_params=0.0,
+            keq_params={"r1": 2.0, "r2": 0.5},
+            params_r={"r1": {"C": 2.0}, "r2": {"B": 1.0}},
+        )
+
+    with pytest.raises(ValueError, match="params_r requires keq_params"):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns=rxns,
+            k_params=k_vals,
+            ea_params=ea_vals,
+            params_r={"r1": {"C": 1.0}},
+        )

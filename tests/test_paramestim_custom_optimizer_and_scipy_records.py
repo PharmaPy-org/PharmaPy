@@ -155,14 +155,14 @@ def custom_gauss_newton(
     lo_bound = -np.inf  # [1/s]
     hi_bound = np.inf  # [1/s]
     if bounds is not None:
-        if (isinstance(bounds, (list, tuple))
+        if (isinstance(bounds, list)
                 and len(bounds) == len(x_curr)
-                and isinstance(bounds[0], (list, tuple))):
+                and all(isinstance(b, tuple) and len(b) == 2 for b in bounds)):
             lo_bound = np.array(
                 [-np.inf if b[0] is None else float(b[0]) for b in bounds])
             hi_bound = np.array(
                 [np.inf if b[1] is None else float(b[1]) for b in bounds])
-        elif isinstance(bounds, (list, tuple)) and len(bounds) == 2:
+        elif isinstance(bounds, (list, tuple, np.ndarray)) and len(bounds) == 2:
             lo_bound = np.asarray(bounds[0], dtype=float)
             hi_bound = np.asarray(bounds[1], dtype=float)
 
@@ -643,6 +643,14 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
     np.testing.assert_allclose(
         replayed_two.params_convg, opt_two, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
     )
+    # Direct replay through optimizer_inputs() also formats SciPy bounds as (lower, upper)
+    direct_two = ParameterEstimation(
+        first_order_decay, **rec_two.estimation_inputs()
+    )
+    direct_two.optimize_fn(verbose=False, **rec_two.optimizer_inputs())
+    np.testing.assert_allclose(
+        direct_two.params_convg, opt_two, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )
 
     # 2. Three-parameter problem with 2-D NumPy bounds array of shape (2, 3)
     def three_param_decay(params: np.ndarray, t_grid: np.ndarray) -> np.ndarray:
@@ -660,7 +668,9 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
         numpy.ndarray
             Concentration trajectory [mol/L], shape ``(n_times, 1)``.
         """
-        ca0, k_rate, offset = float(params[0]), float(params[1]), float(params[2])
+        ca0 = float(params[0])  # [mol/L]
+        k_rate = float(params[1])  # [1/s]
+        offset = float(params[2])  # [mol/L]
         c_a = ca0 * np.exp(-k_rate * np.asarray(t_grid, dtype=float)) + offset  # [mol/L]
         return c_a[:, None]
 
@@ -673,7 +683,9 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
     )
     opt_three_lm, _, _ = est_three_lm.optimize_fn(method='LM', verbose=False)
 
-    bounds_3d = np.array([[0.5, 0.05, -0.1], [3.0, 2.0, 0.1]], dtype=float)
+    bounds_3d = np.array(
+        [[0.5, 0.05, -0.1], [3.0, 2.0, 0.1]], dtype=float
+    )  # [mol/L, 1/s, mol/L]
     est_three = ParameterEstimation(
         three_param_decay,
         [1.1, 0.2, 0.02],
@@ -711,3 +723,47 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
     np.testing.assert_allclose(
         replayed_three.params_convg, opt_three, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
     )
+
+    # 3. Custom-optimizer capture and replay with both native tuple bounds
+    #    ([0.0, 0.05], [3.0, 2.0]) and per-parameter pair-list bounds [(0.0, 3.0), (0.05, 2.0)]
+    for label, custom_bounds in (
+        ('native_tuple', ([0.0, 0.05], [3.0, 2.0])),
+        ('pair_list', [(0.0, 3.0), (0.05, 2.0)]),
+    ):
+        est_cust = ParameterEstimation(
+            first_order_decay,
+            [0.8, 1.2],
+            experiments,
+            optimize_flags=[True, True],
+            name_params=['c_A0', 'k'],
+        )
+        opt_cust, _, _ = est_cust.optimize_fn(
+            method=custom_gauss_newton,
+            bounds=custom_bounds,
+            verbose=False,
+        )
+        np.testing.assert_allclose(
+            opt_cust, opt_two_lm, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+        )
+        rec_cust = CalibrationRecord.from_estimation(
+            est_cust,
+            experiments,
+            case=f'custom_bounds_{label}',
+            parameter_units={'c_A0': 'mol/L', 'k': '1/s'},
+            model=ModelRevision('first_order_decay', revision='v1'),
+            sources=[DataSource('synthetic_batch', 'synthetic', 'internal test')],
+        )
+        by_name_cust = {p.name: p for p in rec_cust.parameters}
+        assert (by_name_cust['c_A0'].lower, by_name_cust['c_A0'].upper) == (0.0, 3.0)
+        assert (by_name_cust['k'].lower, by_name_cust['k'].upper) == (0.05, 2.0)
+
+        loaded_cust = CalibrationRecord.from_json(rec_cust.to_json())
+        replayed_cust = loaded_cust.rerun(
+            first_order_decay,
+            optimizer=custom_gauss_newton,
+            rtol=ESTIMATE_RTOL,
+            atol=ESTIMATE_ATOL,
+        )
+        np.testing.assert_allclose(
+            replayed_cust.params_convg, opt_cust, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+        )

@@ -457,7 +457,8 @@ class RxnKinetics:
                  keq_params=None, params_f=None, delta_hrxn=0,
                  tref_hrxn=298.15, kinetic_model=None, df_dstates=None,
                  df_dtheta=None, rxns=None, dh_rxn=None,
-                 fit_paramsf: Optional[bool] = None) -> None:
+                 fit_paramsf: Optional[bool] = None,
+                 params_r=None) -> None:
         """Initialize species ordering, reaction normalization, and parameters.
 
         Parameters
@@ -520,6 +521,13 @@ class RxnKinetics:
             included in ``concat_params`` and parameter Jacobians. Defaults to
             True when ``params_f`` is provided for irreversible kinetics and
             False otherwise.
+        params_r : array-like or mapping, optional
+            Reverse reaction orders [-] grouped by reaction/product (including
+            reaction-ID mappings of species-keyed order mappings). For
+            reversible elementary reactions (``keq_params`` not ``None``),
+            reverse orders must equal raw product stoichiometry ``stoich_prod``
+            for thermodynamic consistency with ``Keq``; non-zero reverse
+            orders without ``keq_params`` raise ``ValueError``.
 
         Raises
         ------
@@ -672,7 +680,8 @@ class RxnKinetics:
 
         # ---------- Parameters
         params_dict = {'k_params': k_params, 'ea_params': ea_params,
-                       'keq_params': self.keq_params, 'params_f': params_f}
+                       'keq_params': self.keq_params, 'params_f': params_f,
+                       'params_r': params_r}
         if fit_paramsf is not None:
             params_dict['fit_paramsf'] = fit_paramsf
 
@@ -786,28 +795,37 @@ class RxnKinetics:
     def _coerce_elementary_orders(
         self,
         params_f: Union[Sequence, np.ndarray, Mapping],
+        *,
+        stoich_side: Optional[np.ndarray] = None,
+        param_name: str = 'params_f',
     ) -> tuple[np.ndarray, np.ndarray]:
         """Normalize explicit elementary reaction orders to database species order.
 
         Parameters
         ----------
         params_f : sequence, numpy.ndarray, or mapping
-            Forward reaction orders [-]. Accepts:
+            Reaction orders [-]. Accepts:
             - A reaction-ID-keyed mapping whose values are either species-keyed
-              order mappings ``{species: order}`` or per-reactant order
-              sequences.
+              order mappings ``{species: order}`` or per-side order sequences.
             - A sequence of species-keyed order mappings, one per reaction.
             - A 2-D array of shape ``(num_rxns, num_species)`` in
               ``self.partic_species`` order.
-            - A sequence of per-reaction reactant-order sequences in
-              ``self.partic_species`` reactant order.
+            - A sequence of per-reaction side-order sequences in
+              ``self.partic_species`` order.
+        stoich_side : numpy.ndarray, optional
+            Default stoichiometric exponents [-], shape
+            ``(num_rxns, num_species)``. Defaults to ``self.stoich_react``
+            for forward orders and ``self.stoich_prod`` for reverse orders.
+        param_name : str, optional
+            Parameter argument name used in error messages (``'params_f'`` or
+            ``'params_r'``).
 
         Returns
         -------
         orders : numpy.ndarray
-            Forward reaction orders [-], shape ``(num_rxns, num_species)``.
+            Reaction orders [-], shape ``(num_rxns, num_species)``.
         order_map : numpy.ndarray
-            Boolean mask of active reactant/order positions, shape
+            Boolean mask of active order positions, shape
             ``(num_rxns, num_species)``.
 
         Raises
@@ -815,13 +833,15 @@ class RxnKinetics:
         ValueError
             If reaction IDs, species names, or row lengths are invalid.
         """
-        default_reactant_map = self.stoich_react > 0
+        if stoich_side is None:
+            stoich_side = self.stoich_react  # [-]
+        default_side_map = stoich_side > 0
 
         if isinstance(params_f, Mapping):
             non_str = [k for k in params_f.keys() if not isinstance(k, str)]
             if non_str:
                 raise ValueError(
-                    f"params_f mapping keys must be strings, got {non_str!r}."
+                    f"{param_name} mapping keys must be strings, got {non_str!r}."
                 )
             missing = [k for k in self.rxn_names if k not in params_f]
             unexpected = [k for k in params_f.keys() if k not in self.rxn_names]
@@ -830,7 +850,7 @@ class RxnKinetics:
             )
             if not params_f or unexpected or (missing and not all_species_mappings):
                 raise ValueError(
-                    f"params_f keys must match reaction identifiers "
+                    f"{param_name} keys must match reaction identifiers "
                     f"{list(self.rxn_names)}; missing={missing}, "
                     f"unexpected={unexpected}."
                 )
@@ -838,7 +858,7 @@ class RxnKinetics:
         elif isinstance(params_f, np.ndarray):
             if params_f.ndim == 2 and params_f.shape == (self.num_rxns, self.num_species):
                 orders = np.asarray(params_f, dtype=np.float64)  # [-]
-                order_map = default_reactant_map | (orders != 0)
+                order_map = default_side_map | (orders != 0)
                 return orders, order_map
             if params_f.ndim == 1 and self.num_rxns == 1:
                 row_specs = [params_f]
@@ -846,42 +866,42 @@ class RxnKinetics:
                 row_specs = list(params_f)
             else:
                 raise ValueError(
-                    f"params_f array shape {params_f.shape} is incompatible with "
+                    f"{param_name} array shape {params_f.shape} is incompatible with "
                     f"{self.num_rxns} reaction(s) and {self.num_species} species."
                 )
         elif isinstance(params_f, Sequence) and not isinstance(params_f, str):
             if len(params_f) == 0:
-                raise ValueError("params_f cannot be empty.")
+                raise ValueError(f"{param_name} cannot be empty.")
             if not isinstance(params_f[0], (list, tuple, np.ndarray, Mapping)):
                 row_specs = [params_f]
             else:
                 row_specs = list(params_f)
         else:
             raise ValueError(
-                "params_f must be a sequence, 2-D array, or reaction-ID mapping."
+                f"{param_name} must be a sequence, 2-D array, or reaction-ID mapping."
             )
 
         if len(row_specs) != self.num_rxns:
             raise ValueError(
-                f"params_f length ({len(row_specs)}) must match the number of "
+                f"{param_name} length ({len(row_specs)}) must match the number of "
                 f"reactions ({self.num_rxns})."
             )
 
         orders = np.zeros_like(self.stoich_matrix, dtype=np.float64)  # [-]
         for ind, row_spec in enumerate(row_specs):
-            reactant_mask = default_reactant_map[ind]
-            num_reactants = int(reactant_mask.sum())
+            side_mask = default_side_map[ind]
+            num_side = int(side_mask.sum())
             if isinstance(row_spec, Mapping):
                 unknown_sp = [
                     sp for sp in row_spec.keys() if sp not in self.partic_species
                 ]
                 if unknown_sp:
                     raise ValueError(
-                        f"params_f for reaction {self.rxn_names[ind]!r} contains "
+                        f"{param_name} for reaction {self.rxn_names[ind]!r} contains "
                         f"unknown participating species {unknown_sp}; valid "
                         f"participating species are {self.partic_species}."
                     )
-                orders[ind] = self.stoich_react[ind].copy()  # [-]
+                orders[ind] = stoich_side[ind].copy()  # [-]
                 for sp_name, order_val in row_spec.items():
                     sp_idx = self.partic_species.index(sp_name)
                     orders[ind, sp_idx] = float(order_val)  # [-]
@@ -889,20 +909,20 @@ class RxnKinetics:
                 row_arr = np.atleast_1d(np.asarray(row_spec, dtype=np.float64))  # [-]
                 if row_arr.ndim != 1:
                     raise ValueError(
-                        f"params_f row {ind} must be 1-D, got shape {row_arr.shape}."
+                        f"{param_name} row {ind} must be 1-D, got shape {row_arr.shape}."
                     )
-                if len(row_arr) == num_reactants:
-                    orders[ind, reactant_mask] = row_arr
+                if len(row_arr) == num_side:
+                    orders[ind, side_mask] = row_arr
                 elif len(row_arr) == self.num_species:
                     orders[ind] = row_arr
                 else:
                     raise ValueError(
-                        f"params_f row {ind} for reaction {self.rxn_names[ind]!r} "
-                        f"has {len(row_arr)} entries, expected {num_reactants} "
+                        f"{param_name} row {ind} for reaction {self.rxn_names[ind]!r} "
+                        f"has {len(row_arr)} entries, expected {num_side} "
                         f"reactant order(s) or {self.num_species} species order(s)."
                     )
 
-        order_map = default_reactant_map | (orders != 0)
+        order_map = default_side_map | (orders != 0)
         return orders, order_map
 
     def transform_params(self, kvals, evals):
@@ -1032,6 +1052,19 @@ class RxnKinetics:
                 if orders.ndim == 1:
                     orders = orders[np.newaxis, ...]
                 params_f = orders
+                raw_params_r = params.get('params_r', None)  # [-], reverse orders
+                if raw_params_r is None:
+                    params_r = (
+                        self.stoich_prod.copy()
+                        if self.keq_params is not None
+                        else np.zeros_like(self.stoich_prod, dtype=np.float64)
+                    )  # [-]
+                else:
+                    params_r, _ = self._coerce_elementary_orders(
+                        raw_params_r,
+                        stoich_side=self.stoich_prod,
+                        param_name='params_r',
+                    )  # [-]
             else:
                 params_f = params.get('params_f', None)  # [custom model units]
                 if params_f is None:
@@ -1039,10 +1072,23 @@ class RxnKinetics:
                                        "argument 'params_f' is mandatory.")
                 params_f = np.asarray(params_f)
                 order_map = self.stoich_react > 0
+                raw_params_r = params.get('params_r', None)
+                params_r = (
+                    np.zeros_like(self.stoich_prod, dtype=np.float64)
+                    if raw_params_r is None
+                    else np.asarray(raw_params_r, dtype=np.float64)
+                )  # [-]
         else:
             phi_1, phi_2 = np.split(params[:self.num_paramsk], 2)  # [k units, J/mol] or [-]
             fit_paramsf = self.fit_paramsf
             params_f = self.params_f  # [-] or [custom model units]
+            params_r = getattr(
+                self,
+                'params_r',
+                self.stoich_prod.copy()
+                if self.keq_params is not None
+                else np.zeros_like(self.stoich_prod, dtype=np.float64),
+            )  # [-]
             order_map = self.order_map
             if self.elem_flag:
                 if fit_paramsf:
@@ -1053,17 +1099,30 @@ class RxnKinetics:
                 params_f = np.asarray(params[self.num_paramsk:])
                 params_f = params_f.reshape(self.params_f_shape)
 
+        # Accept arithmetic roundoff well below meaningful O(1) order changes.
+        order_atol = 1e-12  # [-], well above double roundoff for O(1) orders
         if self.elem_flag and self.keq_params is not None:
             reactant_orders = self.stoich_react.copy()  # [-]
-            # Accept arithmetic roundoff well below meaningful O(1) order changes.
-            order_atol = 1e-12  # [-], well above double roundoff for O(1) orders
             if not np.allclose(params_f, reactant_orders, rtol=0, atol=order_atol):
                 raise ValueError(
                     "For thermodynamic consistency with keq_params, params_f "
                     "forward orders must equal the raw reactant stoichiometric "
                     "coefficients (elementary mass action).")
+            product_orders = self.stoich_prod.copy()  # [-]
+            if not np.allclose(params_r, product_orders, rtol=0, atol=order_atol):
+                raise ValueError(
+                    "For thermodynamic consistency with keq_params, params_r "
+                    "reverse orders must equal the raw product stoichiometric "
+                    "coefficients (elementary mass action).")
             params_f = reactant_orders  # [-], exact mass-action exponents
+            params_r = product_orders  # [-], exact mass-action exponents
             fit_paramsf = False
+        elif self.elem_flag and self.keq_params is None:
+            if not np.allclose(params_r, 0.0, rtol=0, atol=order_atol):
+                raise ValueError(
+                    "params_r requires keq_params (reversible kinetics); "
+                    "non-zero reverse reaction orders are not supported for "
+                    "irreversible reactions.")
 
         self.phi_1, self.phi_2 = phi_1, phi_2  # [k units, J/mol] or [-]
         if not self.reformulate_kin:
@@ -1075,6 +1134,7 @@ class RxnKinetics:
                 self.phi_1 + self.ea_params / (gas_ct * self.temp_ref)
             )  # [k units]
         self.params_f = params_f  # [-] for orders; custom model units otherwise
+        self.params_r = params_r  # [-], reverse reaction orders
         if isinstance(params, dict):
             self.num_paramsk = len(self.phi_1) + len(self.phi_2)
             self.fit_paramsf = fit_paramsf

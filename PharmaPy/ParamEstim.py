@@ -3858,10 +3858,10 @@ class ParameterEstimation:
               gradient ``J @ r`` of shape ``(num_params,)`` and
               ``gradient_fun(x, out_array=True)`` returns the 2-D weighted
               sensitivity Jacobian ``J = dr/dtheta`` of shape
-              ``(num_params, n_residuals)``). Callables accepting only two
-              positional parameters are invoked as
-              ``optimizer(seed, objective_fun, **options)``; callables
-              accepting fewer than two positional parameters raise
+              ``(num_params, n_residuals)``). The callable is always invoked
+              with three positional arguments as
+              ``optimizer(seed, objective_fun, gradient_fun, **options)``;
+              callables that do not accept three positional arguments raise
               ``TypeError``.
             * **Bounds**: When ``bounds`` is supplied (either via ``bounds=``
               or ``optim_options['bounds']``), it is forwarded as the

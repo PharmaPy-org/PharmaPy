@@ -3027,7 +3027,21 @@ def _stored_bounds_to_pairs(
             for item in raw_bounds)
         has_none = all_pairs and any(
             item[0] is None or item[1] is None for item in raw_bounds)
-        if all_pairs and (num_optimized != 2 or has_none or method == 'custom'):
+        is_custom_pair_list = (
+            method == 'custom'
+            and isinstance(raw_bounds, list)
+            and all_pairs
+            and all(
+                isinstance(item, tuple)
+                and (
+                    item[0] is None
+                    or item[1] is None
+                    or float(item[0]) <= float(item[1])
+                )
+                for item in raw_bounds
+            )
+        )
+        if all_pairs and (num_optimized != 2 or has_none or is_custom_pair_list):
             return [
                 (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
                 for lo, hi in raw_bounds]
@@ -4210,8 +4224,11 @@ covariance_include_mse
         -------
         dict
             ``method``, a new ``optim_options`` dict on every call, and
-            ``bounds``: one ``(lower, upper)`` pair per optimized parameter
-            in parameter units (None for an unbounded side), or None when no
+            ``bounds``: for ``'scipy'`` and ``'least_squares'``, a
+            ``(lower_bounds, upper_bounds)`` 2-tuple of lists in parameter
+            units (with ``-inf`` / ``inf`` for unbounded sides); for other
+            methods, one ``(lower, upper)`` pair per optimized parameter in
+            parameter units (None for an unbounded side), or None when no
             bound is declared. ``optim_options`` holds the recorded
             ``solver.default_options`` followed by ``solver.options``, so
             the rerun uses the settings of the original fit even if the
@@ -4243,6 +4260,12 @@ covariance_include_mse
                   if item.optimized]  # [parameter units]
         if all(pair == (None, None) for pair in bounds):
             bounds = None
+        elif self._solver.method in ('scipy', 'least_squares'):
+            lower = [-np.inf if lo is None else float(lo)
+                     for lo, _ in bounds]  # [parameter units]
+            upper = [np.inf if hi is None else float(hi)
+                     for _, hi in bounds]  # [parameter units]
+            bounds = (lower, upper)
         optim_options = self._solver.default_options or {}
         optim_options.update(self._solver.options)
         return {'method': self._solver.method,
@@ -4384,14 +4407,6 @@ covariance_include_mse
                     "dx_finitediff, which a record cannot hold; pass it as "
                     "rerun(..., dx_finitediff=...)")
         opt_inputs = self.optimizer_inputs()
-        if (self._solver is not None
-                and self._solver.method in ('scipy', 'least_squares')
-                and opt_inputs['bounds'] is not None):
-            lower = [-np.inf if lo is None else float(lo)
-                     for lo, _ in opt_inputs['bounds']]  # [parameter units]
-            upper = [np.inf if hi is None else float(hi)
-                     for _, hi in opt_inputs['bounds']]  # [parameter units]
-            opt_inputs['bounds'] = (lower, upper)
         if self._solver is not None and self._solver.method == 'custom':
             custom_opt = (
                 optimizer if optimizer is not None

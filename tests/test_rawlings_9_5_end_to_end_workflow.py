@@ -368,8 +368,8 @@ def test_rawlings_9_5_named_interface_core_workflow(
         ----------
         log10_params : numpy.ndarray
             Base-10 logarithms of rate constants on a per-day basis [-], shape
-            ``(6,)``, where reactions 1..3 are in ``1/day`` and reactions 4..6
-            are in ``L/(mol*day)``.
+            ``(6,)``, where reactions 1..5 are in ``1/day`` and reaction 6 is
+            in ``L/(mol*day)``.
         t_days : numpy.ndarray
             Sample times [day], shape ``(num_times,)``.
 
@@ -381,7 +381,7 @@ def test_rawlings_9_5_named_interface_core_workflow(
         """
         k_sec = (
             (10.0 ** np.asarray(log10_params, dtype=float)) / SECONDS_PER_DAY
-        )  # [1/s] for rxn_1..rxn_3; [L/(mol*s)] for rxn_4..rxn_6
+        )  # [1/s] for rxn_1..rxn_5; [L/(mol*s)] for rxn_6
         kinetics_step = RxnKinetics(
             rawlings_purecomp_json,
             rxns=RAWLINGS_9_5_RXNS,
@@ -442,7 +442,7 @@ def test_rawlings_9_5_named_interface_core_workflow(
             optim_options=opt_kwargs,
             verbose=False,
         )
-        k_fit = 10.0 ** log_fit  # [1/day] for rxn_1..rxn_3; [L/(mol*day)] for rxn_4..rxn_6
+        k_fit = 10.0 ** log_fit  # [1/day] for rxn_1..rxn_5; [L/(mol*day)] for rxn_6
         np.testing.assert_allclose(
             k_fit[IDENTIFIABLE_INDICES],
             RAWLINGS_9_5_TRUE_RATES_DAY[IDENTIFIABLE_INDICES],
@@ -584,7 +584,8 @@ def test_rawlings_9_5_batch_reactor_assimulo_workflow(
         ----------
         log10_params : numpy.ndarray
             Base-10 logarithms of rate constants on a per-day basis [-], shape
-            ``(6,)``.
+            ``(6,)``, where reactions 1..5 are in ``1/day`` and reaction 6 is
+            in ``L/(mol*day)``.
         t_days : numpy.ndarray
             Sample times [day], shape ``(num_times,)``.
 
@@ -596,7 +597,7 @@ def test_rawlings_9_5_batch_reactor_assimulo_workflow(
         """
         k_sec = (
             (10.0 ** np.asarray(log10_params, dtype=float)) / SECONDS_PER_DAY
-        )  # [1/s] for rxn_1..rxn_3; [L/(mol*s)] for rxn_4..rxn_6
+        )  # [1/s] for rxn_1..rxn_5; [L/(mol*s)] for rxn_6
         kin_step = RxnKinetics(
             rawlings_purecomp_json,
             rxns=RAWLINGS_9_5_RXNS,
@@ -634,7 +635,7 @@ def test_rawlings_9_5_batch_reactor_assimulo_workflow(
         optim_options={'max_nfev': 80},
         verbose=False,
     )
-    k_fit = 10.0 ** log_fit  # [1/day] for rxn_1..rxn_3; [L/(mol*day)] for rxn_4..rxn_6
+    k_fit = 10.0 ** log_fit  # [1/day] for rxn_1..rxn_5; [L/(mol*day)] for rxn_6
     np.testing.assert_allclose(
         k_fit[IDENTIFIABLE_INDICES],
         RAWLINGS_9_5_TRUE_RATES_DAY[IDENTIFIABLE_INDICES],

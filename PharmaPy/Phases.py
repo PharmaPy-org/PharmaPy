@@ -2848,8 +2848,10 @@ class SolidPhase(ThermoPhysicalManager):
         porosity : float, optional
             Stored pore volume fraction [-], default zero for nonporous solids.
         mole_conc : array-like, optional
-            Reserved species molar concentrations [mol/L], shape
-            ``(num_species,)``; currently unused.
+            Legacy reserved keyword [mol/L], shape ``(num_species,)``; unused
+            because solid crystal composition is defined by intensive fractions
+            (``mass_frac`` or ``mole_frac``) with mixture density fixed by
+            ``rho_solid`` (#338).
         kv : float, optional
             Volumetric shape factor [-] in ``particle_volume = kv * size**3``;
             Must be a finite positive scalar; default one represents cubic
