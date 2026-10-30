@@ -1283,6 +1283,13 @@ class SimulationExec:
             If ``SetParamEstimation`` has not been called, so that
             ``ParamInst`` does not exist.
 
+        Warns
+        -----
+        RuntimeWarning
+            From ``ParameterEstimation.optimize_fn``, pointing at the
+            caller of ``EstimateParams``, if the optimizer stops without
+            converging or the covariance is undefined.
+
         Notes
         -----
         The wall-clock duration of the optimization [s] is stored as

@@ -51,6 +51,47 @@ _ABSENT = object()
 #: 12, default 5; Ipopt options reference,
 #: https://coin-or.github.io/Ipopt/OPTIONS.html). ``verbose=False`` gives 0.
 IPOPT_VERBOSE_PRINT_LEVEL = 5
+#: ``stop_criterion`` values of ``levenberg_marquardt`` (PharmaPy/LevMarq.py)
+#: that mean a stopping test was met: a step below ``eps_2``, a gradient
+#: below ``eps_1`` or a residual norm below ``tol_fun``. Its only other
+#: value, ``'Maximum iterations exceeded'``, means that ``max_fun_eval``
+#: trials were spent without meeting any of them.
+_LM_CONVERGED_STOPS = (
+    'Small step', 'Small gradient',
+    'Value of the objective function lower than tolerance')
+#: ``stop_criterion`` of ``levenberg_marquardt`` when its evaluation budget
+#: ``max_fun_eval`` was spent.
+_LM_BUDGET_STOP = 'Maximum iterations exceeded'
+#: ``status`` of ``scipy.optimize.least_squares`` when its evaluation budget
+#: ``max_nfev`` was exceeded (SciPy documentation of ``least_squares``,
+#: ``OptimizeResult.status``); other unsuccessful statuses, -1 (improper
+#: MINPACK input) and -2 (callback stop), have other causes.
+_SCIPY_BUDGET_STATUS = 0
+#: Stopping criteria of ``levenberg_marquardt`` recorded in
+#: ``info['tolerances']``, in its signature order: ``max_fun_eval`` [-]
+#: trial evaluations, ``eps_1`` [residual units**2 / parameter units] on
+#: the gradient norm, ``eps_2`` [-] on the step relative to the parameter
+#: norm and ``tol_fun`` [residual units] on the residual norm.
+_LM_STOPPING_OPTIONS = ('max_fun_eval', 'eps_1', 'eps_2', 'tol_fun')
+#: Stopping criteria of ``scipy.optimize.least_squares`` recorded in
+#: ``info['tolerances']``, in its signature order: ``ftol`` [-] on the
+#: relative cost change, ``xtol`` [-] on the relative step, ``gtol`` on the
+#: method-scaled gradient norm (see the SciPy documentation) and
+#: ``max_nfev`` [-] residual evaluations.
+_SCIPY_STOPPING_OPTIONS = ('ftol', 'xtol', 'gtol', 'max_nfev')
+#: Ipopt options of the "Termination" section of the Ipopt options
+#: reference (https://coin-or.github.io/Ipopt/OPTIONS.html), the stopping
+#: criteria recorded in ``info['tolerances']`` when they are in the options
+#: of an IPOPT fit: tolerances on the scaled and unscaled optimality
+#: error and its components, the iteration and time limits [-] and [s],
+#: the "acceptable" termination thresholds and counts, the divergence
+#: threshold and the complementarity target.
+_IPOPT_STOPPING_OPTIONS = (
+    'tol', 's_max', 'max_iter', 'max_wall_time', 'max_cpu_time',
+    'dual_inf_tol', 'constr_viol_tol', 'compl_inf_tol', 'acceptable_tol',
+    'acceptable_iter', 'acceptable_dual_inf_tol',
+    'acceptable_constr_viol_tol', 'acceptable_compl_inf_tol',
+    'acceptable_obj_change_tol', 'diverging_iterates_tol', 'mu_target')
 
 linestyles = cycle(['-', '--', '-.', ':'])
 
@@ -88,6 +129,100 @@ def _user_stacklevel() -> int:
         level += 1
 
     return 1
+
+
+def _stopping_tolerances(method: str, options: Mapping) -> dict:
+    """Return the stopping criteria that governed a fit, with their values.
+
+    Parameters
+    ----------
+    method : {'LM', 'IPOPT', 'scipy', 'least_squares'}
+        Optimization method of the fit.
+    options : Mapping
+        Effective options of the fit as the solver left them
+        (``optimize_fn``'s private copy). For IPOPT, cyipopt has converted
+        its keys to bytes and added its own entries, such as ``tol``.
+
+    Returns
+    -------
+    dict
+        For LM, ``_LM_STOPPING_OPTIONS`` and for ``'scipy'`` and
+        ``'least_squares'``, ``_SCIPY_STOPPING_OPTIONS``, each with the
+        value in ``options`` or, when not given, the keyword default of
+        ``levenberg_marquardt`` or ``scipy.optimize.least_squares`` read
+        from its signature, so that it cannot drift from the code that ran
+        the fit (as ``Records._default_options`` reads the LM defaults).
+        SciPy's ``max_nfev`` default is None, which selects SciPy's
+        automatic, version-dependent evaluation limit (``100 * n`` for
+        ``n`` parameters in SciPy 1.16 and later); None is recorded rather
+        than a number SciPy may not use. For IPOPT, the entries of
+        ``_IPOPT_STOPPING_OPTIONS`` present in ``options``, with bytes keys
+        decoded as UTF-8: the caller's options and cyipopt's ``tol``
+        default. Ipopt's native defaults, e.g. ``max_iter`` and
+        ``acceptable_tol``, are not available there and are not recorded,
+        as in ``Records.SolverSettings.default_options``. Units are those
+        documented with each tuple of option names.
+    """
+    if method == 'IPOPT':
+        decoded = {(key.decode('utf-8', errors='replace')
+                    if isinstance(key, bytes) else key): value
+                   for key, value in options.items()}
+        return {name: decoded[name] for name in _IPOPT_STOPPING_OPTIONS
+                if name in decoded}
+
+    if method == 'LM':
+        function, names = levenberg_marquardt, _LM_STOPPING_OPTIONS
+    else:  # 'scipy' or 'least_squares'
+        function, names = least_squares, _SCIPY_STOPPING_OPTIONS
+    parameters = inspect.signature(function).parameters
+    return {name: options.get(name, parameters[name].default)
+            for name in names}
+
+
+def _warn_unconverged(solver: str, reason: str, evaluations: str,
+                      budget_option: Optional[str] = None,
+                      budget_value: Optional[int] = None) -> None:
+    """Warn that a fit stopped before meeting a convergence criterion.
+
+    Parameters
+    ----------
+    solver : str
+        Description of the optimizer and the ``method`` that selected it.
+    reason : str
+        The optimizer's stop reason (status and message).
+    evaluations : str
+        Description of the evaluation counts of the fit.
+    budget_option : str, optional
+        Name of the option whose evaluation budget stopped the fit
+        (``max_fun_eval`` or ``max_nfev``). None (the default) when the fit
+        stopped for another reason, e.g. a SciPy callback; the warning then
+        names no budget and does not suggest raising one.
+    budget_value : int, optional
+        Effective value of ``budget_option`` [-]; None for SciPy's
+        automatic limit. Ignored without ``budget_option``.
+
+    Warns
+    -----
+    RuntimeWarning
+        Always, pointing at the first caller outside PharmaPy
+        (``_user_stacklevel``).
+    """
+    if budget_option is None:
+        cause = ''
+        advice = 'Review the solver status and message.'
+    else:
+        limit = (f"{budget_option}=None, SciPy's automatic limit"
+                 if budget_value is None
+                 else f"{budget_option}={budget_value!r}")
+        cause = f', bounded by {limit}'
+        advice = (f'Raise {budget_option} or review the seed, scaling and '
+                  "tolerances (info['tolerances']).")
+    warnings.warn(
+        f"{solver} stopped without converging ({reason}) after "
+        f"{evaluations}{cause}; the returned parameters, covariance and "
+        "statistics describe the last accepted iterate, not a converged "
+        f"estimate. {advice}",
+        RuntimeWarning, stacklevel=_user_stacklevel())
 
 
 def pseudo_inv(states, dstates_dparam=None):
@@ -3795,6 +3930,29 @@ class ParameterEstimation:
             ``info['status']`` (int, Ipopt's return status),
             ``info['message']`` (str, Ipopt's status message) and, when
             cyipopt reports it, ``info['nit']`` (int, iterations [-]).
+            Every method reports ``info['success']`` (bool) and
+            ``info['message']`` (str). For LM, ``success`` is True when
+            ``info['stop_criterion']`` is a convergence test
+            (``'Small step'``, ``'Small gradient'`` or ``'Value of the
+            objective function lower than tolerance'``) and False for
+            ``'Maximum iterations exceeded'``; ``message`` repeats the stop
+            criterion. With ``max_fun_eval=0`` LM evaluates the seed only,
+            reports no ``stop_criterion``, and ``success`` is False with a
+            message saying that no iterations were requested. For
+            ``'scipy'``/``'least_squares'``, ``success``, ``status`` and
+            ``message`` are SciPy's (``success`` True for ``status > 0``).
+            ``info['tolerances']`` (dict) holds the stopping criteria that
+            governed the fit with their effective values, the given options
+            merged over the optimizer defaults: ``max_fun_eval`` [-],
+            ``eps_1`` [residual units**2 / parameter units], ``eps_2`` [-]
+            and ``tol_fun`` [residual units] for LM (defaults read from
+            ``levenberg_marquardt``'s signature); ``ftol`` [-], ``xtol``
+            [-], ``gtol`` and ``max_nfev`` [-] for SciPy (defaults read from
+            ``scipy.optimize.least_squares``'s signature; ``max_nfev=None``
+            means SciPy's automatic limit); and, for IPOPT, only the
+            termination options present in the solver's options, with
+            ``str`` keys: the caller's and cyipopt's ``tol`` default, not
+            Ipopt's native defaults (see ``_stopping_tolerances``).
 
         Raises
         ------
@@ -3816,6 +3974,21 @@ class ParameterEstimation:
             for example at its iteration limit. The warning names the status
             and message; the returned parameters, covariance and statistics
             then describe the last iterate, not a converged estimate.
+            Likewise if LM stops with ``'Maximum iterations exceeded'`` or
+            ``scipy.optimize.least_squares`` without success (e.g. status
+            0 at ``max_nfev``, or status -2 after a callback stop): the
+            warning names the method, the stop reason (SciPy's status and
+            message) and the evaluation counts, and states that the results
+            describe the last accepted iterate, not a converged estimate.
+            Only when the evaluation budget stopped the fit (LM's
+            ``'Maximum iterations exceeded'``, SciPy status 0) does it name
+            the limiting option with its effective value (``max_fun_eval``
+            for LM, ``max_nfev`` for SciPy) and suggest raising it.
+            The returned parameters, covariance and statistics are those of
+            the solver, unchanged. No warning is issued for the
+            evaluation-only LM call ``max_fun_eval=0``. These warnings point
+            at the caller outside PharmaPy, also through
+            ``estimate_parameters`` or ``SimulationExec.EstimateParams``.
             Also, from ``get_covariance``, if the covariance at the accepted
             parameters is undefined. The warning gives one of three causes:
             a non-finite weighted residual Jacobian (naming those
@@ -3921,6 +4094,30 @@ class ParameterEstimation:
                 # metadata.
                 self.get_objective(opt_par, out_array=True)
 
+                if 'stop_criterion' not in info:
+                    # max_fun_eval=0: an explicit evaluation at the seed,
+                    # not a fit, so it is reported but not warned about.
+                    info['success'] = False
+                    info['message'] = (
+                        'No iterations were requested (max_fun_eval=0); '
+                        'the parameters are the seed, evaluated only')
+                else:
+                    info['success'] = (info['stop_criterion']
+                                       in _LM_CONVERGED_STOPS)
+                    info['message'] = str(info['stop_criterion'])
+                    if not info['success']:
+                        budget = (
+                            ('max_fun_eval', _stopping_tolerances(
+                                'LM', effective_options)['max_fun_eval'])
+                            if info['stop_criterion'] == _LM_BUDGET_STOP
+                            else (None, None))
+                        _warn_unconverged(
+                            "Levenberg-Marquardt (method='LM')",
+                            info['message'],
+                            f"{info['num_fun_eval']} trial evaluations and "
+                            f"{info['num_iter']} accepted steps",
+                            *budget)
+
             elif method == 'IPOPT':
                 effective_options['print_level'] = (
                     int(verbose) * IPOPT_VERBOSE_PRINT_LEVEL)  # [-]
@@ -3951,7 +4148,7 @@ class ParameterEstimation:
                         f"{info['status']}: {message}); the returned "
                         "parameters, covariance and statistics describe its "
                         "last iterate, not a converged estimate",
-                        RuntimeWarning, stacklevel=2)
+                        RuntimeWarning, stacklevel=_user_stacklevel())
 
             else:  # 'scipy' or 'least_squares'
                 scipy_options = effective_options
@@ -4012,6 +4209,24 @@ class ParameterEstimation:
                 info['scipy_result'] = result
                 # [residual unit / parameter unit], shape (num_params, n_data).
                 info['jac'] = np.asarray(result.jac).T
+                info['success'] = bool(result.success)
+                info['message'] = str(result.message)
+                if not info['success']:
+                    budget = (
+                        ('max_nfev', _stopping_tolerances(
+                            method, effective_options)['max_nfev'])
+                        if result.status == _SCIPY_BUDGET_STATUS
+                        else (None, None))
+                    _warn_unconverged(
+                        "scipy.optimize.least_squares "
+                        f"(method={method!r})",
+                        f"status {int(result.status)}: {info['message']}",
+                        f"{result.nfev} residual and {result.njev} Jacobian "
+                        "evaluations",
+                        *budget)
+
+            info['tolerances'] = _stopping_tolerances(method,
+                                                      effective_options)
 
             # Statistics use the data residuals; see _data_solver_info.
             info = self._data_solver_info(info)
@@ -4100,7 +4315,11 @@ class ParameterEstimation:
         info : dict
             Solver information at the accepted parameters, with ``info['jac']``
             in the canonical ``(num_params, len(info['fun']))`` orientation
-            documented by ``optimize_fn``.
+            documented by ``optimize_fn``, the termination outcome
+            ``info['success']`` and ``info['message']``, and the effective
+            stopping criteria ``info['tolerances']``, which include the
+            options given here through ``optim_options`` or
+            ``**solver_options``.
 
         Raises
         ------
@@ -4110,6 +4329,12 @@ class ParameterEstimation:
             If the same option is given in both ``optim_options`` and
             ``**solver_options``, or if ``optimize_fn`` rejects ``method`` or
             ``bounds``.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the optimizer stops without converging, or the covariance is
+            undefined; see ``optimize_fn``.
         """
         if optim_options is not None and not isinstance(optim_options, Mapping):
             raise TypeError(

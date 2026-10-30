@@ -1465,8 +1465,10 @@ class StatisticsClass:
             at the accepted parameters; the sample's exception is still
             raised, also when warnings are turned into errors (the report is
             then dropped).
-            Also, from ``optimize_fn``, if an IPOPT sample refit terminates
-            unsuccessfully; see Notes.
+            Also, from ``optimize_fn``, if a sample refit stops without
+            converging: an unsuccessful IPOPT termination, LM's
+            ``'Maximum iterations exceeded'`` or an unsuccessful
+            ``scipy.optimize.least_squares`` status; see Notes.
             Also, from ``ParameterEstimation.get_covariance``, if a sample
             refit's covariance is undefined, for example because its
             parameters are not identifiable.
@@ -1506,12 +1508,16 @@ class StatisticsClass:
         ``ParameterEstimation.optimize_fn`` also accepts ``'IPOPT'``, whose
         numerical failures surface from cyipopt rather than as a
         ``LinAlgError``. Under that method a failed sample aborts the whole
-        bootstrap run instead of recording a NaN row. An unsuccessful IPOPT
-        termination of a sample refit, for example at ``max_iter``, does not
-        raise: ``optimize_fn`` emits its ``RuntimeWarning`` naming the Ipopt
-        status, and the sample's last iterate is stored as its row. When
-        that warning is turned into an error, it propagates like any other
-        sample exception and aborts the run.
+        bootstrap run instead of recording a NaN row. A sample refit that
+        stops without converging does not raise, whatever the method: an
+        unsuccessful IPOPT termination (e.g. at ``max_iter``), LM at
+        ``max_fun_eval`` (``'Maximum iterations exceeded'``) or an
+        unsuccessful ``scipy.optimize.least_squares`` status (e.g. 0 at
+        ``max_nfev``). ``optimize_fn`` emits its ``RuntimeWarning`` naming
+        the stop reason, and the sample's last accepted iterate is stored as
+        its row. When that warning is turned into an error, it propagates
+        like any other sample exception (it is not a ``LinAlgError``) and
+        aborts the run.
         """
         y_samples = self.get_bootsamples(
             num_samples)  # [response-dependent units]

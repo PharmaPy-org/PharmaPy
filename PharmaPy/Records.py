@@ -4280,6 +4280,14 @@ covariance_include_mse
             evaluation.
         RerunMismatchError
             If the fitted values are not reproduced within tolerance.
+
+        Warns
+        -----
+        RuntimeWarning
+            From ``ParameterEstimation.optimize_fn``, pointing at the
+            caller of ``rerun``, if the refit stops without converging, e.g.
+            a recorded fit truncated by ``max_fun_eval``, or its covariance
+            is undefined.
         """
         for label, value in (('rtol', rtol), ('atol', atol)):
             if _finite_float(value, label) < 0:

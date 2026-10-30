@@ -277,6 +277,48 @@ message; the returned parameters, covariance and statistics then describe the
 last iterate, not a converged estimate. Earlier releases discarded the outcome,
 so such fits were indistinguishable from converged ones.
 
+Levenberg-Marquardt and SciPy fits report their outcome the same way (issue
+#352): :code:`info['success']` (bool) and :code:`info['message']` (str) for
+every method. For LM, :code:`success` is True when :code:`stop_criterion` is
+one of its convergence tests (:code:`'Small step'`, :code:`'Small gradient'`,
+:code:`'Value of the objective function lower than tolerance'`) and False for
+:code:`'Maximum iterations exceeded'`; for :code:`'scipy'` and
+:code:`'least_squares'` they are SciPy's own :code:`success`, :code:`status`
+and :code:`message`. A fit that stops without converging, for example at
+:code:`max_fun_eval` (LM) or :code:`max_nfev` (SciPy), emits a
+:code:`RuntimeWarning` naming the method, the stop reason and the evaluation
+counts, and stating that the returned parameters, covariance and statistics
+describe the last accepted iterate, not a converged estimate. When the
+evaluation budget stopped the fit (LM's :code:`'Maximum iterations
+exceeded'`, SciPy status 0), the warning also names the limiting option with
+its effective value and suggests raising it; other unsuccessful SciPy
+statuses, such as -2 after a callback stop, are reported with their status
+and message only. The returned values themselves are unchanged. Earlier
+releases did not warn: the outcome was only available as LM's
+:code:`info['stop_criterion']` or SciPy's native :code:`info['success']`,
+:code:`info['status']` and :code:`info['message']`. An LM call
+with :code:`max_fun_eval=0` evaluates the seed only: it reports
+:code:`success` False with a message saying that no iterations were
+requested, and does not warn. These warnings, like IPOPT's, point at the
+user's call, also through :code:`estimate_parameters`,
+:code:`SimulationExec.EstimateParams` and :code:`CalibrationRecord.rerun`.
+Like other warnings, they can be turned into errors by a warnings filter;
+a bootstrap refit that stops without converging then aborts the run
+(see :code:`StatisticsClass.bootstrap_params`).
+
+:code:`info['tolerances']` records the stopping criteria that governed the
+fit with their effective values, the given options merged over the optimizer
+defaults: :code:`max_fun_eval`, :code:`eps_1`, :code:`eps_2` and
+:code:`tol_fun` for LM (defaults 100, 1e-8, 1e-8 and 1e-12, read from
+:code:`levenberg_marquardt`), and :code:`ftol`, :code:`xtol`, :code:`gtol`
+and :code:`max_nfev` for SciPy (defaults 1e-8, 1e-8, 1e-8 and None, read from
+:code:`scipy.optimize.least_squares`; :code:`max_nfev=None` selects SciPy's
+automatic limit, which is recorded as None rather than as a number). For
+IPOPT it holds only the Ipopt termination options present in the solver's
+options, i.e. the caller's and cyipopt's :code:`tol` default; Ipopt's native
+defaults, such as :code:`max_iter`, are not recorded, as in calibration
+records.
+
 Default parameter labels (:code:`name_params` omitted) are numbered over the
 full parameter vector (issue #477): with :code:`optimize_flags=[False, True]`
 the optimized parameter is :code:`theta_2` in :code:`name_params`,
