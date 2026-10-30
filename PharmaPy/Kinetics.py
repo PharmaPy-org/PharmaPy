@@ -7,7 +7,7 @@ import numpy as np
 import json
 import re
 import warnings
-from typing import Union
+from typing import Tuple, Union
 
 from PharmaPy.Commons import get_permutation_indexes
 from PharmaPy.Errors import PharmaPyTypeError, PharmaPyValueError
@@ -16,6 +16,14 @@ from PharmaPy.Errors import PharmaPyTypeError, PharmaPyValueError
 
 gas_ct = 8.314  # J/mol/K
 eps = np.finfo(float).eps  # machine-epsilon floor for singularities
+# Projected concentrations below -DEPLETION_ROUNDOFF_TOLERANCE count as real
+# depletion for the return_both limiter in get_rxn_rates; anything closer to
+# zero is round-off from the dot product of the extents with the
+# stoichiometry. Ten units of double round-off at unit magnitude (about
+# 2e-15 mol/L) is far below any concentration a solver resolves, so a species
+# sitting at exactly zero with a zero net rate does not throttle every
+# reaction. A numerical design choice, not a fitted value.
+DEPLETION_ROUNDOFF_TOLERANCE = 10 * eps  # [mol/L]
 
 STOICH_COEFFICIENT_PATTERN = r'\d+(\.\d+)?(/\d+)?'
 STOICH_COEFFICIENT_PREFIX = r'^' + STOICH_COEFFICIENT_PATTERN + r'\s?'
@@ -1047,9 +1055,9 @@ class RxnKinetics:
             return jac_params
 
     def get_rxn_rates(self, conc, temp=298.15, overall_rates: bool = True,
-                      jac: bool = False, delta_hrxn=None, max_iter: int = 3,
-                      return_both: bool = False,
-                      limiter_dt: float = 1.0) -> np.ndarray:
+                      jac: bool = False, delta_hrxn=None,
+                      return_both: bool = False, limiter_dt: float = 1.0
+                      ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Evaluate reaction rates or their concentration Jacobian.
 
         Parameters
@@ -1070,8 +1078,6 @@ class RxnKinetics:
             reversible rate or Jacobian evaluations. Values use the raw
             ``stoich_matrix`` row basis. None uses ``self.delta_hrxn``;
             explicit values, including zero, take precedence.
-        max_iter : int, optional
-            Unused; kept for call-site compatibility. The default is 3.
         return_both : bool, optional
             If True, return ``(rxn_rates, total_rates)`` with every
             reaction extent scaled by one factor so no species is driven
@@ -1124,8 +1130,8 @@ class RxnKinetics:
             # reactions that consume each offender. Scaling all extents by a
             # single number is trivially stoichiometry preserving, leaves the
             # selectivity between reactions exactly as the kinetics set it,
-            # and terminates without iterating -- so there is no max_iter to
-            # exhaust and no way to return a rate set that still goes
+            # and terminates without iterating -- so there is no iteration cap
+            # to exhaust and no way to return a rate set that still goes
             # negative. It is the more conservative choice, because a reaction
             # that does not touch the limiting species is throttled too.
             #
@@ -1139,7 +1145,8 @@ class RxnKinetics:
             if return_both and np.asarray(conc).ndim == 1:
 
                 total_rates = np.dot(rrates, self.normalized_stoich.T)
-                short = conc + total_rates * limiter_dt < -eps * 10
+                short = (conc + total_rates * limiter_dt
+                         < -DEPLETION_ROUNDOFF_TOLERANCE)  # [mol/L]
 
                 if short.any():
 
@@ -1817,6 +1824,22 @@ class CrystKinetics:
         return bool(size_factor.size and np.all(size_factor != 0))
 
     def supports(self, mechanism):
+        """Whether any of the named mechanisms has a nonzero parameter.
+
+        Parameters
+        ----------
+        mechanism : str or list of str
+            Names among ``names_mechanisms``: 'nucl_prim', 'nucl_sec',
+            'growth', 'dissolution'. An unknown name counts as unsupported.
+
+        Returns
+        -------
+        bool
+            True if at least one listed mechanism has at least one nonzero
+            parameter. A mechanism that was not given, or whose parameters
+            are all zero, contributes a zero rate and is reported as
+            unsupported, so the crystallizers can skip its state.
+        """
         if not isinstance(mechanism,list):
             mechanism = [mechanism]
         checks = []
