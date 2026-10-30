@@ -2057,7 +2057,7 @@ class ThermoPhysicalManager:
         ndims = set()
         profile_lengths = set()
         for sp_name, raw_val in comp.items():
-            arr = np.asarray(raw_val, dtype=float)
+            arr = np.asarray(raw_val, dtype=float)  # [-], [mol/L], or [kg/m**3]
             if arr.ndim > 1 or arr.size == 0 or not np.all(np.isfinite(arr)) or np.any(arr < 0):
                 raise ValueError(
                     f"{name} entry for species {sp_name!r} must be a finite "
@@ -2253,7 +2253,13 @@ class ThermoPhysicalManager:
             is reordered/subsetted to match ``species`` in caller order.
         copy : bool, optional
             If True (default), return a copy of array-valued fields so mutating
-            the returned array does not corrupt internal phase state.
+            the returned array does not corrupt internal phase state. When
+            ``copy=False``, whole-field retrieval, single-species retrieval,
+            and ``as_dict=True`` profile entries return views into the stored
+            array when ``raw_val`` is already a ``float`` ``ndarray``;
+            multi-species array subset selection (``as_dict=False`` with a
+            sequence of ``species``) always allocates a new array via NumPy
+            advanced indexing.
         as_dict : bool, optional
             If True, return species-indexed fields as a dictionary mapping each
             selected species name to its value or spatial profile.
@@ -2339,13 +2345,16 @@ class ThermoPhysicalManager:
                     f"{self.name_species}."
                 )
             indices = [self.name_species.index(sp) for sp in species]
-            selected = arr[..., indices]
             if as_dict:
                 return {
-                    sp: (float(selected[i]) if selected.ndim == 1 else selected[..., i])
-                    for i, sp in enumerate(species)
+                    sp: (
+                        float(arr[idx])
+                        if arr.ndim == 1
+                        else (arr[..., idx].copy() if copy else arr[..., idx])
+                    )
+                    for sp, idx in zip(species, indices)
                 }
-            return selected
+            return arr[..., indices]
 
         raise FieldLookupError(
             f"species must be a species name string or sequence of strings, "
@@ -2358,13 +2367,13 @@ class ThermoPhysicalManager:
 
         Parameters
         ----------
-        conc : array-like or mapping of str to float
+        conc : array-like or mapping of str to float/array-like
             Species molar concentrations [mol/L]. Shape ``(num_species,)``
             is always accepted; ``(num_points, num_species)`` is accepted
-            only when ``solvent_ind`` and ``solv_mass_frac`` are ``None``.
-            When ``solvent_ind`` or ``solv_mass_frac`` is given, the solvent
-            concentration(s) are back-calculated to close the mixture volume
-            balance on a 1-D input.
+            when ``solvent_ind`` is ``None`` (including with
+            ``solv_mass_frac``). When ``solvent_ind`` or ``solv_mass_frac``
+            is given, the solvent concentration(s) are back-calculated to
+            close the mixture volume balance.
         solvent_ind : int or mapping of str to float, optional
             Positional index of the solvent species [-], or a solvent-blend
             mass-fraction mapping ``{solvent_name: z_j}`` [-]. Index ``0`` is a
@@ -2496,13 +2505,13 @@ class ThermoPhysicalManager:
 
         Parameters
         ----------
-        conc : array-like or mapping of str to float
+        conc : array-like or mapping of str to float/array-like
             Species mass concentrations [kg/m**3]. Shape ``(num_species,)``
             is always accepted; ``(num_points, num_species)`` is accepted
-            only when ``solvent_ind`` and ``solv_mass_frac`` are ``None``.
-            When ``solvent_ind`` or ``solv_mass_frac`` is given, the solvent
-            concentration(s) are back-calculated to close the mixture volume
-            balance on a 1-D input.
+            when ``solvent_ind`` is ``None`` (including with
+            ``solv_mass_frac``). When ``solvent_ind`` or ``solv_mass_frac``
+            is given, the solvent concentration(s) are back-calculated to
+            close the mixture volume balance.
         solvent_ind : int or mapping of str to float, optional
             Positional index of the solvent species [-], or a solvent-blend
             mass-fraction mapping ``{solvent_name: z_j}`` [-]. Index ``0`` is a

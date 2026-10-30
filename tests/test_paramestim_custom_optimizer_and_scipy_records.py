@@ -587,3 +587,127 @@ def test_scipy_least_squares_rejects_reserved_options_with_value_error(
 
     assert est.opt_method == 'LM'
     np.testing.assert_array_equal(est.params_convg, prior_par)
+
+
+def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
+    """Verify native SciPy [(lb0, lb1), (ub0, ub1)] and (2, 3) ndarray bounds in records."""
+    experiments = make_decay_experiments()
+
+    # 1. Two-parameter problem with bounds=[(0.0, 0.05), (3.0, 2.0)]
+    # In SciPy least_squares, bounds[0] = (0.0, 0.05) are lower bounds and
+    # bounds[1] = (3.0, 2.0) are upper bounds. Seed [0.8, 1.2] is feasible
+    # under native SciPy semantics (0.0 <= 0.8 <= 3.0 and 0.05 <= 1.2 <= 2.0),
+    # whereas transposing to per-parameter pairs [(0.0, 0.05), (3.0, 2.0)]
+    # would make seed [0.8, 1.2] infeasible on both parameters.
+    est_two_lm = ParameterEstimation(
+        first_order_decay,
+        [0.8, 1.2],
+        experiments,
+        optimize_flags=[True, True],
+        name_params=['c_A0', 'k'],
+    )
+    opt_two_lm, _, _ = est_two_lm.optimize_fn(method='LM', verbose=False)
+
+    est_two = ParameterEstimation(
+        first_order_decay,
+        [0.8, 1.2],
+        experiments,
+        optimize_flags=[True, True],
+        name_params=['c_A0', 'k'],
+    )
+    opt_two, _, _ = est_two.optimize_fn(
+        method='scipy',
+        bounds=[(0.0, 0.05), (3.0, 2.0)],
+        optim_options={'ftol': SOLVER_TOL, 'xtol': SOLVER_TOL},
+        verbose=False,
+    )
+    np.testing.assert_allclose(
+        opt_two, opt_two_lm, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )
+
+    rec_two = CalibrationRecord.from_estimation(
+        est_two,
+        experiments,
+        case='two_param_list_of_tuples_bounds',
+        parameter_units={'c_A0': 'mol/L', 'k': '1/s'},
+        model=ModelRevision('first_order_decay', revision='v1'),
+        sources=[DataSource('synthetic_batch', 'synthetic', 'internal test')],
+    )
+    by_name_two = {p.name: p for p in rec_two.parameters}
+    assert (by_name_two['c_A0'].lower, by_name_two['c_A0'].upper) == (0.0, 3.0)
+    assert (by_name_two['k'].lower, by_name_two['k'].upper) == (0.05, 2.0)
+
+    replayed_two = rec_two.rerun(
+        first_order_decay, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )
+    np.testing.assert_allclose(
+        replayed_two.params_convg, opt_two, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )
+
+    # 2. Three-parameter problem with 2-D NumPy bounds array of shape (2, 3)
+    def three_param_decay(params: np.ndarray, t_grid: np.ndarray) -> np.ndarray:
+        """Evaluate c_A(t) = c_A0 * exp(-k * t) + offset [mol/L].
+
+        Parameters
+        ----------
+        params : numpy.ndarray
+            Parameter vector ``[c_A0, k, offset]`` in ``[mol/L, 1/s, mol/L]``.
+        t_grid : numpy.ndarray
+            Sample times [s], shape ``(n_times,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Concentration trajectory [mol/L], shape ``(n_times, 1)``.
+        """
+        ca0, k_rate, offset = float(params[0]), float(params[1]), float(params[2])
+        c_a = ca0 * np.exp(-k_rate * np.asarray(t_grid, dtype=float)) + offset  # [mol/L]
+        return c_a[:, None]
+
+    est_three_lm = ParameterEstimation(
+        three_param_decay,
+        [1.1, 0.2, 0.02],
+        experiments,
+        optimize_flags=[True, True, True],
+        name_params=['c_A0', 'k', 'offset'],
+    )
+    opt_three_lm, _, _ = est_three_lm.optimize_fn(method='LM', verbose=False)
+
+    bounds_3d = np.array([[0.5, 0.05, -0.1], [3.0, 2.0, 0.1]], dtype=float)
+    est_three = ParameterEstimation(
+        three_param_decay,
+        [1.1, 0.2, 0.02],
+        experiments,
+        optimize_flags=[True, True, True],
+        name_params=['c_A0', 'k', 'offset'],
+    )
+    opt_three, _, _ = est_three.optimize_fn(
+        method='scipy',
+        bounds=bounds_3d,
+        optim_options={'ftol': SOLVER_TOL, 'xtol': SOLVER_TOL},
+        verbose=False,
+    )
+    np.testing.assert_allclose(
+        opt_three, opt_three_lm, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )
+
+    rec_three = CalibrationRecord.from_estimation(
+        est_three,
+        experiments,
+        case='three_param_ndarray_bounds',
+        parameter_units={'c_A0': 'mol/L', 'k': '1/s', 'offset': 'mol/L'},
+        model=ModelRevision('three_param_decay', revision='v1'),
+        sources=[DataSource('synthetic_batch', 'synthetic', 'internal test')],
+    )
+    by_name_three = {p.name: p for p in rec_three.parameters}
+    assert (by_name_three['c_A0'].lower, by_name_three['c_A0'].upper) == (0.5, 3.0)
+    assert (by_name_three['k'].lower, by_name_three['k'].upper) == (0.05, 2.0)
+    assert (by_name_three['offset'].lower, by_name_three['offset'].upper) == (-0.1, 0.1)
+
+    loaded_three = CalibrationRecord.from_json(rec_three.to_json())
+    replayed_three = loaded_three.rerun(
+        three_param_decay, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )
+    np.testing.assert_allclose(
+        replayed_three.params_convg, opt_three, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
+    )

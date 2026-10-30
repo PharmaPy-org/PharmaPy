@@ -19,6 +19,7 @@ from PharmaPy.ThermoModule import FieldLookupError
 # preserves standard five-species flowsheet fixtures while bounding wider
 # multicomponent reaction/crystallization tables.
 DEFAULT_MAX_COMPONENTS = 5  # [-]
+_UNSET = object()
 
 
 def get_name_object(obj):
@@ -401,13 +402,33 @@ class DynamicResult:
 
         if has_str_index:
             comp_names = list(index_meta)
+            num_comp = len(comp_names)
             arr = np.asarray(raw_val)
+
+            def _slice_component(sp_idx: int) -> np.ndarray:
+                """Extract a component trajectory while preserving squeezed singleton time axes.
+
+                Parameters
+                ----------
+                sp_idx : int
+                    Zero-based component index [-].
+
+                Returns
+                -------
+                numpy.ndarray
+                    Component trajectory in the state's stored units, with the
+                    time (and any spatial) axis preserved.
+                """
+                if num_comp == 1 and arr.ndim == 1:
+                    selected = arr
+                else:
+                    selected = arr[..., sp_idx]
+                return selected.copy() if copy else selected
+
             if species is None:
                 return {
-                    comp_names[idx]: (
-                        arr[..., idx].copy() if copy else arr[..., idx]
-                    )
-                    for idx in range(len(comp_names))
+                    comp_names[idx]: _slice_component(idx)
+                    for idx in range(num_comp)
                 }
             if isinstance(species, str):
                 if species not in comp_names:
@@ -416,7 +437,7 @@ class DynamicResult:
                         f"available species are {comp_names}."
                     )
                 sp_idx = comp_names.index(species)
-                return arr[..., sp_idx].copy() if copy else arr[..., sp_idx]
+                return _slice_component(sp_idx)
             if isinstance(species, Sequence):
                 unknown = [
                     sp for sp in species
@@ -428,11 +449,7 @@ class DynamicResult:
                         f"available species are {comp_names}."
                     )
                 return {
-                    sp: (
-                        arr[..., comp_names.index(sp)].copy()
-                        if copy
-                        else arr[..., comp_names.index(sp)]
-                    )
+                    sp: _slice_component(comp_names.index(sp))
                     for sp in species
                 }
             raise TypeError(
@@ -454,7 +471,7 @@ class DynamicResult:
 
     def pprint(
         self,
-        max_components: Optional[int] = DEFAULT_MAX_COMPONENTS,
+        max_components: Optional[int] = _UNSET,
         str_out: bool = True,
     ) -> Union[str, List[str]]:
         """Format the state and function-of-state tables with bounded component display.
@@ -463,8 +480,9 @@ class DynamicResult:
         ----------
         max_components : int or None, optional
             Maximum number of component names rendered inline before ellipsis
-            truncation [-]. ``None`` renders all component names. Defaults to
-            ``DEFAULT_MAX_COMPONENTS``.
+            truncation [-]. ``None`` renders all component names. When omitted,
+            defaults to ``self.max_components`` (which defaults to
+            ``DEFAULT_MAX_COMPONENTS``).
         str_out : bool, optional
             If ``True`` (default), return a single newline-joined string;
             otherwise return the list of lines.
@@ -474,6 +492,8 @@ class DynamicResult:
         str or list of str
             Formatted state metadata table(s).
         """
+        if max_components is _UNSET:
+            max_components = self.max_components
         headers = {'dim': '', 'units': 's', 'index': 's'}
 
         str_states = pprint(

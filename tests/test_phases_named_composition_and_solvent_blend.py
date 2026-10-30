@@ -416,3 +416,105 @@ def test_retrieve_field_across_phases_and_profiles(solvent_blend_db: str) -> Non
         liq.retrieve_field('mole_conc', species='NO_SUCH')
     with pytest.raises(ValueError, match="Unknown species 'NO_SUCH'"):
         liq.retrieve_field('mole_conc', species='NO_SUCH')
+
+    # copy=False with as_dict=True on a species subset returns views into stored array
+    dict_views = liq.retrieve_field(
+        'mole_conc', species=['B', 'A'], copy=False, as_dict=True
+    )
+    assert np.shares_memory(dict_views['B'], liq.mole_conc)
+    assert np.shares_memory(dict_views['A'], liq.mole_conc)
+
+
+@pytest.mark.unit
+def test_solid_composition_update_reconciles_volume_and_stream_vol_flow(
+    solvent_blend_db: str,
+) -> None:
+    """Composition-only updates on SolidPhase and SolidStream reconcile volume with density."""
+    # Database species A has rho_solid=1350 kg/m**3 (MW=150 g/mol);
+    # B has rho_solid=1250 kg/m**3 (MW=200 g/mol).
+    x_grid = np.linspace(10.0, 50.0, 5)  # [um]
+    weights = np.array([0.1, 0.2, 0.4, 0.2, 0.1])  # [-]
+    solid_mass = 1.5  # [kg]
+
+    solid = SolidPhase(
+        path_thermo=solvent_blend_db,
+        mass=solid_mass,
+        x_distrib=x_grid,
+        distrib=weights,
+        mass_frac={'A': 1.0},
+    )
+    assert solid.vol == pytest.approx(solid_mass / 1350.0)
+    assert solid.moles == pytest.approx(solid_mass * 1000.0 / 150.0)
+
+    # Update to pure B via mass_frac mapping
+    solid.updatePhase(mass_frac={'B': 1.0})
+    assert solid.mass == pytest.approx(solid_mass)
+    assert solid.getDensity() == pytest.approx(1250.0)
+    assert solid.vol == pytest.approx(solid_mass / 1250.0)
+    assert solid.moles == pytest.approx(solid_mass * 1000.0 / 200.0)
+
+    # Update back to pure A via mole_frac mapping
+    solid.updatePhase(mole_frac={'A': 1.0})
+    assert solid.vol == pytest.approx(solid_mass / 1350.0)
+    assert solid.moles == pytest.approx(solid_mass * 1000.0 / 150.0)
+
+    # SolidStream volume-flow alias stays synchronized on composition-only update
+    stream = SolidStream(
+        path_thermo=solvent_blend_db,
+        mass_flow=solid_mass,
+        x_distrib=x_grid,
+        distrib=weights,
+        mass_frac={'A': 1.0},
+    )
+    assert stream.vol_flow == pytest.approx(solid_mass / 1350.0)
+    stream.updatePhase(mass_frac={'B': 1.0})
+    assert stream.mass_flow == pytest.approx(solid_mass)
+    assert stream.vol_flow == pytest.approx(solid_mass / 1250.0)
+    assert stream.mole_flow == pytest.approx(solid_mass * 1000.0 / 200.0)
+
+
+@pytest.mark.unit
+def test_profile_update_preserves_solvent_blend_and_vapor_mass_conc_init(
+    solvent_blend_db: str,
+) -> None:
+    """2-D profile updates on LiquidPhase/LiquidStream retain stored solvent blend."""
+    liq = LiquidPhase(
+        path_thermo=solvent_blend_db,
+        mole_conc={'A': [0.2, 0.4], 'B': [0.1, 0.2]},
+        mass_frac={'ACN': 0.3, 'THF': 0.7},
+        vol=0.1,
+    )
+    initial_mole_conc = liq.mole_conc.copy()  # [mol/L]
+    initial_mass = np.array(liq.mass, copy=True)  # [kg]
+    assert liq.concentration_basis is False
+    assert np.all(initial_mole_conc[:, 2:] > 0.0)
+
+    # Repeat 2-D profile update via mole_conc mapping without re-passing mass_frac
+    liq.updatePhase(mole_conc={'A': [0.2, 0.4], 'B': [0.1, 0.2]})
+    assert liq.concentration_basis is False
+    np.testing.assert_allclose(liq.mole_conc, initial_mole_conc, rtol=1e-12)
+    np.testing.assert_allclose(liq.mass, initial_mass, rtol=1e-12)
+
+    # Repeat 2-D profile update via mass_conc mapping (MW_A=150 g/mol, MW_B=200 g/mol)
+    target_mass_conc = {
+        'A': initial_mole_conc[:, 0] * 150.0,
+        'B': initial_mole_conc[:, 1] * 200.0,
+    }  # [kg/m**3]
+    liq.updatePhase(mass_conc=target_mass_conc)
+    assert liq.concentration_basis is False
+    np.testing.assert_allclose(liq.mole_conc, initial_mole_conc, rtol=1e-12)
+    np.testing.assert_allclose(liq.mass, initial_mass, rtol=1e-12)
+
+    # VaporPhase and VaporStream accept mass_conc mappings in __init__
+    vap = VaporPhase(
+        path_thermo=solvent_blend_db,
+        mass_conc={'A': 2.0, 'B': 1.0},
+        vol=1.0,
+    )
+    assert vap.mass_frac == pytest.approx([2.0 / 3.0, 1.0 / 3.0, 0.0, 0.0])
+    vap_stream = VaporStream(
+        path_thermo=solvent_blend_db,
+        mass_conc={'A': 2.0, 'B': 1.0},
+        vol_flow=1.0,
+    )
+    assert vap_stream.mass_frac == pytest.approx([2.0 / 3.0, 1.0 / 3.0, 0.0, 0.0])

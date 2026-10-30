@@ -280,21 +280,31 @@ class LiquidPhase(ThermoPhysicalManager):
         mass, vol, moles : float, optional
             Mass [kg], volume [m**3], and amount [mol]. The first positive
             value in that order controls; zero means no amount was supplied.
-        mass_frac, mole_frac : array-like, optional
+        mass_frac, mole_frac : array-like or mapping of str to float/array-like, optional
             Species mass or mole fractions [-], shape ``(num_species,)`` or
-            ``(num_points, num_species)``. Stored as float arrays.
-        mass_conc, mole_conc : array-like, optional
+            ``(num_points, num_species)``, or a species-keyed mapping. Stored
+            as float arrays. When ``mole_conc`` or ``mass_conc`` is supplied
+            together with a species-keyed ``mass_frac`` mapping (and
+            ``mole_frac`` is ``None``), ``mass_frac`` specifies the solute-free
+            solvent-blend mass fractions [-] summing to 1.0, and solvent
+            concentrations are completed from the coupled ideal-mixture volume
+            balance (issues #336, #338).
+        mass_conc, mole_conc : array-like or mapping of str to float/array-like, optional
             Species mass [kg/m**3] or molar [mol/L] concentrations with the
-            same shapes as fractions, stored as float arrays. Solvent
-            completion supports only shape ``(num_species,)``.
+            same shapes as fractions, or species-keyed mappings, stored as
+            float arrays. Single-solvent completion via ``name_solv`` supports
+            shape ``(num_species,)``; solvent-blend completion via a
+            ``mass_frac`` mapping supports both ``(num_species,)`` and
+            ``(num_points, num_species)``.
         name_solv : str, optional
             Solvent species whose concentration is completed from the
             ideal-mixing volume balance ``sum_i c_i v_i = 1`` when
-            concentrations are supplied. With None (default), supplied
-            concentrations are authoritative: fractions are normalized from
-            them and the amounts follow ``sum(mole_conc) * vol * 1000``
-            [mol] and ``sum(mass_conc) * vol`` [kg] (see the class Notes).
-            Ignored for fraction inputs.
+            concentrations are supplied. With None (default) and no
+            solvent-blend ``mass_frac`` mapping, supplied concentrations are
+            authoritative: fractions are normalized from them and the amounts
+            follow ``sum(mole_conc) * vol * 1000`` [mol] and
+            ``sum(mass_conc) * vol`` [kg] (see the class Notes). Ignored for
+            full-mixture fraction inputs.
         verbose : bool, optional
             Print diagnostics for fractions summing below the legacy 0.99
             threshold [-]. Defaults to True.
@@ -332,16 +342,18 @@ class LiquidPhase(ThermoPhysicalManager):
         Notes
         -----
         Warning filters are left unchanged.
-        Exactly one composition measure is required. Constructor composition
-        inputs are copied before conversion. Derived concentrations retain
-        the liquid volume basis. No physical basis changes during coercion.
+        Provide a single composition measure, or solute concentrations
+        (``mole_conc`` or ``mass_conc``) together with a solvent-blend
+        ``mass_frac`` mapping. Constructor composition inputs are copied
+        before conversion. Derived concentrations retain the liquid volume
+        basis. No physical basis changes during coercion.
         Amounts are reconciled on the concentration basis when ``mole_conc``
-        or ``mass_conc`` is supplied without ``name_solv`` and on the
-        ideal-mixing basis otherwise; :attr:`concentration_basis` records
-        the choice. Earlier releases always used ideal mixing, so for
-        concentrations that do not close ``sum_i c_i v_i = 1`` the mass,
-        moles and fractions-times-amount now follow the concentrations
-        (issue #439).
+        or ``mass_conc`` is supplied without ``name_solv`` or a solvent-blend
+        ``mass_frac`` mapping, and on the ideal-mixing basis otherwise;
+        :attr:`concentration_basis` records the choice. Earlier releases
+        always used ideal mixing, so for concentrations that do not close
+        ``sum_i c_i v_i = 1`` the mass, moles and fractions-times-amount now
+        follow the concentrations (issue #439).
         """
 
         super().__init__(path_thermo)
@@ -839,26 +851,31 @@ class LiquidPhase(ThermoPhysicalManager):
             self._solv_mass_frac = solv_mass_frac
             mass_frac = None
 
-        mole_conc_was_mapping = isinstance(mole_conc, Mapping)
-        mass_conc_was_mapping = isinstance(mass_conc, Mapping)
-
         mole_conc = self._coerce_composition_mapping(mole_conc, 'mole_conc')
         mass_conc = self._coerce_composition_mapping(mass_conc, 'mass_conc')
         mass_frac = self._coerce_composition_mapping(mass_frac, 'mass_frac')
         mole_frac = self._coerce_composition_mapping(mole_frac, 'mole_frac')
 
-        if solv_mass_frac is None and getattr(self, '_solv_mass_frac', None) is not None:
-            if (mole_conc_was_mapping or mass_conc_was_mapping) and np.ndim(
-                mole_conc if mole_conc is not None else mass_conc
-            ) == 1:
-                conc_arr = mole_conc if mole_conc is not None else mass_conc
-                solv_indices = [
-                    self.name_species.index(sp)
-                    for sp in self._solv_mass_frac.keys()
-                    if sp in self.name_species
-                ]
-                if all(conc_arr[idx] == 0 for idx in solv_indices):
-                    solv_mass_frac = self._solv_mass_frac
+        if (
+            solv_mass_frac is None
+            and getattr(self, '_solv_mass_frac', None) is not None
+            and (mole_conc is not None or mass_conc is not None)
+        ):
+            conc_arr = np.asarray(
+                mole_conc if mole_conc is not None else mass_conc, dtype=float
+            )  # [mol/L] or [kg/m**3]
+            solv_indices = [
+                self.name_species.index(sp)
+                for sp in self._solv_mass_frac.keys()
+                if sp in self.name_species
+            ]
+            if (
+                solv_indices
+                and conc_arr.ndim in (1, 2)
+                and conc_arr.shape[-1] == self.num_species
+                and np.all(conc_arr[..., solv_indices] == 0)
+            ):
+                solv_mass_frac = self._solv_mass_frac
 
         has_solvent_closure = (
             self.ind_solv is not None or solv_mass_frac is not None
@@ -1633,7 +1650,8 @@ class VaporPhase(ThermoPhysicalManager):
                  mass_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
                  mole_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
                  mole_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
-                 check_input: bool = True, verbose: bool = True) -> None:
+                 check_input: bool = True, verbose: bool = True,
+                 mass_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None) -> None:
         """Initialize a vapor-phase thermodynamic state.
 
         Parameters
@@ -1663,6 +1681,9 @@ class VaporPhase(ThermoPhysicalManager):
             If ``True``, warn when mass, volume, and moles are all zero [-].
         verbose : bool, optional
             If ``True``, print composition-normalization warnings [-].
+        mass_conc : array-like or mapping of str to float/array-like, optional
+            Species mass concentrations [kg/m**3], shape ``(num_species,)`` or
+            ``(num_points, num_species)``, or a species-keyed mapping.
 
         Raises
         ------
@@ -1680,10 +1701,10 @@ class VaporPhase(ThermoPhysicalManager):
 
         Notes
         -----
-        Provide exactly one of ``mass_frac``, ``mole_frac``, or
-        ``mole_conc``. Concentration inputs use PharmaPy's [mol/L] basis and
-        are retained as supplied. Concentrations derived from fractions are
-        the converters' liquid-basis values, not gas-EOS concentrations.
+        Provide exactly one of ``mass_frac``, ``mole_frac``, ``mole_conc``, or
+        ``mass_conc``. Concentration inputs use PharmaPy's [mol/L] or
+        [kg/m**3] basis and determine normalized vapor fractions; stored
+        concentrations follow the ideal-gas EOS.
         The first positive amount in the order mass, volume, moles is
         authoritative for every composition row; the other amounts follow
         from the ideal-gas EOS. Composition-dependent amounts have one value
@@ -1697,11 +1718,12 @@ class VaporPhase(ThermoPhysicalManager):
         mass_frac = self._coerce_composition_mapping(mass_frac, 'mass_frac')
         mole_frac = self._coerce_composition_mapping(mole_frac, 'mole_frac')
         mole_conc = self._coerce_composition_mapping(mole_conc, 'mole_conc')
+        mass_conc = self._coerce_composition_mapping(mass_conc, 'mass_conc')
 
         composition = {
             'mass_frac': mass_frac, 'mole_frac': mole_frac,
-            'mole_conc': mole_conc,
-        }  # mass/mole fractions [-]; mole_conc [mol/L]
+            'mole_conc': mole_conc, 'mass_conc': mass_conc,
+        }  # mass/mole fractions [-]; mole_conc [mol/L]; mass_conc [kg/m**3]
         supplied = [name for name, value in composition.items()
                     if value is not None]
         if not supplied:
@@ -3033,10 +3055,11 @@ class SolidPhase(ThermoPhysicalManager):
             If updated species fractions sum to less than 0.99 [-].
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. As in the
-            constructor: if a ``distrib`` or ``mass`` update relates mass and
-            volume through the density and a present species of the stored
-            composition has no ``rho_solid`` [kg/m**3]; a species at the zero
-            sentinel needs none.
+            constructor: if a ``distrib``, ``mass``, or composition update on
+            a phase with a defined volume relates mass and volume through the
+            density and a present species of the stored composition has no
+            ``rho_solid`` [kg/m**3]; a species at the zero sentinel needs
+            none.
 
         Notes
         -----
@@ -3054,11 +3077,15 @@ class SolidPhase(ThermoPhysicalManager):
         density-derived volume take precedence. If ``moments`` is also
         supplied, it replaces the recalculated moments without another mass or
         volume update. Distribution updates recalculate orders zero through
-        ``self.num_mom - 1``, preserving the configured moment-state size. The
-        mole amount is recalculated whenever a distribution, composition, or
-        explicit mass changes the solid inventory. A moments-only update does
-        not imply an amount change and therefore leaves mass, volume, and
-        moles intact.
+        ``self.num_mom - 1``, preserving the configured moment-state size.
+        A composition-only update conserves ``self.mass`` [kg] (or [kg/s] on
+        streams), recalculates ``self.moles`` from the updated mixture molar
+        mass ``mw_av``, and—when ``vol`` is already defined on the phase—
+        reconciles ``self.vol = self.mass / self.getDensity()`` [m**3] with
+        the updated solid mixture density; any attached particle population
+        (``distrib`` and ``moments``) is left unscaled unless ``distrib`` is
+        also supplied. A moments-only update does not imply an amount change
+        and therefore leaves mass, volume, and moles intact.
         """
         if mass_frac is not None and mole_frac is not None:
             raise ValueError(
@@ -3115,8 +3142,10 @@ class SolidPhase(ThermoPhysicalManager):
             self.mass = self.vol * self.getDensity()  # [kg]
 
         if mass is not None:
-            self.mass = mass
-            self.vol = mass / self.getDensity()
+            self.mass = mass  # [kg]
+            self.vol = mass / self.getDensity()  # [m**3]
+        elif composition_updated and distrib is None and hasattr(self, 'vol'):
+            self.vol = self.mass / self.getDensity()  # [m**3]
 
         if moments is not None:
             self.moments = _as_float_array(moments)  # [m**n], order n

@@ -362,8 +362,26 @@ def test_rawlings_9_5_named_interface_core_workflow(
     true_log10_rates = np.log10(RAWLINGS_9_5_TRUE_RATES_DAY)  # [-]
 
     def model_wrapper(log10_params: np.ndarray, t_days: np.ndarray) -> np.ndarray:
-        """Evaluate measured species [A, B, C] concentrations [mol/L] at ``t_days``."""
-        k_sec = (10.0 ** np.asarray(log10_params, dtype=float)) / SECONDS_PER_DAY
+        """Evaluate measured species [A, B, C] concentrations at ``t_days``.
+
+        Parameters
+        ----------
+        log10_params : numpy.ndarray
+            Base-10 logarithms of rate constants on a per-day basis [-], shape
+            ``(6,)``, where reactions 1..3 are in ``1/day`` and reactions 4..6
+            are in ``L/(mol*day)``.
+        t_days : numpy.ndarray
+            Sample times [day], shape ``(num_times,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Predicted molar concentrations of ``('A', 'B', 'C')`` [mol/L],
+            shape ``(num_times, 3)``.
+        """
+        k_sec = (
+            (10.0 ** np.asarray(log10_params, dtype=float)) / SECONDS_PER_DAY
+        )  # [1/s] for rxn_1..rxn_3; [L/(mol*s)] for rxn_4..rxn_6
         kinetics_step = RxnKinetics(
             rawlings_purecomp_json,
             rxns=RAWLINGS_9_5_RXNS,
@@ -374,11 +392,29 @@ def test_rawlings_9_5_named_interface_core_workflow(
             kinetics_step,
             initial_partic_conc,
             np.asarray(t_days, dtype=float) * SECONDS_PER_DAY,
-        )
+        )  # [mol/L]
         return prof[:, :3]
 
     def custom_lsq_optimizer(seed, objective_fun, gradient_fun, **options):
-        """Custom optimizer callable wrapping scipy.optimize.least_squares."""
+        """Wrap ``scipy.optimize.least_squares`` as a custom optimizer callable.
+
+        Parameters
+        ----------
+        seed : numpy.ndarray
+            Initial free parameter vector [-], shape ``(num_params,)``.
+        objective_fun : callable
+            Residual callback ``objective_fun(theta, out_array=True)`` [-].
+        gradient_fun : callable
+            Jacobian callback ``gradient_fun(theta, out_array=True)`` [-],
+            shape ``(num_params, n_residuals)``.
+        **options
+            Forwarded solver options such as ``submethod`` and ``max_nfev``.
+
+        Returns
+        -------
+        scipy.optimize.OptimizeResult
+            Converged SciPy least-squares result object.
+        """
         return least_squares(
             lambda theta: objective_fun(theta, out_array=True),
             seed,
@@ -406,7 +442,7 @@ def test_rawlings_9_5_named_interface_core_workflow(
             optim_options=opt_kwargs,
             verbose=False,
         )
-        k_fit = 10.0 ** log_fit
+        k_fit = 10.0 ** log_fit  # [1/day] for rxn_1..rxn_3; [L/(mol*day)] for rxn_4..rxn_6
         np.testing.assert_allclose(
             k_fit[IDENTIFIABLE_INDICES],
             RAWLINGS_9_5_TRUE_RATES_DAY[IDENTIFIABLE_INDICES],
@@ -542,8 +578,25 @@ def test_rawlings_9_5_batch_reactor_assimulo_workflow(
     )  # [(L/mol)**2]
 
     def batch_reactor_callback(log10_params: np.ndarray, t_days: np.ndarray) -> np.ndarray:
-        """Run BatchReactor and extract A, B, C via result.retrieve_state('mole_conc')."""
-        k_sec = (10.0 ** np.asarray(log10_params, dtype=float)) / SECONDS_PER_DAY
+        """Run ``BatchReactor`` and extract ``('A', 'B', 'C')`` concentrations.
+
+        Parameters
+        ----------
+        log10_params : numpy.ndarray
+            Base-10 logarithms of rate constants on a per-day basis [-], shape
+            ``(6,)``.
+        t_days : numpy.ndarray
+            Sample times [day], shape ``(num_times,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Predicted molar concentrations of ``('A', 'B', 'C')`` [mol/L],
+            shape ``(num_times, 3)``.
+        """
+        k_sec = (
+            (10.0 ** np.asarray(log10_params, dtype=float)) / SECONDS_PER_DAY
+        )  # [1/s] for rxn_1..rxn_3; [L/(mol*s)] for rxn_4..rxn_6
         kin_step = RxnKinetics(
             rawlings_purecomp_json,
             rxns=RAWLINGS_9_5_RXNS,
@@ -581,7 +634,7 @@ def test_rawlings_9_5_batch_reactor_assimulo_workflow(
         optim_options={'max_nfev': 80},
         verbose=False,
     )
-    k_fit = 10.0 ** log_fit
+    k_fit = 10.0 ** log_fit  # [1/day] for rxn_1..rxn_3; [L/(mol*day)] for rxn_4..rxn_6
     np.testing.assert_allclose(
         k_fit[IDENTIFIABLE_INDICES],
         RAWLINGS_9_5_TRUE_RATES_DAY[IDENTIFIABLE_INDICES],

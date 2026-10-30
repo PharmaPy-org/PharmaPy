@@ -711,10 +711,11 @@ class VaporStream(VaporPhase):
     def __init__(self, path_thermo: Optional[str] = None,
                  temp: float = 298.15, pres: float = 101325,
                  mass_flow: float = 0, vol_flow: float = 0, mole_flow: float = 0,
-                 mass_frac: Optional[np.ndarray] = None,
-                 mole_frac: Optional[np.ndarray] = None,
-                 mole_conc: Optional[np.ndarray] = None,
-                 check_input: bool = True, verbose: bool = True) -> None:
+                 mass_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                 mole_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                 mole_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                 check_input: bool = True, verbose: bool = True,
+                 mass_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None) -> None:
         """Initialize a vapor stream and its consistent flow aliases.
 
         Parameters
@@ -727,14 +728,17 @@ class VaporStream(VaporPhase):
         mass_flow, vol_flow, mole_flow : float, optional
             Mass [kg/s], volume [m**3/s], and molar [mol/s] flow. The first
             positive value in that order controls; all zeros give zero flow.
-        mass_frac, mole_frac : array-like, optional
+        mass_frac, mole_frac : array-like or mapping of str to float/array-like, optional
             Species mass and mole fractions [-], shape ``(num_species,)`` or
-            ``(num_points, num_species)``.
-        mole_conc : array-like, optional
+            ``(num_points, num_species)``, or species-keyed mappings.
+        mole_conc : array-like or mapping of str to float/array-like, optional
             Species molar concentrations [mol/L], shape ``(num_species,)`` or
-            ``(num_points, num_species)``.
+            ``(num_points, num_species)``, or a species-keyed mapping.
         check_input, verbose : bool, optional
             Enable zero-flow warnings and composition diagnostics, respectively.
+        mass_conc : array-like or mapping of str to float/array-like, optional
+            Species mass concentrations [kg/m**3], shape ``(num_species,)`` or
+            ``(num_points, num_species)``, or a species-keyed mapping.
 
         Raises
         ------
@@ -752,8 +756,8 @@ class VaporStream(VaporPhase):
         Notes
         -----
         Exactly one composition measure is required. Supplied concentrations
-        are retained; concentrations derived from fractions use the converters'
-        liquid basis, not gas-EOS values. The first positive flow applies to
+        determine normalized vapor fractions; stored concentrations follow the
+        ideal-gas EOS. The first positive flow applies to
         every composition row. Composition-dependent flows have one value per
         row; shared flows independent of composition remain scalar.
         """
@@ -762,7 +766,7 @@ class VaporStream(VaporPhase):
                          mass=mass_flow, vol=vol_flow, moles=mole_flow,
                          mass_frac=mass_frac, mole_frac=mole_frac,
                          mole_conc=mole_conc, check_input=check_input,
-                         verbose=verbose)
+                         verbose=verbose, mass_conc=mass_conc)
 
         self.mass_flow = self.mass  # [kg/s]
         self.vol_flow = self.vol  # [m**3/s]
@@ -772,10 +776,10 @@ class VaporStream(VaporPhase):
 
         self._DynamicInlet = None
 
-    def updatePhase(self, mole_conc: Optional[np.ndarray] = None,
-                    mass_conc: Optional[np.ndarray] = None,
-                    mass_frac: Optional[np.ndarray] = None,
-                    mole_frac: Optional[np.ndarray] = None,
+    def updatePhase(self, mole_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                    mass_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                    mass_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                    mole_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
                     vol: float = 0, mass: float = 0, moles: float = 0,
                     vol_flow: Optional[float] = None,
                     mass_flow: Optional[float] = None,
@@ -786,13 +790,13 @@ class VaporStream(VaporPhase):
 
         Parameters
         ----------
-        mole_conc, mass_conc : ndarray, optional
+        mole_conc, mass_conc : array-like or mapping of str to float/array-like, optional
             Species molar [mol/L] and mass [kg/m**3] concentrations, shape
-            ``(num_species,)`` or ``(num_points, num_species)``. Supplied
-            concentrations retain their basis.
-        mass_frac, mole_frac : ndarray, optional
+            ``(num_species,)`` or ``(num_points, num_species)``, or
+            species-keyed mappings.
+        mass_frac, mole_frac : array-like or mapping of str to float/array-like, optional
             Species mass and mole fractions [-], shape ``(num_species,)`` or
-            ``(num_points, num_species)``.
+            ``(num_points, num_species)``, or species-keyed mappings.
         vol, mass, moles : float, optional
             Phase-style names for volume [m**3/s], mass [kg/s], and molar
             [mol/s] flow. Zero means no amount was supplied.

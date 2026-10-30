@@ -524,7 +524,7 @@ def test_mismatched_reaction_id_keys_are_rejected():
             ea_params=ea_vals,
         )
     # Also verify rejection on dh_rxn, keq_params, and params_f mappings.
-    with pytest.raises(ValueError, match=r"delta_hrxn keys must match reaction identifiers"):
+    with pytest.raises(ValueError, match=r"dh_rxn keys must match reaction identifiers"):
         RxnKinetics(
             path=str(DATABASE),
             rxns={"coupling": "A \u2192 B", "degradation": "B \u21c4 C"},
@@ -623,3 +623,44 @@ def test_malformed_reaction_strings_are_rejected(bad_rxn):
     """Reject reaction strings with missing/multiple arrows or empty tokens."""
     with pytest.raises(ValueError):
         disect_rxns([bad_rxn])
+
+
+def test_dh_rxn_alias_error_message_and_reformulated_k_ea_attributes():
+    """Verify dh_rxn error naming and k_params/ea_params attributes under reformulation."""
+    rxns = {"r1": "A + B --> C", "r2": "A --> C"}
+    k_vals = {"r1": 1.2, "r2": 0.4}  # [L/(mol*s), 1/s]
+    ea_vals = {"r1": 25000.0, "r2": 35000.0}  # [J/mol]
+
+    with pytest.raises(ValueError, match="dh_rxn keys must match"):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns=rxns,
+            k_params=k_vals,
+            ea_params=ea_vals,
+            dh_rxn={"r1": -10000.0, "wrong_id": -5000.0},
+        )
+    with pytest.raises(ValueError, match="delta_hrxn keys must match"):
+        RxnKinetics(
+            path=str(DATABASE),
+            rxns=rxns,
+            k_params=k_vals,
+            ea_params=ea_vals,
+            delta_hrxn={"r1": -10000.0, "wrong_id": -5000.0},
+        )
+
+    kin_ref = RxnKinetics(
+        path=str(DATABASE),
+        rxns=rxns,
+        k_params=k_vals,
+        ea_params=ea_vals,
+        temp_ref=300.0,
+        reformulate_kin=True,
+    )
+    np.testing.assert_allclose(kin_ref.k_params, [1.2, 0.4], rtol=1e-12)
+    np.testing.assert_allclose(kin_ref.ea_params, [25000.0, 35000.0], rtol=1e-12)
+
+    # Flat vector update under reformulate_kin=True also refreshes k_params and ea_params
+    updated_flat = np.concatenate((kin_ref.phi_1 + np.log(2.0), kin_ref.phi_2))  # [-]
+    kin_ref.set_params(updated_flat)
+    np.testing.assert_allclose(kin_ref.k_params, [2.4, 0.8], rtol=1e-12)
+    np.testing.assert_allclose(kin_ref.ea_params, [25000.0, 35000.0], rtol=1e-12)

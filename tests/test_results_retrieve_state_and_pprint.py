@@ -162,3 +162,43 @@ def test_bounded_component_list_display_and_non_mutation() -> None:
     # Invalid max_components raises ValueError
     with pytest.raises(ValueError, match="max_components must be a positive integer"):
         pprint(tank_res.di_states, 'states', {'dim': '', 'units': 's', 'index': 's'}, max_components=0)
+
+    # Instance-configured max_components is honored by result.pprint() when called with no args
+    tank_res_custom = DynamicResult(
+        tank_res.di_states,
+        tank_res.di_fstates,
+        time=tank_res.time,
+        mole_conc=tank_res.mole_conc,
+        temp=tank_res.temp,
+        mass_frac=tank_res.mass_frac,
+        max_components=3,
+    )
+    assert 'A, N, ..., solvent' in tank_res_custom.pprint()
+    assert 'A, N, M, AA, BP, solvent' in tank_res_custom.pprint(max_components=None)
+
+
+def test_retrieve_state_preserves_time_axis_for_squeezed_singleton_species() -> None:
+    """Single-species trajectories unpacked as 1-D (n_time,) retain their time axis."""
+    from PharmaPy.Commons import unpack_states
+
+    di_states = {
+        'mass_frac': {'dim': 1, 'units': '', 'index': ['A'], 'type': 'diff'},
+        'temp': {'dim': 1, 'units': 'K', 'type': 'diff'},
+    }
+    raw_traj = np.array([[1.0, 300.0], [0.9, 305.0], [0.8, 310.0]])  # [-], [K]
+    unpacked = unpack_states(raw_traj, [1, 1], ['mass_frac', 'temp'])
+    assert unpacked['mass_frac'].shape == (3,)
+
+    res = DynamicResult(di_states, time=np.array([0.0, 5.0, 10.0]), **unpacked)
+    all_species = res.retrieve_state('mass_frac')
+    assert list(all_species.keys()) == ['A']
+    assert all_species['A'].shape == (3,)
+    assert all_species['A'] == pytest.approx([1.0, 0.9, 0.8])
+
+    single_sp = res.retrieve_state('mass_frac', species='A')
+    assert single_sp.shape == (3,)
+    assert single_sp == pytest.approx([1.0, 0.9, 0.8])
+
+    subset_sp = res.retrieve_state('mass_frac', species=['A'])
+    assert subset_sp['A'].shape == (3,)
+    assert subset_sp['A'] == pytest.approx([1.0, 0.9, 0.8])

@@ -2974,18 +2974,23 @@ def _weight_matrix_array(weight_matrix, names: list) -> np.ndarray:
     return symmetric
 
 
-def _stored_bounds_to_pairs(raw_bounds, num_optimized: int) -> list:
+def _stored_bounds_to_pairs(
+        raw_bounds, num_optimized: int, method: str = 'scipy') -> list:
     """Convert stored optimizer bounds into ``(lower, upper)`` pairs.
 
     Parameters
     ----------
-    raw_bounds : sequence
-        Either SciPy's ``(lower_bounds, upper_bounds)`` 2-tuple or a sequence
-        of ``num_optimized`` per-parameter ``(lower, upper)`` pairs in
+    raw_bounds : sequence or numpy.ndarray
+        Either SciPy's ``(lower_bounds, upper_bounds)`` 2-container (tuple,
+        list, or 2-D array of shape ``(2, num_optimized)``) or a sequence of
+        ``num_optimized`` per-parameter ``(lower, upper)`` pairs in
         parameter units. ``-np.inf``, ``np.inf`` and ``None`` represent an
         unbounded side.
     num_optimized : int
         Number of optimized parameters [-].
+    method : str, optional
+        Optimization method identifier (``'scipy'``, ``'least_squares'``, or
+        ``'custom'``).
 
     Returns
     -------
@@ -2994,7 +2999,21 @@ def _stored_bounds_to_pairs(raw_bounds, num_optimized: int) -> list:
         units, with ``None`` for an unbounded side.
     """
     def _bound_or_none(val, infinite_sign: int) -> Optional[float]:
-        """Map an unbounded sentinel (None or +/-inf) to None."""
+        """Map an unbounded sentinel (None or +/-inf) to None.
+
+        Parameters
+        ----------
+        val : float or None
+            Bound value in parameter units, or ``None``.
+        infinite_sign : {-1, 1}
+            Sign of the infinite sentinel that represents an unbounded side
+            (``-1`` for lower bounds, ``1`` for upper bounds) [-].
+
+        Returns
+        -------
+        float or None
+            Finite bound in parameter units, or ``None`` if unbounded.
+        """
         if val is None:
             return None
         num = float(val)  # [parameter units]
@@ -3008,17 +3027,13 @@ def _stored_bounds_to_pairs(raw_bounds, num_optimized: int) -> list:
             for item in raw_bounds)
         has_none = all_pairs and any(
             item[0] is None or item[1] is None for item in raw_bounds)
-        is_pair_list = (
-            all_pairs
-            and isinstance(raw_bounds, list)
-            and all(isinstance(item, tuple) for item in raw_bounds))
-        if all_pairs and (num_optimized != 2 or has_none or is_pair_list):
+        if all_pairs and (num_optimized != 2 or has_none or method == 'custom'):
             return [
                 (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
                 for lo, hi in raw_bounds]
 
-    if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == 2:
-        lo_raw, hi_raw = raw_bounds
+    if isinstance(raw_bounds, (list, tuple, np.ndarray)) and len(raw_bounds) == 2:
+        lo_raw, hi_raw = raw_bounds[0], raw_bounds[1]
         lo_arr = np.broadcast_to(
             np.asarray(lo_raw, dtype=object), (num_optimized,))
         hi_arr = np.broadcast_to(
@@ -4369,6 +4384,14 @@ covariance_include_mse
                     "dx_finitediff, which a record cannot hold; pass it as "
                     "rerun(..., dx_finitediff=...)")
         opt_inputs = self.optimizer_inputs()
+        if (self._solver is not None
+                and self._solver.method in ('scipy', 'least_squares')
+                and opt_inputs['bounds'] is not None):
+            lower = [-np.inf if lo is None else float(lo)
+                     for lo, _ in opt_inputs['bounds']]  # [parameter units]
+            upper = [np.inf if hi is None else float(hi)
+                     for _, hi in opt_inputs['bounds']]  # [parameter units]
+            opt_inputs['bounds'] = (lower, upper)
         if self._solver is not None and self._solver.method == 'custom':
             custom_opt = (
                 optimizer if optimizer is not None
@@ -4620,7 +4643,8 @@ covariance_include_mse
                     "parameters); optimize_fn does not store them")
             if (method in ('scipy', 'least_squares', 'custom')
                     and stored_bounds is not None):
-                bounds = _stored_bounds_to_pairs(stored_bounds, num_optimized)
+                bounds = _stored_bounds_to_pairs(
+                    stored_bounds, num_optimized, method=method)
             else:
                 bounds = [(None, None)] * num_optimized
         bounds = list(_sequence(bounds, 'bounds'))  # [parameter units]

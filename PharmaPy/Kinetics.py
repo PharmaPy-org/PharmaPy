@@ -680,11 +680,12 @@ class RxnKinetics:
         self.nomenclature(stoich_matrix, self.phi_1)
 
         # Heat of reaction
+        dh_param_name = 'dh_rxn' if dh_rxn is not None else 'delta_hrxn'
         if delta_hrxn is None:
             delta_hrxn = 0  # [J/mol_rxn], documented default on the raw basis
         if isinstance(delta_hrxn, Mapping):
             self.delta_hrxn = self._align_rxn_param(
-                delta_hrxn, 'delta_hrxn', allow_scalar=True
+                delta_hrxn, dh_param_name, allow_scalar=True
             )  # [J/mol_rxn]
         else:
             self.delta_hrxn = np.atleast_1d(delta_hrxn)  # [J/mol_rxn]
@@ -905,15 +906,36 @@ class RxnKinetics:
         return orders, order_map
 
     def transform_params(self, kvals, evals):
-        if self.reformulate_kin:
-            ea_term = evals/gas_ct/self.temp_ref
+        """Transform Arrhenius parameters into native or logarithmic coordinates.
 
-            phi_1 = np.log(kvals) - ea_term
-            phi_2 = np.log(evals/gas_ct)
+        Parameters
+        ----------
+        kvals : numpy.ndarray
+            Pre-exponential or reference-temperature rate factors
+            ``[mol/L]**(1-m)/time`` for total forward order ``m`` [-].
+        evals : numpy.ndarray
+            Activation energies [J/mol].
+
+        Returns
+        -------
+        phi_1 : numpy.ndarray
+            Native ``kvals`` when ``reformulate_kin=False``, or logarithmic
+            intercept ``ln(kvals) - evals / (R * temp_ref)`` [-] when
+            ``reformulate_kin=True``.
+        phi_2 : numpy.ndarray
+            Native ``evals`` [J/mol] when ``reformulate_kin=False``, or
+            logarithmic slope ``ln(evals / R)`` [-] when
+            ``reformulate_kin=True``.
+        """
+        if self.reformulate_kin:
+            ea_term = evals / gas_ct / self.temp_ref  # [-]
+
+            phi_1 = np.log(kvals) - ea_term  # [-]
+            phi_2 = np.log(evals / gas_ct)  # [-]
 
         else:
-            phi_1 = kvals
-            phi_2 = evals
+            phi_1 = kvals  # [k units]
+            phi_2 = evals  # [J/mol]
 
         return phi_1, phi_2
 
@@ -1047,6 +1069,11 @@ class RxnKinetics:
         if not self.reformulate_kin:
             self.k_params = self.phi_1  # [k units]
             self.ea_params = self.phi_2  # [J/mol]
+        else:
+            self.ea_params = gas_ct * np.exp(self.phi_2)  # [J/mol]
+            self.k_params = np.exp(
+                self.phi_1 + self.ea_params / (gas_ct * self.temp_ref)
+            )  # [k units]
         self.params_f = params_f  # [-] for orders; custom model units otherwise
         if isinstance(params, dict):
             self.num_paramsk = len(self.phi_1) + len(self.phi_2)

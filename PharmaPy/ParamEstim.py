@@ -3701,11 +3701,7 @@ class ParameterEstimation:
                 for item in raw_bounds)
             has_none = all_pairs and any(
                 item[0] is None or item[1] is None for item in raw_bounds)
-            is_pair_list = (
-                all_pairs
-                and (isinstance(raw_bounds, list)
-                     and all(isinstance(item, tuple) for item in raw_bounds)))
-            if all_pairs and (num_params != 2 or has_none or is_pair_list):
+            if all_pairs and (num_params != 2 or has_none):
                 lower = [
                     -np.inf if item[0] is None else float(item[0])
                     for item in raw_bounds]  # [model parameter units]
@@ -3713,7 +3709,7 @@ class ParameterEstimation:
                     np.inf if item[1] is None else float(item[1])
                     for item in raw_bounds]  # [model parameter units]
                 return (lower, upper)
-        if isinstance(raw_bounds, tuple) and len(raw_bounds) == 2:
+        if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == 2:
             lo_raw, hi_raw = raw_bounds
             if isinstance(lo_raw, (list, tuple)) and any(x is None for x in lo_raw):
                 lo_raw = [-np.inf if x is None else float(x) for x in lo_raw]
@@ -3843,9 +3839,46 @@ class ParameterEstimation:
             ``optimizer(seed, objective_fun, gradient_fun, **options)`` or by
             passing ``method='custom'`` with ``optim_options={'optimizer':
             callable, ...}``. The default is ``'LM'``.
+
+            When a custom optimizer callable is used:
+
+            * **Signature and callback defaults**: ``seed`` is a 1-D
+              ``numpy.ndarray`` of the free parameters only
+              (``param_seed[map_variable]``), shape ``(num_params,)``, in
+              model parameter units; fixed parameters (``optimize_flags``
+              entries set to ``False``) are held constant inside
+              ``get_objective`` and ``get_gradient`` and reassembled into
+              the full parameter vector automatically. ``objective_fun`` is
+              ``self.get_objective`` (where ``objective_fun(x, out_array=False)``
+              returns the scalar objective ``0.5 * r @ r`` and
+              ``objective_fun(x, out_array=True)`` returns the 1-D weighted
+              residual vector ``r`` of shape ``(n_residuals,)``).
+              ``gradient_fun`` is ``self.get_gradient`` (where
+              ``gradient_fun(x, out_array=False)`` returns the 1-D objective
+              gradient ``J @ r`` of shape ``(num_params,)`` and
+              ``gradient_fun(x, out_array=True)`` returns the 2-D weighted
+              sensitivity Jacobian ``J = dr/dtheta`` of shape
+              ``(num_params, n_residuals)``). Callables accepting only two
+              positional parameters are invoked as
+              ``optimizer(seed, objective_fun, **options)``; callables
+              accepting fewer than two positional parameters raise
+              ``TypeError``.
+            * **Bounds**: When ``bounds`` is supplied (either via ``bounds=``
+              or ``optim_options['bounds']``), it is forwarded as the
+              ``bounds`` keyword argument to ``optimizer``.
+            * **Accepted return forms**: ``optimizer`` may return (1) a
+              mapping containing ``'x'`` (1-D array of shape
+              ``(num_params,)``) plus optional diagnostic entries
+              (``'status'``, ``'success'``, ``'message'``, ``'nit'``,
+              ``'nfev'``, ``'njev'``, ``'stop_criterion'``, ``'num_iter'``,
+              ``'num_fun_eval'``), (2) an object with attribute ``.x`` (such
+              as ``scipy.optimize.OptimizeResult``), (3) a 2-tuple
+              ``(x_opt, info_dict)``, or (4) a 1-D array-like ``x_opt`` of
+              shape ``(num_params,)``.
         bounds : sequence, optional
             Parameter bounds in the model parameter units, passed to IPOPT,
-            ``scipy.optimize.least_squares``, or a custom optimizer.
+            ``scipy.optimize.least_squares`` (as SciPy's ``(lower, upper)``
+            2-container), or a custom optimizer.
 
         Returns
         -------
@@ -4227,7 +4260,10 @@ class ParameterEstimation:
             is True.
         method : {'scipy', 'least_squares', 'LM', 'IPOPT', 'custom'} or callable, optional
             Optimization method forwarded to ``optimize_fn``. The default is
-            ``'scipy'`` (``scipy.optimize.least_squares``).
+            ``'scipy'`` (``scipy.optimize.least_squares``). See
+            :meth:`optimize_fn` for the custom-optimizer callable signature,
+            callback defaults, fixed-parameter mask handling, bounds
+            forwarding, and accepted return forms.
         bounds : sequence, optional
             Parameter bounds in the model parameter units, forwarded to
             ``optimize_fn``.
