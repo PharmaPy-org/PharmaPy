@@ -5,7 +5,7 @@ Created on Wed May 27 10:12:13 2020
 @author: dcasasor
 """
 
-from typing import Optional, Sequence, Union
+from typing import Mapping, Optional, Sequence, Union
 from numpy.typing import ArrayLike
 
 from PharmaPy.Phases import LiquidPhase, SolidPhase, VaporPhase, classify_phases
@@ -439,31 +439,45 @@ class LiquidStream(LiquidPhase):
         return interpolate_inputs(time, self.time_upstream, self.y_inlet,
                                   **kwargs_interp)
 
-    def updatePhase(self, concentr: Optional[ArrayLike] = None,
-                    mass_conc: Optional[ArrayLike] = None,
-                    mass_frac: Optional[ArrayLike] = None,
-                    mole_frac: Optional[ArrayLike] = None,
+    def updatePhase(self,
+                    concentr: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                    mass_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                    mass_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                    mole_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
                     vol_flow: Optional[float] = None,
                     mass_flow: Optional[float] = None,
-                    mole_flow: Optional[float] = None) -> None:
+                    mole_flow: Optional[float] = None,
+                    mole_conc: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None) -> None:
         """Update liquid composition and reconcile explicit flow rates.
 
         Parameters
         ----------
-        concentr, mass_conc : array-like, optional
+        concentr, mass_conc : array-like or mapping of str to float/array-like, optional
             Species molar [mol/L] and mass [kg/m**3] concentrations, shape
-            ``(num_species,)``. ``concentr`` is the liquid stream's name for
-            the phase's ``mole_conc`` argument.
-        mass_frac, mole_frac : array-like, optional
-            Species mass and mole fractions [-], shape ``(num_species,)``.
+            ``(num_species,)``, or species-keyed mappings. ``concentr`` is
+            the liquid stream's name for the phase's ``mole_conc`` argument.
+        mass_frac, mole_frac : array-like or mapping of str to float/array-like, optional
+            Species mass and mole fractions [-], shape ``(num_species,)``, or
+            species-keyed mappings. When ``concentr``/``mole_conc`` or
+            ``mass_conc`` is provided alongside a species-keyed ``mass_frac``
+            mapping, ``mass_frac`` specifies the solute-free solvent-blend
+            mass fractions [-].
         vol_flow, mass_flow, mole_flow : float, optional
             Volume [m**3/s], mass [kg/s], and molar [mol/s] flow rates.
             None and zero mean no explicit flow was supplied.
+        mole_conc : array-like or mapping of str to float/array-like, optional
+            Optional alias for ``concentr`` [mol/L]. Specify at most one of
+            ``concentr`` and ``mole_conc``.
 
         Returns
         -------
         None
             The stream state and flow aliases are updated in place.
+
+        Raises
+        ------
+        ValueError
+            If both ``concentr`` and ``mole_conc`` are provided.
 
         Notes
         -----
@@ -477,13 +491,19 @@ class LiquidStream(LiquidPhase):
         attributes; use the flow aliases to read the reconciled amounts.
         Zero means "not supplied", so this method cannot set flow to zero.
         """
+        if concentr is not None and mole_conc is not None:
+            raise ValueError(
+                "Specify either 'concentr' or 'mole_conc', not both."
+            )
+        resolved_mole_conc = concentr if mole_conc is None else mole_conc
+
         # The parent reconciles amounts on the stream's per-second basis.
         self.mass = self.mass_flow  # [kg/s]
         self.vol = self.vol_flow  # [m**3/s]
         self.moles = self.mole_flow  # [mol/s]
 
         super().updatePhase(
-            mole_conc=concentr, mass_conc=mass_conc,
+            mole_conc=resolved_mole_conc, mass_conc=mass_conc,
             mass_frac=mass_frac, mole_frac=mole_frac,
             vol=0 if vol_flow is None else vol_flow,
             mass=0 if mass_flow is None else mass_flow,
@@ -522,10 +542,12 @@ class SolidStream(SolidPhase):
 
     def __init__(self, path_thermo: Optional[str] = None,
                  temp: float = 298.15, pres: float = 101325,
-                 mass_flow: float = 0, mass_frac: Optional[ArrayLike] = None,
+                 mass_flow: float = 0,
+                 mass_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
                  distrib: Optional[ArrayLike] = None,
                  x_distrib: Optional[ArrayLike] = None,
-                 kv: float = 1, temp_ref: float = 298.15) -> None:
+                 kv: float = 1, temp_ref: float = 298.15,
+                 mole_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None) -> None:
         """Initialize a solid stream and its flow-basis aliases.
 
         Parameters
@@ -540,8 +562,9 @@ class SolidStream(SolidPhase):
             Solid mass flow [kg/s]. Zero derives the flow from the number-rate
             distribution; a positive value scales ``distrib`` as normalized
             bin weights, as in ``SolidPhase`` with ``mass``.
-        mass_frac : array-like
-            Species mass fractions [-], shape ``(num_species,)``.
+        mass_frac : array-like or mapping of str to float/array-like, optional
+            Species mass fractions [-], shape ``(num_species,)``, or a
+            species-keyed mapping.
         distrib : array-like, optional
             Shape ``(num_sizes,)``: crystal number rate [#/um/s] when
             ``mass_flow`` is zero, otherwise bin weights [-].
@@ -556,6 +579,9 @@ class SolidStream(SolidPhase):
             uses it when its own ``temp_ref`` is omitted; an explicit method
             argument takes precedence. It follows the existing parameters, so
             positional calls keep their meaning.
+        mole_frac : array-like or mapping of str to float/array-like, optional
+            Species mole fractions [-], shape ``(num_species,)``, or a
+            species-keyed mapping, as an alternative to ``mass_frac``.
 
         Raises
         ------
@@ -586,7 +612,8 @@ class SolidStream(SolidPhase):
         """
         super().__init__(path_thermo, temp, temp_ref=temp_ref, pres=pres,
                          mass=mass_flow, mass_frac=mass_frac,
-                         distrib=distrib, x_distrib=x_distrib, kv=kv)
+                         distrib=distrib, x_distrib=x_distrib, kv=kv,
+                         mole_frac=mole_frac)
 
         self._sync_flow_aliases()
 
@@ -610,7 +637,9 @@ class SolidStream(SolidPhase):
                     distrib: Optional[np.ndarray] = None,
                     mass: Optional[float] = None,
                     moments: Optional[np.ndarray] = None,
-                    mass_flow: Optional[float] = None) -> None:
+                    mass_flow: Optional[float] = None,
+                    mass_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None,
+                    mole_frac: Optional[Union[ArrayLike, Mapping[str, ArrayLike]]] = None) -> None:
         """Update solid-stream state and synchronize flow-basis aliases.
 
         Parameters
@@ -635,11 +664,18 @@ class SolidStream(SolidPhase):
         mass_flow : float, optional
             Additive flow-oriented alias for ``mass`` [kg/s]. Specify at most
             one of ``mass`` and ``mass_flow``.
+        mass_frac : array-like or mapping of str to float/array-like, optional
+            Updated species mass fractions [-], shape ``(num_species,)``, or a
+            species-keyed mapping.
+        mole_frac : array-like or mapping of str to float/array-like, optional
+            Updated species mole fractions [-], shape ``(num_species,)``, or a
+            species-keyed mapping.
 
         Raises
         ------
         ValueError
-            If both ``mass`` and ``mass_flow`` are supplied.
+            If both ``mass`` and ``mass_flow`` are supplied, or both
+            ``mass_frac`` and ``mole_frac`` are supplied.
 
         Notes
         -----
@@ -659,6 +695,8 @@ class SolidStream(SolidPhase):
             distrib=distrib,
             mass=resolved_mass_flow,
             moments=moments,
+            mass_frac=mass_frac,
+            mole_frac=mole_frac,
         )
 
         self._sync_flow_aliases()
