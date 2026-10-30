@@ -26,6 +26,9 @@ This file gathers literature cited by PharmaPy source, tests, and documentation.
   https://doi.org/10.1007/978-0-387-40065-5. Section 8.1, eq. (8.5): error
   bound of forward-difference derivatives (default `jacobian_rtol` and
   sensitivity error model of `ParameterEstimation.get_identifiability`).
+  Section 8.1, central differences: step proportional to the cube root of
+  the output accuracy (`jac_module.CENTRAL_DIFFERENCE_REL_STEP` and the
+  step choice of `ParameterEstimation.check_derivatives`).
 
 ## Parameter Identifiability
 

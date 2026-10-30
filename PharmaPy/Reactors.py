@@ -19,7 +19,8 @@ from PharmaPy.Results import DynamicResult
 from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 from PharmaPy.CheckModule import check_modeling_objects
 from PharmaPy.Errors import PharmaPyNonImplementedError
-from PharmaPy.jac_module import numerical_jac_central
+from PharmaPy.jac_module import (numerical_jac_central,
+                                 CENTRAL_DIFFERENCE_REL_STEP)
 from PharmaPy.ThermoModule import MissingPropertyError
 
 import numpy as np
@@ -39,7 +40,6 @@ linestyles = cycle(['-', '--', '-.', ':'])
 
 gas_ct = 8.314  # J/mol/K
 eps = np.finfo(float).eps
-_CENTRAL_DIFFERENCE_REL_STEP = np.cbrt(eps)  # [-], optimal for O(h**2) error
 
 
 def _reject_params_control(params_control) -> None:
@@ -1327,7 +1327,7 @@ class _BaseReactor:
             state_args = (
                 time, parameter_values, sw, False
             )  # [s; parameter-dependent units; -; -]
-            state_steps = _CENTRAL_DIFFERENCE_REL_STEP * np.maximum(
+            state_steps = CENTRAL_DIFFERENCE_REL_STEP * np.maximum(
                 1.0, np.abs(state_values)
             )  # [mol/L for species; K for temperatures]
             jac_states = numerical_jac_central(
@@ -1343,7 +1343,7 @@ class _BaseReactor:
                     time, state_values, sw, True
                 )  # [s; mol/L and K; -; -]
                 parameter_steps = (
-                    _CENTRAL_DIFFERENCE_REL_STEP
+                    CENTRAL_DIFFERENCE_REL_STEP
                     * np.maximum(1.0, np.abs(parameter_values))
                 )  # [parameter-dependent units]
                 jac_params = numerical_jac_central(

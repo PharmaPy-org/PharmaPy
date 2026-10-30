@@ -447,6 +447,90 @@ is missing) and :code:`identifiable` and :code:`covariance_diagnostic` in
     print(report.summary())
     table = report.to_frame()
 
+Verifying derivatives
+---------------------
+
+The optimizer, the covariance and the identifiability report all use the
+weighted residual Jacobian of :code:`get_gradient`: sensitivities returned
+by the model callback (for example CVODES forward sensitivities of the
+reactor and crystallizer models), a user :code:`jac_fun`, or the
+estimator's own forward differences with :code:`dx_finitediff`. Before
+relying on a new model, verify that Jacobian with
+:code:`ParameterEstimation.check_derivatives(params=None, rel_step=None,
+param_scale=None, bounds=None, rtol=None)` (issue #352). It returns an
+immutable, picklable :code:`ParamEstim.DerivativeCheck` that compares the
+Jacobian at :code:`params` (default: :code:`params_convg` after a fit, the
+optimized seed before one) with an independent second-order
+finite-difference derivative of the weighted residuals
+:code:`get_objective(params, out_array=True)`. Only the optimized
+parameters are perturbed, one at a time; fixed parameters keep their
+values. Both arrays follow :code:`get_residual_layout`; unobserved entries
+are zero in both and are left out of the norms. Per parameter it reports
+the step, the formula, the largest absolute error and the relative error
+:code:`||J_i - R_i|| / ||R_i||`. No pass/fail threshold is applied unless
+:code:`rtol` is given (then :code:`agrees` holds :code:`relative_error <=
+rtol`). The estimator's fit (:code:`params_convg`, :code:`info_opt`,
+:code:`covar_params`, the evaluation buffers, including arrays a callback
+refills in place, and the iteration histories) is left unchanged, also when
+an evaluation raises. Afterwards the model is evaluated once more at
+:code:`params_convg` (at the checked point before a fit), as
+:code:`optimize_fn` refreshes its accepted point, so stateful callbacks such
+as the unit operations of a :code:`SimulationExec` estimator end with the
+parameters and results they started from. If that re-evaluation fails after
+a failed check, the original error is raised and a :code:`RuntimeWarning`
+reports the second failure.
+
+The step of parameter :code:`i` is :code:`h_i = rel_step * scale_i`, with
+:code:`scale_i = |p_i|` or :code:`param_scale`; a parameter at exactly zero
+needs :code:`param_scale`, because no magnitude is invented for it. The
+central difference has a truncation error proportional to :code:`h**2`
+and a rounding error of about :code:`u |f| / h` for outputs of relative
+accuracy :code:`u`; the sum is smallest for :code:`h` proportional to
+:code:`u**(1/3)` (Nocedal and Wright, *Numerical Optimization*, 2nd ed.,
+Springer, 2006, Sec. 8.1). The default :code:`rel_step`,
+:code:`jac_module.CENTRAL_DIFFERENCE_REL_STEP`, is the cube root of the
+machine epsilon (about 6e-6) and is right only for outputs accurate to
+machine precision, such as closed-form models. For a model solved by an ODE
+integrator with relative tolerance :code:`solver_rtol` (e.g. the CVode
+:code:`rtol` option, not the agreement threshold :code:`rtol` of this
+method), :code:`u` is about :code:`solver_rtol`: pass :code:`rel_step` of
+about :code:`solver_rtol**(1/3)`, e.g.
+:code:`jac_module.DEFAULT_OUTPUT_RTOL**(1/3) = 0.01` at CVode's default
+relative tolerance of 1e-6, and tighten the solver tolerances for a sharper
+check. Judge the relative errors against the accuracy of the reference
+itself, about :code:`rel_step**2 + u / rel_step` for well-scaled
+parameters; a forward-difference Jacobian additionally differs from it by
+its own truncation error, about :code:`|dx_finitediff| / |p|`.
+
+:code:`bounds` gives the valid domain in parameter units: one
+:code:`(lower, upper)` pair per optimized parameter (None for an unbounded
+side), as for an IPOPT fit and in
+:code:`CalibrationRecord.optimizer_inputs()`, or a
+:code:`scipy.optimize.Bounds(lower_array, upper_array)`. Wrap the
+:code:`(lower_array, upper_array)` bounds of
+:code:`scipy.optimize.least_squares` in :code:`scipy.optimize.Bounds`: a
+plain tuple of two arrays is read as per-parameter pairs (for two
+parameters it is accepted with that meaning, otherwise its shape is
+rejected). A parameter whose bounds have zero width cannot be checked; fix
+it through :code:`optimize_flags` instead.
+:code:`params` must lie inside, and after a fit :code:`params_convg` too,
+because the model is re-evaluated there at the end (widen the bounds to
+include it, or check without bounds); the model is never evaluated outside: a
+parameter whose central points :code:`p - h` or :code:`p + h` would leave
+the domain uses the one-sided three-point formula :code:`(-3 f(p) + 4 f(p
++ s) - f(p + 2s)) / (2s)` toward the interior (:code:`s = +h` or
+:code:`-h`), which has the same :code:`h**2` order. A parameter with room
+for neither stencil, or an estimator forward difference
+(:code:`dx_finitediff`) that would step outside, raises
+:code:`ValueError`.
+
+.. code-block:: python
+
+    check = estimator.check_derivatives(rel_step=1e-2,
+                                        bounds=[(0.0, None), (None, None)])
+    print(check.summary())
+    table = check.to_frame()
+
 Liquid heat capacity
 ====================
 
