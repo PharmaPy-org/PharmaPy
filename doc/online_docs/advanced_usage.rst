@@ -201,8 +201,9 @@ raised :code:`AttributeError` for such units.
 :code:`optimize_fn` validates :code:`method` against :code:`'LM'`,
 :code:`'IPOPT'`, :code:`'scipy'` and :code:`'least_squares'` and checks that
 cyipopt is installed for IPOPT before changing the estimator (issue #479). A
-call that raises, during the solve or afterwards (for example a singular
-covariance), keeps the previous fit: :code:`opt_method`, :code:`optim_options`,
+call that raises, during the solve or afterwards (for example when a warnings
+filter turns the undefined-covariance warning below into an error), keeps the
+previous fit: :code:`opt_method`, :code:`optim_options`,
 :code:`optimize_flag`, :code:`params_convg`, :code:`info_opt`, :code:`y_model`,
 :code:`covar_params`, :code:`correl_params`, :code:`paramest_df`, the
 iteration histories and the evaluation buffers (:code:`y_runs`,
@@ -229,6 +230,44 @@ later edits of the caller's dictionary changed the stored options and
 calibration records. SciPy fits already used a shallow copy, so only in-place
 edits of nested values, such as arrays or the bounds, reached their stored
 options.
+
+When the parameters are not (locally) identifiable from the observed data,
+:code:`optimize_fn` keeps the solved fit and returns an all-NaN covariance
+instead of discarding the fit or reporting meaningless numbers (issue #532).
+The linearized covariance is undefined when :code:`J @ J.T` of the weighted
+residual Jacobian is singular or numerically singular: a parameter changes no
+observed entry, or the Jacobi-scaled matrix :code:`D J J^T D`, with
+:code:`D = diag((J J^T)_ii**-0.5)`, has a condition number of at least
+:code:`1/eps`. Here :code:`eps` is the machine epsilon, twice the unit
+roundoff :code:`u`; a computed inverse has a relative error of order
+:code:`u * cond` (Golub and Van Loan, *Matrix Computations*, 4th ed., Johns
+Hopkins University Press, 2013, Sec. 2.6), so such an inverse would have no
+correct significant digit. The scaled matrix, and hence the test, does not
+change with the units chosen for the parameters; Jacobi scaling is moreover
+within a factor of the number of parameters of the best diagonal scaling (van
+der Sluis, A., 1969, Condition numbers and equilibration of matrices,
+Numerische Mathematik 14(1), 14-23, doi:10.1007/BF02165096). The covariance
+is also undefined when the Jacobian has non-finite entries, or when
+:code:`J @ J.T` passes the test but its inversion fails or gives non-finite or
+negative variances. :code:`get_covariance` then stores all-NaN
+:code:`covar_params` and :code:`correl_params` and emits a
+:code:`RuntimeWarning` that states the cause and names the parameters
+involved: the parameters without effect and the poorly determined directions,
+for example :code:`0.707*a - 0.707*b` when only the product :code:`a * b` is
+determined; the parameters with non-finite sensitivities; or the parameters
+with invalid variances and the least-determined direction.
+:code:`get_confidence_intervals`, :code:`plot_correlation`,
+:code:`StatisticsClass.get_intervals`, :code:`confidence_regions`,
+:code:`bootstrap_confid` and :code:`CalibrationRecord.from_estimation` raise a
+:code:`ValueError` saying that the covariance is undefined and pointing to that
+warning; :code:`bootstrap_params` keeps the refitted estimates of such samples.
+Earlier releases raised :code:`numpy.linalg.LinAlgError` for an exactly
+singular :code:`J @ J.T` (Levenberg-Marquardt inside the solver, other methods
+after it, discarding the fit; bootstrap refits became NaN rows), otherwise
+returned meaningless values, including negative variances, and
+:code:`plot_correlation` drew an empty heatmap. The final inverse of
+:code:`levenberg_marquardt` is NaN instead of raising for a singular matrix.
+Well-conditioned covariances are unchanged.
 
 IPOPT fits report Ipopt's termination outcome in :code:`info`:
 :code:`success`, :code:`status`, :code:`message` and the iteration count

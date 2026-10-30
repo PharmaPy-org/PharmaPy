@@ -71,6 +71,7 @@ from PharmaPy.ParamEstim import (Experiment, Measurement,
                                  _float_vector, _frozen,
                                  _labelled_weight_matrix,
                                  _validate_output_names)
+from PharmaPy.StatsModule import _require_defined_covariance
 
 #: Identifier of the record format written to the ``'schema'`` entry.
 RECORD_SCHEMA = 'pharmapy.calibration-record'
@@ -4416,10 +4417,13 @@ covariance_include_mse
             ``bounds`` is missing for IPOPT, has the wrong length or holds
             a pair that is not ``(lower, upper)`` with ``lower <= upper``,
             the weight matrix is missing, unexpected or different from the
-            estimator's, an IPOPT option is not UTF-8 text, or a recorded
-            value is not finite.
-        numpy.linalg.LinAlgError
-            If the covariance cannot be computed (singular ``J @ J.T``).
+            estimator's, an IPOPT option is not UTF-8 text, a recorded
+            value is not finite, or the parameter covariance is undefined,
+            for example because the parameters are not identifiable from the
+            observed data (all NaN from ``get_covariance``, whose warning
+            states the cause; earlier
+            releases raised ``numpy.linalg.LinAlgError`` for a singular
+            ``J @ J.T``, #532).
 
         Notes
         -----
@@ -4599,6 +4603,8 @@ covariance_include_mse
                     setattr(estimator, name, stored[name])
                 elif hasattr(estimator, name):
                     delattr(estimator, name)
+        _require_defined_covariance(covariance,
+                                    'CalibrationRecord.from_estimation')
 
         units_by_name, basis_by_name, x_units = _declared_metadata(
             experiments)

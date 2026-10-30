@@ -7,6 +7,7 @@ Created on Mon Oct 28 15:35:48 2019
 """
 
 import copy
+import inspect
 import numbers
 import warnings
 
@@ -29,7 +30,8 @@ from PharmaPy import Gaussians as gs
 
 from PharmaPy.LevMarq import levenberg_marquardt
 from PharmaPy.Commons import plot_sens, reorder_sens
-from PharmaPy.StatsModule import StatisticsClass
+from PharmaPy.StatsModule import (StatisticsClass, _information_inverse,
+                                  _require_defined_covariance)
 
 try:
     from cyipopt import minimize_ipopt
@@ -53,6 +55,39 @@ IPOPT_VERBOSE_PRINT_LEVEL = 5
 linestyles = cycle(['-', '--', '-.', ':'])
 
 eps = np.finfo(float).eps
+
+
+def _user_stacklevel() -> int:
+    """Return the ``warnings.warn`` stacklevel of the nearest user frame.
+
+    Public estimation methods reach the same warning through call chains of
+    different depth (``get_covariance`` directly, through ``optimize_fn``,
+    ``estimate_parameters``, ``SimulationExec.EstimateParams``,
+    ``CalibrationRecord.from_estimation`` or the bootstrap refits), so a
+    fixed ``stacklevel`` cannot point at the user's call.
+
+    Returns
+    -------
+    int
+        Stacklevel [-] of the first frame, counted from the caller of this
+        helper (stacklevel 1), whose module is not ``PharmaPy`` or one of
+        its submodules. Falls back to 1 when every frame belongs to
+        PharmaPy.
+    """
+    frame = inspect.currentframe()
+    if frame is None:  # pragma: no cover - no frame support on this runtime
+        return 1
+
+    frame = frame.f_back  # caller of this helper, i.e. stacklevel 1
+    level = 1
+    while frame is not None:
+        module = frame.f_globals.get('__name__', '')
+        if module != 'PharmaPy' and not module.startswith('PharmaPy.'):
+            return level
+        frame = frame.f_back
+        level += 1
+
+    return 1
 
 
 def pseudo_inv(states, dstates_dparam=None):
@@ -3724,6 +3759,10 @@ class ParameterEstimation:
         covar_params : numpy.ndarray
             Estimated covariance, shape ``(num_params, num_params)``. Entry
             ``(i, j)`` has the product of parameter i and parameter j units.
+            Filled with NaN, with a ``RuntimeWarning`` stating the cause,
+            when it is undefined, for example because the parameters are not
+            (locally) identifiable from the observed data (see
+            ``get_covariance``); the fit is kept.
         info : dict
             Solver information at the accepted parameters. ``info['fun']`` is
             the weighted residual vector, ordered by experiment then
@@ -3769,8 +3808,6 @@ class ParameterEstimation:
             finite-difference sensitivities are used and ``dx_finitediff``
             gives a zero or infinite step for an optimized parameter (see
             ``get_gradient``).
-        numpy.linalg.LinAlgError
-            If the accepted Jacobian yields a singular covariance matrix.
 
         Warns
         -----
@@ -3779,6 +3816,20 @@ class ParameterEstimation:
             for example at its iteration limit. The warning names the status
             and message; the returned parameters, covariance and statistics
             then describe the last iterate, not a converged estimate.
+            Also, from ``get_covariance``, if the covariance at the accepted
+            parameters is undefined. The warning gives one of three causes:
+            a non-finite weighted residual Jacobian (naming those
+            parameters); a singular or numerically singular ``J @ J.T``,
+            i.e. parameters that the observed data do not (locally)
+            identify (naming them and the undetermined parameter
+            directions); or an inversion of ``J @ J.T`` that failed or gave
+            non-finite or negative variances although it passed the
+            conditioning test (naming those parameters and the
+            least-determined direction). The fit is stored and returned
+            with an all-NaN ``covar_params`` and ``correl_params``. Earlier
+            releases raised ``numpy.linalg.LinAlgError`` for an exactly
+            singular ``J @ J.T`` and kept the previous fit, or returned
+            meaningless values such as negative variances (#532).
 
         Notes
         -----
@@ -3804,8 +3855,9 @@ class ParameterEstimation:
         solver returns, so they always describe the same fit.
         ``optimize_flag`` is set to ``not simulate`` during the solve,
         because ``get_objective`` reads it. A call that raises, during the
-        solve or afterwards (for example ``get_covariance`` with a singular
-        ``J @ J.T``), restores every attribute named in the class's
+        solve or afterwards (for example when a ``get_covariance`` warning
+        is turned into an error by a warnings filter), restores every
+        attribute named in the class's
         ``_FIT_ATTRIBUTES`` to its value before the call, or removes it if a
         first fit had not yet created it: the fit results (``opt_method``,
         ``optim_options``, ``optimize_flag``, ``params_convg``,
@@ -3993,7 +4045,8 @@ class ParameterEstimation:
             covar_params = self.get_covariance()
         except BaseException:
             # Keep the previous fit, also when the post-solve assembly fails,
-            # e.g. a singular covariance (#479).
+            # e.g. an undefined-covariance warning raised as an error
+            # (#479, #532).
             self._restore_fit_state(previous_fit)
             raise
 
@@ -4041,6 +4094,9 @@ class ParameterEstimation:
         covar_params : numpy.ndarray
             Estimated covariance, shape ``(num_params, num_params)``. Entry
             ``(i, j)`` has the product of parameter i and parameter j units.
+            All NaN, with a ``RuntimeWarning``, when it is undefined, for
+            example because the parameters are not identifiable (see
+            ``optimize_fn``).
         info : dict
             Solver information at the accepted parameters, with ``info['jac']``
             in the canonical ``(num_params, len(info['fun']))`` orientation
@@ -4132,10 +4188,13 @@ class ParameterEstimation:
         ValueError
             If ``alpha`` is not in the open interval ``(0, 1)``, both
             ``covar_params`` and ``include_mse`` are supplied, the number of
-            observed data entries does not exceed ``num_params``, or
-            ``covar_params`` does not have finite entries of shape
-            ``(num_params, num_params)`` with non-negative diagonal
-            variances.
+            observed data entries does not exceed ``num_params``, the
+            stored or recomputed covariance (``covar_params`` None) is
+            undefined (all NaN, as ``get_covariance`` returns it; the message
+            says so and points to its warning for the cause), or
+            ``covar_params`` does not have finite
+            entries of shape ``(num_params, num_params)`` with
+            non-negative diagonal variances.
         """
         if (isinstance(alpha, bool)
                 or not isinstance(alpha, (int, float, np.number))
@@ -4163,6 +4222,7 @@ class ParameterEstimation:
                 f"(num_data_total={int(self.num_data_total)}, "
                 f"num_params={int(self.num_params)})")
 
+        given_covar = covar_params is not None
         if covar_params is None:
             had_covar = hasattr(self, 'covar_params')
             prev_covar = getattr(self, 'covar_params', None)
@@ -4195,6 +4255,9 @@ class ParameterEstimation:
             raise ValueError(
                 f"covar_params must have shape {expected_shape}; got "
                 f"{covar_array.shape}")
+        if not given_covar:
+            _require_defined_covariance(
+                covar_array, 'ParameterEstimation.get_confidence_intervals')
         if not np.all(np.isfinite(covar_array)):
             raise ValueError("covar_params entries must be finite")
         if np.any(np.diag(covar_array) < 0.0):
@@ -4244,17 +4307,47 @@ class ParameterEstimation:
             form is a physical covariance: it depends on the units chosen
             for each measurement. Also stored as ``covar_params``; the
             matching correlation matrix [-] is stored as ``correl_params``.
+            Both are filled with NaN, in the unit of the requested form,
+            when the covariance is undefined (see Warns and Notes).
 
         Raises
         ------
         AttributeError
             If no fit has been run, so ``info_opt`` does not exist.
-        numpy.linalg.LinAlgError
-            If ``J @ J.T`` is singular, for example when a parameter does
-            not affect any observed entry.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the covariance is undefined, with one of three diagnostics:
+            the weighted residual Jacobian has non-finite entries (naming
+            those parameters); the parameters are not (locally)
+            identifiable from the observed data (naming every parameter
+            with no effect on any observed entry and every poorly
+            determined direction as a combination of parameter names, e.g.
+            ``0.707*k - 0.707*b``); or ``J @ J.T`` passed the conditioning
+            test but its inversion failed or gave non-finite or negative
+            variances (naming those parameters and the least-determined
+            direction).
 
         Notes
         -----
+        The linearized covariance is undefined when ``J`` is not finite or
+        ``J @ J.T`` is singular or numerically singular: a parameter has
+        zero information (it changes no observed entry), the Jacobi-scaled
+        matrix ``D J J^T D``, ``D = diag((J J^T)_ii**-0.5)``, has a
+        condition number of at least ``1/eps`` with ``eps`` the machine
+        epsilon (``2u`` for the unit roundoff ``u``; the computed inverse
+        would have an error of order one and no correct significant digit,
+        Golub & Van Loan, *Matrix Computations*, 4th ed., 2013, Sec. 2.6;
+        evaluated from the singular values of ``D J``), the inversion
+        fails, or it yields a non-finite or negative variance. The Jacobi
+        scaled matrix does not change with the units chosen for the
+        parameters, so neither does the test; ``_information_inverse``
+        gives the details. Earlier releases raised ``numpy.linalg.LinAlgError``
+        for an exactly singular ``J @ J.T`` and otherwise returned
+        meaningless values, including negative variances (#532). A defined
+        covariance is computed exactly as before.
+
         Only observed entries count as data: unobserved entries have zero
         weighted residual and zero Jacobian column, and the degrees of
         freedom are ``num_data_total - num_params`` with ``num_data_total``
@@ -4276,20 +4369,29 @@ class ParameterEstimation:
         jac = self.info_opt['jac']
         resid = self.info_opt['fun']
 
-        hessian_approx = np.dot(jac, jac.T)
-
         dof = self.num_data_total - self.num_params
         mse = 1 / dof * np.dot(resid.T, resid)
 
-        if include_mse:
-            covar = mse * np.linalg.inv(hessian_approx)
-
+        # inv(J @ J.T) [p_i*p_j/r**2], computed as before #532 when defined;
+        # NaN when the covariance is undefined.
+        inverse, diagnostic = _information_inverse(jac, self.name_params)
+        if diagnostic is not None:
+            warnings.warn(diagnostic, RuntimeWarning,
+                          stacklevel=_user_stacklevel())
+            # All NaN, in the unit of the requested form: [p_i*p_j] with
+            # include_mse, [p_i*p_j/r**2] without.
+            covar = inverse
+            correlation = np.full_like(inverse, np.nan)  # [-]
         else:
-            covar = np.linalg.inv(hessian_approx)
-        # Correlation matrix
-        sigma = np.sqrt(covar.diagonal())
-        d_matrix = np.diag(1/sigma)
-        correlation = d_matrix.dot(covar).dot(d_matrix)
+            if include_mse:
+                covar = mse * inverse  # [p_i*p_j], scaled by s2
+
+            else:
+                covar = inverse  # [p_i*p_j/r**2]
+            # Correlation matrix
+            sigma = np.sqrt(covar.diagonal())
+            d_matrix = np.diag(1/sigma)
+            correlation = d_matrix.dot(covar).dot(d_matrix)
 
         self.covar_params = covar
         self.correl_params = correlation
@@ -4440,6 +4542,30 @@ class ParameterEstimation:
         return fig, axis
 
     def plot_correlation(self):
+        """Plot the parameter correlation matrix as a heatmap.
+
+        Returns
+        -------
+        fig_heat : matplotlib.figure.Figure
+            Figure holding the heatmap.
+        axis_heat : matplotlib.axes.Axes
+            Axis of the heatmap: the lower triangle of ``correl_params``
+            [-], diagonal included, on a -1 to 1 colour scale, with the
+            optimized parameters' plot labels (``name_params_plot``).
+
+        Raises
+        ------
+        AttributeError
+            If no covariance has been computed, so ``correl_params`` does
+            not exist.
+        ValueError
+            If the correlations are undefined (all NaN, as stored by
+            ``get_covariance`` when the covariance is undefined; its
+            warning states the cause). Earlier releases drew an empty
+            heatmap.
+        """
+        _require_defined_covariance(self.correl_params,
+                                    'ParameterEstimation.plot_correlation')
 
         # Mask
         mask = np.tri(self.num_params, k=-1).T

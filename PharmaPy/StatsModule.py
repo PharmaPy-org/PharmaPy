@@ -55,6 +55,288 @@ def _validated_count(value, name: str) -> int:
     return int(value)
 
 
+# Machine epsilon of float64 [-], the spacing of floats at 1: eps = 2u with
+# u the unit roundoff of Golub & Van Loan (Matrix Computations, 4th ed.,
+# 2013). A computed inverse carries a relative error of order u * cond
+# (ibid., Sec. 2.6), so cond * eps >= 1, i.e. u * cond >= 1/2, leaves an
+# error of order one and no correct significant digit; this is the
+# singularity test of _information_inverse.
+_FLOAT_EPS = np.finfo(float).eps  # [-]
+# Decimal places [-] of the unit-vector components that the
+# undefined-covariance diagnostic prints for each poorly determined
+# direction. Display choice only: components that round to zero at this
+# precision are left out of the message; the test itself is not affected.
+_DIRECTION_DECIMALS = 3  # [-]
+# Remedy of the undefined-covariance warnings for unidentifiable parameters.
+_UNIDENTIFIABLE_REMEDY = (
+    "Fix or remove those parameters, reparameterize the model in "
+    "identifiable combinations, or add data that distinguish them, then "
+    "refit")
+
+
+def _format_direction(vector: np.ndarray, names: list) -> str:
+    """Write a parameter-space direction as a linear combination of names.
+
+    Parameters
+    ----------
+    vector : numpy.ndarray
+        Unit eigenvector of the Jacobi-scaled information matrix, shape
+        ``(len(names),)`` [-] (see ``_information_inverse``).
+    names : list of str
+        Parameter name of each component.
+
+    Returns
+    -------
+    str
+        Combination such as ``'0.707*k - 0.707*b'`` of the components
+        rounded to ``_DIRECTION_DECIMALS`` decimals, with the sign chosen
+        so that the first nonzero rounded component is positive; components
+        that round to zero are omitted.
+    """
+    rounded = np.round(vector, _DIRECTION_DECIMALS)  # [-]
+    nonzero = np.flatnonzero(rounded)
+    # An eigenvector is defined up to its sign; fix it by the first shown
+    # component, which round-off cannot flip, for a stable message.
+    if nonzero.size and rounded[nonzero[0]] < 0:
+        rounded = -rounded
+    terms = []
+    for coefficient, name in zip(rounded, names):
+        if coefficient == 0:
+            continue
+        magnitude = f"{abs(coefficient):.{_DIRECTION_DECIMALS}f}*{name}"
+        if not terms:
+            terms.append(magnitude if coefficient > 0 else f"-{magnitude}")
+        else:
+            terms.append(('+ ' if coefficient > 0 else '- ') + magnitude)
+
+    return ' '.join(terms)
+
+
+def _information_inverse(jac, param_names) -> tuple:
+    """Invert the Gauss-Newton information matrix, or report it undefined.
+
+    Parameters
+    ----------
+    jac : array_like
+        Weighted residual Jacobian ``J``, shape ``(num_params,
+        n_entries)``; entry ``(i, k)`` in [weighted residual k unit /
+        parameter i unit]. Unobserved entries are zero columns.
+    param_names : sequence of str
+        Names of the optimized parameters in the row order of ``J``, used
+        in the diagnostic.
+
+    Returns
+    -------
+    inverse : numpy.ndarray
+        ``numpy.linalg.inv(np.dot(jac, jac.T))``, the inverse of the
+        information matrix ``A = J @ J.T``, shape ``(num_params,
+        num_params)``, entry ``(i, j)`` in [parameter i unit * parameter j
+        unit / weighted residual unit**2], when the linearized covariance is
+        defined; otherwise an array of that shape filled with NaN.
+    diagnostic : str or None
+        None when the inverse is defined. Otherwise an actionable message
+        of one of three kinds: ``J`` has non-finite entries (naming those
+        parameters); the parameters are not (locally) identifiable from
+        the observed data (naming every parameter with zero information
+        and every poorly determined direction, see Notes); or ``A`` passed
+        the conditioning test but its inversion failed or gave non-finite
+        or negative variances (naming those parameters and the
+        least-determined direction).
+
+    Notes
+    -----
+    The inverse is undefined when ``J`` has a non-finite entry, when a
+    row of ``J`` is exactly zero (parameter ``i`` changes no observed
+    weighted residual, ``A_ii = 0``), when the Jacobi-scaled matrix
+    ``A_s = D A D`` with ``D = diag(A_ii**-0.5)`` is numerically singular,
+    when ``numpy.linalg.inv`` raises ``LinAlgError``, or when the inverse
+    has a non-finite or negative diagonal entry (a negative variance).
+
+    ``A_s`` is numerically singular when ``cond(A_s) * eps >= 1``, with
+    ``eps`` the float64 machine epsilon, ``eps = 2u`` for the unit
+    roundoff ``u``: the relative error of a computed inverse is of order
+    ``u * cond`` (Golub & Van Loan, *Matrix Computations*, 4th ed., 2013,
+    Sec. 2.6), so ``cond * eps >= 1`` means an error of order one and no
+    correct significant digit. ``A_s`` is unchanged when the parameter
+    units change (a diagonal rescaling ``S A S`` of ``A``), so the test
+    does not depend on those units, whereas ``cond(A)`` does. Jacobi
+    scaling is also nearly optimal: for a symmetric positive-definite
+    matrix it gives a condition number within a factor ``num_params`` of
+    the smallest over all diagonal scalings (van der Sluis, A., 1969,
+    "Condition numbers and equilibration of matrices", Numerische
+    Mathematik 14(1), 14-23, doi:10.1007/BF02165096).
+
+    ``cond(A_s)`` is evaluated as ``(s_max / s_min)**2`` from the singular
+    values ``s`` of the scaled Jacobian ``D J`` (``A_s = (D J)(D J)^T``),
+    not from the eigenvalues of the rounded product ``A_s``. Forming
+    ``J J^T`` rounds every entry by a few ``eps`` relative to the largest,
+    so the smallest computed eigenvalue of an exactly singular ``A_s`` can
+    land a few ``eps`` above zero and pass ``cond(A_s) * eps < 1``; the
+    singular values of ``D J`` resolve ratios down to about ``eps``, that
+    is ``cond(A_s)`` up to about ``1/eps**2``. When ``J`` has fewer
+    columns than rows, the missing singular values are zero. Each row of
+    ``J`` is divided by its largest magnitude before it is normalized, so
+    the row norms neither overflow nor underflow.
+
+    Passing the test bounds the error of an inverse of the exact ``A_s``,
+    not of the rounded ``A``: forming ``J @ J.T`` adds its own rounding, and
+    entries near the overflow or underflow limits are not representable, so
+    an ``A`` just below the threshold can still invert to invalid
+    variances. That case is reported separately, with the least-determined
+    direction (smallest singular value of ``D J``).
+
+    The poorly determined directions are the left singular vectors of
+    ``D J`` (the eigenvectors of ``A_s``) whose eigenvalue ``s**2`` meets
+    the same criterion, ``s**2 <= eps * s_max**2``. Their components refer
+    to the scaled parameters ``u_i = dp_i * sqrt(A_ii)``: each parameter
+    change divided by that parameter's standard error when the others are
+    held fixed, so the components are unit-free [-]. Parameters with
+    ``A_ii = 0`` are reported separately and left out of ``D J``.
+
+    When the inverse is defined it is ``numpy.linalg.inv`` of
+    ``np.dot(jac, jac.T)`` itself, bit for bit, as computed before #532.
+    """
+    jac = np.asarray(jac)  # [r_k/p_i], shape (num_params, n_entries)
+    names = list(param_names)
+    num_params = jac.shape[0]  # [-]
+    undefined = np.full((num_params, num_params), np.nan)  # [p_i*p_j/r**2]
+    preamble = ("The linearized parameter covariance is undefined and is "
+                "returned as NaN")
+    if num_params == 0:
+        return np.linalg.inv(np.dot(jac, jac.T)), None
+
+    finite_rows = np.isfinite(jac).all(axis=1)
+    if not finite_rows.all():
+        bad = [names[ind] for ind in np.flatnonzero(~finite_rows)]
+        return undefined, (
+            f"{preamble}: the weighted residual Jacobian has non-finite "
+            f"entries for parameters {', '.join(bad)}. Check the model and "
+            "its sensitivities at the accepted parameters")
+
+    a_matrix = np.dot(jac, jac.T)  # [r**2/(p_i*p_j)], information matrix
+    no_effect = ~jac.any(axis=1)  # exactly zero rows, A_ii = 0
+    informed = np.flatnonzero(~no_effect)
+    # Jacobi scaling D J, D = diag(A_ii**-0.5): unit row norms. Dividing
+    # each row by its largest magnitude first keeps the squares inside
+    # np.linalg.norm, and the division by the norm, free of overflow and
+    # underflow.
+    num_informed = len(informed)  # [-]
+    rows = jac[informed].astype(float)  # [r_k/p_i]
+    if num_informed:
+        # [-], largest magnitude 1 per row
+        rows = rows / np.abs(rows).max(axis=1, keepdims=True)
+        rows = rows / np.linalg.norm(rows, axis=1, keepdims=True)
+    scaled_jac = rows  # [-], unit row norms
+    if scaled_jac.shape[1] < num_informed:
+        # Zero columns add the zero singular values of a short J.
+        scaled_jac = np.hstack((scaled_jac, np.zeros(
+            (num_informed, num_informed - scaled_jac.shape[1]))))
+    if num_informed:
+        # [-]; columns of directions are eigenvectors of A_s, descending
+        directions, singular, _ = np.linalg.svd(scaled_jac,
+                                                full_matrices=False)
+        eigvals = singular ** 2  # [-], eigenvalues of A_s, descending
+        weak = eigvals <= _FLOAT_EPS * eigvals[0]
+        condition = (eigvals[0] / eigvals[-1] if eigvals[-1] > 0
+                     else np.inf)  # [-], cond(A_s)
+    else:
+        weak = np.zeros(0, dtype=bool)
+        condition = np.inf  # [-]
+
+    if not no_effect.any() and not weak.any():
+        try:
+            inverse = np.linalg.inv(a_matrix)  # [p_i*p_j/r**2]
+        except np.linalg.LinAlgError:
+            inverse = None
+        if inverse is None:
+            failure = "numpy.linalg.inv found it singular"
+            bad = names
+        else:
+            variances = np.diag(inverse)  # [p_i**2/r**2]
+            invalid = ~np.isfinite(variances) | (variances < 0)
+            if not invalid.any():
+                return inverse, None
+            failure = "the inverse has non-finite or negative variances"
+            bad = [names[ind] for ind in np.flatnonzero(invalid)]
+        least = _format_direction(directions[:, -1], names)
+        return undefined, (
+            f"{preamble}: J @ J.T passed the conditioning test (Jacobi-scaled "
+            f"condition number {condition:.3g} < 1/eps = "
+            f"{1 / _FLOAT_EPS:.3g}), but {failure}, for parameters "
+            f"{', '.join(bad)}. Rounding in forming or inverting J @ J.T, or "
+            "sensitivities near the floating-point overflow or underflow "
+            "limits, dominate. Least-determined parameter direction (smallest "
+            "singular value of the scaled Jacobian; components are changes "
+            "in units of each parameter's standard error with the others held "
+            f"fixed): {least}. Rescale the parameters to moderate units, or "
+            "fix, remove or reparameterize the poorly determined ones, then "
+            "refit")
+
+    parts = [f"{preamble}: the parameters are not (locally) identifiable "
+             "from the observed data."]
+    if no_effect.any():
+        dead = [names[ind] for ind in np.flatnonzero(no_effect)]
+        parts.append("Parameters with no effect on any observed entry "
+                     f"(zero information): {', '.join(dead)}.")
+    if weak.any():
+        informed_names = [names[ind] for ind in informed]
+        described = [_format_direction(directions[:, ind], informed_names)
+                     for ind in np.flatnonzero(weak)]
+        parts.append(
+            "Poorly determined parameter directions (Jacobi-scaled "
+            f"condition number of J @ J.T {condition:.3g} >= 1/eps = "
+            f"{1 / _FLOAT_EPS:.3g}; components are changes in units of each "
+            "parameter's standard error with the others held fixed): "
+            + '; '.join(described) + '.')
+    parts.append(_UNIDENTIFIABLE_REMEDY + "; the fitted parameters are kept, "
+                 "but their covariance, correlations and confidence "
+                 "intervals are not available.")
+
+    return undefined, ' '.join(parts)
+
+
+def _require_defined_covariance(covar_params, consumer: str) -> None:
+    """Raise an actionable error for an undefined (all-NaN) covariance.
+
+    Parameters
+    ----------
+    covar_params : array_like
+        Parameter covariance, shape ``(num_params, num_params)``, entry
+        ``(i, j)`` in the product of the units of parameters ``i`` and
+        ``j``, or the inverse information matrix ``inv(J @ J.T)``.
+        ``ParameterEstimation.get_covariance`` returns it filled with NaN
+        when it is undefined.
+    consumer : str
+        Name of the calling method, used in the message.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If ``covar_params`` is a non-empty floating-point array whose
+        entries are all NaN, the marker of an undefined covariance.
+        Partially non-finite matrices are left to the caller's own checks.
+
+    Notes
+    -----
+    Apply it only to a covariance (or ``inv(J @ J.T)``) that the estimator
+    produced: a NaN matrix given by the user says nothing about
+    identifiability and keeps the caller's own validation message.
+    """
+    covar = np.asarray(covar_params)  # [p_i*p_j]
+    if covar.size and covar.dtype.kind == 'f' and np.isnan(covar).all():
+        raise ValueError(
+            f"{consumer} needs the linearized parameter covariance, which is "
+            "undefined (all NaN) for this fit. The RuntimeWarning of "
+            "get_covariance (also issued by optimize_fn) states the cause, "
+            "parameters that the observed data do not identify, a non-finite "
+            "Jacobian, or an inversion of J @ J.T without valid variances, "
+            "and names the parameters involved; remove that cause and refit")
+
+
 def _covariance_factor(covar_params, num_params: int,
                        check_symmetry: bool = True) -> np.ndarray:
     """Validate a parameter covariance and return its Cholesky factor.
@@ -485,14 +767,26 @@ class StatisticsClass:
         -----
         The attribute ``sigma_t`` (always None, never assigned) was removed
         together with the ``bootstrap_confid`` repair (#400).
+
+        ``a_matrix`` is ``J @ J.T`` of the weighted residual Jacobian
+        ``J = info_opt['jac']`` and ``a_inv`` its inverse, computed with the
+        test of ``ParameterEstimation.get_covariance`` (see
+        ``_information_inverse``): when the covariance is undefined (the
+        parameters are not identifiable, ``J`` is not finite, or the
+        inversion fails), ``a_inv`` is filled with NaN instead of raising
+        ``numpy.linalg.LinAlgError`` or holding meaningless values, so the
+        bootstrap methods, which refit the data, stay available, and
+        ``confidence_regions`` raises an actionable ``ValueError``.
         """
 
         # Values from the instance
         inst = estimation_instance
         jac = inst.info_opt['jac']
 
+        # [r**2/(p_i*p_j)], information matrix J J^T
         self.a_matrix = jac.dot(jac.T)
-        self.a_inv = np.linalg.inv(self.a_matrix)
+        # [p_i*p_j/r**2], NaN when the covariance is undefined
+        self.a_inv, _ = _information_inverse(jac, inst.name_params)
         self.jac = jac
 
         self.params = inst.params_convg.copy()
@@ -533,9 +827,46 @@ class StatisticsClass:
         self.boot_params = None
 
     def get_intervals(self, covar_params=None, verbose=True, set_self=True):
+        """Compute two-sided Student-t intervals of the fitted parameters.
 
+        Parameters
+        ----------
+        covar_params : array_like, optional
+            Parameter covariance, shape ``(num_params, num_params)``, entry
+            ``(i, j)`` in the product of the units of parameters ``i`` and
+            ``j``. The default None uses the estimator's ``covar_params``.
+        verbose : bool, optional
+            If True (the default), print the interval table.
+        set_self : bool, optional
+            If True (the default), store ``confid_intervals``,
+            ``covar_params`` and ``intervals_array`` on this object.
+
+        Returns
+        -------
+        dict
+            Mapping from each parameter name in ``param_names`` to its
+            two-element array ``[lower_bound, upper_bound]`` in that
+            parameter's units: ``params -/+ t * sqrt(diag(covar_params))``
+            with ``t`` the ``(1 + alpha) / 2`` quantile of Student's t
+            distribution with ``dof`` degrees of freedom.
+
+        Raises
+        ------
+        ValueError
+            If ``covar_params`` is None and the estimator's covariance is
+            undefined (all NaN, as ``ParameterEstimation.get_covariance``
+            returns it; its warning states the cause). A given
+            ``covar_params`` is used as is.
+
+        Notes
+        -----
+        ``confid_intervals['perc_deviation']`` is the half-width relative to
+        the parameter value [%].
+        """
         if covar_params is None:
             covar_params = self.inst.covar_params
+            _require_defined_covariance(covar_params,
+                                        'StatisticsClass.get_intervals')
 
         sigma_params = np.sqrt(np.diag(covar_params))
 
@@ -578,27 +909,39 @@ class StatisticsClass:
         return confidence_int
 
     def confidence_regions(self, param_means, alphas=None):
-        """
-        Generate pairwise confidence ellipses. For three or more parameters,
-        the 2D projections are calculated as described in 'Nonlinear
-        Regression' by Seber and Wilde (1989).
+        """Generate pairwise linearized confidence ellipses and boxes.
+
+        For three or more parameters, the 2D projections are calculated as
+        described in 'Nonlinear Regression' by Seber and Wild (1989).
 
         Parameters
         ----------
+        param_means : pandas.Series
+            Centre of each region, one entry per optimized parameter in
+            ``param_names`` order and units, indexed by position.
         alphas : tuple or list, optional
-            confidence levels to draw ellipses. If None, the alpha value
-            specified when creating the instance is used.
+            Confidence levels [-] of the regions to draw. If None, the alpha
+            value specified when creating the instance is used.
             The default is None.
 
         Returns
         -------
         info_dict : dict of dicts
-            dictionary with keys as the paramter pair names, e.g.
+            Dictionary with keys as the parameter pair names, e.g.
             'theta_1/theta_2'. Each dictionary value is in turn a dictionary
             with the ellipse and rectangle patches and their respective
-            dimensions (axes lenghts or side lengths)
+            dimensions (axes lengths or side lengths) in the units of the
+            pair's parameters.
 
+        Raises
+        ------
+        ValueError
+            If the inverse information matrix ``a_inv`` is undefined (all
+            NaN; see ``ParameterEstimation.get_covariance`` for the causes);
+            the linearized regions do not exist then.
         """
+        _require_defined_covariance(self.a_inv,
+                                    'StatisticsClass.confidence_regions')
 
         info_dict = {}
         indexes = set(range(self.num_par))
@@ -809,7 +1152,10 @@ class StatisticsClass:
             If ``num_samples`` is not a positive integer, or the covariance
             is not a finite, positive-definite ``(num_params, num_params)``
             matrix; a given ``covar_params`` must also be symmetric on the
-            correlation scale (see ``_covariance_factor``).
+            correlation scale (see ``_covariance_factor``). The estimator's
+            own covariance, when undefined (all NaN, see
+            ``ParameterEstimation.get_covariance``), is rejected with a
+            message saying so.
         Exception
             Whatever the model raises at a drawn parameter vector.
 
@@ -849,6 +1195,8 @@ class StatisticsClass:
         # Lower Cholesky factor [param units]. The estimator's own
         # covariance is only symmetrized; a user matrix is also checked.
         if covar_params is None:
+            _require_defined_covariance(self.inst.covar_params,
+                                        'StatisticsClass.bootstrap_confid')
             chol_lower = _covariance_factor(self.inst.covar_params,
                                             self.num_par,
                                             check_symmetry=False)
@@ -1103,7 +1451,10 @@ class StatisticsClass:
             one row per bootstrap dataset in sampling order, columns in the
             order of the optimized parameters (``name_params``), in the
             physical units configured for each model parameter. A row is NaN
-            when the optimizer encounters a singular linear system.
+            when the optimizer encounters a singular linear system during the
+            solve. A refit whose covariance is undefined, for example
+            because its parameters are not identifiable, keeps its
+            estimates as the row (see Notes).
 
         Warns
         -----
@@ -1116,6 +1467,9 @@ class StatisticsClass:
             then dropped).
             Also, from ``optimize_fn``, if an IPOPT sample refit terminates
             unsuccessfully; see Notes.
+            Also, from ``ParameterEstimation.get_covariance``, if a sample
+            refit's covariance is undefined, for example because its
+            parameters are not identifiable.
 
         Raises
         ------
@@ -1139,7 +1493,10 @@ class StatisticsClass:
         ``BaseException`` aborts at once without that evaluation.
 
         The package's Levenberg-Marquardt implementation uses
-        ``numpy.linalg.solve`` and ``numpy.linalg.inv``. Their documented
+        ``numpy.linalg.solve`` for its steps; its final ``numpy.linalg.inv``
+        and ``get_covariance`` return NaN instead of raising for a singular
+        ``J @ J.T`` (#532), so a refit whose covariance is undefined keeps its
+        estimates, which are all the bootstrap uses. The documented
         Exception type, rather than origin, defines recovery. Any
         ``LinAlgError`` escaping ``optimize_fn`` is recorded as a NaN row,
         including one raised inside a user model. Other programming and model
