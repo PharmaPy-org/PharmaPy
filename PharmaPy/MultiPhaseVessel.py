@@ -2273,16 +2273,32 @@ class MultiPhaseVessel():
             completed_state,
             limiter_dt=1.0,
         ):
-        """
-        Compute one throttling factor per phase inventory.
+        """Compute one throttling factor per phase inventory.
 
         Inlet and intraphase terms are treated as fixed; cross-phase and
         outlet terms compete for whatever inventory is left over
         ``limiter_dt`` and share a single factor per phase, which keeps an
-        outlet composition consistent with the phase it drains.
+        outlet composition consistent with the phase it drains. Mechanisms
+        requesting outlet rates use an exact minimum in their phase, preserving
+        an exactly feasible withdrawal already reserved by metabolic constraints.
+        Other phases retain the default smooth minimum.
 
-        Returns ``None`` when nothing needs throttling, so the common case
-        costs one vectorized comparison and no allocation of scale vectors.
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions by source [native state units/s].
+        completed_state : dict
+            Native completed state.
+        limiter_dt : float, optional
+            Depletion horizon [s]. Zero or negative disables throttling.
+            Default 1.0.
+
+        Returns
+        -------
+        ndarray or None
+            Scale factors [-] per material entry, or None when nothing needs
+            throttling, so the common case costs one vectorized comparison and
+            no allocation of scale vectors.
         """
 
         if limiter_dt <= 0.0:
@@ -2316,6 +2332,19 @@ class MultiPhaseVessel():
         scales[active] = self.soft_saturate(
             np.maximum(available[active], 0.0) / demand[active]
         )
+
+        # Outlet-aware feasibility already reserves this withdrawal. A smooth
+        # minimum would throttle an exactly feasible boundary (ratio=1) to
+        # 0.975, changing both dilution and working volume after the LP solve.
+        for process in self.intraphase_processes:
+            if getattr(process.mechanism, 'requires_outlet_rates', False):
+                for key, state_slice in self.solver_state_collection.material_slices.items():
+                    if key.phaseref == process.phaseref:
+                        selected = active[state_slice]
+                        ratios = np.ones_like(scales[state_slice])  # [-]
+                        np.divide(np.maximum(available[state_slice], 0.),
+                                  demand[state_slice], out=ratios, where=selected)
+                        scales[state_slice] = np.minimum(ratios, 1.)
 
         engaged = False
 
@@ -2823,6 +2852,25 @@ class MultiPhaseVessel():
         resolved_inlets,
         resolved_outlets,
     ):
+        """Assemble native material rates, reserving requested outlet inventories.
+
+        Parameters
+        ----------
+        time : float
+            Solver time [s].
+        completed_state : Mapping
+            Material inventories in native units.
+        resolved_inlets, resolved_outlets : StreamConditions
+            Native resolved transfers [state unit/s], including volume [m3/s].
+
+        Returns
+        -------
+        MaterialContributionBuffer
+            Signed rates by source. Only mechanisms explicitly requesting
+            outlet rates change assembly order; other vessels retain it.
+        """
+        outlets_first = any(getattr(p.mechanism, 'requires_outlet_rates', False)
+                            for p in self.intraphase_processes)
         buffer = self._material_contributions
         buffer.reset()
         self.add_inlet_terms(
@@ -2833,6 +2881,8 @@ class MultiPhaseVessel():
             
         )
 
+        if outlets_first:
+            self.add_outlet_terms(buffer, time, completed_state, resolved_outlets)
         self.add_intraphase_terms(
             buffer,
             time,
@@ -2844,12 +2894,14 @@ class MultiPhaseVessel():
             completed_state,
         )
 
-        self.add_outlet_terms(
-            buffer,
-            time,
-            completed_state,
-            resolved_outlets,
-        )
+        if not outlets_first:
+            self.add_outlet_terms(
+                buffer,
+                time,
+                completed_state,
+                resolved_outlets,
+            )
+
         if self.dilutes_intensive_states:
             self.add_dilution_terms(
                 buffer,
@@ -3032,14 +3084,49 @@ class MultiPhaseVessel():
             time,
             completed_state
         ):
+        """Add every intraphase mechanism's rates to the contribution buffer.
+
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions; the intraphase row is filled.
+        time : float
+            Absolute simulation time [s].
+        completed_state : dict
+            Native completed state.
+
+        Notes
+        -----
+        Mechanisms that set ``requires_inlet_rates`` also receive
+        ``inlet_rates``: a copy of the inlet contributions to their own phase's
+        material states [native state units/s], so inventory feasibility can count
+        actual supply. ``requires_outlet_rates`` additionally supplies signed
+        ``outlet_rates`` before reaction evaluation. For that phase, finite-step
+        transport uses the exact minimum availability factor rather than the
+        default smooth limiter, preserving an exactly feasible withdrawal.
+        """
         for process in self.intraphase_processes:
             phase = self.phase_states.get_phase(process.phaseref)
 
+            inputs = {}
+            if getattr(process.mechanism, 'requires_inlet_rates', False):
+                inputs['inlet_rates'] = {
+                    key: buffer.contributions[buffer.INLET, state_slice].copy()
+                    for key, state_slice in self.solver_state_collection.material_slices.items()
+                    if key.phaseref == process.phaseref
+                }
+            if getattr(process.mechanism, 'requires_outlet_rates', False):
+                inputs['outlet_rates'] = {
+                    key: buffer.contributions[buffer.OUTLET, state_slice].copy()
+                    for key, state_slice in self.solver_state_collection.material_slices.items()
+                    if key.phaseref == process.phaseref
+                }
             intraphase_result = process.mechanism.get_solver_state_rates(
                 process=process,
                 phase=phase,
                 time=time,
-                completed_state=completed_state
+                completed_state=completed_state,
+                **inputs
             )
 
             for state_key,rate in intraphase_result.state_rates.items():

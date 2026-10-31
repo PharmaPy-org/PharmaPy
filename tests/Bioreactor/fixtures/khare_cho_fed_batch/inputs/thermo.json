@@ -1,0 +1,350 @@
+{
+  "GLC": {
+    "formula": "C6H12O6",
+    "mw": 180.156,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "LAC": {
+    "formula": "C3H6O3",
+    "mw": 90.078,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ALA": {
+    "formula": "C3H7NO2",
+    "mw": 89.094,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ASN": {
+    "formula": "C4H8N2O3",
+    "mw": 132.119,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ASP": {
+    "formula": "C4H7NO4",
+    "mw": 133.103,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "CYSTINE": {
+    "formula": "C6H12N2O4S2",
+    "mw": 240.3,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "GLN": {
+    "formula": "C5H10N2O3",
+    "mw": 146.145,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "GLY": {
+    "formula": "C2H5NO2",
+    "mw": 75.067,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "SER": {
+    "formula": "C3H7NO3",
+    "mw": 105.093,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "NH3": {
+    "formula": "NH3",
+    "mw": 17.031,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "GLU": {
+    "formula": "C5H9NO4",
+    "mw": 147.13,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "water": {
+    "formula": "H2O",
+    "mw": 18.015,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  }
+}
