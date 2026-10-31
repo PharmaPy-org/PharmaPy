@@ -16,14 +16,16 @@ from PharmaPy.Errors import PharmaPyTypeError, PharmaPyValueError
 
 gas_ct = 8.314  # J/mol/K
 eps = np.finfo(float).eps  # machine-epsilon floor for singularities
-# Projected concentrations below -DEPLETION_ROUNDOFF_TOLERANCE count as real
+# Projected concentrations below -DEPLETION_ROUNDOFF_ULPS * eps count as real
 # depletion for the return_both limiter in get_rxn_rates; anything closer to
 # zero is round-off from the dot product of the extents with the
 # stoichiometry. Ten units of double round-off at unit magnitude (about
 # 2e-15 mol/L) is far below any concentration a solver resolves, so a species
 # sitting at exactly zero with a zero net rate does not throttle every
-# reaction. A numerical design choice, not a fitted value.
-DEPLETION_ROUNDOFF_TOLERANCE = 10 * eps  # [mol/L]
+# reaction. A numerical design choice, not a fitted value. Kept as a count
+# and multiplied where it is used: the docs build mocks NumPy, so the module
+# must not do NumPy arithmetic at import time.
+DEPLETION_ROUNDOFF_ULPS = 10  # [-]
 
 STOICH_COEFFICIENT_PATTERN = r'\d+(\.\d+)?(/\d+)?'
 STOICH_COEFFICIENT_PREFIX = r'^' + STOICH_COEFFICIENT_PATTERN + r'\s?'
@@ -1146,7 +1148,7 @@ class RxnKinetics:
 
                 total_rates = np.dot(rrates, self.normalized_stoich.T)
                 short = (conc + total_rates * limiter_dt
-                         < -DEPLETION_ROUNDOFF_TOLERANCE)  # [mol/L]
+                         < -DEPLETION_ROUNDOFF_ULPS * eps)  # [mol/L]
 
                 if short.any():
 
