@@ -14,9 +14,39 @@ from PharmaPy.Connections import interpolate_inputs
 from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
 
+import copy
+import math
+import numbers
 import warnings
 
 import numpy as np
+
+
+def _require_finite_positive(value, name: str, unit: str) -> None:
+    """Reject a parameter that is not a finite real number above zero.
+
+    Parameters
+    ----------
+    value : float
+        Parameter value, in ``unit``.
+    name : str
+        Parameter name, used in the message.
+    unit : str
+        Bracketed unit of the parameter, such as ``'[s]'`` or ``'[-]'``.
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not a real number (booleans included), or is
+        zero, negative, NaN or infinite. The message names the parameter,
+        the value and the unit.
+    """
+    # bool is a numbers.Real; numpy.bool_ is not registered as one.
+    is_real = isinstance(value, numbers.Real) and not isinstance(value, bool)
+    if not (is_real and math.isfinite(value) and value > 0):
+        raise ValueError(
+            f'BatchToFlowConnector {name} must be a finite number greater '
+            f'than zero {unit}; got {value!r}.')
 
 
 def Interpolation(t_data, y_data, time, newton=True, num_points=3):
@@ -79,7 +109,9 @@ class BatchToFlowConnector:
     ``has_solids`` is retained for compatibility and is always False for an
     accepted holdup. The class-level ``is_instantaneous = True`` is
     declared for consistency with the ``Mixer`` (its result spans 0 s); it
-    has no raw-material effect, because the connector has no raw inlets.
+    has no raw-material effect, because the connector has no raw inlets. A
+    holdup charged by the user is reported as the connector's initial
+    holdup (issue #456).
     """
 
     is_instantaneous = True
@@ -90,11 +122,25 @@ class BatchToFlowConnector:
         Parameters
         ----------
         cycle_time : float
-            Time over which the batch holdup is discharged [s].
+            Time over which the batch holdup is discharged [s]; finite and
+            greater than zero.
         flow_mult : float, optional
-            Multiplier applied to the discharge mass flow [-]; the default
-            of one discharges the holdup exactly once per cycle.
+            Multiplier applied to the discharge mass flow [-], finite and
+            greater than zero; the default of one discharges the holdup
+            exactly once per cycle.
+
+        Raises
+        ------
+        ValueError
+            If ``cycle_time`` or ``flow_mult`` is not a finite real number
+            greater than zero. The outlet mass flow [kg/s] is the holdup
+            mass [kg] / ``cycle_time`` * ``flow_mult``, so such values gave
+            a negative or NaN flow, or a ``ZeroDivisionError`` when solved
+            (issue #434).
         """
+        _require_finite_positive(cycle_time, 'cycle_time', '[s]')
+        _require_finite_positive(flow_mult, 'flow_mult', '[-]')
+
         self.flow_mult = flow_mult  # [-]
         self.cycle_time = cycle_time  # [s]
 
@@ -148,6 +194,14 @@ class BatchToFlowConnector:
         Those holdups are rejected rather than reduced to their liquid,
         because the liquid-only outlet would drop the rest from the
         flowsheet mass balance.
+
+        An accepted holdup is also kept as a deep copy,
+        ``__original_phase__``, the initial-holdup snapshot that
+        ``SimulationExec.get_holdup`` reports as a raw material unless the
+        holdup was transferred from an upstream unit
+        (``transferred_from_uo``), whose source is charged instead.
+        Earlier releases kept no snapshot, so a user charge was missing
+        from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
         """
         candidates = (list(phases) if isinstance(phases, (list, tuple))
                       else [phases])
@@ -182,6 +236,9 @@ class BatchToFlowConnector:
         classify_phases(self, names=['Liquid_1'])
         self.nomenclature()
 
+        # Initial-holdup snapshot for raw-material accounting (issue #456).
+        self.__original_phase__ = copy.deepcopy(self.Liquid_1)
+
     def nomenclature(self) -> None:
         """Declare the published outlet states and their metadata.
 
@@ -215,7 +272,15 @@ class BatchToFlowConnector:
         -----
         The outlet ``LiquidStream`` carries the holdup's temperature [K],
         pressure [Pa] and mass fractions [-] with mass flow
-        ``Liquid_1.mass / cycle_time * flow_mult`` [kg/s].
+        ``Liquid_1.mass / cycle_time * flow_mult`` [kg/s]. When the holdup's
+        concentrations are authoritative (``Liquid_1.concentration_basis``),
+        the outlet is built from its ``mole_conc`` [mol/L] and the volume
+        flow ``Liquid_1.vol / cycle_time * flow_mult`` [m**3/s] instead, so
+        it keeps those concentrations and the same mass flow (issue #439);
+        before, the ideal-mixing density re-derived its volume and
+        concentrations from the mass fractions. The published ``outputs``
+        names are unchanged; ``NameAnalyzer`` converts this single-sample
+        discharge with the outlet's inventory density.
 
         The transfer itself is instantaneous, like the solids ``Mixer``:
         ``outputs`` (a dictionary) and ``result`` (a ``DynamicResult``
@@ -236,9 +301,19 @@ class BatchToFlowConnector:
         liquid = self.Liquid_1
         num_species = len(liquid.name_species)
         mass_flow = liquid.mass / self.cycle_time * self.flow_mult  # [kg/s]
-        outlet = LiquidStream(liquid.path_data, temp=liquid.temp,
-                              pres=liquid.pres, mass_frac=liquid.mass_frac,
-                              mass_flow=mass_flow)
+        if liquid.concentration_basis:
+            # Authoritative concentrations (issue #439): discharge the held
+            # volume so the outlet keeps them; its mass flow is mass_flow.
+            vol_flow = (liquid.vol / self.cycle_time
+                        * self.flow_mult)  # [m**3/s]
+            outlet = LiquidStream(liquid.path_data, temp=liquid.temp,
+                                  pres=liquid.pres,
+                                  mole_conc=liquid.mole_conc,
+                                  vol_flow=vol_flow)
+        else:
+            outlet = LiquidStream(liquid.path_data, temp=liquid.temp,
+                                  pres=liquid.pres, mass_frac=liquid.mass_frac,
+                                  mass_flow=mass_flow)
 
         outputs = {
             'temp': np.array(liquid.temp, dtype=float).reshape(1),  # [K]
@@ -393,10 +468,10 @@ class LiquidStream(LiquidPhase):
         Notes
         -----
         Only explicit positive flows participate in mass, volume, then mole
-        precedence. For scalar inventory and one-dimensional composition,
-        composition-only updates conserve mass flow [kg/s] and recompute the
-        dependent flows. Composition precedence, solvent completion, and
-        unchanged profile inventories follow :meth:`LiquidPhase.updatePhase`.
+        precedence. Composition-only updates conserve mass flow [kg/s] and
+        recompute the dependent flows, point by point for a composition
+        profile (issue #439). Composition precedence, solvent completion,
+        and profile reconciliation follow :meth:`LiquidPhase.updatePhase`.
         A no-argument update retains the state and flow values. As in previous
         versions, updates delete the inherited ``mass``, ``vol``, and ``moles``
         attributes; use the flow aliases to read the reconciled amounts.

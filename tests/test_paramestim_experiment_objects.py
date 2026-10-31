@@ -7,12 +7,13 @@ replicate mapping on multiset-union grids; per-measurement uncertainty
 scaling; validation messages; and caller-data isolation.
 
 Fixtures: an analytic first-order decay A -> B with an adiabatic
-temperature rise, whose states and rate sensitivities have closed forms,
-and a two-output model linear in its rate for closed-form generalized least
-squares (GLS). Expected values come from those closed forms and from
-hand-written layouts, never from estimator internals. Everything runs in
-milliseconds with PharmaPy's Levenberg-Marquardt (LM) solver; no optional
-backend is used.
+temperature rise, whose states and rate sensitivities have closed forms;
+a two-output model linear in its rate for closed-form generalized least
+squares (GLS); and the three-species kinetic network from Rawlings &
+Ekerdt (2002), Example 9.5, exercising the ``rawlings_9-5.ipynb`` workflow
+with ``estimate_parameters`` and ``get_confidence_intervals``. Expected
+values come from those closed forms, physical balances, and hand-written
+layouts, never from estimator internals.
 """
 
 import re
@@ -20,6 +21,8 @@ import re
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import stats
+from scipy.integrate import solve_ivp
 
 from PharmaPy.ParamEstim import (Experiment, Measurement,
                                  MultipleCurveResolution, ParameterEstimation)
@@ -1816,3 +1819,535 @@ def test_repeated_fits_leave_caller_and_measurement_data_unchanged():
     legacy.optimize_fn(verbose=False)
     np.testing.assert_array_equal(times, [0.0, 1.0, 2.0])
     np.testing.assert_array_equal(observed, [2.0, np.nan, 0.8])
+
+
+# ------------------------- rawlings_9-5 API reconciliation (#346 / #347)
+
+
+def test_measurement_aliases_and_default_mapping_field():
+    """Measurement supports y, unit_x, unit_y and mapping-key field default."""
+    times = np.array([0.0, 1.0, 2.0])  # [days]
+    obs_a = np.array([1.0, 0.7, 0.5])  # [mol/L]
+    obs_b = np.array([0.0, 0.3, 0.5])  # [mol/L]
+    meas_a = Measurement(x=times, y=obs_a, unit_x='days', unit_y='mol/L')
+    meas_b = Measurement(
+        field='c_B', x=times, y=obs_b, unit_x='days', unit_y='mol/L')
+
+    assert meas_a.field is None
+    np.testing.assert_array_equal(meas_a.y, obs_a)
+    np.testing.assert_array_equal(meas_a.values, obs_a)
+    assert meas_a.unit_x == 'days'
+    assert meas_a.x_units == 'days'
+    assert meas_a.unit_y == 'mol/L'
+    assert meas_a.units == 'mol/L'
+
+    experiment = Experiment(
+        name='exp1',
+        author='James Rawlings/John Ekerdt',
+        date='2026-10-21',
+        measurements={'c_A': meas_a, 'c_B': meas_b},
+        args=(1.0,),
+    )
+    assert experiment.name == 'exp1'
+    assert experiment.author == 'James Rawlings/John Ekerdt'
+    assert experiment.date == '2026-10-21'
+    assert experiment.measurements['c_A'].field == 'c_A'
+    assert experiment.measurements['c_B'].field == 'c_B'
+    # Caller's Measurement object keeps field=None (not mutated in place).
+    assert meas_a.field is None
+
+
+@pytest.mark.parametrize('kwargs, exception, match', [
+    ({'field': 0, 'x': [0.0, 1.0], 'values': [1.0, 0.5], 'y': [1.0, 0.5]},
+     ValueError,
+     "Measurement received both 'values' and alias 'y'; pass only one"),
+    ({'field': 0, 'x': [0.0, 1.0]},
+     TypeError, "Measurement requires observation values; pass 'values' or 'y'"),
+    ({'field': 0, 'x': [0.0, 1.0], 'y': [1.0, 0.5],
+      'units': 'mol/L', 'unit_y': 'mol/L'},
+     ValueError,
+     "Measurement received both 'units' and alias 'unit_y'; pass only one"),
+    ({'field': 0, 'x': [0.0, 1.0], 'y': [1.0, 0.5],
+      'x_units': 's', 'unit_x': 's'},
+     ValueError,
+     "Measurement received both 'x_units' and alias 'unit_x'; pass only one"),
+])
+def test_measurement_rejects_duplicate_or_missing_aliases(
+        kwargs, exception, match):
+    with pytest.raises(exception, match=match):
+        Measurement(**kwargs)
+
+
+def test_experiment_sequence_rejects_omitted_measurement_field():
+    meas = Measurement(x=[0.0, 1.0], y=[1.0, 0.5])  # [s], [mol/L]
+    with pytest.raises(
+            ValueError,
+            match=r"Experiment measurements\[0\] has field=None; specify "
+                  r"field on each Measurement"):
+        Experiment([meas])
+
+
+@pytest.mark.parametrize('kwargs, exception, match', [
+    ({'name': 123}, TypeError, 'Experiment name must be a str or None'),
+    ({'name': ''}, ValueError, 'Experiment name must be non-empty'),
+    ({'author': 45}, TypeError, 'Experiment author must be a str or None'),
+    ({'author': ''}, ValueError, 'Experiment author must be non-empty'),
+    ({'date': 2026}, TypeError, 'Experiment date must be a str or None'),
+    ({'date': ''}, ValueError, 'Experiment date must be non-empty'),
+])
+def test_experiment_validates_metadata_attributes(kwargs, exception, match):
+    meas = Measurement(0, [0.0, 1.0], [1.0, 0.5])  # [s], [mol/L]
+    with pytest.raises(exception, match=match):
+        Experiment([meas], **kwargs)
+
+
+def test_experiments_keyword_and_experiment_names_match_x_data_contract():
+    """ParameterEstimation(experiments=...) normalizes named experiments."""
+    raw = build_experiments()
+    named_list = [
+        Experiment(
+            {meas: Measurement(
+                x=m.x, y=m.y, unit_x=m.unit_x, unit_y=m.unit_y)
+             for meas, m in raw[name].measurements.items()},
+            args=raw[name].args,
+            kwargs=dict(raw[name].kwargs),
+            name=name,
+            author='Test Author',
+            date='2026-10-22',
+        )
+        for name in ('hot', 'cold')
+    ]
+    output_names = ['c_A', 'c_B', 'T']
+    from_x_data = ParameterEstimation(decay_model, [SEED_RATE], raw)
+    from_kw_list = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=named_list,
+        output_names=output_names)
+    from_kw_single = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=named_list[0],
+        output_names=output_names)
+
+    assert from_kw_list.experim_names == ['hot', 'cold']
+    assert from_kw_single.experim_names == ['hot']
+    pd.testing.assert_frame_equal(
+        from_kw_list.get_residual_layout(),
+        from_x_data.get_residual_layout())
+    np.testing.assert_allclose(
+        from_kw_list.get_objective([SEED_RATE], out_array=True),
+        from_x_data.get_objective([SEED_RATE], out_array=True),
+        rtol=ROUNDOFF_RTOL, atol=ROUNDOFF_ATOL)
+
+
+def test_experiments_keyword_and_name_conflicts_are_rejected():
+    exp_a = single()
+    exp_named_a = Experiment(
+        exp_a.measurements, args=exp_a.args, name='run_a')
+    exp_named_dup = Experiment(
+        exp_a.measurements, args=exp_a.args, name='run_a')
+    with pytest.raises(ValueError, match='Pass either x_data or experiments'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], x_data=exp_a, experiments=exp_a)
+    with pytest.raises(TypeError, match='x_data or experiments is required'):
+        ParameterEstimation(decay_model, [SEED_RATE])
+    with pytest.raises(
+            ValueError,
+            match="Experiment mapping key 'wrong' disagrees with "
+                  "experiment.name 'run_a'"):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], experiments={'wrong': exp_named_a})
+    with pytest.raises(
+            ValueError,
+            match=r"Experiment sequence repeats the names \['run_a'\]"):
+        ParameterEstimation(
+            decay_model, [SEED_RATE],
+            experiments=[exp_named_a, exp_named_dup])
+    with pytest.raises(
+            TypeError,
+            match='experiments must be an Experiment or a non-empty mapping'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], experiments=[1.0, 2.0])
+    with pytest.raises(
+            TypeError,
+            match='experiments holds Measurement objects'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE],
+            experiments=Measurement(0, [0.0, 1.0], [1.0, 0.5]))
+    with pytest.raises(
+            ValueError,
+            match='y_data must be None when experiments holds Experiment'):
+        ParameterEstimation(
+            decay_model, [SEED_RATE], experiments=exp_a,
+            y_data=np.array([1.0, 0.8]))
+
+
+def test_estimate_parameters_and_confidence_intervals_match_closed_form_gls():
+    """estimate_parameters (scipy) and get_confidence_intervals match GLS."""
+    observations = gls_observations()  # [mol/L]
+    labelled = pd.DataFrame(
+        GLS_COVARIANCE, index=['y_0', 'y_1'],
+        columns=['y_0', 'y_1'])  # [(mol/L)**2]
+    experiments = gls_experiments()
+
+    estimator_scipy = ParameterEstimation(
+        linear_model, [1.0], experiments=experiments,
+        weight_matrix=labelled, jac_fun=linear_sensitivity,
+        name_params=['rate'])
+    estimator_lm = ParameterEstimation(
+        linear_model, [1.0], experiments=experiments,
+        weight_matrix=labelled, jac_fun=linear_sensitivity,
+        name_params=['rate'])
+
+    rows = gls_rows(observations)
+    information = sum(x @ p @ x for _, x, p in rows)  # [s**2/(mol/L)**2]
+    score = sum(x @ p @ y for y, x, p in rows)  # [s/(mol/L)]
+    rate_hat = score / information  # [mol/L/s]
+    dof = GLS_NUM_OBSERVED - 1  # [-]
+    variance = 2.0 * gls_objective(rows, rate_hat) / dof  # [-]
+    expected_cov_mse = np.array([[variance / information]])  # [(mol/L/s)**2]
+    expected_cov_abs = np.array([[1.0 / information]])  # [(mol/L/s)**2]
+
+    fitted_scipy, cov_scipy, info_scipy = (
+        estimator_scipy.estimate_parameters(max_nfev=100, verbose=0))
+    fitted_lm, cov_lm, info_lm = estimator_lm.optimize_fn(verbose=False)
+
+    np.testing.assert_allclose(fitted_scipy, [rate_hat], rtol=FIT_RTOL)
+    np.testing.assert_allclose(fitted_scipy, fitted_lm, rtol=FIT_RTOL)
+    np.testing.assert_allclose(cov_scipy, expected_cov_mse, rtol=FIT_RTOL)
+    np.testing.assert_allclose(cov_scipy, cov_lm, rtol=FIT_RTOL)
+    # Canonical (num_params, n_residuals) orientation across optimizers, while
+    # info['scipy_result'] retains the raw OptimizeResult orientation.
+    assert info_scipy['jac'].shape == info_lm['jac'].shape
+    assert info_scipy['scipy_result'].jac.shape == info_scipy['jac'].T.shape
+    np.testing.assert_allclose(
+        info_scipy['jac'], info_lm['jac'], rtol=FIT_RTOL)
+    np.testing.assert_allclose(
+        info_scipy['scipy_result'].jac.T, info_scipy['jac'],
+        rtol=ROUNDOFF_RTOL, atol=ROUNDOFF_ATOL)
+
+    alpha = 0.95  # [-]
+    t_val = stats.t.ppf((1.0 + alpha) / 2.0, dof)  # [-]
+    delta_mse = t_val * np.sqrt(expected_cov_mse[0, 0])  # [mol/L/s]
+    delta_abs = t_val * np.sqrt(expected_cov_abs[0, 0])  # [mol/L/s]
+
+    ci_mse = estimator_scipy.get_confidence_intervals(
+        alpha=alpha, include_mse=True, verbose=False)
+    np.testing.assert_allclose(
+        ci_mse['rate'], [rate_hat - delta_mse, rate_hat + delta_mse],
+        rtol=FIT_RTOL)
+    assert 'intervals' in estimator_scipy.confid_intervals
+
+    ci_abs = estimator_scipy.get_confidence_intervals(
+        alpha=alpha, include_mse=False, verbose=False, set_self=False)
+    np.testing.assert_allclose(
+        ci_abs['rate'], [rate_hat - delta_abs, rate_hat + delta_abs],
+        rtol=FIT_RTOL)
+    # set_self=False leaves estimator_scipy.covar_params at the mse covariance.
+    np.testing.assert_allclose(
+        estimator_scipy.covar_params, expected_cov_mse, rtol=FIT_RTOL)
+
+    # After get_covariance(include_mse=False), default get_confidence_intervals()
+    # reuses the stored covar_params without overwriting it back to include_mse=True.
+    estimator_scipy.get_covariance(include_mse=False)
+    ci_reused = estimator_scipy.get_confidence_intervals(
+        alpha=alpha, verbose=False)
+    np.testing.assert_allclose(
+        ci_reused['rate'], [rate_hat - delta_abs, rate_hat + delta_abs],
+        rtol=FIT_RTOL)
+    np.testing.assert_allclose(
+        estimator_scipy.covar_params, expected_cov_abs, rtol=FIT_RTOL)
+
+
+def test_estimate_parameters_validates_options_and_methods():
+    estimator = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=single())
+    with pytest.raises(TypeError, match='optim_options must be a mapping'):
+        estimator.estimate_parameters(optim_options=[1, 2])
+    with pytest.raises(
+            ValueError,
+            match=r"Duplicate solver options in optim_options and keyword "
+                  r"arguments: \['max_nfev'\]"):
+        estimator.estimate_parameters(
+            optim_options={'max_nfev': 10}, max_nfev=20)
+    with pytest.raises(
+            ValueError,
+            match='Pass bounds either through bounds= or optim_options'):
+        estimator.estimate_parameters(
+            bounds=([0.0], [2.0]),
+            optim_options={'bounds': ([0.0], [2.0])})
+    with pytest.raises(
+            ValueError,
+            match="Only loss='linear' is supported for least-squares "
+                  "parameter estimation and covariance; got 'soft_l1'"):
+        estimator.estimate_parameters(loss='soft_l1')
+    with pytest.raises(
+            ValueError, match="Unknown optimization method 'bogus'"):
+        estimator.optimize_fn(method='bogus')
+
+
+def test_get_confidence_intervals_validates_inputs():
+    """get_confidence_intervals validates alpha, include_mse, covar_params, dof."""
+    estimator = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=single())
+    with pytest.raises(AttributeError):
+        estimator.get_confidence_intervals(verbose=False)
+
+    estimator.estimate_parameters(verbose=0)
+    with pytest.raises(TypeError, match='alpha must be a real number'):
+        estimator.get_confidence_intervals(alpha=True, verbose=False)
+    for bad_alpha in (0.0, 1.0, -0.1, 1.2, np.nan):
+        with pytest.raises(
+                ValueError, match='alpha must be strictly between 0 and 1'):
+            estimator.get_confidence_intervals(alpha=bad_alpha, verbose=False)
+    with pytest.raises(TypeError, match='include_mse must be a bool or None'):
+        estimator.get_confidence_intervals(include_mse='yes', verbose=False)
+    with pytest.raises(
+            ValueError,
+            match='Pass either covar_params or include_mse, not both'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[1.0]]), include_mse=True, verbose=False)
+    with pytest.raises(
+            TypeError, match='covar_params must be a real numeric 2D array'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[True]]), verbose=False)
+    with pytest.raises(
+            ValueError,
+            match=r'covar_params must have shape \(1, 1\); got \(2, 2\)'):
+        estimator.get_confidence_intervals(
+            covar_params=np.eye(2), verbose=False)
+    with pytest.raises(
+            ValueError, match='covar_params entries must be finite'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[np.nan]]), verbose=False)
+    with pytest.raises(
+            ValueError,
+            match='covar_params diagonal variances must be non-negative'):
+        estimator.get_confidence_intervals(
+            covar_params=np.array([[-1.0]]), verbose=False)
+
+    # Zero degrees of freedom (1 observation, 1 parameter) is rejected.
+    one_point_exp = Experiment(
+        [Measurement(0, [1.0], [1.2])], args=(2.0,))  # [s], [mol/L]
+    zero_dof_est = ParameterEstimation(
+        decay_model, [SEED_RATE], experiments=one_point_exp)
+    zero_dof_est.info_opt = {
+        'fun': np.array([0.0]),  # [mol/L]
+        'jac': np.array([[1.0]]),  # [mol/L*s]
+    }
+    zero_dof_est.params_convg = np.array([SEED_RATE])  # [1/s]
+    zero_dof_est.y_model = [np.array([1.2])]  # [mol/L]
+    zero_dof_est.resid_runs = [np.array([0.0])]  # [mol/L]
+    with pytest.raises(
+            ValueError,
+            match='Student-t confidence intervals require more observed '
+                  'entries than optimized parameters'):
+        zero_dof_est.get_confidence_intervals(
+            covar_params=np.array([[1.0]]), verbose=False)
+
+
+# Rawlings, J. B. & Ekerdt, J. G. (2002), Chemical Reactor Analysis and
+# Design Fundamentals, Nob Hill Publishing, Example 9.5 (also the reference
+# case in rawlings_9-5.ipynb for issues #346 and #347):
+#   rxn 1: N + A -> B + A   (r1 = k1 * c_A, N in zero-order excess)
+#   rxn 2: M + B -> A       (r2 = k2 * c_B, M in zero-order excess)
+#   rxn 3: AA + A -> C + A  (r3 = k3 * c_A, AA in zero-order excess)
+#   rxn 4: A -> D           (r4 = k4 * c_A)
+#   rxn 5: C -> S           (r5 = k5 * c_C)
+#   rxn 6: B + C -> V       (r6 = k6 * c_B * c_C)
+# Species k_1..k_5 have units [1/day]; bimolecular k_6 has units [L/(mol*day)].
+RAWLINGS_9_5_TRUE_RATES = np.array(
+    [2.0, 0.025, 1000.0, 0.25, 2.0, 7.5e-6]
+)  # [1/day, 1/day, 1/day, 1/day, 1/day, L/(mol*day)]
+# Initial guess theta_0 = log10(k_0) from rawlings_9-5.ipynb Cell 4.
+RAWLINGS_9_5_LOG10_SEED = np.array(
+    [0.8, -1.13, 3.15, -0.77, -0.16, -5.46]
+)  # [-], log10 of rate constants in their respective units
+RAWLINGS_9_5_INITIAL_CONC = {
+    'A': 1.0,  # [mol/L]
+    'B': 0.0,  # [mol/L]
+    'C': 0.0,  # [mol/L]
+}
+RAWLINGS_9_5_END_TIME_DAYS = 100.0  # [days], batch horizon in Cell 0
+RAWLINGS_9_5_NUM_SAMPLES = 51  # [-], uniform 2-day sampling count in Cell 0
+RAWLINGS_9_5_NOISE_REL_STD = 0.015  # [-], 1.5% relative Gaussian noise in Cell 1
+RAWLINGS_9_5_RNG_SEED = 0  # [-], deterministic PRNG seed in Cell 1
+# Diagonal residual weights in rawlings_9-5.ipynb Cell 4 balancing the
+# O(1) A, O(10) B, and O(500) C concentration scales.
+RAWLINGS_9_5_WEIGHT_DIAG = np.array(
+    [1.0, 1e2, 1e4]
+)  # [(L/mol)**2]
+RAWLINGS_9_5_ODE_TOL = 1e-6  # [-], BDF integration rtol and atol
+RAWLINGS_9_5_MAX_NFEV = 100  # [-], optimizer evaluation limit in Cell 4
+# With 1.5% relative noise on 51 samples, the four identifiable rate constants
+# (k1, k2, k4, k6) are recovered within 15% relative error; 0.20 bounds that.
+RAWLINGS_9_5_IDENTIFIABLE_RTOL = 0.20  # [-]
+# Because k3 and k5 are rapid (k3 = 1000 1/day, k5 = 2 1/day), species C is in
+# quasi-steady state (c_C approx (k3 / k5) * c_A) on the 2-day sampling grid,
+# so only the ratio log10(k3 / k5) = log10(500) is identifiable within 0.05.
+RAWLINGS_9_5_RATIO_LOG10_ATOL = 0.05  # [-]
+# In log10 space, identifiable parameters have 95% CI half-widths below
+# 0.1 decades, whereas the collinear pair (theta_3, theta_5) exceeds 0.5.
+RAWLINGS_9_5_WELL_DETERMINED_CI_MAX = 0.10  # [-], log10-decade half-width
+RAWLINGS_9_5_COLLINEAR_CI_MIN = 0.50  # [-], log10-decade half-width
+# In rawlings_9-5.ipynb Cell 6, J @ J.T has eigenvalues spanning from ~4.5 to
+# ~6.0e7 (condition number ~1.3e7 > 1e6), and its smallest eigenvalue mode is
+# aligned with the equal-perturbation direction (e_3 + e_5) / sqrt(2) that
+# leaves k_3 / k_5 invariant.
+RAWLINGS_9_5_HESSIAN_COND_MIN = 1e6  # [-], ill-conditioned J @ J.T threshold
+RAWLINGS_9_5_COLLINEAR_MODE_ATOL = 0.02  # [-], eigenvector component tolerance
+
+
+def solve_rawlings_9_5(log10_rates, time_days, exp_name, material_specs=None):
+    """Integrate the three-state ODE system of Rawlings & Ekerdt Example 9.5.
+
+    Parameters
+    ----------
+    log10_rates : array_like
+        Base-10 logarithms of rate constants ``(k_1, ..., k_6)`` [-], shape (6,),
+        where ``k_1..k_5`` are in [1/day] and ``k_6`` is in [L/(mol*day)].
+    time_days : numpy.ndarray
+        Sampling times [days], shape (n_times,).
+    exp_name : str
+        Experiment identifier indexing ``material_specs``.
+    material_specs : dict of str to dict of str to float, optional
+        Mapping from ``exp_name`` to initial molar concentrations [mol/L] of
+        species ``'A'``, ``'B'``, and ``'C'``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Simulated molar concentrations ``[c_A, c_B, c_C]`` [mol/L],
+        shape (n_times, 3).
+    """
+    rates = 10.0 ** np.asarray(log10_rates, dtype=float)  # [1/day or L/(mol*day)]
+    k1, k2, k3, k4, k5, k6 = rates
+    specs = material_specs[exp_name]
+    c_init = np.array(
+        [specs['A'], specs['B'], specs['C']], dtype=float
+    )  # [mol/L]
+    t_grid = np.asarray(time_days, dtype=float)  # [days]
+
+    def rhs(_t_days, conc_mol_l):
+        ca, cb, cc = conc_mol_l  # [mol/L]
+        dca_dt = k2 * cb - k4 * ca  # [mol/(L*day)]
+        dcb_dt = k1 * ca - k2 * cb - k6 * cb * cc  # [mol/(L*day)]
+        dcc_dt = k3 * ca - k5 * cc - k6 * cb * cc  # [mol/(L*day)]
+        return [dca_dt, dcb_dt, dcc_dt]
+
+    solution = solve_ivp(
+        rhs,
+        (float(t_grid[0]), float(t_grid[-1])),
+        c_init,
+        t_eval=t_grid,
+        method='BDF',
+        rtol=RAWLINGS_9_5_ODE_TOL,
+        atol=RAWLINGS_9_5_ODE_TOL,
+    )
+    if not solution.success:
+        raise RuntimeError(f'Rawlings 9.5 BDF solver failed: {solution.message}')
+    return solution.y.T
+
+
+def test_rawlings_9_5_collinear_parameter_estimation_and_confidence_intervals():
+    """End-to-end Rawlings & Ekerdt Example 9.5 workflow from rawlings_9-5.ipynb.
+
+    Exercises Measurement(x=..., y=..., unit_x=..., unit_y=...) with omitted
+    field, Experiment(name=..., author=..., measurements=..., args=...,
+    kwargs=...), ParameterEstimation(..., experiments=[experiment],
+    output_names=..., weight_matrix=...), estimate_parameters(), and
+    get_confidence_intervals() on the six-parameter kinetic network with
+    collinear quasi-steady-state parameters (k_3, k_5).
+    """
+    tdata = np.linspace(
+        0.0, RAWLINGS_9_5_END_TIME_DAYS, RAWLINGS_9_5_NUM_SAMPLES
+    )  # [days]
+    experimental_conditions = {'exp1': dict(RAWLINGS_9_5_INITIAL_CONC)}
+    true_log10_rates = np.log10(RAWLINGS_9_5_TRUE_RATES)  # [-]
+    conc_true = solve_rawlings_9_5(
+        true_log10_rates, tdata, 'exp1',
+        material_specs=experimental_conditions,
+    )  # [mol/L]
+
+    rng = np.random.RandomState(RAWLINGS_9_5_RNG_SEED)
+    noise_std = np.abs(conc_true) * RAWLINGS_9_5_NOISE_REL_STD  # [mol/L]
+    conc_noisy = conc_true + rng.normal(0.0, noise_std)  # [mol/L]
+
+    names_meas = ('A', 'B', 'C')
+    measurements = {
+        name: Measurement(x=tdata, y=val, unit_x='days', unit_y='mol/L')
+        for name, val in zip(names_meas, conc_noisy.T)
+    }
+    experiment = Experiment(
+        name='exp1',
+        author='James Rawlings/John Ekerdt',
+        measurements=measurements,
+        args=('exp1',),
+        kwargs={'material_specs': experimental_conditions},
+    )
+
+    weights = pd.DataFrame(
+        np.diag(RAWLINGS_9_5_WEIGHT_DIAG),
+        index=list(names_meas),
+        columns=list(names_meas),
+    )  # [(L/mol)**2]
+
+    estimator = ParameterEstimation(
+        solve_rawlings_9_5,
+        param_seed=RAWLINGS_9_5_LOG10_SEED,
+        experiments=[experiment],
+        output_names=list(names_meas),
+        weight_matrix=weights,
+    )
+    assert estimator.experim_names == ['exp1']
+
+    initial_cost = estimator.get_objective(RAWLINGS_9_5_LOG10_SEED)  # [-]
+    log_estim, cov, info = estimator.estimate_parameters(
+        max_nfev=RAWLINGS_9_5_MAX_NFEV, verbose=0)
+    ci = estimator.get_confidence_intervals(verbose=False)
+
+    assert info['success']
+    assert info['cost'] < initial_cost * 1e-5
+    assert info['jac'].shape == (
+        len(RAWLINGS_9_5_TRUE_RATES),
+        RAWLINGS_9_5_NUM_SAMPLES * len(names_meas),
+    )
+    assert cov.shape == (
+        len(RAWLINGS_9_5_TRUE_RATES), len(RAWLINGS_9_5_TRUE_RATES))
+
+    # Identifiable rate constants (k_1, k_2, k_4, k_6) and the quasi-steady-state
+    # ratio log10(k_3 / k_5) match the ground-truth values used to generate data.
+    k_estim = 10.0 ** log_estim  # [1/day or L/(mol*day)]
+    identifiable_indices = [0, 1, 3, 5]
+    np.testing.assert_allclose(
+        k_estim[identifiable_indices],
+        RAWLINGS_9_5_TRUE_RATES[identifiable_indices],
+        rtol=RAWLINGS_9_5_IDENTIFIABLE_RTOL,
+    )
+    true_log10_ratio = true_log10_rates[2] - true_log10_rates[4]  # [-]
+    fitted_log10_ratio = log_estim[2] - log_estim[4]  # [-]
+    assert fitted_log10_ratio == pytest.approx(
+        true_log10_ratio, abs=RAWLINGS_9_5_RATIO_LOG10_ATOL)
+
+    # Confidence intervals distinguish well-determined parameters from the
+    # collinear pair (theta_3, theta_5), and J @ J.T reflects the singular mode.
+    half_widths = {
+        name: 0.5 * float(bounds[1] - bounds[0])  # [-], log10 decades
+        for name, bounds in ci.items()
+    }
+    for param_name in ('theta_1', 'theta_2', 'theta_4', 'theta_6'):
+        assert half_widths[param_name] < RAWLINGS_9_5_WELL_DETERMINED_CI_MAX
+    for param_name in ('theta_3', 'theta_5'):
+        assert half_widths[param_name] > RAWLINGS_9_5_COLLINEAR_CI_MIN
+
+    hessian_approx = info['jac'] @ info['jac'].T  # [-]
+    assert np.linalg.cond(hessian_approx) > RAWLINGS_9_5_HESSIAN_COND_MIN
+    _, eigvecs = np.linalg.eigh(hessian_approx)  # [-]
+    softest_mode = eigvecs[:, 0]  # [-]
+    if softest_mode[2] < 0.0:
+        softest_mode = -softest_mode  # [-]
+    expected_collinear_mode = np.array(
+        [0.0, 0.0, np.sqrt(0.5), 0.0, np.sqrt(0.5), 0.0]
+    )  # [-]
+    np.testing.assert_allclose(
+        softest_mode,
+        expected_collinear_mode,
+        atol=RAWLINGS_9_5_COLLINEAR_MODE_ATOL,
+    )

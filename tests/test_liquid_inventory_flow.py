@@ -6,7 +6,8 @@ Only the estimation-wrapper cases require the real optional Assimulo backend.
 
 
 Related issue scope:
-https://github.com/PharmaPy-org/PharmaPy/issues/217
+https://github.com/PharmaPy-org/PharmaPy/issues/217,
+https://github.com/PharmaPy-org/PharmaPy/issues/439 (profile updates)
 """
 
 import json
@@ -337,11 +338,24 @@ def test_slurry_distribution_mass_basis_refreshes_volume_flow(thermo_path):
         expected_liquid_flow + expected_solid_flow, rel=RTOL)
 
 
+# Pure-species properties of the synthetic database, for hand expectations.
+SPECIES_DENSITY = np.array([800.0, 1600.0])  # [kg/m**3], A, B
+SPECIES_MOLAR_MASS = np.array([100.0, 50.0])  # [g/mol], A, B
+
+
 @pytest.mark.parametrize("initial_basis", ["vol", "moles"])
 @pytest.mark.parametrize("update", ["composition", "uniform_composition",
                                     "temperature"])
-def test_profile_inventory_is_unchanged(thermo_path, initial_basis, update):
-    """Preserve baseline profile amounts for composition and temperature updates.
+def test_profile_update_retains_point_mass(thermo_path, initial_basis, update):
+    """Reconcile each point of a profile like a scalar inventory (#439).
+
+    A composition update without an explicit amount retains each point's
+    mass [kg] and recomputes its volume and moles from the new fractions
+    by adding species volumes, ``V = m sum(w_i / rho_i)`` [m**3], and mole
+    amounts, ``n = 1000 m sum(w_i / MW_i)`` [mol]. Before #439 the profile
+    amounts were left unchanged, contradicting the new composition; this
+    test then pinned that exemption. A temperature-only update leaves the
+    already consistent amounts untouched.
 
     Parameters
     ----------
@@ -359,24 +373,35 @@ def test_profile_inventory_is_unchanged(thermo_path, initial_basis, update):
                         **{initial_basis: 1.0})
     before = {name: getattr(phase, name) for name in ("mass", "vol", "moles")}
     assert np.shape(phase.mass) == (3,)
-    if update == "composition":
-        phase.updatePhase(mass_frac=fractions[::-1])
-        np.testing.assert_allclose(phase.mass_frac, fractions[::-1],
-                                   rtol=RTOL, atol=0)
-    elif update == "uniform_composition":
-        phase.updatePhase(mass_frac=UPDATED_FRACTIONS)
-        np.testing.assert_allclose(phase.mass_frac, UPDATED_FRACTIONS,
-                                   rtol=RTOL, atol=0)
-    else:
+    if update == "temperature":
         temperatures = [290.0, 300.0, 310.0]  # [K], distinct spatial values
         phase.updatePhase(temp=temperatures)
         np.testing.assert_array_equal(phase.temp, temperatures)
-    for name, amount in before.items():  # [kg], [m**3], or [mol]
-        assert getattr(phase, name) is amount
+        for name, amount in before.items():  # [kg], [m**3], or [mol]
+            assert getattr(phase, name) is amount
+        return
+    new_fractions = (np.array(fractions[::-1]) if update == "composition"
+                     else np.array(UPDATED_FRACTIONS))  # [-]
+    phase.updatePhase(mass_frac=new_fractions)
+    np.testing.assert_allclose(phase.mass_frac, new_fractions, rtol=RTOL, atol=0)
+    point_mass = before["mass"]  # [kg], retained per point
+    assert phase.mass is point_mass
+    np.testing.assert_allclose(
+        phase.vol, point_mass * (new_fractions @ (1 / SPECIES_DENSITY)),
+        rtol=RTOL, atol=0)  # [m**3]
+    np.testing.assert_allclose(
+        phase.moles, 1000 * point_mass * (new_fractions @ (1 / SPECIES_MOLAR_MASS)),
+        rtol=RTOL, atol=0)  # [mol]
 
 
-def test_washing_profile_keeps_scalar_inventory(thermo_path):
-    """Keep scalar amounts when washing supplies a spatial composition field.
+def test_concentration_profile_retains_scalar_mass(thermo_path):
+    """Apply a scalar mass to every point of a concentration profile (#439).
+
+    The concentrations are authoritative, so each point holds the scalar
+    mass [kg] in ``V = m / sum(c)`` [m**3] with
+    ``n = 1000 V sum(c_i / MW_i)`` [mol]. Before #439 the scalar amounts were
+    left unchanged, contradicting the concentrations; this test then pinned
+    that exemption.
 
     Parameters
     ----------
@@ -385,14 +410,17 @@ def test_washing_profile_keeps_scalar_inventory(thermo_path):
     """
     phase = LiquidPhase(thermo_path, mass_frac=INITIAL_FRACTIONS,
                         mass=INITIAL_MASS)
-    before = {name: getattr(phase, name) for name in ("mass", "vol", "moles")}
-    concentrations = [[320.0, 960.0], [640.0, 320.0],
-                      [160.0, 1280.0]]  # [kg/m**3], three zones, two species
+    concentrations = np.array([[320.0, 960.0], [640.0, 320.0],
+                               [160.0, 1280.0]])  # [kg/m**3], three zones
     phase.updatePhase(mass_conc=concentrations)
     np.testing.assert_array_equal(phase.mass_conc, concentrations)
-    for name, amount in before.items():  # [kg], [m**3], or [mol]
-        assert np.ndim(getattr(phase, name)) == 0
-        assert getattr(phase, name) is amount
+    assert phase.concentration_basis is True
+    assert phase.mass == INITIAL_MASS
+    volume = INITIAL_MASS / concentrations.sum(axis=1)  # [m**3]
+    np.testing.assert_allclose(phase.vol, volume, rtol=RTOL, atol=0)
+    np.testing.assert_allclose(
+        phase.moles, 1000 * volume * (concentrations @ (1 / SPECIES_MOLAR_MASS)),
+        rtol=RTOL, atol=0)  # [mol]
 
 
 @pytest.mark.assimulo

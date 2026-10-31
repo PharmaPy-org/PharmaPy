@@ -220,6 +220,14 @@ class Slurry:
         Phase-only input requires positive combined volume: an empty mixture
         has neither defined volume-specific moments nor a thermal inventory
         from which to determine its mixture temperature.
+
+        With a distribution and positive ``vol``, the liquid volume [m**3]
+        is handed to the liquid as ``vol``; with a known ``mass_slurry``,
+        the liquid mass [kg] is handed over instead. Either way the liquid's
+        ``getInventoryDensity`` [kg/m**3] relates the two, also in the mass
+        split of :meth:`getFractions`, so a liquid with authoritative
+        concentrations keeps its inventory (issue #439) and any other liquid
+        uses the ideal-mixing density as before.
         """
         if isinstance(phases_list, (list, tuple)):
             phases_list = list(phases_list)
@@ -297,7 +305,10 @@ class Slurry:
 
             self.moments = self.Solid_1.getMoments(distrib=self.distrib)
 
-            dens_liq = self.Liquid_1.getDensity()  # [kg/m**3]
+            # The liquid's own inventory density [kg/m**3] relates its mass
+            # and volume; it is the ideal-mixing value unless the liquid's
+            # concentrations are authoritative (issue #439).
+            dens_liq = self.Liquid_1.getInventoryDensity()  # [kg/m**3]
             dens_sol = self.Solid_1.getDensity()  # [kg/m**3]
             dens_phases = np.array([dens_liq, dens_sol])  # [kg/m**3]
 
@@ -307,6 +318,8 @@ class Slurry:
 
                 mass_liq, mass_sol = vol_phases * dens_phases
                 self.mass_slurry = np.dot(vol_phases, dens_phases)
+                # The liquid volume [m**3] is the known quantity.
+                self.Liquid_1.updatePhase(vol=vol_phases[0])
             elif self.mass_slurry > 0:
                 mass_share = self.getFractions(vol_basis=False)
                 mass_phases = self.mass_slurry * mass_share
@@ -314,10 +327,10 @@ class Slurry:
                 mass_liq, mass_sol = mass_phases
 
                 self.vol = np.dot(mass_phases, 1/dens_phases)
+                self.Liquid_1.updatePhase(mass=mass_liq)
 
             f_distr = self.vol * self.distrib
 
-            self.Liquid_1.updatePhase(mass=mass_liq)
             self.Solid_1.updatePhase(distrib=f_distr, mass=mass_sol)
 
         self.num_species = self.Liquid_1.num_species
@@ -338,6 +351,30 @@ class Slurry:
         return density
 
     def getSolidsConcentr(self, distrib=None, basis='vol'):
+        """Return the solid concentration of the slurry.
+
+        Parameters
+        ----------
+        distrib : numpy.ndarray, optional
+            Solid number distribution [#/m**3/um], shape (num_bins,) or
+            (num_times, num_bins); the stored moments are used when None.
+        basis : {'vol', 'mass'}, optional
+            ``'vol'`` (default) returns solid mass per slurry volume
+            [kg/m**3]; ``'mass'`` returns solid mass per liquid mass [-].
+
+        Returns
+        -------
+        float or numpy.ndarray
+            ``kv mu_3 rho_s`` [kg/m**3], or that divided by the liquid mass
+            per slurry volume ``(1 - kv mu_3) rho_l`` [kg/m**3].
+
+        Notes
+        -----
+        ``rho_l`` converts the slurry's own liquid volume to mass, so it is
+        the liquid's ``getInventoryDensity`` [kg/m**3]: the ideal-mixing
+        density as before, or ``sum(mass_conc)`` for authoritative
+        concentrations (issue #439), matching the liquid's mass.
+        """
         if distrib is None:
             moments = self.moments
         else:
@@ -354,12 +391,42 @@ class Slurry:
         concentr_solids = vol_frac * dens_solid  # kg_solids / m**3
 
         if basis == 'mass':
-            dens_liq = self.Liquid_1.getDensity(basis='mass')
+            dens_liq = self.Liquid_1.getInventoryDensity()  # [kg/m**3]
             concentr_solids *= 1/(1 - vol_frac)/dens_liq
 
         return concentr_solids
 
     def getFractions(self, distrib=None, mu_3=None, vol_basis=True):
+        """Return the liquid and solid shares of the slurry.
+
+        Parameters
+        ----------
+        distrib : numpy.ndarray, optional
+            Solid number distribution [#/m**3/um] whose third moment sets
+            the solid volume fraction; the stored moments are used when
+            neither ``distrib`` nor ``mu_3`` is given.
+        mu_3 : float, optional
+            Volume-specific third moment [m**3/m**3].
+        vol_basis : bool, optional
+            Return volume fractions (default) or mass fractions.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``[liquid, solid]`` volume fractions ``[1 - kv mu_3, kv mu_3]``
+            [-], or the corresponding mass fractions [-].
+
+        Notes
+        -----
+        Mass fractions weight each volume fraction by the density that
+        relates that phase's own mass and volume: the liquid's
+        ``getInventoryDensity`` [kg/m**3] and the solid's ``getDensity``
+        [kg/m**3]. The liquid value is the ideal-mixing density, as before,
+        unless the liquid's concentrations are authoritative (issue #439),
+        when it is ``sum(mass_conc)``. The mass fractions therefore agree
+        with the attached phase masses that ``energy_balance`` weights, and
+        a mass split recovers the volume fractions.
+        """
         if distrib is None and mu_3 is None:
             mom_three = self.moments[3]
         elif distrib is None:
@@ -374,7 +441,8 @@ class Slurry:
             return vol_fracs
 
         else:
-            density = self.getDensity()  # TODO: what is this?
+            density = np.array([self.Liquid_1.getInventoryDensity(),
+                                self.Solid_1.getDensity()])  # [kg/m**3]
             mass_phases = vol_fracs * density
             mass_fracs = mass_phases / mass_phases.sum()
 
@@ -603,6 +671,17 @@ class SlurryStream(Slurry):
         defined, including the no-distribution branch where the solid stream
         carries the number rate [#/um/s]. Liquid volume and mass
         use flow aliases because liquid updates delete phase amount attributes.
+
+        When the slurry volume flow is known (moments, or a distribution
+        with positive ``vol``), the liquid share of it [m**3/s] is handed to
+        the liquid stream as ``vol_flow``, so a liquid with authoritative
+        concentrations (``LiquidPhase.concentration_basis``) derives its mass
+        flow [kg/s] from them (issue #439); for other liquids the mass flow
+        is unchanged and the volume flow is now exact. With a known
+        ``mass_slurry``, the liquid mass flow is handed over instead; the
+        mass split (:meth:`Slurry.getFractions`) and the phase volumes then
+        use the liquid's ``getInventoryDensity`` [kg/m**3], so the solid
+        population, its mass and the phase volumes stay consistent.
         """
         if isinstance(phases_list, tuple):
             phases_list = list(phases_list)
@@ -615,16 +694,16 @@ class SlurryStream(Slurry):
             if self.vol == 0:
                 raise ValueError('If the moments are provided, Slurry volume needs to be larger than 0.')
 
-            dens_liq = self.Liquid_1.getDensity()
-            dens_sol = self.Solid_1.getDensity()
-            dens_phases = np.array([dens_liq, dens_sol])
+            dens_sol = self.Solid_1.getDensity()  # [kg/m**3]
 
-            vol_share = self.getFractions()
-            vol_phases = vol_share * self.vol
+            vol_share = self.getFractions()  # [-]
+            vol_phases = vol_share * self.vol  # [m**3/s] each
 
-            mass_liq, mass_sol = vol_phases * dens_phases  # [kg/s] each
+            mass_sol = vol_phases[1] * dens_sol  # [kg/s]
 
-            self.Liquid_1.updatePhase(mass_flow=mass_liq)
+            # The liquid volume flow [m**3/s] is the known quantity, so a
+            # liquid with authoritative concentrations keeps it (#439).
+            self.Liquid_1.updatePhase(vol_flow=vol_phases[0])
 
             self.Solid_1.updatePhase(
                 moments=self.moments,
@@ -665,15 +744,15 @@ class SlurryStream(Slurry):
                                                    self.distrib)
 
             if self.vol > 0:
-                dens_liq = self.Liquid_1.getDensity()
-
                 vol_share = self.getFractions()
                 vol_phases = vol_share * self.vol
 
-                mass_liq = vol_phases[0] * dens_liq  # [kg/s]
+                # The liquid volume flow [m**3/s] is the known quantity.
+                self.Liquid_1.updatePhase(vol_flow=vol_phases[0])
 
             elif self.mass_slurry > 0:
-                dens_liq = self.Liquid_1.getDensity()  # [kg/m**3]
+                # Liquid inventory density [kg/m**3], as in getFractions
+                dens_liq = self.Liquid_1.getInventoryDensity()  # [kg/m**3]
                 dens_sol = self.Solid_1.getDensity()  # [kg/m**3]
                 dens_phases = np.array(
                     [dens_liq, dens_sol]
@@ -686,9 +765,9 @@ class SlurryStream(Slurry):
 
                 self.vol = vol_phases.sum()  # [m**3/s]
 
-            f_distr = self.vol * self.distrib
+                self.Liquid_1.updatePhase(mass_flow=mass_liq)
 
-            self.Liquid_1.updatePhase(mass_flow=mass_liq)
+            f_distr = self.vol * self.distrib
 
             # The total-population distribution [#/um] is the authoritative
             # solid inventory; its third moment determines mass flow [kg/s].

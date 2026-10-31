@@ -7,28 +7,35 @@ flowsheet graph and that successor verifiably uses the transferred outlet:
 for the successor's fed duration, recursively through chains of
 instantaneous units, so a consumer solved for 0 s gives a total of 0.
 Otherwise the totals are NaN with a ``RuntimeWarning`` naming the unit and
-the reason: a terminal unit, fan-out to several successors (each receives a
-full copy, issue #437), or a successor that no longer holds the transfer,
-such as a charged ``SemibatchReactor`` (issue #438). Units without the
-flag, such as a ``DynamicCollector`` solved for 0 s, keep their own (zero)
-fed duration for static and controlled feeds. Batch inlets are unchanged.
+the reason: a terminal unit, or a successor that no longer holds the
+transfer, such as a collector whose inlet was replaced by hand and solved
+again. A charged ``SemibatchReactor`` consumes the transferred stream as
+its feed (issue #438), so the Mixer is charged for the reactor run.
+Fan-out to several successors is rejected by ``SolveFlowsheet`` before
+any unit is solved (issue #437), so nothing is charged for it. Units
+without the flag, such as a ``DynamicCollector`` solved for 0 s, keep
+their own (zero) fed duration for static and controlled feeds. Batch
+inlets are unchanged.
 A raw inlet with a ``DynamicInput`` that controls no field feeds the static
 stream and follows the same contract; one whose controls were added after
 the solve, which the instantaneous Mixer never consumed, raises
 ``ValueError``.
 
 Provenance is recorded per flowsheet edge across ``SolveFlowsheet`` calls
-and checked at accounting time. Covered cases: repeated solves that leave
-several outlet copies in a ``Mixer`` (issue #441); a source re-solved after
-its transfer; a consumer whose solve after a new transfer failed; a
+and checked at accounting time. Covered cases: repeated solves, after which
+a connected ``Mixer`` holds its raw feed and one copy of the upstream outlet
+and is charged for the latest run (issue #441); an outlet copy assigned to
+the Mixer again by hand, which gives NaN, also after a repeated solve
+replaced both entries; a source re-solved after its
+transfer; a consumer whose solve after a new transfer failed; a
 consumer solved before any transfer; partial solves (``pick_units``) of
 unrelated units or of the consumer alone; consumers that keep several solve
 segments (a continued ``CSTR``, and a continued ``ContinuousEvaporator``
 that restarts its clock per segment, issue #278) or none (a ``CSTR`` after
 ``reset()``), which give NaN; and reset consumers (``reset()`` or
-``reset_states=True``), charged for their own fresh run. Discarded transfer
-copies are pruned from the record and freed, and a destination with an
-untimed result (``BatchExtractor``) does not break re-solving.
+``reset_states=True``), charged for their own fresh run. Replaced transfer
+copies are freed, and a destination with an untimed result
+(``BatchExtractor``) does not break re-solving.
 
 Fixtures use the shipped five-species database and the issue reproduction:
 1.0 kg/s (A, B, C, D, solvent = 0.1, 0.1, 0.1, 0.1, 0.6) at 300 K and
@@ -52,6 +59,7 @@ import numpy as np
 import pytest
 
 from PharmaPy.Containers import DynamicCollector, Mixer
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.Phases import LiquidPhase
 from PharmaPy.ProcessControl import DynamicInput
 from PharmaPy.SimExec import SimulationExec
@@ -315,41 +323,38 @@ def test_chained_mixers_follow_to_the_consumer(path):
         rtol=RTOL)
 
 
-@pytest.mark.assimulo
-@pytest.mark.integration
-def test_fan_out_reports_nan(path):
-    """Report NaN, not a duration, when two units each copy the outlet.
+@pytest.mark.unit
+def test_fan_out_is_rejected_so_nothing_is_charged(path):
+    """Charge nothing, not NaN or a copy per branch, for a rejected fan-out.
 
-    Provisional: each successor receives a full copy of the outlet (issue
-    #437), so no total is defensible. Once #437 splits fan-out, expect a
-    per-branch charge instead.
+    Each successor would receive a full copy of the outlet (issue #437), so
+    ``SolveFlowsheet`` rejects the graph before solving any unit and no
+    raw material is reported.
     """
-    pytest.importorskip('assimulo')
-    sim = SimulationExec(path, {'M01': ['C01', 'C02'], 'C01': [], 'C02': []})
+    sim = SimulationExec(path, {'M01': ['M02', 'M03'], 'M02': [], 'M03': []})
     sim.M01 = _mixer(path)
-    sim.C01 = DynamicCollector()
-    sim.C02 = DynamicCollector()
-    sim.SolveFlowsheet(kwargs_run={
-        'C01': {'runtime': SHORT_RUNTIME, 'verbose': False},
-        'C02': {'runtime': RUNTIME, 'verbose': False}}, verbose=False)
+    sim.M02, sim.M03 = Mixer(), Mixer()
+    with pytest.raises(PharmaPyNonImplementedError,
+                       match=r"'M01' feeds \['M02', 'M03'\]"):
+        sim.SolveFlowsheet(verbose=False)
 
-    reason = (r"its outlet feeds 2 units \['C01', 'C02'\], each receiving a "
-              r"full copy of it \(fan-out, issue #437\)")
-    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
-            unit='M01', reason=reason)):
-        _, totals = _raw_amounts(sim.GetRawMaterials(), 'mass')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
+        raw = sim.GetRawMaterials()
 
-    assert np.isnan(totals).all()
+    assert sim.uos_instances == {}
+    assert raw.empty
 
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_successor_ignoring_the_transfer_reports_nan(data_path):
-    """Report NaN when a charged semibatch reactor keeps its own inlet.
+def test_semibatch_reactor_consumes_the_mixer_feed(data_path):
+    """Charge the Mixer feeds for the run of a charged semibatch reactor.
 
-    Provisional: the fixture relies on issue #438 (a charged semibatch
-    destination ignores the transferred stream). Once #438 is fixed,
-    replace it with another successor that does not consume the outlet.
+    The issue #438 reproduction: the connection installs the Mixer outlet
+    as the reactor's feed in place of its own pre-set ``Inlet``, which is
+    therefore neither consumed nor reported. Before the fix the reactor
+    ignored the transfer and the Mixer totals were NaN.
     """
     pytest.importorskip('assimulo')
     from PharmaPy.Reactors import SemibatchReactor
@@ -366,21 +371,48 @@ def test_successor_ignoring_the_transfer_reports_nan(data_path):
     own_inlet = sim.R01.Inlet
     sim.SolveFlowsheet(kwargs_run={'R01': {'runtime': REACTOR_RUNTIME,
                                            'verbose': False}}, verbose=False)
-    assert sim.R01.Inlet is own_inlet  # the transfer was not installed
+    assert sim.R01.Inlet is not own_inlet
+    assert sim.R01.Inlet is sim.connections['CONN1'].transferred_matter
 
-    reason = (r"downstream unit 'R01' no longer holds the transferred outlet "
-              r"\(it ignored the transfer, see issue #438, or another "
-              r"transfer replaced it, see issue #444\)")
-    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
-            unit='M01', reason=reason)):
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
         raw = sim.GetRawMaterials(include_holdups=False)
 
     keys, totals = _raw_amounts(raw, 'mass')
-    assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1'), ('R01', 'Inlet_0')]
+    assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1')]
+    np.testing.assert_allclose(
+        totals, [FLOW_A * REACTOR_RUNTIME, FLOW_B * REACTOR_RUNTIME],
+        rtol=RTOL)
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_consumer_inlet_replaced_after_the_transfer_reports_nan(path):
+    """Report NaN when the consumer is re-solved on a replaced inlet.
+
+    ``SolveFlowsheet`` rejects fan-in to a non-Mixer unit (issue #444),
+    but a user can still replace the collector's inlet by hand and solve
+    it again, after which it no longer consumes the Mixer outlet.
+    """
+    pytest.importorskip('assimulo')
+    sim = SimulationExec(path, {'M01': ['C01'], 'C01': []})
+    sim.M01 = _mixer(path)
+    sim.C01 = DynamicCollector()
+    sim.SolveFlowsheet(kwargs_run={'C01': {'runtime': RUNTIME,
+                                           'verbose': False}}, verbose=False)
+    sim.C01.Inlet = _stream(path, COMPOSITION_C, FLOW_C)
+    sim.C01.solve_unit(runtime=RUNTIME, verbose=False)
+
+    reason = (r"downstream unit 'C01' no longer holds the transferred outlet "
+              r"as a feed \(its input was replaced after the transfer\)")
+    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
+            unit='M01', reason=reason)):
+        keys, totals = _raw_amounts(sim.GetRawMaterials(), 'mass')
+
+    assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1'), ('C01', 'Inlet_0')]
     assert np.isnan(totals[:2]).all()
-    # The reactor's own raw inlet is charged for its own run.
-    assert totals[2] == pytest.approx(own_inlet.mass_flow * REACTOR_RUNTIME,
-                                      rel=RTOL)
+    # The replacing raw stream is charged for the collector's own run.
+    assert totals[2] == pytest.approx(FLOW_C * RUNTIME, rel=RTOL)
 
 
 @pytest.mark.assimulo
@@ -511,28 +543,89 @@ RUN_C01 = {'C01': {'runtime': RUNTIME, 'verbose': False}}
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_repeated_solve_with_copied_outlet_reports_nan(path):
-    """Report NaN when a re-solve leaves two outlet copies in a Mixer.
+def test_repeated_solve_charges_the_latest_run(path):
+    """Charge the latest run after re-solving a Mixer chain (issue #441).
 
-    Provisional: a connected Mixer appends another transferred copy on
-    every solve (issue #441); once fixed, a repeated solve should charge
-    the latest run.
+    The second solve replaces M02's copy of the M01 outlet instead of
+    adding one, so M02 holds its raw feed plus one copy and every raw feed
+    is charged for the collector's latest run.
     """
     pytest.importorskip('assimulo')
     sim = _chain(path)
     sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
     sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
-    assert len(sim.M02.Inlets) == 3  # raw feed plus two copies of M01's outlet
+    assert len(sim.M02.Inlets) == 2  # raw feed plus one copy of M01's outlet
 
-    reason = (r"downstream unit 'M02' holds 2 copies of its outlet "
-              r"\(issue #441\)")
-    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
-            unit='M01', reason=reason)):
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', RuntimeWarning)
         keys, totals = _raw_amounts(sim.GetRawMaterials(), 'mass')
 
     assert keys == [('M01', 'Inlet_0'), ('M01', 'Inlet_1'), ('M02', 'Inlet_0')]
+    np.testing.assert_allclose(
+        totals, [FLOW_A * RUNTIME, FLOW_B * RUNTIME, FLOW_C * RUNTIME],
+        rtol=RTOL)
+
+
+@pytest.mark.unit
+def test_outlet_assigned_again_by_hand_reports_nan(path):
+    """Report NaN when a Mixer holds the transferred outlet twice.
+
+    A flowsheet transfer never leaves two copies (issue #441), but a user
+    can append the transferred object again and solve the Mixer by hand;
+    it then mixes the upstream outlet twice.
+    """
+    sim = SimulationExec(path, {'M01': ['M02'], 'M02': []})
+    sim.M01 = _mixer(path)
+    sim.M02 = Mixer()
+    sim.M02.Inlets = [_stream(path, COMPOSITION_C, FLOW_C)]
+    sim.SolveFlowsheet(verbose=False)
+    sim.M02.Inlets = sim.M02.Inlets[-1]  # the transferred copy, again
+    sim.M02.solve_unit()
+
+    reason = (r"downstream unit 'M02' holds the transferred outlet 2 times "
+              r"\(it was assigned again by hand\)")
+    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
+            unit='M01', reason=reason)):
+        raw = sim.GetRawMaterials()
+
+    keys, totals = _raw_amounts(raw, 'mass')
+    assert keys[:2] == [('M01', 'Inlet_0'), ('M01', 'Inlet_1')]
     assert np.isnan(totals[:2]).all()
-    np.testing.assert_allclose(totals[2], FLOW_C * RUNTIME, rtol=RTOL)
+
+
+@pytest.mark.unit
+def test_hand_duplicate_survives_a_re_solve_and_reports_nan(path):
+    """Replace both entries of a hand-duplicated copy, and report NaN.
+
+    A repeated solve replaces every entry of the earlier transfer, so the
+    duplicate made by hand stays a duplicate of the new copy (M02 mixes
+    it twice) and is not left behind as a stale copy that accounting
+    would miss.
+    """
+    sim = SimulationExec(path, {'M01': ['M02'], 'M02': []})
+    sim.M01 = _mixer(path)
+    sim.M02 = Mixer()
+    sim.M02.Inlets = [_stream(path, COMPOSITION_C, FLOW_C)]
+    sim.SolveFlowsheet(verbose=False)
+    sim.M02.Inlets = sim.M02.Inlets[-1]  # the transferred copy, again
+
+    sim.SolveFlowsheet(verbose=False)
+
+    latest = sim.connections['CONN1'].transferred_matter
+    assert len(sim.M02.Inlets) == 3
+    assert sim.M02.Inlets[1] is latest and sim.M02.Inlets[2] is latest
+    # [kg/s], M02's raw feed plus the M01 outlet mixed twice
+    doubled_flow = FLOW_C + 2 * (FLOW_A + FLOW_B)
+    assert sim.M02.Outlet.mass_flow == pytest.approx(doubled_flow, rel=RTOL)
+    reason = (r"downstream unit 'M02' holds the transferred outlet 2 times "
+              r"\(it was assigned again by hand\)")
+    with pytest.warns(RuntimeWarning, match=UNDEFINED_WARNING.format(
+            unit='M01', reason=reason)):
+        raw = sim.GetRawMaterials()
+
+    keys, totals = _raw_amounts(raw, 'mass')
+    assert keys[:2] == [('M01', 'Inlet_0'), ('M01', 'Inlet_1')]
+    assert np.isnan(totals[:2]).all()
 
 
 @pytest.mark.assimulo
@@ -651,8 +744,8 @@ def test_consumer_solved_before_any_transfer_reports_nan(path):
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_repeated_solves_keep_only_held_transfers(path):
-    """Prune discarded transfer copies so they can be freed."""
+def test_repeated_solves_free_replaced_transfers(path):
+    """Keep only the latest transfer, so replaced copies can be freed."""
     pytest.importorskip('assimulo')
     sim = SimulationExec(path, {'M01': ['C01'], 'C01': []})
     sim.M01 = _mixer(path)
@@ -662,25 +755,28 @@ def test_repeated_solves_keep_only_held_transfers(path):
     for _ in range(REPEATED_SOLVES):
         sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
 
-    history = sim._transfer_history[('M01', 'C01')]
-    assert len(history) == 1 and history[0] is sim.C01.Inlet
+    assert sim._transfers[('M01', 'C01')][0] is sim.C01.Inlet
     gc.collect()
     assert first() is None
 
 
 @pytest.mark.assimulo
 @pytest.mark.integration
-def test_mixer_history_keeps_every_held_copy(path):
-    """Keep the copies a re-solved Mixer still holds (issue #441)."""
+def test_repeated_solves_keep_one_copy_in_the_mixer(path):
+    """Replace a re-solved Mixer's connected copy in place (issue #441)."""
     pytest.importorskip('assimulo')
     sim = _chain(path)
+    raw_feed = sim.M02.Inlets[0]
+    sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
+    first = weakref.ref(sim.M02.Inlets[1])
     for _ in range(REPEATED_SOLVES):
         sim.SolveFlowsheet(kwargs_run=RUN_C01, verbose=False)
 
-    history = sim._transfer_history[('M01', 'M02')]
-    held = sim.M02.Inlets[1:]  # every copy of M01's outlet
-    assert len(history) == len(held) == REPEATED_SOLVES
-    assert all(any(copy is item for item in held) for copy in history)
+    latest = sim._transfers[('M01', 'M02')][0]
+    assert len(sim.M02.Inlets) == 2
+    assert sim.M02.Inlets[0] is raw_feed and sim.M02.Inlets[1] is latest
+    gc.collect()
+    assert first() is None
 
 
 def _cstr_flowsheet(data_path, **reactor_kwargs):

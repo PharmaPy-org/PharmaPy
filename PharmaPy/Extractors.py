@@ -5,6 +5,8 @@ Created on Mon Jun 29 14:55:22 2020
 @author: dcasasor
 """
 
+import copy
+
 import numpy as np
 from scipy.optimize import newton
 
@@ -89,6 +91,18 @@ class ContinuousExtractor:
             and return distribution coefficients ``K_i`` [-].
         gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
             Activity-coefficient method used by the default ``k_fun``.
+
+        Notes
+        -----
+        The extractor declares the flowsheet destination contract of a
+        continuous unit (issue #445): ``oper_mode = 'Continuous'``,
+        ``is_continuous = True`` and ``names_states_in``, the stream fields
+        it reads from its ``Inlet``: mole fractions [-], molar flow
+        [mol/s], temperature [K] and pressure [Pa]. It reads them from the
+        stored state of the ``Inlet`` object, so a connected upstream time
+        profile is not resolved: the extractor splits the upstream outlet's
+        final state. It publishes ``Liquid_2`` and ``Liquid_3`` but no
+        ``Outlet``, so it cannot be a flowsheet source.
         """
         validate_gamma_method(gamma_method)
 
@@ -99,6 +113,8 @@ class ContinuousExtractor:
         self.gamma_method = gamma_method
 
         self.oper_mode = 'Continuous'
+        self.is_continuous = True
+        self.names_states_in = ['mole_frac', 'mole_flow', 'temp', 'pres']
 
     @property
     def Inlet(self):
@@ -116,6 +132,43 @@ class ContinuousExtractor:
 
     def get_inputs(self):
         pass
+
+    def get_reported_outlets(self) -> dict:
+        """Return the two liquid products that the stream table reports.
+
+        Returns
+        -------
+        dict of str to LiquidStream or LiquidPhase
+            ``{'heavy': Liquid_2, 'light': Liquid_3}``: the liquid products,
+            as flows [mol/s] for ``ContinuousExtractor`` or amounts [mol]
+            for ``BatchExtractor``, at the feed temperature [K] and
+            pressure [Pa].
+
+        Raises
+        ------
+        AttributeError
+            If the extractor has not been solved, so it has no
+            ``Liquid_2``.
+
+        Notes
+        -----
+        ``heavy`` and ``light`` follow the extractor's current
+        classification of ``Liquid_2`` and ``Liquid_3`` in
+        ``retrieve_results``, also used by its result fields ``x_heavy``
+        and ``x_light``: when two liquid phases form, ``Liquid_2`` is the
+        one with the larger molar density [mol/m**3], not necessarily the
+        larger mass density [kg/m**3]. Otherwise the products are not
+        compared by density: ``Liquid_2`` takes the phase-fraction share of
+        the feed and ``Liquid_3`` the rest, so one of them is empty.
+        Classifying by mass density is tracked by issue #257
+        (https://github.com/PharmaPy-org/PharmaPy/issues/257); fixing it
+        there corrects these rows without renaming them.
+        ``SimulationResult.GetStreamTable`` reads this hook before
+        ``Outlet`` and reports the products as the rows ``'Outlet_heavy'``
+        and ``'Outlet_light'`` (issue #451). The extractor deliberately has
+        no ``Outlet``, so it cannot be a flowsheet source (issue #445).
+        """
+        return {'heavy': self.Liquid_2, 'light': self.Liquid_3}
 
     def material_eqn_based(self, extr, raff, x_extr, x_raff, z_i):
 
@@ -369,22 +422,61 @@ class ContinuousExtractor:
 
 class BatchExtractor(ContinuousExtractor):
     def __init__(self, k_fun=None, gamma_method='UNIQUAC'):
+        """Create a batch extractor.
+
+        Parameters
+        ----------
+        k_fun : callable, optional
+            Equilibrium function. It must accept two liquid mole-fraction
+            vectors ``x1`` [-] and ``x2`` [-] plus temperature ``temp`` [K],
+            and return distribution coefficients ``K_i`` [-].
+        gamma_method : {'ideal', 'UNIFAC', 'UNIQUAC'}, optional
+            Activity-coefficient method used by the default ``k_fun``.
+
+        Notes
+        -----
+        A batch destination is charged through ``Phases`` with an inventory
+        [mol], so ``is_continuous`` is False. The extractor publishes no
+        ``Outlet`` and an untimed result, so it cannot be a flowsheet
+        source (issue #445).
+        """
         super().__init__(k_fun, gamma_method)
 
         # ``super`` sets the continuous default; batch extraction must keep
         # amount semantics [mol] for Phases and downstream result objects.
         self.oper_mode = 'Batch'
+        self.is_continuous = False
         self._Phases = None
 
     @property
     def Phases(self):
+        """Liquid charge of the extractor (``LiquidPhase``), or None."""
         return self._Phases
 
     @Phases.setter
     def Phases(self, instance):
+        """Charge the extractor with the liquid inventory to separate.
+
+        Parameters
+        ----------
+        instance : LiquidPhase
+            Liquid charge with mole fractions [-], amount [mol],
+            temperature [K] and pressure [Pa].
+
+        Notes
+        -----
+        A deep copy of the charge is kept as ``__original_phase__``, the
+        initial-holdup snapshot that ``SimulationExec.get_holdup`` reports
+        as a raw material unless the charge was transferred from an
+        upstream unit (``transferred_from_uo``), whose source is charged
+        instead. Earlier releases kept no snapshot, so a user charge was
+        missing from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
+        """
         fields = material_setter(instance, oper_mode=self.oper_mode)
         self._Phases = instance
         self.matter = self._Phases
 
         for key, val in fields.items():
             setattr(self, key, val)
+
+        self.__original_phase__ = copy.deepcopy(instance)
