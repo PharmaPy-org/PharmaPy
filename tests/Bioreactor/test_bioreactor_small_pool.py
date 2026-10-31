@@ -12,6 +12,7 @@ from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Phases_Refactored import LiquidPhase
 
 
+# Real fixture construction and independent qualification helpers.
 class PoolBalance(Mechanism):
     """Synthetic first-order conversion with a constant external mass source."""
 
@@ -95,6 +96,7 @@ def pool_vessel(initial, source, coefficient):
     return unit
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('rate', [-2e-12, -0.5e-12, 2e-12])
 def test_empty_inventory_rate_error_budget(rate):
     """Reject infeasibility while retaining bounded roundoff and real supply.
