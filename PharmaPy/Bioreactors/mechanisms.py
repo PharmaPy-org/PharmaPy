@@ -759,8 +759,8 @@ class PathwayMetabolism(ThermalBiology):
         Parameters
         ----------
         phase : LiquidPhase
-            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol] and ``vol``
-            [m3].
+            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol], ``vol``
+            [m3] and live ``temp`` [K].
         completed_state : Mapping
             Native completed state; supplies ``biomass_kg`` [kgDW].
         **kwargs
@@ -1348,8 +1348,8 @@ class RateReconciledCulture(ThermalBiology):
         Parameters
         ----------
         phase : LiquidPhase
-            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol] and ``vol``
-            [m3].
+            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol], ``vol``
+            [m3] and live ``temp`` [K].
         completed_state : Mapping
             Native completed state with the population, product and IVCD states.
         **kwargs
