@@ -5,6 +5,7 @@ Acceptance uses the original constraints and a rational Lagrangian lower bound
 on the original problem's necessary linear relaxation.
 """
 
+from functools import partial
 from fractions import Fraction
 
 import numpy as np
@@ -12,6 +13,77 @@ from scipy.linalg import null_space, qr
 from scipy.optimize import LinearConstraint, linprog, minimize, nnls
 
 
+from .reconciled import _reconciliation_objective, _reconciliation_gradient
+# Keep certification arithmetic exact for the supplied floating coefficients.
+def _as_fraction(x):
+    """Represent a floating coefficient exactly as a rational number.
+
+    Parameters
+    ----------
+    x : float
+        Finite coefficient, retaining the physical unit of the caller's matrix or objective term.
+
+    Returns
+    -------
+    Fraction
+        Exact representation, retaining the input coefficient's physical unit.
+
+    Raises
+    ------
+    ValueError
+        The coefficient is NaN.
+    OverflowError
+        The coefficient is infinite.
+    """
+    return Fraction(float(x))
+
+
+# Adapt the original objective and gradient to candidate coordinates.
+def _boundary_objective(z: np.ndarray, *, origin, transform, terms) -> float:
+    """Evaluate the original objective in boundary-candidate coordinates.
+
+    Parameters
+    ----------
+    z : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    origin : ndarray
+        Affine origin: full physical fluxes in the boundary recovery, normalized free coordinates [-] in reconciliation.
+    transform : ndarray
+        Affine basis from optimizer coordinates to the origin's coordinate basis; row/column order is unchanged.
+    terms : _QuadraticTerms
+        Dimensionless quadratic objective with coefficients on the declared flux basis.
+
+    Returns
+    -------
+    float
+        Original dimensionless objective [-].
+    """
+    return _reconciliation_objective(origin + transform @ z, terms)
+
+
+def _boundary_gradient(z: np.ndarray, *, transform, origin, terms) -> np.ndarray:
+    """Project the original gradient onto boundary-candidate coordinates.
+
+    Parameters
+    ----------
+    z : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    transform : ndarray
+        Affine basis from optimizer coordinates to the origin's coordinate basis; row/column order is unchanged.
+    origin : ndarray
+        Affine origin: full physical fluxes in the boundary recovery, normalized free coordinates [-] in reconciliation.
+    terms : _QuadraticTerms
+        Dimensionless quadratic objective with coefficients on the declared flux basis.
+
+    Returns
+    -------
+    ndarray
+        Gradient with respect to normalized candidate coordinates [-].
+    """
+    return transform.T @ _reconciliation_gradient(origin + transform @ z, terms)
+
+
+# Eliminate equality constraints exactly before proposing a candidate.
 def _affine_basis(matrix, rhs):
     """Eliminate equalities exactly for the supplied binary floating coefficients.
 
@@ -64,6 +136,7 @@ def _affine_basis(matrix, rhs):
     return origin, basis
 
 
+# Certify the original problem independently of optimizer status.
 def _objective_gap(matrix, lower, upper, terms, inequality, capacity, flux):
     """Bound original objective error with exact arithmetic and feasible dual signs.
 
@@ -115,7 +188,7 @@ def _objective_gap(matrix, lower, upper, terms, inequality, capacity, flux):
         (C.T @ multipliers - gradient) * scale, rcond=None)[0]
     # Floating linear algebra only proposes multipliers. The following bound
     # remains valid for any such multipliers; stationarity need not be exact.
-    F = lambda x: Fraction(float(x))
+    F = _as_fraction
     quadratic = [Fraction(0) for _ in lower]
     linear = quadratic.copy()
     constant = Fraction(0)
@@ -151,6 +224,7 @@ def _objective_gap(matrix, lower, upper, terms, inequality, capacity, flux):
     return float(gap), float(defect), float(objective)
 
 
+# Propose a boundary candidate and accept only its original-problem certificate.
 def boundary_candidate(matrix, lower, upper, terms, availability, tolerance):
     """Return a qualified boundary candidate or refuse numerical recovery.
 
@@ -204,37 +278,52 @@ def boundary_candidate(matrix, lower, upper, terms, availability, tolerance):
         scale = np.ones(len(lower))
         positive = terms.diagonal > 0
         scale[positive] = 1 / np.sqrt(terms.diagonal[positive])
-        raw = np.array(basis, dtype=float).reshape(len(lower), -1)
-        transform = scale[:, None] * qr(raw / scale[:, None], mode='economic')[0] if raw.shape[1] else raw
+        raw_basis = np.array(basis, dtype=float).reshape(len(lower), -1)
+        if raw_basis.shape[1]:
+            scaled_basis = raw_basis / scale[:, None]  # [1/model flux unit]
+            orthonormal_basis, _ = qr(scaled_basis, mode='economic')  # [-]
+            transform = scale[:, None] * orthonormal_basis  # [model flux unit]
+        else:
+            transform = raw_basis  # [-], empty basis: the equalities determine all fluxes
         zero = np.array([not any(row) for row in basis])
         transform[zero] = 0
         exposure, _ = availability._exposure(origin)
         if not np.isfinite(exposure):
             return None
-        C0 = np.vstack([identity, -identity, exposure * availability.matrix / availability.scale[:, None]])
-        d0 = np.r_[-lower, upper, (availability.amounts + availability.other) / availability.scale]
-        C, d = C0 @ transform, C0 @ origin + d0
+        inventory_coefficients = exposure * availability.matrix / availability.scale[:, None]  # [1/model flux unit]
+        inventory_margin = (availability.amounts + availability.other) / availability.scale  # [-]
+        constraint_matrix = np.vstack([identity, -identity, inventory_coefficients])
+        constraint_offsets = np.r_[-lower, upper, inventory_margin]  # [flux units for bounds, - for inventory]
+        projected_constraints = constraint_matrix @ transform
+        projected_offsets = constraint_matrix @ origin + constraint_offsets
         # Only algebraically constant directions are removed. Never normalize
         # a roundoff remnant of a constraint that is exactly constant.
-        F = lambda x: Fraction(float(x))
-        keep = np.array([any(sum(F(row[i])*basis[i][j] for i in np.flatnonzero(row) if basis[i][j])
-                        for j in range(raw.shape[1]))
-                        for row in np.vstack([identity, -identity, availability.matrix])])
+        original_rows = np.vstack([identity, -identity, availability.matrix])
+        keep = np.zeros(len(original_rows), dtype=bool)
+        for row_index, row in enumerate(original_rows):
+            for direction_index in range(raw_basis.shape[1]):
+                coefficient = Fraction(0)  # [row unit], exact projected coefficient
+                for flux_index in np.flatnonzero(row):
+                    basis_coefficient = basis[flux_index][direction_index]  # [-]
+                    if basis_coefficient:
+                        coefficient += _as_fraction(row[flux_index]) * basis_coefficient
+                if coefficient:
+                    keep[row_index] = True
+                    break
         if exposure == 0:
             keep[2*len(lower):] = False
-        if np.any(d[~keep] < -tolerance):
+        if np.any(projected_offsets[~keep] < -tolerance):
             return None
-        C, d = C[keep], d[keep]
-        norms = np.max(abs(C), axis=1) if C.shape[1] else np.empty(0)
+        projected_constraints, projected_offsets = projected_constraints[keep], projected_offsets[keep]
+        norms = np.max(abs(projected_constraints), axis=1) if projected_constraints.shape[1] else np.empty(0)
         if np.any(norms == 0):
             return None
-        C, d = C / norms[:, None], d / norms
-        from .reconciled import _reconciliation_objective, _reconciliation_gradient
+        projected_constraints, projected_offsets = projected_constraints / norms[:, None], projected_offsets / norms
         if transform.shape[1]:
-            result = minimize(lambda z: _reconciliation_objective(origin + transform @ z, terms),
+            result = minimize(partial(_boundary_objective, origin=origin, transform=transform, terms=terms),
                 np.linalg.lstsq(transform, seed.x - origin, rcond=None)[0],
-                jac=lambda z: transform.T @ _reconciliation_gradient(origin + transform @ z, terms),
-                constraints=[LinearConstraint(C, -d, np.inf)], method='SLSQP',
+                jac=partial(_boundary_gradient, transform=transform, origin=origin, terms=terms),
+                constraints=[LinearConstraint(projected_constraints, -projected_offsets, np.inf)], method='SLSQP',
                 options={'ftol': 1e-10, 'maxiter': 1000})
             if not result.success:
                 return None
@@ -247,12 +336,12 @@ def boundary_candidate(matrix, lower, upper, terms, availability, tolerance):
             # Refine a nearly active solution through its linear KKT equations.
             # These extra equalities only generate a candidate; the unchanged
             # original-problem certificate decides whether it may be accepted.
-            active = C @ result.x + d < 1e-7
-            rows = C[active]
+            active = projected_constraints @ result.x + projected_offsets < 1e-7
+            rows = projected_constraints[active]
             hessian = 2 * transform.T @ (terms.diagonal[:, None] * transform)
             kkt = np.block([[hessian, rows.T],
                             [rows, np.zeros((len(rows), len(rows)))]])
-            rhs = np.r_[-2 * transform.T @ (terms.diagonal * origin + terms.linear), -d[active]]
+            rhs = np.r_[-2 * transform.T @ (terms.diagonal * origin + terms.linear), -projected_offsets[active]]
             polished = np.linalg.lstsq(kkt, rhs, rcond=None)[0][:transform.shape[1]]
             flux = origin + transform @ polished
             gap, defect, value = _objective_gap(matrix, lower, upper, terms, inequality, capacity, flux)

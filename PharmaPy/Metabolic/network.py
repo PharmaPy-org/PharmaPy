@@ -20,6 +20,7 @@ from scipy.optimize import linprog
 FloatArray = NDArray[np.float64]
 
 
+# Validate immutable reaction and stoichiometric declarations.
 @dataclass(frozen=True)
 class ReactionDefinition:
     """Represent one bounded reaction column in a metabolic network.
@@ -66,6 +67,7 @@ class ReactionDefinition:
 
 
 # Assembles reaction columns into the stoichiometric matrix, objective vector, and flux bounds.
+# Construct networks and audit represented conservation/resource constraints.
 class MetabolicNetworkDefinition:
     """Validated immutable `S v = 0` network with stable declared ordering."""
 

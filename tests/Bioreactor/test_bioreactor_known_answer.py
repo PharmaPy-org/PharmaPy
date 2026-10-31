@@ -11,6 +11,7 @@ from PharmaPy.Bioreactors import build_bioreactor
 EXAMPLE = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/reconciliation/analytic_balances'
 
 
+# Real fixture construction and independent qualification helpers.
 def load(variant):
     """Read a synthetic analytical fixture without changing its inputs.
 
@@ -107,6 +108,7 @@ def observed(assembly, history):
                             history.ivcd_million_cell_day_per_ml_liquid0))
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('variant, targets, expected', [
     ('consistent', (2., 2.), 2.), ('conflicting', (4., 2.), 3.),
 ])

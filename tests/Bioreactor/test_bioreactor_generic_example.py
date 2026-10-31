@@ -13,34 +13,6 @@ import pytest
 ROOT = Path(__file__).parents[2]
 
 
-@pytest.mark.parametrize("name, uptake, feed_volume", [
-    ("generic_batch", 2.0, None),
-    ("generic_batch", 1.0, None),
-    ("generic_fed_batch", 2.0, .1),
-    ("generic_fed_batch", 1.0, .1),
-    ("generic_fed_batch", 2.0, .05),
-])
-def test_generic_notebook_and_editable_inputs(tmp_path, name, uptake, feed_volume):
-    """Run notebook assertions without mutating the pytest working directory.
-
-    Parameters
-    ----------
-    tmp_path : Path
-        Disposable export directory.
-    name : str
-        Generic example directory.
-    uptake : float
-        Configured specific uptake [mmol/(gDW h)].
-    feed_volume : float or None
-        Configured bolus [L], or None for batch.
-    """
-    result = subprocess.run([sys.executable, '-c',
-        "import runpy, pathlib, sys, json; "
-        "runpy.run_path(sys.argv[1])['_check_notebook'](pathlib.Path(sys.argv[2]), "
-        "sys.argv[3], float(sys.argv[4]), json.loads(sys.argv[5]))",
-        str(Path(__file__).resolve()), str(tmp_path), name, str(uptake), json.dumps(feed_volume)],
-        cwd=ROOT, capture_output=True, text=True, timeout=120)
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _check_notebook(tmp_path, name, uptake, feed_volume):
@@ -87,3 +59,31 @@ def _check_notebook(tmp_path, name, uptake, feed_volume):
         assert (tmp_path / 'trajectories.csv').is_file()
     finally:
         plt.close(namespace['figure'])
+@pytest.mark.parametrize("name, uptake, feed_volume", [
+    ("generic_batch", 2.0, None),
+    ("generic_batch", 1.0, None),
+    ("generic_fed_batch", 2.0, .1),
+    ("generic_fed_batch", 1.0, .1),
+    ("generic_fed_batch", 2.0, .05),
+])
+def test_generic_notebook_and_editable_inputs(tmp_path, name, uptake, feed_volume):
+    """Run notebook assertions without mutating the pytest working directory.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Disposable export directory.
+    name : str
+        Generic example directory.
+    uptake : float
+        Configured specific uptake [mmol/(gDW h)].
+    feed_volume : float or None
+        Configured bolus [L], or None for batch.
+    """
+    result = subprocess.run([sys.executable, '-c',
+        "import runpy, pathlib, sys, json; "
+        "runpy.run_path(sys.argv[1])['_check_notebook'](pathlib.Path(sys.argv[2]), "
+        "sys.argv[3], float(sys.argv[4]), json.loads(sys.argv[5]))",
+        str(Path(__file__).resolve()), str(tmp_path), name, str(uptake), json.dumps(feed_volume)],
+        cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr

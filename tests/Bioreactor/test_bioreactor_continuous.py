@@ -21,6 +21,7 @@ ROOT = Path(__file__).parents[2]
 INPUTS = ROOT / 'examples/bioreactors/generic_batch/inputs'
 
 
+# Real fixture construction and independent qualification helpers.
 def continuous_inputs(tmp_path, dilution=0.1, closure='pathway-lp', growth=True):
     """Construct matched synthetic continuous cases through existing input forms.
 
@@ -66,6 +67,7 @@ def continuous_inputs(tmp_path, dilution=0.1, closure='pathway-lp', growth=True)
     return case, model, path
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('closure', ['pathway-lp', 'configured-kinetics'])
 def test_continuous_sterile_feed_washes_out_biomass(tmp_path, closure):
     """Each representation obeys X=X0 exp(-Dt), with fixed liquid volume.

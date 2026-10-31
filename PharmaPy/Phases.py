@@ -10,6 +10,7 @@ from numpy.typing import ArrayLike
 from PharmaPy.ThermoModule import (ThermoPhysicalManager,
                                   validate_activity_model)
 from PharmaPy.Commons import trapezoidal_rule
+from PharmaPy.Errors import PharmaPyValueError
 from scipy.optimize import newton
 
 import warnings
@@ -54,6 +55,80 @@ def _as_float_array(values: ArrayLike) -> np.ndarray:
     if values is None:
         raise TypeError("Provide numeric array-like input, not None")
     return np.asarray(values, dtype=float)
+
+
+def _amount_supplied(amount: ArrayLike) -> bool:
+    """Tell whether an amount argument was supplied.
+
+    Parameters
+    ----------
+    amount : float or array-like
+        Mass [kg], volume [m**3] or moles [mol] (per second for streams),
+        scalar or per-point with shape ``(num_points,)``.
+
+    Returns
+    -------
+    bool
+        True if any entry is positive. Zero means "not supplied", so a
+        per-point amount counts as supplied when at least one point holds
+        material; its zero points then hold none.
+    """
+    return bool(np.any(np.asarray(amount, dtype=float) > 0))
+
+
+def _amount_ratio(amount: ArrayLike, divisor: ArrayLike):
+    """Divide an amount by a property, giving zero where the amount is zero.
+
+    Parameters
+    ----------
+    amount : float or array-like
+        Mass [kg], volume [m**3] or moles [mol] (per second for streams),
+        scalar or per point.
+    divisor : float or array-like
+        Density or molar mass converting it, in matching units, scalar or
+        per point.
+
+    Returns
+    -------
+    numpy.float64 or numpy.ndarray
+        ``amount / divisor`` with the broadcast shape; points without
+        material (zero amount) give exactly zero, even where the divisor is
+        zero or not finite because their composition is undefined.
+    """
+    amount = np.asarray(amount, dtype=float)
+    divisor = np.asarray(divisor, dtype=float)
+    shape = np.broadcast(amount, divisor).shape
+    with np.errstate(divide='ignore', invalid='ignore'):
+        ratio = np.divide(amount, divisor, out=np.zeros(shape),
+                          where=amount != 0)
+    return ratio[()] if ratio.ndim == 0 else ratio
+
+
+def _amount_product(amount: ArrayLike, factor: ArrayLike):
+    """Multiply an amount by a property, giving zero where the amount is zero.
+
+    Parameters
+    ----------
+    amount : float or array-like
+        Mass [kg], volume [m**3] or moles [mol] (per second for streams),
+        scalar or per point.
+    factor : float or array-like
+        Density or molar mass converting it, in matching units, scalar or
+        per point.
+
+    Returns
+    -------
+    numpy.float64 or numpy.ndarray
+        ``amount * factor`` with the broadcast shape; points without
+        material give exactly zero, even where the factor is not finite.
+    """
+    amount = np.asarray(amount, dtype=float)
+    factor = np.asarray(factor, dtype=float)
+    shape = np.broadcast(amount, factor).shape
+    with np.errstate(invalid='ignore'):
+        product = np.multiply(amount, factor, out=np.zeros(shape),
+                              where=amount != 0)
+    return product[()] if product.ndim == 0 else product
 
 
 def classify_phases(instance: object, names: Optional[Sequence[str]] = None) -> None:
@@ -139,18 +214,41 @@ def getPropsPhaseMix(phases, basis='mass'):
 
 
 class LiquidPhase(ThermoPhysicalManager):
-    """ Creates a LiquidPhase object.
-    
-    Parameters
-    ----------
-    mass_frac : array-like (optional)
-        mass fractions of the constituents of the phase.
-    mole_conc : array-like (optional)
-        molar concentrations of the constituents of the phase, excluding
-        the solvent
-    ind_solv : int
-        index of solvent components in the liquid phase. It must be
-        only specified if 'mass_frac' or 'mole_frac' are not given.
+    """Liquid holdup with a composition, an amount and an intensive state.
+
+    The composition is given by exactly one of ``mass_frac`` or
+    ``mole_frac`` [-], ``mass_conc`` [kg/m**3] or ``mole_conc`` [mol/L],
+    each covering every species of the database, solvent included. The
+    amount is given by ``mass`` [kg], ``vol`` [m**3] or ``moles`` [mol];
+    see :meth:`__init__` for the constructor parameters.
+
+    Notes
+    -----
+    The pure-species liquid densities ``rho_liq`` [kg/m**3] are temperature
+    independent, and :meth:`getDensity` mixes them ideally (additive
+    volumes): ``1 / rho = sum_i w_i / rho_i``.
+
+    How an amount is reconciled depends on the composition basis:
+
+    * Fractions carry no absolute packing, so the ideal-mixing density
+      relates mass, volume and moles.
+    * Concentrations with ``name_solv``: the solvent concentration is
+      completed so that ``sum_i c_i v_i = 1``, with ``v_i = MW_i / rho_i``
+      the pure molar volume [L/mol]. The concentrations then close ideal
+      mixing, and the ideal-mixing density applies as for fractions.
+    * Concentrations without ``name_solv`` are authoritative (issue #439):
+      ``moles = sum_i c_i * vol * 1000`` [mol] and
+      ``mass = sum_i mass_conc_i * vol`` [kg], so the inventory density is
+      ``sum_i mass_conc_i`` [kg/m**3] and the ideal-mixing model is not
+      used for the amounts. The supplied concentrations need not close
+      ideal mixing; when they do, both rules agree to rounding.
+
+    In every case the stored state satisfies
+    ``mole_conc * vol * 1000 == mole_frac * moles`` and
+    ``sum(mass_conc) * vol == mass`` to rounding. :attr:`concentration_basis`
+    reports which rule relates the amounts, and :meth:`getInventoryDensity`
+    returns the corresponding density; :meth:`getDensity` remains the
+    ideal-mixing property model.
     """
     # Frames between the zero-amount warning and the code that constructed
     # the phase: ``__init__`` sits one frame below its caller. Subclasses
@@ -188,8 +286,13 @@ class LiquidPhase(ThermoPhysicalManager):
             same shapes as fractions, stored as float arrays. Solvent
             completion supports only shape ``(num_species,)``.
         name_solv : str, optional
-            Solvent species whose concentration is completed from the volume
-            balance when concentrations are supplied; None normalizes directly.
+            Solvent species whose concentration is completed from the
+            ideal-mixing volume balance ``sum_i c_i v_i = 1`` when
+            concentrations are supplied. With None (default), supplied
+            concentrations are authoritative: fractions are normalized from
+            them and the amounts follow ``sum(mole_conc) * vol * 1000``
+            [mol] and ``sum(mass_conc) * vol`` [kg] (see the class Notes).
+            Ignored for fraction inputs.
         verbose : bool, optional
             Print diagnostics for fractions summing below the legacy 0.99
             threshold [-]. Defaults to True.
@@ -201,6 +304,11 @@ class LiquidPhase(ThermoPhysicalManager):
         ------
         ValueError
             If no composition measure is supplied.
+        PharmaPyValueError
+            A subclass of ``ValueError``. If a positive ``mass``, ``vol``
+            or ``moles`` is supplied with authoritative concentrations (no
+            ``name_solv``) whose total is zero, which leaves the fractions
+            (and, for mass or moles, the volume) undefined.
         RuntimeWarning
             If more than one composition measure is supplied.
 
@@ -219,6 +327,13 @@ class LiquidPhase(ThermoPhysicalManager):
         Exactly one composition measure is required. Constructor composition
         inputs are copied before conversion. Derived concentrations retain
         the liquid volume basis. No physical basis changes during coercion.
+        Amounts are reconciled on the concentration basis when ``mole_conc``
+        or ``mass_conc`` is supplied without ``name_solv`` and on the
+        ideal-mixing basis otherwise; :attr:`concentration_basis` records
+        the choice. Earlier releases always used ideal mixing, so for
+        concentrations that do not close ``sum_i c_i v_i = 1`` the mass,
+        moles and fractions-times-amount now follow the concentrations
+        (issue #439).
         """
 
         super().__init__(path_thermo)
@@ -229,6 +344,10 @@ class LiquidPhase(ThermoPhysicalManager):
             ind_solv = self.name_species.index(name_solv)
 
         self.ind_solv = ind_solv
+
+        # Set after ThermoPhysicalManager.__init__, which replaces __dict__.
+        # __calcComposition sets the basis of the supplied composition.
+        self._concentration_basis = False
 
         self.temp = float(temp)
         self.pres = pres
@@ -336,24 +455,118 @@ class LiquidPhase(ThermoPhysicalManager):
     def name(self, name):
         self._name = name
 
+    @property
+    def concentration_basis(self) -> bool:
+        """Whether the amounts follow the stored concentrations (read-only).
+
+        Returns
+        -------
+        bool
+            True when the current composition was supplied as ``mole_conc``
+            [mol/L] or ``mass_conc`` [kg/m**3] without a solvent
+            (``name_solv`` None). Mass [kg], volume [m**3] and moles [mol]
+            are then related by the inventory density
+            ``sum(mass_conc)`` [kg/m**3] and ``sum(mole_conc)`` [mol/L]
+            instead of ideal mixing (issue #439). False for fraction inputs
+            and for every ``name_solv`` input.
+
+        Notes
+        -----
+        The flag is set by the constructor and by :meth:`updatePhase`
+        composition updates: concentrations without a solvent switch it on,
+        fractions or a declared solvent switch it off, and amount-only or
+        intensive-state updates keep it. It is read-only so that it cannot
+        disagree with the stored state; consumers that convert this phase's
+        own amount to a volume use :meth:`getInventoryDensity`.
+        """
+        return self._concentration_basis
+
     def __set_amounts(self, mass, vol, moles, massfrac, molefrac,
-                      conc, mass_conc):
-        densMass = self.getDensityMix(massfrac)
-        mw_av = np.dot(molefrac, self.mw)
-        if mass > 0:
-            self.mass = mass
-            self.vol = mass / densMass
-            self.moles = mass / mw_av * 1000
+                      conc, mass_conc, concentration_basis=False):
+        """Store a composition and reconcile mass, volume and moles.
 
-        elif vol > 0:
-            self.vol = vol
-            self.mass = vol * densMass
-            self.moles = self.mass / mw_av * 1000
+        Parameters
+        ----------
+        mass : float or numpy.ndarray
+            Liquid mass [kg] (streams: [kg/s]), scalar or per point with
+            shape ``(num_points,)``; used when any entry is positive.
+        vol : float or numpy.ndarray
+            Liquid volume [m**3] (streams: [m**3/s]); used when ``mass`` is
+            not positive and ``vol`` is.
+        moles : float or numpy.ndarray
+            Liquid amount [mol] (streams: [mol/s]); used when neither
+            ``mass`` nor ``vol`` is positive.
+        massfrac, molefrac : numpy.ndarray
+            Species mass and mole fractions [-], shape ``(num_species,)``
+            or ``(num_points, num_species)``.
+        conc : numpy.ndarray
+            Species molar concentrations [mol/L], same shape.
+        mass_conc : numpy.ndarray
+            Species mass concentrations [kg/m**3], same shape.
+        concentration_basis : bool, optional
+            If True, the concentrations are authoritative: the inventory
+            mass density is ``sum(mass_conc)`` [kg/m**3] and the molar
+            density ``sum(conc)`` [mol/L] along the species axis. If False
+            (default), the ideal-mixing density of ``massfrac`` and the
+            average molar mass relate the amounts.
 
-        elif moles > 0:
-            self.moles = moles
-            self.mass = moles * mw_av / 1000  # kg
-            self.vol = self.mass / densMass
+        Raises
+        ------
+        PharmaPyValueError
+            If ``concentration_basis`` is True, a positive amount controls,
+            and the total concentration is zero: the fractions are then
+            undefined and, for mass or moles, the volume infinite.
+
+        Notes
+        -----
+        The first positive amount among ``mass``, ``vol`` and ``moles``
+        controls; without one the stored amounts are left unchanged. A point
+        of a profile without material (zero controlling amount) gets zero
+        mass, volume and moles, never NaN, even though its fractions are
+        undefined when its composition is zero. The
+        factor 1000 converts [mol/L] times [m**3] to [mol] and [g/mol] to
+        [kg/mol]. On the concentration basis, with ``mw_av = sum(mass_conc)
+        / sum(conc)`` [g/mol], both rules coincide when the concentrations
+        close ideal mixing.
+        """
+        mw_av = np.dot(molefrac, self.mw)  # [g/mol]
+        if concentration_basis:
+            mass_density = np.sum(mass_conc, axis=-1)  # [kg/m**3]
+            molar_density = np.sum(conc, axis=-1)  # [mol/L] == [kmol/m**3]
+            if _amount_supplied(mass):
+                self.__reject_zero_total(mass_density, mass, 'mass')
+                self.mass = mass  # [kg]
+                self.vol = _amount_ratio(mass, mass_density)  # [m**3]
+                self.moles = self.vol * molar_density * 1000  # [mol]
+
+            elif _amount_supplied(vol):
+                self.__reject_zero_total(molar_density, vol, 'vol')
+                self.vol = vol  # [m**3]
+                self.mass = vol * mass_density  # [kg]
+                self.moles = vol * molar_density * 1000  # [mol]
+
+            elif _amount_supplied(moles):
+                self.__reject_zero_total(molar_density, moles, 'moles')
+                self.moles = moles  # [mol]
+                self.vol = _amount_ratio(moles, molar_density * 1000)  # [m**3]
+                self.mass = self.vol * mass_density  # [kg]
+
+        else:
+            densMass = self.getDensityMix(massfrac)  # [kg/m**3], ideal mixing
+            if _amount_supplied(mass):
+                self.mass = mass  # [kg]
+                self.vol = _amount_ratio(mass, densMass)  # [m**3]
+                self.moles = _amount_ratio(mass, mw_av) * 1000  # [mol]
+
+            elif _amount_supplied(vol):
+                self.vol = vol  # [m**3]
+                self.mass = _amount_product(vol, densMass)  # [kg]
+                self.moles = _amount_ratio(self.mass, mw_av) * 1000  # [mol]
+
+            elif _amount_supplied(moles):
+                self.moles = moles  # [mol]
+                self.mass = _amount_product(moles, mw_av) / 1000  # [kg]
+                self.vol = _amount_ratio(self.mass, densMass)  # [m**3]
 
         self.mass_frac = massfrac
         self.mole_frac = molefrac
@@ -361,8 +574,57 @@ class LiquidPhase(ThermoPhysicalManager):
         self.mass_conc = mass_conc
 
         self.mw_av = mw_av
+        self._concentration_basis = concentration_basis
+
+    @staticmethod
+    def __reject_zero_total(total_conc, amount, amount_name: str) -> None:
+        """Reject an amount that authoritative zero concentrations cannot hold.
+
+        Parameters
+        ----------
+        total_conc : float or numpy.ndarray
+            Total concentration, ``sum(mass_conc)`` [kg/m**3] or
+            ``sum(mole_conc)`` [mol/L], scalar or shape ``(num_points,)``.
+        amount : float or numpy.ndarray
+            Controlling amount, [kg], [m**3] or [mol], scalar or per point.
+        amount_name : {'mass', 'vol', 'moles'}
+            Name of the controlling positive amount, used in the message.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a point with a positive amount has an exactly zero total
+            concentration.
+        """
+        if np.any((np.asarray(total_conc) == 0) & (np.asarray(amount) > 0)):
+            raise PharmaPyValueError(
+                f"Liquid concentrations sum to zero, so the positive "
+                f"'{amount_name}' leaves the composition (and, for mass or "
+                f"moles, the volume) undefined; supply nonzero "
+                f"concentrations, or fractions with the amount.")
 
     def __calcComposition(self):
+        """Derive the full composition from the constructor input.
+
+        Notes
+        -----
+        Exactly one of ``mole_conc`` [mol/L], ``mass_conc`` [kg/m**3],
+        ``mass_frac`` or ``mole_frac`` [-] is set on entry; the others are
+        derived from it, completing the solvent concentration when
+        ``ind_solv`` is set. The stored ``mass`` [kg], ``vol`` [m**3] and
+        ``moles`` [mol] are then reconciled by ``__set_amounts`` on the
+        concentration basis for concentrations without a solvent, and on
+        the ideal-mixing basis otherwise.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If authoritative concentrations total zero with a positive
+            amount; see ``__set_amounts``.
+        """
+        concentration_basis = (
+            (self.mole_conc is not None or self.mass_conc is not None)
+            and self.ind_solv is None)
 
         if self.mole_conc is not None:
             frac_out = self.conc_to_frac(self.mole_conc,
@@ -402,7 +664,8 @@ class LiquidPhase(ThermoPhysicalManager):
             mole_frac = self.mole_frac
 
         self.__set_amounts(self.mass, self.vol, self.moles,
-                           mass_frac, mole_frac, mole_conc, mass_conc)
+                           mass_frac, mole_frac, mole_conc, mass_conc,
+                           concentration_basis=concentration_basis)
 
     def updatePhase(self, mole_conc: Optional[ArrayLike] = None,
                     mass_conc: Optional[ArrayLike] = None,
@@ -426,12 +689,14 @@ class LiquidPhase(ThermoPhysicalManager):
             Species mass fractions with shape ``(num_species,)`` [-].
         mole_frac : array-like, optional
             Species mole fractions with shape ``(num_species,)`` [-].
-        vol : float, optional
-            Liquid volume [m**3].
-        mass : float, optional
-            Liquid mass [kg].
-        moles : float, optional
-            Amount of liquid [mol].
+            Every composition argument also accepts a profile shaped
+            ``(num_points, num_species)``.
+        vol : float or array-like, optional
+            Liquid volume [m**3], scalar or per point ``(num_points,)``.
+        mass : float or array-like, optional
+            Liquid mass [kg], scalar or per point ``(num_points,)``.
+        moles : float or array-like, optional
+            Amount of liquid [mol], scalar or per point ``(num_points,)``.
         temp : float or array-like, optional
             Liquid temperature [K], stored as a Python float for scalar input.
             A spatial profile of shape ``(num_points,)`` is stored as a float
@@ -458,32 +723,61 @@ class LiquidPhase(ThermoPhysicalManager):
         the amount and intensive state are refreshed.
 
         The amount is set from the first positive value among ``mass``,
-        ``vol``, and ``moles``, using the mixture mass density [kg/m**3] and
-        the average molar mass [g/mol]. Without a positive explicit amount,
-        composition or intensive-state changes conserve the stored mass [kg],
-        the liquid inventory integrated by the mass balances, and recompute
-        volume [m**3] and moles [mol] from the updated mixture properties.
-        This retained-mass reconciliation applies only when the resolved
-        composition is one-dimensional and stored mass is scalar. For
-        two-dimensional compositions shaped ``(num_points, num_species)``
-        or array-valued stored mass, profile inventories are not reconciled:
-        mass, volume, and moles retain their values and scalar-versus-array
-        behavior when no positive explicit amount is supplied.
+        ``vol``, and ``moles``. On the concentration basis (``mole_conc``
+        or ``mass_conc`` without a declared solvent) the inventory densities
+        ``sum(mass_conc)`` [kg/m**3] and ``sum(mole_conc)`` [mol/L] relate
+        them, so ``mole_conc * vol * 1000 == mole_frac * moles``; otherwise
+        the ideal-mixing mass density [kg/m**3] and the average molar mass
+        [g/mol] do (issue #439). A fraction update switches the phase to the
+        ideal-mixing basis, a concentration update without a solvent to the
+        concentration basis, and an update without a composition keeps the
+        current basis (:attr:`concentration_basis`). Without a positive
+        explicit amount, composition or intensive-state changes conserve
+        the stored mass [kg], the liquid inventory integrated by the mass
+        balances, and recompute volume [m**3] and moles [mol] from the
+        updated composition on that basis.
+        Profiles are reconciled point by point in the same way (issue
+        #439): a two-dimensional composition shaped
+        ``(num_points, num_species)`` uses the species axis, and amounts
+        may be scalars, which apply to every point, or arrays of shape
+        ``(num_points,)``. A composition update without a positive explicit
+        amount retains the stored mass of each point, scalar or per point,
+        and recomputes volume and moles per point, so the invariants above
+        hold for every point. Earlier releases left profile amounts
+        unchanged, contradicting the updated composition. An update of only
+        the temperature or pressure of a profile leaves its amounts, already
+        consistent with the unchanged composition, untouched.
         A no-argument update leaves all state unchanged. Zero amounts mean
-        "not supplied" and cannot empty the phase through this method.
+        "not supplied" and cannot empty the phase through this method; a
+        per-point amount is supplied when any point is positive, and its
+        zero points, which hold no material, keep zero mass, volume and
+        moles (their fractions are undefined if their composition is zero).
 
         Solvent handling matches the constructor: ``self.ind_solv`` is
         compared with ``None`` rather than tested for truth, so a solvent
         declared as the first species (index ``0``) is honored and the
         concentration converters' three-value return is unpacked correctly.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If concentrations without a solvent total zero while a positive
+            amount, explicit or retained, is reconciled; or if a per-point
+            amount, explicit or retained, does not have one entry per point
+            of a two-dimensional composition.
         """
 
-        explicit_amount = any(amount > 0 for amount in (mass, vol, moles))
+        explicit_amount = any(_amount_supplied(amount)
+                              for amount in (mass, vol, moles))
+        composition_supplied = any(value is not None for value in
+                                   (mole_conc, mass_conc, mass_frac, mole_frac))
         if not explicit_amount:
-            if all(value is None for value in
-                   (mole_conc, mass_conc, mass_frac, mole_frac, temp, pres)):
+            if not composition_supplied and temp is None and pres is None:
                 return
 
+        # Concentrations without a solvent are authoritative; fractions
+        # and solvent-completed concentrations close ideal mixing.
+        concentration_basis = self.ind_solv is None
         if mole_conc is not None:
             mole_conc = _as_float_array(mole_conc)  # [mol/L]
             frac_out = self.conc_to_frac(mole_conc,
@@ -508,26 +802,40 @@ class LiquidPhase(ThermoPhysicalManager):
             mole_conc = mass_conc / self.mw
 
         elif mass_frac is not None:
+            concentration_basis = False
             mass_frac = _as_float_array(mass_frac)  # [-]
             mole_conc = self.frac_to_conc(mass_frac)
             mass_conc = mole_conc * self.mw
             mole_frac = self.frac_to_frac(mass_frac)
 
         elif mole_frac is not None:
+            concentration_basis = False
             mole_frac = _as_float_array(mole_frac)  # [-]
             mole_conc = self.frac_to_conc(mole_frac=mole_frac)
             mass_conc = mole_conc * self.mw
             mass_frac = self.frac_to_frac(mole_frac=mole_frac)
 
         else:
+            concentration_basis = self._concentration_basis
             mass_frac = self.mass_frac
             mole_frac = self.mole_frac
             mole_conc = self.mole_conc
             mass_conc = self.mass_conc
 
-        if (not explicit_amount and np.ndim(mass_frac) == 1
-                and np.ndim(self.mass) == 0):
-            mass = self.mass  # [kg], authoritative retained liquid inventory
+        profile = np.ndim(mass_frac) == 2 or np.ndim(self.mass) > 0
+        if not explicit_amount and (composition_supplied or not profile):
+            # [kg], authoritative retained liquid inventory, per point for
+            # a profile (issue #439)
+            mass = self.mass
+
+        num_points = len(mass_frac) if np.ndim(mass_frac) == 2 else None
+        for name, amount in (('mass', mass), ('vol', vol), ('moles', moles)):
+            if (num_points is not None and np.ndim(amount) > 0
+                    and np.shape(amount) != (num_points,)):
+                raise PharmaPyValueError(
+                    f"The liquid profile has {num_points} points but its "
+                    f"'{name}' has shape {np.shape(amount)}; supply one "
+                    f"amount per point or a scalar.")
 
         if temp is not None:
             self.temp = (float(temp) if np.ndim(temp) == 0
@@ -537,7 +845,8 @@ class LiquidPhase(ThermoPhysicalManager):
             self.pres = pres
 
         self.__set_amounts(mass, vol, moles, mass_frac, mole_frac,
-                           mole_conc, mass_conc)
+                           mole_conc, mass_conc,
+                           concentration_basis=concentration_basis)
 
     def getDensity(self, mass_frac=None, mole_frac=None, temp=None,
                    basis='mass'):
@@ -567,6 +876,14 @@ class LiquidPhase(ThermoPhysicalManager):
         ValueError
             If ``basis`` is neither 'mass' nor 'mole', raised by
             ``ThermoPhysicalManager.getDensityMix``.
+
+        Notes
+        -----
+        This is the ideal-mixing property model, a function of composition
+        only; model equations and their Jacobians rely on that. It is not
+        the density of the stored inventory when :attr:`concentration_basis`
+        is True and the concentrations do not close ideal mixing; use
+        :meth:`getInventoryDensity` to convert this phase's own amounts.
         """
         if temp is None:
             temp = self.temp
@@ -579,6 +896,49 @@ class LiquidPhase(ThermoPhysicalManager):
                                     basis=basis, temp=temp)
 
         return rhoLiq
+
+    def getInventoryDensity(self, basis: str = 'mass'
+                            ) -> Union[float, np.ndarray]:
+        """Return the density that relates this phase's stored amounts.
+
+        Parameters
+        ----------
+        basis : {'mass', 'mole'}, optional
+            Physical basis of the returned density; default mass.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Inventory density, [kg/m**3] for ``basis='mass'`` and [mol/L]
+            (equivalently [kmol/m**3]) for ``basis='mole'``. Scalar for a
+            one-dimensional composition, shape ``(num_points,)`` for a
+            profile.
+
+        Raises
+        ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole'.
+
+        Notes
+        -----
+        On the concentration basis (:attr:`concentration_basis`) this is
+        ``sum(mass_conc)`` [kg/m**3] or ``sum(mole_conc)`` [mol/L], so
+        ``mass / vol`` and ``moles / (1000 * vol)`` reproduce it. Otherwise
+        it is :meth:`getDensity` of the stored composition, bit for bit.
+        Use it to convert this phase's (or stream's, per second) own mass or
+        moles to a volume; use :meth:`getDensity` for a composition-only
+        property model.
+        """
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
+
+        if not self._concentration_basis:
+            return self.getDensity(basis=basis)
+
+        if basis == 'mass':
+            return np.sum(self.mass_conc, axis=-1)  # [kg/m**3]
+
+        return np.sum(self.mole_conc, axis=-1)  # [mol/L]
 
     def getCp(self, temp: Optional[ArrayLike] = None,
               mass_frac: Optional[np.ndarray] = None,
@@ -624,7 +984,7 @@ class LiquidPhase(ThermoPhysicalManager):
         return cpLiq
 
     def getEnthalpy(self, temp: Optional[ArrayLike] = None,
-                    temp_ref: float = 298.15,
+                    temp_ref: Optional[float] = None,
                     mass_frac: Optional[np.ndarray] = None,
                     mole_frac: Optional[np.ndarray] = None,
                     total_h: bool = True, basis: str = 'mass',
@@ -638,7 +998,8 @@ class LiquidPhase(ThermoPhysicalManager):
             Temperature [K], scalar or shape ``(num_temps,)``. The phase
             temperature is used when ``None``.
         temp_ref : float, optional
-            Lower limit of the ``cp_liq`` integral [K]; default 298.15 K.
+            Lower limit of the ``cp_liq`` integral [K]; defaults to
+            ``self.temp_ref`` when present on the phase, or 298.15 K.
         mass_frac, mole_frac : ndarray, optional
             Liquid species fractions [-], shape ``(num_species,)`` or
             ``(num_rows, num_species)``. The stored phase composition is used
@@ -685,6 +1046,9 @@ class LiquidPhase(ThermoPhysicalManager):
 
         if temp is None:
             temp = self.temp
+
+        if temp_ref is None:
+            temp_ref = getattr(self, 'temp_ref', 298.15)  # [K]
 
         hLiq = super().getEnthalpy(temp, temp_ref, mass_frac, mole_frac,
                                    phase='liquid', total_h=total_h,
@@ -1479,7 +1843,7 @@ class VaporPhase(ThermoPhysicalManager):
     def getEnthalpy(
             self,
             temp: Optional[ArrayLike] = None,
-            temp_ref: float = 298.15,
+            temp_ref: Optional[float] = None,
             mass_frac: Optional[np.ndarray] = None,
             mole_frac: Optional[np.ndarray] = None,
             total_h: bool = True,
@@ -1505,7 +1869,8 @@ class VaporPhase(ThermoPhysicalManager):
             is ``None``.
         temp_ref : float, optional
             Liquid-reference temperature for the sensible-enthalpy integral
-            [K]. The default is 298.15 K.
+            [K]. Defaults to ``self.temp_ref`` when present on the phase, or
+            298.15 K.
         mass_frac : ndarray, optional
             Vapor-phase species mass fractions [-], ordered according to the
             phase's components: shape ``(num_species,)`` for a composition
@@ -1600,6 +1965,9 @@ class VaporPhase(ThermoPhysicalManager):
 
         if temp is None:
             temp = self.temp
+
+        if temp_ref is None:
+            temp_ref = getattr(self, 'temp_ref', 298.15)  # [K]
 
         temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
         num_temp, num_comp = is_supercritical.shape

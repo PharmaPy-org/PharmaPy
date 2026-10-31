@@ -11,7 +11,24 @@ from .test_bioreactor_rate_providers import _definition, _snapshot, _rule_provid
 from PharmaPy.Bioreactors.rate_providers import build_rate_provider
 
 
+# Real fixture construction and independent qualification helpers.
 def configured(backend='scipy', mode='batch', expression=0.):
+    """Configure the module's real input-built qualification case.
+
+    Parameters
+    ----------
+    backend : str
+        Native integrator selector; scipy or fixed-step.
+    mode : str or None
+        Native operation selector; None preserves the fixture selection.
+    expression : dict or float
+        Explicit rate expression; physical output units follow the selected relationship.
+
+    Returns
+    -------
+    tuple
+        Case and model declarations with explicit units, and native thermophysical input path.
+    """
     case, config, thermo = load('growth')
     case['numerics']['backend'] = backend
     case['numerics']['step']['value'] = .01
@@ -28,10 +45,18 @@ def configured(backend='scipy', mode='batch', expression=0.):
 
 
 def response():
+    """Declare the synthetic accepted-uptake-dependent death increment.
+
+    Returns
+    -------
+    dict
+        Explicit operator graph returning a death increment [1/day].
+    """
     return {'op':'multiply','args':[.2,{'op':'maximum','args':[0.,
         {'op':'subtract','args':[2.,{'accepted_flux':'ua'}]}]}]}
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('backend',['scipy','fixed-step'])
 @pytest.mark.parametrize('mode',['batch','fed-batch'])
 def test_accepted_flux_survival_has_known_population_balance(backend,mode):

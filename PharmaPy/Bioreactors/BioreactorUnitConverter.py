@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 
+# Centralize declared mass, molar, population, time, and rate-basis conversions.
 class BioreactorUnitConverter:
     """Compile biological rate mappings and convert supported physical quantities.
 
@@ -99,6 +100,7 @@ class BioreactorUnitConverter:
                 if growth != dict(amount_unit='1', normalization='none', time_unit=flux_time_unit[2:]):
                     raise ValueError('pathway growth must be specific growth in the declared time unit')
 
+    # Read and validate declared input units.
     @classmethod
     def from_inputs(cls, case, mechanism=None) -> 'BioreactorUnitConverter':
         """Read mappings or JSON paths using the same adapter as build_bioreactor.
@@ -155,6 +157,7 @@ class BioreactorUnitConverter:
         if any(units.get(name) != unit for name, unit in self.expected_rate_units.items()):
             raise ValueError("provider output units disagree with the declared flux basis")
 
+    # Convert physical source rates and declared rate quantities.
     @classmethod
     def mass_rates(cls, amount_rates, molecular_weights, *, amount_unit, time_unit):
         """Map accepted molecular sources to native kg/s, with no change to fluxes.
@@ -323,6 +326,7 @@ class BioreactorUnitConverter:
             raise ValueError("converted rate scale must be finite and positive")
         return converted
 
+    # Build the explicitly configured reconciliation metric.
     def reconciliation_target_scales(self, policy, reactions):
         """Preserve a declared dimensionless residual metric across flux units.
 
@@ -418,6 +422,7 @@ class BioreactorUnitConverter:
         internal = None if internal is None else self.rate_quantity(internal, basis.get('exchange'))
         return floors, internal_floor, internal
 
+    # Resolve physical flux bases before external property conversion.
     def _configure_flux_basis(self):
         """Compile source conversions once; keep undeclared legacy bases explicit.
 
@@ -523,6 +528,7 @@ class BioreactorUnitConverter:
             raise ValueError(f"{name} must be finite and positive")
         return value
 
+    # Expose the shared observation and quantity conversion boundary.
     @classmethod
     def convert(cls, value, source, target, *, molecular_weight_g_mol=None,
                 mass_per_cmol_g=None, carbon_atoms=None,

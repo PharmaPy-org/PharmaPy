@@ -9,6 +9,7 @@ from copy import deepcopy
 from math import isfinite
 
 
+# Build reusable equation graphs without organism-specific coefficients.
 def _op(name, *args):
     """Build one rule-graph operator node.
 
@@ -110,6 +111,7 @@ _FAMILIES = {
 }
 
 
+# Validate explicitly declared correction values before graph expansion.
 def _scalar(value, parameters, name, positive=False):
     """Validate one scalar relationship slot that must be a literal or parameter.
 
@@ -194,6 +196,7 @@ def _expand(expr, parameters):
     return build(_expand(values, parameters))
 
 
+# Expose the validated relationship-to-graph translation.
 def expand_relationships(model, parameters):
     """Return a private ordinary rule graph, preserving explicit equations and order.
 

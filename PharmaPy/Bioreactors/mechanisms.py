@@ -34,6 +34,7 @@ from .inventory import InventoryAvailability, LinearInventoryAvailability
 from .rate_providers import RateProviderResult, build_rate_provider
 
 
+# Preserve declared stream density and physical working-volume behavior.
 class DeclaredStreamDensity(Mechanism):
     """Use an explicit solution density through native stream property hooks.
 
@@ -181,6 +182,7 @@ class WorkingVolume(Mechanism):
                 "mass_conc": self.get_mass_conc, "mole_conc": self.get_mole_conc,
                 "set_mass_conc": self.set_mass_conc, "set_mole_conc": self.set_mole_conc}
 
+    # Keep explicit volume and native concentration properties consistent.
     def get_volume(self):
         """Return the working volume.
 
@@ -292,6 +294,7 @@ class WorkingVolume(Mechanism):
         super().update_state(completed_state, **kwargs)
         self.set_volume(self.working_volume)
 
+    # Hand physical outflow and biological state rates to the native vessel.
     def get_outlet_contributions(self, stream_phase, vessel_phase, amount, completed_state):
         """Remove the resolved outlet volume through the native material buffer.
 
@@ -328,6 +331,7 @@ class WorkingVolume(Mechanism):
                               aux={}, net_mass_rate=0.)
 
 
+# Evaluate explicit biological rates on native phase states.
 class ConfiguredRates(Mechanism):
     """Map user-defined volumetric kinetic rules to native species mass balances.
 
@@ -409,6 +413,7 @@ class ConfiguredRates(Mechanism):
         self.expected_rate_units = units
         self.last_provider_result = None
 
+    # Evaluate input-declared rates before constructing reported and native outputs.
     def _evaluate_rates(self, phase):
         """Evaluate declared sources and diagnostics at one native phase state.
 
@@ -509,6 +514,7 @@ class ConfiguredRates(Mechanism):
         """
         return {'status': 'NOT_CHECKED', 'reason': 'Configured kinetic rules do not declare elemental balances.'}
 
+    # Construct accepted species and biological auxiliary source terms.
     def get_solver_state_rates(self, phase, process, **kwargs):
         """Evaluate the provider and return native species mass rates.
 
@@ -541,6 +547,7 @@ class ConfiguredRates(Mechanism):
                               {'rate_provider': result}, float(mass_rates.sum()))
 
 
+# Hand configured pathway rates to the native material and energy balances.
 class PathwayMetabolism(Mechanism):
     """Couple an arbitrary input-declared pathway LP to a native liquid phase.
 
@@ -666,6 +673,7 @@ class PathwayMetabolism(Mechanism):
         self._update_exposed_attributes()
         self._timers = {}
 
+    # Preserve native properties and reset/step lifecycle hooks.
     def get_overrides(self, name=None):
         """Declare that no phase property hooks are replaced.
 
@@ -732,6 +740,7 @@ class PathwayMetabolism(Mechanism):
         duplicate._timers = {}
         return duplicate
 
+    # Solve the real pathway problem before returning material and heat payloads.
     def get_solver_state_rates(self, *, phase, completed_state, **kwargs):
         """Optimize pathway use and return native species-mass and biomass rates.
 
@@ -864,6 +873,7 @@ class PathwayMetabolism(Mechanism):
         )
 
 
+# Reconcile biological targets before constructing accepted source terms.
 class RateReconciledCulture(Mechanism):
     """Reconcile an arbitrary kinetic rule graph with an input-declared network.
 
@@ -1047,6 +1057,7 @@ class RateReconciledCulture(Mechanism):
         self._update_exposed_attributes()
         self._timers = {}
 
+    # Report represented conservation and preserve native lifecycle behavior.
     def audit_conservation(self):
         """Report network consistency and exchanges without reactor inventories.
 
@@ -1140,6 +1151,7 @@ class RateReconciledCulture(Mechanism):
         """
         self._step_s = float(step_s)
 
+    # Build target rates and solve the actual constrained reconciliation.
     def _targets(self, exchange_fluxes):
         """Build relative-regularized reconciliation targets.
 
@@ -1254,6 +1266,7 @@ class RateReconciledCulture(Mechanism):
             environment_context=self.conditions,
         ) from last_error
 
+    # Derive actual available inventories on the configured physical bases.
     def _availability(self, phase, rules, values, matrix, other, supply):
         """Map all declared exchanges and degradation into joint inventory constraints.
 
@@ -1307,6 +1320,7 @@ class RateReconciledCulture(Mechanism):
             growth_conversion=(1.0 if growth_reaction is None else
                                self.unit_converter.growth_scale))
 
+    # Return accepted source rates and the existing native thermal handoff.
     def get_solver_state_rates(self, *, phase, completed_state, **kwargs):
         """Evaluate kinetics, reconcile fluxes, and return native culture balances.
 

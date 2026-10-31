@@ -1,9 +1,13 @@
 """Independent population, network, constraint, operation and coupled-model checks."""
 
+
+from functools import partial
+from operator import itemgetter
+import cProfile
 import json
 from .input_helpers import read_input_json
 import os
-import signal
+import sys
 import time
 from copy import deepcopy
 from decimal import Decimal, localcontext
@@ -28,15 +32,587 @@ from .reconciliation_reference import (
 # Population qualification
 
 POPULATION_BASE = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/reconciliation/population_dynamics'
+# Characteristic synthetic-fixture magnitudes normalize errors without changing
+# any state: [mmol, 10^6 cells, 10^6 cells, g, L, 10^6 cell day/mL].
 POPULATION_SCALES = np.array([10., 1., .2, .1, 1., .001])
 
 
+# These are existing qualification limits, not model parameters or solver settings.
+OPERATION_TIMEOUT_S = 60.  # [s], campaign watchdog for small synthetic systems
+OPERATION_FEASIBILITY_TOLERANCE = 1e-8  # [-], strict returned-flux qualification bound
+
+
+
+
+# Network qualification
+
+NETWORK_BASE = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/reconciliation/network_structure'
+NETWORK_FIELDS = ['nutrient_a_mmol', 'nutrient_b_mmol', 'byproduct_mmol', 'product_g',
+          'viable_cells_million', 'dead_cells_million', 'volume_l', 'ivcd_million_cell_day_per_ml']
+# Characteristic synthetic-fixture magnitudes, in NETWORK_FIELDS order:
+# [mmol, mmol, mmol, g, 10^6 cells, 10^6 cells, L, 10^6 cell day/mL].
+NETWORK_SCALES = np.array([10., 10., 2., .1, 1., .1, 1., .001])
+NETWORK_VARIANTS = ['compatible', 'conflicting', 'switching', 'growth', 'nonunique']
+
+
+# Constraint qualification
+
+CONSTRAINT_BASE = Path(__file__).parents[2]/'tests/Bioreactor/fixtures/reconciliation/optimization_constraints'
+CONSTRAINT_CASES = ['relative', 'relaxed', 'untargeted', 'normalization', 'near_zero',
+         'redundant', 'equivalent_units']
+CONSTRAINT_IDS = ['ua', 'ub', 'p', 'q', 'g']
+# [-], exact coordinate map implied by the synthetic network balances.
+CONSTRAINT_MAPPING = np.array([[1., 1.], [0., 1.], [1., 0.], [0., 2.], [0., 0.]])
+
+
+# Operation qualification
+
+OPERATION_BASE = Path(__file__).parents[2]/'tests/Bioreactor/fixtures/reconciliation/operating_transitions'
+OPERATION_CASES = sorted(p.name for p in (OPERATION_BASE/'inputs').iterdir() if p.is_dir())
+# Operating-transition fixture magnitudes, in NETWORK_FIELDS order:
+# [mmol, mmol, mmol, g, 10^6 cells, 10^6 cells, L, 10^6 cell day/mL].
+OPERATION_SCALES = np.array([1.,1.,1.,.1,1.,1.,1.,.0001])
+# Real fixture construction and independent qualification helpers.
+def _check_operation_budget(elapsed):
+    """Reject a campaign that has exhausted the existing wall-time budget.
+
+    Parameters
+    ----------
+    elapsed : float
+        Monotonic elapsed time [s].
+
+    Raises
+    ------
+    TimeoutError
+        Elapsed time exceeds the campaign budget [s].
+    """
+    if elapsed > OPERATION_TIMEOUT_S:
+        raise TimeoutError('Operating-transition small-system run exceeded the 60-second campaign guard')
+
+
+class _ClosureObserver:
+    """Observe real solver returns without altering the solver or its inputs.
+
+    Python profiling is needed because the last accepted solution omits earlier
+    optimizer returns, including trial integration stages. All are qualified.
+    The full campaign tests exercise the real PharmaPy/HiGHS/SLSQP handoff.
+    """
+
+    def __init__(self, closure, start, report):
+        """Configure the observer for one real closure and its output report.
+
+        Parameters
+        ----------
+        closure : RateReconciledMFAClosure
+            Actual closure instance used by the native campaign.
+        start : float
+            Monotonic start time [s].
+        report : dict
+            Mutable counts [-], scaled feasibility [-], and elapsed time [s].
+        """
+        self.closure = closure
+        self.code = closure.solve.__func__.__code__
+        self.start = start  # [s]
+        self.report = report
+
+    def __call__(self, frame, event, result):
+        """Check elapsed time and qualify each actual closure return.
+
+        Parameters
+        ----------
+        frame : frame
+            Frame supplied by Python's standard profiling API.
+        event : str
+            Profiling event name.
+        result : object
+            Actual returned value for a return event; None on an exception.
+
+        Raises
+        ------
+        TimeoutError
+            The campaign exceeds its wall-time budget [s].
+        AssertionError
+            An actual flux result exceeds the scaled feasibility limit [-].
+        """
+        _check_operation_budget(time.perf_counter() - self.start)
+        if event != 'return' or frame.f_code is not self.code or result is None:
+            return
+        if frame.f_locals.get('self') is not self.closure:
+            return
+        self.report['closure_calls'] += 1
+        scale = max(1., max(abs(result.fluxes)))  # [model flux unit], existing normalization
+        error = max(result.mass_balance_residual_inf, result.bound_violation_inf) / scale  # [-]
+        availability = frame.f_locals.get('availability')
+        if availability is not None:
+            error = max(error, -np.min(availability.residual(result.fluxes)))  # [-]
+        self.report['max_scaled_feasibility'] = max(self.report['max_scaled_feasibility'], float(error))
+        assert error <= OPERATION_FEASIBILITY_TOLERANCE
+
+
+def _nonlinear_exposure(s):
+    """Evaluate exposure for the declared small nonlinear constraint case.
+
+    Parameters
+    ----------
+    s : float
+        Sum of reduced uptake coordinates [mmol/(10^6 cell day)] in the synthetic nonlinear case.
+
+    Returns
+    -------
+    float
+        Trapezoidal viable-population exposure [10^6 cell day].
+    """
+    return 0.05 * (1.0 + np.exp((0.1 * s - 0.05) * 0.1))
+
+
+def _nonlinear_capacity_residual(s, *, exposure):
+    """Locate the declared small-case inventory boundary.
+
+    Parameters
+    ----------
+    s : float
+        Sum of reduced uptake coordinates [mmol/(10^6 cell day)] in the synthetic nonlinear case.
+    exposure : callable
+        Independent growth-to-exposure law [10^6 cell day].
+
+    Returns
+    -------
+    float
+        Inventory use minus its explicit 0.12 mmol capacity [mmol].
+    """
+    return s * exposure(s) - 0.12
+
+
+def _projection_error(z, *, mapping, target):
+    """Evaluate an independent coordinate-projection residual.
+
+    Parameters
+    ----------
+    z : ndarray
+        Reduced flux coordinates in the synthetic fixture's declared model flux basis.
+    mapping : ndarray
+        Linear coordinate map [-], with one row per physical flux.
+    target : ndarray
+        Target vector in the corresponding model coordinate units.
+
+    Returns
+    -------
+    float
+        Squared mismatch in the supplied target's squared units.
+    """
+    return np.sum((mapping @ z - target) ** 2)
+
+
+def _operation_objective(z, *, hessian, linear):
+    """Evaluate the independent reduced operating-transition quadratic.
+
+    Parameters
+    ----------
+    z : ndarray
+        Reduced flux coordinates in the synthetic fixture's declared model flux basis.
+    hessian : ndarray
+        Quadratic objective coefficients [1/(coordinate_i coordinate_j)].
+    linear : ndarray
+        Linear objective coefficients [1/model coordinate unit].
+
+    Returns
+    -------
+    float
+        Dimensionless quadratic objective [-], without its constant term.
+    """
+    return z @ hessian @ z - 2 * linear @ z
+
+
+def _candidate_objective(s, *, candidate):
+    """Read the independently evaluated candidate objective.
+
+    Parameters
+    ----------
+    s : float
+        Sum of reduced uptake coordinates [mmol/(10^6 cell day)] in the synthetic nonlinear case.
+    candidate : callable
+        Independent candidate evaluator returning a flux and dimensionless objective.
+
+    Returns
+    -------
+    float
+        Dimensionless objective [-], including genuine infeasible infinity.
+    """
+    return candidate(s)[1]
+
+
+def _pivot_magnitude(k, *, a, i):
+    """Rank decimal-elimination rows by their current pivot magnitude.
+
+    Parameters
+    ----------
+    k : int
+        Candidate pivot row index.
+    a : list of list of Decimal
+        Augmented linear system; coefficients retain each equation's row and coordinate units.
+    i : int
+        Selected species or pivot-column index.
+
+    Returns
+    -------
+    Decimal
+        Absolute pivot coefficient in its original matrix-entry unit.
+    """
+    return abs(a[k][i])
+
+
+def _population_rhs(t, state, *, variant, flow, death):
+    """Evaluate the independent six-state population balances.
+
+    Parameters
+    ----------
+    t : float
+        Integration time [day].
+    state : ndarray
+        Ordered state vector; component units and order are specified in Notes.
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+    flow : float
+        Inlet volume flow [L/day].
+    death : float
+        Specific death coefficient [1/day].
+
+    Returns
+    -------
+    list of float
+        Derivatives in each state component unit per day.
+
+    Notes
+    -----
+    Population states contain nutrient [mmol], viable/dead populations
+    [10^6 cells], product [g], volume [L], and integrated viable concentration
+    [10^6 cell day/mL]. Operating-transition states use NETWORK_FIELDS.
+    The independent time basis is day.
+    """
+    amount, viable, dead, product, volume, exposure = state
+    mu = (.44*(amount/volume)/(1.+amount/volume) if variant == 'monod'
+          else .25 if variant == 'constrained_growth' else .4)
+    return [2.*flow-2.4*mu*viable, (mu-death)*viable, death*viable,
+            .04*mu*viable, flow, viable/(1000.*volume)]
+
+
+def _network_rhs(t, y, *, ua, ub, q, p, g):
+    """Evaluate the independent eight-state network balances.
+
+    Parameters
+    ----------
+    t : float
+        Integration time [day].
+    y : ndarray
+        Ordered state vector; component units and order are specified in Notes.
+    ua : float
+        First uptake rate [mmol/(10^6 cell day)].
+    ub : float
+        Second uptake rate [mmol/(10^6 cell day)].
+    q : float
+        Byproduct formation rate [mmol/(10^6 cell day)].
+    p : float
+        Product formation [mmol/(10^6 cell day)]; fixture MW=100 g/mol converts it to g.
+    g : float
+        Growth-coordinate value in the input-declared model basis; conversion to [1/day] follows the fixture.
+
+    Returns
+    -------
+    list of float
+        Derivatives in NETWORK_FIELDS component units per day.
+
+    Notes
+    -----
+    States follow NETWORK_FIELDS: three amounts [mmol], product [g],
+    viable/dead populations [10^6 cells], volume [L], and integrated viable
+    concentration [10^6 cell day/mL]. The time basis is day.
+    """
+    return [-ua*y[4], -ub*y[4], q*y[4], .1*p*y[4],
+            (g/2.-.05)*y[4], .05*y[4], .1, y[4]/(1000.*y[6])]
+
+
+def _constraint_objective(z, *, rows, values, total):
+    """Evaluate the independently normalized target and internal-flux residuals.
+
+    Parameters
+    ----------
+    z : ndarray
+        Reduced flux coordinates in the synthetic fixture's declared model flux basis.
+    rows : ndarray
+        Normalized residual coefficients [1/model coordinate unit], or saved observation rows with their declared axes.
+    values : array-like
+        Reference target values or refinement records; normalized errors are dimensionless.
+    total : float
+        Internal-flux normalization in the same model coordinate unit as the fluxes.
+
+    Returns
+    -------
+    float
+        Dimensionless sum of squared residuals [-].
+    """
+    return float(np.sum((rows@z-values)**2)+np.sum(z**2)/total**2)
+
+
+def operation_optimum(config, limits=(np.inf,np.inf)):
+    """Enumerate the unconstrained minimum, edges and vertices of a 2-D QP.
+
+    Parameters
+    ----------
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+    limits : ndarray or None
+        Optional uptake-rate bounds [mmol/(10^6 cell day)], in nutrient order.
+
+    Returns
+    -------
+    ndarray
+        Five fluxes in CONSTRAINT_IDS order and the declared model flux basis.
+    """
+    growth = config['parameters']['rates']['g'] > 0.
+    b = .2 if growth else 0.
+    mapping = np.array([[1.,1.],[0.,1.],[1.-b,0.],[0.,2.-b],[b,b]])
+    target = np.array([config['parameters']['rates'][n] for n in ('ua','ub','p','q','g')])
+    relative = config['model']['reconciliation']['reconciliation_policy'] == 'relative-regularized'
+    weights = 1./np.maximum(abs(target),1e-6) if relative else np.ones(5)
+    rows = weights[:,None]*mapping
+    hessian = rows.T@rows + (np.eye(2)/max(abs(sum(target)),1e-6)**2 if relative else 0.)
+    linear = rows.T@(weights*target)
+    constraints = np.vstack((-np.eye(2),mapping,[1.,1.],[0.,1.]))
+    bounds = np.r_[0.,0.,np.full(5,10.),limits]
+    if relative:
+        constraints = np.vstack((constraints,mapping,-mapping))
+        bounds = np.r_[bounds,1.5*target,-.5*target]
+    keep = np.isfinite(bounds) & (np.linalg.norm(constraints,axis=1)>0.)
+    constraints,bounds = constraints[keep],bounds[keep]
+    candidates = [np.linalg.solve(hessian,linear)]
+    for row,bound in zip(constraints,bounds):
+        system = np.block([[hessian,row[:,None]],[row[None,:],np.zeros((1,1))]])
+        candidates.append(np.linalg.solve(system,np.r_[linear,bound])[:2])
+    for i,j in combinations(range(len(bounds)),2):
+        if abs(np.linalg.det(constraints[[i,j]])) > 1e-12:
+            candidates.append(np.linalg.solve(constraints[[i,j]],bounds[[i,j]]))
+    candidates = [z for z in candidates if np.max(constraints@z-bounds) <= 1e-11]
+    if not candidates:
+        raise ValueError('independent policy infeasible')
+    z = min(candidates,key=partial(_operation_objective, hessian=hessian, linear=linear))
+    return mapping@z
+
+
+def _operation_rhs(t, y, *, supply, config, death, flow):
+    """Evaluate independent balances with constrained uptake and real supplies.
+
+    Parameters
+    ----------
+    t : float
+        Integration time [day].
+    y : ndarray
+        Ordered state vector; component units and order are specified in Notes.
+    supply : ndarray
+        Ordered extracellular inlet supplies [mmol/day].
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+    death : float
+        Specific death coefficient [1/day].
+    flow : float
+        Inlet volume flow [L/day].
+
+    Returns
+    -------
+    list of float
+        Derivatives in NETWORK_FIELDS component units per day.
+
+    Notes
+    -----
+    States follow NETWORK_FIELDS: three amounts [mmol], product [g],
+    viable/dead populations [10^6 cells], volume [L], and integrated viable
+    concentration [10^6 cell day/mL]. The time basis is day.
+    """
+    limits = np.where(y[:2] <= 1e-12,supply/y[4],np.inf)
+    ua,ub,p,q,g = operation_optimum(config,limits)
+    net = supply-y[4]*np.array([ua,ub])
+    net[abs(net)<1e-13] = 0.
+    return [*net,q*y[4],.1*p*y[4],
+            (g/2.-death)*y[4],death*y[4],flow,y[4]/(1000.*y[6])]
+
+
+def _operation_exposure_balance(average, *, config, capacity, state, death, remaining):
+    """Match average viable population to independently constrained growth.
+
+    Parameters
+    ----------
+    average : float
+        Average viable population over the interval [10^6 cells].
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+    capacity : ndarray
+        Available extracellular inventory rates [mmol/day].
+    state : ndarray
+        Ordered state vector; component units and order are specified in Notes.
+    death : float
+        Specific death coefficient [1/day].
+    remaining : ndarray or float
+        Remaining inventories [mmol] in the coupled oracle; remaining duration [day] in the operation balance.
+
+    Returns
+    -------
+    float
+        Average-population balance residual [10^6 cells].
+
+    Notes
+    -----
+    Population states contain nutrient [mmol], viable/dead populations
+    [10^6 cells], product [g], volume [L], and integrated viable concentration
+    [10^6 cell day/mL]. Operating-transition states use NETWORK_FIELDS.
+    The independent time basis is day.
+    """
+    growth_flux = operation_optimum(config,capacity/average)[4]
+    return average-.5*state[4]*(1.+np.exp((growth_flux/2.-death)*remaining))
+
+
+def _rename_network_inputs(value, *, rename):
+    """Rename identities and reverse field order without changing values.
+
+    Parameters
+    ----------
+    value : object
+        JSON-compatible content; numeric physical values are preserved.
+    rename : dict of str
+        Original-to-new identifier mapping; numeric physical values are unchanged.
+
+    Returns
+    -------
+    object
+        Renamed, reordered input content with all numeric values preserved.
+    """
+    if isinstance(value, dict):
+        return {rename.get(k,k):_rename_network_inputs(v, rename=rename) for k,v in reversed(list(value.items()))}
+    if isinstance(value, list):
+        return [_rename_network_inputs(v, rename=rename) for v in value]
+    return rename.get(value, value) if isinstance(value, str) else value
+
+
+def _decimal_constraint_solve(matrix, vector, *, precision):
+    """Solve the independent small linear system in decimal arithmetic.
+
+    Parameters
+    ----------
+    matrix : ndarray
+        Declared stoichiometric/constraint coefficients; row units divided by their corresponding coordinate units.
+    vector : ndarray
+        Linear-system right-hand side, in each equation's row unit.
+    precision : int
+        Decimal significant-digit count [-] for independent elimination.
+
+    Returns
+    -------
+    ndarray
+        Solution in the supplied matrix's coordinate units.
+    """
+    with localcontext() as ctx:
+        ctx.prec = precision
+        a = [[Decimal(str(v)) for v in row]+[Decimal(str(b))] for row,b in zip(matrix,vector)]
+        n = len(a)
+        for i in range(n):
+            pivot = max(range(i,n),key=partial(_pivot_magnitude, a=a, i=i))
+            a[i],a[pivot] = a[pivot],a[i]
+            value = a[i][i]
+            a[i] = [v/value for v in a[i]]
+            for k in range(n):
+                if k != i:
+                    value = a[k][i]
+                    a[k] = [v-value*w for v,w in zip(a[k],a[i])]
+        return np.array([float(row[-1]) for row in a])
+
+
+def _nonlinear_candidate(s, *, exposure, direction, linear, h, rows, target):
+    """Construct and qualify an independent small-case nonlinear candidate.
+
+    Parameters
+    ----------
+    s : float
+        Sum of reduced uptake coordinates [mmol/(10^6 cell day)] in the synthetic nonlinear case.
+    exposure : callable
+        Independent growth-to-exposure law [10^6 cell day].
+    direction : ndarray
+        Declared reduced-coordinate direction [-].
+    linear : ndarray
+        Linear objective coefficients [1/model coordinate unit].
+    h : ndarray
+        Reduced Hessian [1/(coordinate_i coordinate_j)].
+    rows : ndarray
+        Normalized residual coefficients [1/model coordinate unit], or saved observation rows with their declared axes.
+    target : ndarray
+        Target vector in the corresponding model coordinate units.
+
+    Returns
+    -------
+    tuple
+        Reduced flux coordinates in model units and objective [-]; infeasibility retains NaN/infinity.
+    """
+    low = max(.25,s-1.5)
+    high = min(.75,s-.5,.04/exposure(s))
+    if low > high+1e-12:return np.array([np.nan,np.nan]),np.inf
+    origin = np.array([s,0.])
+    y = np.clip(direction@(linear-h@origin)/(direction@h@direction),low,high)
+    z = np.array([s-y,y])
+    objective = np.sum((rows@z-1.)**2)+np.sum(z*z)/target.sum()**2
+    return z,float(objective)
+
+
+def _rename_operation_inputs(value, *, rename):
+    """Rename operation identities and reverse field order.
+
+    Parameters
+    ----------
+    value : object
+        JSON-compatible content; numeric physical values are preserved.
+    rename : dict of str
+        Original-to-new identifier mapping; numeric physical values are unchanged.
+
+    Returns
+    -------
+    object
+        Renamed, reordered input content with all numeric values preserved.
+    """
+    if isinstance(value,dict):
+        return {rename.get(k,k):_rename_operation_inputs(v, rename=rename) for k,v in reversed(list(value.items()))}
+    if isinstance(value,list):
+        return [_rename_operation_inputs(v, rename=rename) for v in value]
+    return rename.get(value,value) if isinstance(value,str) else value
+
+
 def population_load(variant):
+    """Read one population qualification input set.
+
+    Parameters
+    ----------
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+
+    Returns
+    -------
+    tuple
+        Case, biological mappings with explicit units, and thermophysical JSON path.
+    """
     p = POPULATION_BASE/'inputs'/variant
-    return read_input_json((p/'case.json')), read_input_json((p/'mechanism.json')), p/'thermo.json'
+    return read_input_json(p/'case.json'), read_input_json(p/'mechanism.json'), p/'thermo.json'
 
 
 def population_observed(a, h):
+    """Read native histories into the population reference order.
+
+    Parameters
+    ----------
+    a : BioreactorAssembly
+        Real assembly defining species identities and native phase order.
+    h : DynamicResult
+        Native saved histories with masses [kg], time [s], and declared biological auxiliary states.
+
+    Returns
+    -------
+    ndarray
+        Columns: mmol, 10^6 viable cells, 10^6 dead cells, g product, L, and 10^6 cell day/mL.
+    """
     j = list(a.phase.name_species).index('nutrient')
     return np.column_stack((h.mass_j_liquid0[:, j]*10000., h.viable_cells_million_liquid0,
                             h.dead_cells_million_liquid0, h.product_g_liquid0,
@@ -45,7 +621,20 @@ def population_observed(a, h):
 
 
 def population_reference(histories, variant):
-    """Independent ODE; constant-rate cases additionally checked analytically below."""
+    """Independent ODE; constant-rate cases additionally checked analytically below.
+
+    Parameters
+    ----------
+    histories : sequence of DynamicResult
+        Native segment histories; time [s], masses [kg], and declared biological auxiliary states.
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+
+    Returns
+    -------
+    list of ndarray
+        Six-state reference samples for each segment, in population_observed component order and units.
+    """
     y = np.array([10., 1., 0., 0., 1., 0.])
     answer = []
     for h in histories:
@@ -59,12 +648,7 @@ def population_reference(histories, variant):
             y[4] += .1
         death = 0. if variant == 'growth' else .1
 
-        def rhs(t, state):
-            amount, viable, dead, product, volume, exposure = state
-            mu = (.44*(amount/volume)/(1.+amount/volume) if variant == 'monod'
-                  else .25 if variant == 'constrained_growth' else .4)
-            return [2.*flow-2.4*mu*viable, (mu-death)*viable, death*viable,
-                    .04*mu*viable, flow, viable/(1000.*volume)]
+        rhs = partial(_population_rhs, variant=variant, flow=flow, death=death)
 
         solution = solve_ivp(rhs, (start, end), y, t_eval=h.time/86400.,
                              method='DOP853', rtol=2e-13, atol=2e-15, max_step=.0025)
@@ -83,6 +667,642 @@ def population_reference(histories, variant):
     return answer
 
 
+def network_load(variant):
+    """Read one network-structure qualification input set.
+
+    Parameters
+    ----------
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+
+    Returns
+    -------
+    tuple
+        Case, biological mappings with explicit units, and thermophysical JSON path.
+    """
+    folder = NETWORK_BASE/'inputs'/variant
+    return (read_input_json(folder/'case.json'),
+            read_input_json(folder/'mechanism.json'), folder/'thermo.json')
+
+
+def network_projection(variant, limits=(np.inf, np.inf)):
+    """Enumerate all possible active sets in an independently reduced 2-D QP.
+
+    Parameters
+    ----------
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+    limits : ndarray or None
+        Optional uptake-rate bounds [mmol/(10^6 cell day)], in nutrient order.
+
+    Returns
+    -------
+    tuple
+        Reduced coordinates, full model fluxes, and independently minimized squared projection error.
+    """
+    b = .2 if variant == 'growth' else 0.
+    mapping = np.array([[1., 1.], [0., 1.], [1.-b, 0.], [0., 2.-b], [b, b]])
+    target = np.array([4., 1., 1., 4., 0.] if variant == 'conflicting'
+                      else [1.5, .5, 1.-b, (2.-b)*.5, 1.5*b])
+    constraints = np.vstack((-np.eye(2), mapping, [1., 1.], [0., 1.]))
+    bounds = np.array([0., 0., 10., 10., 10., 10., 10., *limits])
+    finite = np.isfinite(bounds)
+    constraints, bounds = constraints[finite], bounds[finite]
+    hessian, linear = mapping.T@mapping, mapping.T@target
+    candidates = []
+    for size in range(3):
+        for subset in combinations(range(len(bounds)), size):
+            rows = constraints[list(subset)]
+            system = np.block([[hessian, rows.T], [rows, np.zeros((size, size))]])
+            if np.linalg.matrix_rank(system) < len(system):
+                continue
+            solution = np.linalg.solve(system, np.r_[linear, bounds[list(subset)]])
+            z = solution[:2]
+            if np.max(constraints@z-bounds) <= 1e-9 and np.all(solution[2:] >= -1e-9):
+                candidates.append(z)
+    assert candidates
+    z = min(candidates, key=partial(_projection_error, mapping=mapping, target=target))
+    return z, mapping@z, float(np.sum((mapping@z-target)**2))
+
+
+def network_observed(assembly, history, names=('nutrient_a', 'nutrient_b', 'byproduct')):
+    """Read native histories into the network reference order.
+
+    Parameters
+    ----------
+    assembly : BioreactorAssembly
+        Actual input-built biological model and native reactor.
+    history : DynamicResult
+        Native saved histories with masses [kg], time [s], and declared biological auxiliary states.
+    names : dict of str or sequence of str
+        Consistent renaming map, or ordered requested species identifiers for observation extraction.
+
+    Returns
+    -------
+    ndarray
+        Columns in NETWORK_FIELDS order: mmol, mmol, mmol, g, 10^6 cells, 10^6 cells, L, 10^6 cell day/mL.
+    """
+    indexes = [list(assembly.phase.name_species).index(n) for n in names]
+    return np.column_stack((history.mass_j_liquid0[:, indexes]*10000.,
+                            history.product_g_liquid0, history.viable_cells_million_liquid0,
+                            history.dead_cells_million_liquid0,
+                            np.asarray(history.vessel_vol).reshape(-1)*1000.,
+                            history.ivcd_million_cell_day_per_ml_liquid0))
+
+
+def network_reference(histories, variant, continuous=False):
+    """Exact finite-step balances for zero growth; independent ODE for growth.
+
+    Parameters
+    ----------
+    histories : sequence of DynamicResult
+        Native segment histories; time [s], masses [kg], and declared biological auxiliary states.
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+    continuous : bool
+        Use the independent continuous ODE; False uses the original finite-step equations.
+
+    Returns
+    -------
+    list of ndarray
+        Reference samples per segment in NETWORK_FIELDS order and its documented physical component units.
+    """
+    state = np.array([.6, .1, 0., 0., 1., 0., 1., 0.] if variant == 'switching'
+                     else [10., 10., 0., 0., 1., 0., 1., 0.])
+    answer = []
+    for history in histories:
+        times = history.time/86400.
+        if np.isclose(times[0], .5):
+            state[:2] += [.6, .2]
+            state[6] += .1
+        if np.isclose(times[0], .75):
+            state[:6] *= 1.-.1/state[6]
+            state[6] -= .1
+        if variant == 'growth':
+            _, fluxes, _ = network_projection(variant)
+            ua, ub, p, q, g = fluxes
+            rhs = partial(_network_rhs, ua=ua, ub=ub, q=q, p=p, g=g)
+            result = solve_ivp(rhs, (times[0], times[-1]), state, t_eval=times,
+                               method='DOP853', rtol=2e-13, atol=2e-15, max_step=.0025)
+            assert result.success
+            rows = result.y.T
+        else:
+            rows = [state.copy()]
+            for dt in np.diff(times):
+                remaining = dt
+                while remaining > 1e-13:
+                    limits = (np.where(state[:2] > 1e-10, np.inf, 0.) if continuous
+                              else np.maximum(state[:2], 0.)/(state[4]*remaining))
+                    _, fluxes, _ = network_projection(variant, limits)
+                    ua, ub, p, q, _ = fluxes
+                    consumption = state[4]*np.array([ua, ub])
+                    duration = remaining
+                    if continuous:
+                        positive = consumption > 1e-10
+                        duration = min(duration, np.min(state[:2][positive]/consumption[positive], initial=np.inf))
+                    state[:4] += duration*state[4]*np.array([-ua, -ub, q, .1*p])
+                    state[7] += (state[4]/100.*np.log1p(.1*duration/state[6]) if continuous
+                                 else duration*state[4]/(1000.*state[6]))
+                    state[6] += .1*duration
+                    remaining -= duration
+                rows.append(state.copy())
+            rows = np.asarray(rows)
+        answer.append(rows)
+        state = rows[-1].copy()
+    return answer
+
+
+def constraint_load(name):
+    """Read one optimizer-constraint qualification input set.
+
+    Parameters
+    ----------
+    name : str
+        Fixture name or requested property identifier.
+
+    Returns
+    -------
+    tuple
+        Case, biological mappings with explicit units, and thermophysical JSON path.
+    """
+    folder = CONSTRAINT_BASE/'inputs'/name
+    return (read_input_json(folder/'case.json'),
+            read_input_json(folder/'mechanism.json'), folder/'thermo.json')
+
+
+def constraint_reference(config, solve=np.linalg.solve):
+    """Enumerate unconstrained, edge and vertex minima, independently of SLSQP.
+
+    Parameters
+    ----------
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+    solve : callable or None
+        Optional independent linear-system solver; None retains the NumPy solver.
+
+    Returns
+    -------
+    tuple
+        Reduced model fluxes, dimensionless objective [-], and accepted relative target-bound envelope [-].
+    """
+    policy = config['model']['reconciliation']
+    targets = np.array([config['parameters']['rates'][n] for n in CONSTRAINT_IDS])
+    selected = np.array([n not in policy['untargeted_exchanges'] for n in CONSTRAINT_IDS])
+    # All campaign fixtures declare the same physical mmol floor, independently
+    # converted here without calling the production unit converter.
+    amount_unit = config['model']['kinetics']['flux_basis']['exchange']['amount_unit']
+    floor = 1e-6 * {'mmol': 1., 'umol': 1000.}[amount_unit]
+    scales = np.maximum(abs(targets[selected]), floor)
+    total = max(abs(sum(t for n,t,keep in zip(CONSTRAINT_IDS,targets,selected)
+                        if keep and n not in policy['normalization_exclusions'])), floor)
+    rows, values = CONSTRAINT_MAPPING[selected]/scales[:,None], targets[selected]/scales
+    hessian, linear = rows.T@rows+np.eye(2)/total**2, rows.T@values
+    coordinate = 1./np.sqrt(np.diag(hessian))
+    hessian = coordinate[:,None]*hessian*coordinate
+    linear = coordinate*linear
+    reaction_rows = dict(zip(CONSTRAINT_IDS, CONSTRAINT_MAPPING))
+    reaction_rows.update(x=np.array([1.,0.]), y=np.array([0.,1.]))
+    # These fixtures declare envelopes 0.5 or 1.0 with increment 0.5.
+    envelopes = [.5] if policy['reconciliation_relative_bound'] == .5 else [.5,1.]
+    for envelope in envelopes:
+        constraints, bounds = [], []
+        for reaction in config['network']['reactions']:
+            name = reaction['identifier']
+            low, high = reaction['lower'], reaction['upper']
+            if name in CONSTRAINT_IDS and selected[CONSTRAINT_IDS.index(name)]:
+                t = targets[CONSTRAINT_IDS.index(name)]
+                low, high = max(low,(1.-envelope)*t), min(high,(1.+envelope)*t)
+            constraints.extend([reaction_rows[name], -reaction_rows[name]])
+            bounds.extend([high, -low])
+        a, b = np.array(constraints)*coordinate, np.array(bounds)
+        norm = np.linalg.norm(a,axis=1)
+        if np.any(b[norm == 0.] < 0.):
+            continue
+        keep = norm > 0.
+        a, b = a[keep]/norm[keep,None], b[keep]/norm[keep]
+        candidates = [solve(hessian,linear)]
+        for row,bound in zip(a,b):
+            system = np.block([[hessian,row[:,None]],[row[None,:],np.zeros((1,1))]])
+            candidates.append(solve(system,np.r_[linear,bound])[:2])
+        for i,j in combinations(range(len(b)),2):
+            matrix = a[[i,j]]
+            if abs(np.linalg.det(matrix)) > 1e-12:
+                candidates.append(solve(matrix,b[[i,j]]))
+        feasible = [z*coordinate for z in candidates if np.max(a@z-b) <= 1e-9]
+        if feasible:
+            objective = partial(_constraint_objective, rows=rows, values=values, total=total)
+            z = min(feasible,key=objective)
+            return z, objective(z), envelope
+    raise ValueError('Independent reference is infeasible')
+
+
+def constraint_decimal_solver(precision):
+    """Bind the precision of the independent decimal linear solver.
+
+    Parameters
+    ----------
+    precision : int
+        Decimal significant-digit count [-] for independent elimination.
+
+    Returns
+    -------
+    callable
+        Small linear-system solver, retaining matrix/rhs units.
+    """
+    solve = partial(_decimal_constraint_solve, precision=precision)
+    return solve
+
+
+def constraint_floor_case(factor):
+    """Build the target-floor qualification at an explicit coordinate scale.
+
+    Parameters
+    ----------
+    factor : float
+        Coordinate or target-floor scaling factor [-].
+
+    Returns
+    -------
+    tuple
+        Case, model, and thermophysical path, retaining explicit scaled flux units.
+    """
+    case, config, thermo = constraint_load('relative')
+    config['parameters']['rates'].update(ua=1.5e-7,ub=5e-8,p=1e-7,q=2e-7,g=0.)
+    if factor != 1.:
+        for name in CONSTRAINT_IDS:
+            config['parameters']['rates'][name] *= factor
+        for reaction in config['network']['reactions']:
+            reaction['lower'] *= factor
+            reaction['upper'] *= factor
+        for name,basis in config['model']['kinetics']['flux_basis'].items():
+            basis['amount_unit'] = 'umol'
+            if name == 'growth':basis['amount_per_million_cells'] *= factor
+        for name in CONSTRAINT_IDS:config['rate_provider']['output_units'][name]='umol/(10^6 cell day)'
+    return case,config,thermo
+
+
+def constraint_nonlinear_reference(points=257):
+    """Reduce the nonlinear QP to total uptake s=x+y and solve each y exactly.
+
+    Parameters
+    ----------
+    points : int
+        Number of scalar search-grid points [-]; refinement is a numerical setting.
+
+    Returns
+    -------
+    tuple
+        Reduced model fluxes, objective [-], and viable-population exposure [10^6 cell day].
+    """
+    mapping = np.array([[1.,1.],[0.,1.],[.8,0.],[0.,1.8],[.2,.2]])
+    target = np.array([1.5,.5,.8,.9,.3])
+    rows = mapping/target[:,None]
+    h = rows.T@rows+np.eye(2)/target.sum()**2
+    linear = rows.T@np.ones(5)
+    exposure = _nonlinear_exposure
+    top = brentq(partial(_nonlinear_capacity_residual, exposure=exposure),.75,2.25,xtol=1e-14)
+    direction = np.array([-1.,1.])
+    candidate = partial(_nonlinear_candidate, exposure=exposure, direction=direction, linear=linear, h=h, rows=rows, target=target)
+    grid = np.linspace(.75,top,points)
+    choices = [candidate(s) for s in grid]
+    for i in range(1,len(grid)-1):
+        if choices[i][1] <= min(choices[i-1][1],choices[i+1][1]):
+            opt = minimize_scalar(partial(_candidate_objective, candidate=candidate),bounds=(grid[i-1],grid[i+1]),
+                                  method='bounded',options={'xatol':1e-14})
+            choices.append(candidate(opt.x))
+    z,obj = min(choices,key=itemgetter(1))
+    return z,obj,exposure(z.sum())
+
+
+def constraint_small_closure(matrix, lower, upper, internal=()):
+    """Construct the real small closure from supplied balances and bounds.
+
+    Parameters
+    ----------
+    matrix : ndarray
+        Declared stoichiometric/constraint coefficients; row units divided by their corresponding coordinate units.
+    lower : ndarray
+        Lower reaction bounds in the declared model flux unit.
+    upper : ndarray
+        Upper reaction bounds in the declared model flux unit.
+    internal : sequence of str
+        Reaction identifiers whose fluxes contribute to the regularization term.
+
+    Returns
+    -------
+    RateReconciledMFAClosure
+        Actual production closure on the supplied model flux basis.
+    """
+    from PharmaPy.Metabolic.network import MetabolicNetworkDefinition, ReactionDefinition
+    from PharmaPy.Metabolic.closures.reconciled import RateReconciledMFAClosure
+    matrix = np.asarray(matrix, dtype=float)
+    metabolites = tuple(f'm{i}' for i in range(len(matrix)))
+    reactions = tuple(ReactionDefinition(
+        f'r{j}', dict(zip(metabolites, matrix[:, j])), lo, hi)
+        for j, (lo, hi) in enumerate(zip(lower, upper)))
+    network = MetabolicNetworkDefinition('edge', '1', metabolites, reactions, {'r0': 1.})
+    return RateReconciledMFAClosure(network, internal)
+
+
+def constraint_problem(closure, value, availability=None, targets=None):
+    """Bind real optimizer and qualification contracts for small synthetic QPs.
+
+    Parameters
+    ----------
+    closure : RateReconciledMFAClosure
+        Synthetic network with dimensionless flux coordinates.
+    value : float
+        Target for r0 [-], when explicit targets are absent.
+    availability : InventoryAvailability or None
+        Additional declared inventory constraints.
+    targets : sequence or None
+        Explicit residual targets with unit scales [-].
+
+    Returns
+    -------
+    tuple
+        Real optimization callback, candidate qualification callback, and
+        quadratic terms. No solver or constraint is replaced by a test double.
+    """
+    from scipy.linalg import null_space
+    from scipy.optimize import LinearConstraint, NonlinearConstraint
+    from PharmaPy.Metabolic.closures import reconciled as r
+    lower, upper = closure.network.lower_bounds, closure.network.upper_bounds  # [-]
+    targets = targets if targets is not None else (r.ReconciliationTarget('r0', value, 1.),)
+    terms = r._make_terms(closure.network, closure.internal_reaction_ids, targets, 1.)
+    free = lower != upper
+    offset = np.where(free, 0., lower)  # [-]
+    scales = np.ones(len(lower))  # [-], fixtures use unit coordinate scales
+    matrix = closure.network.stoichiometric_matrix  # [-]
+    equality, rhs = matrix[:, free], -matrix @ offset  # [-]
+    low, high = lower[free], upper[free]  # [-]
+    tangent = null_space(equality)  # [-]
+    expand = partial(r._reconciliation_expand, offset=offset, free=free, variable_scale=scales)
+    feasible = partial(r._reconciliation_feasible_flux, free=free, variable_scale=scales,
+        closure=closure, lower=lower, upper=upper, availability=availability,
+        equality=equality, rhs=rhs, low=low, high=high)
+    certified = partial(r._reconciliation_certified, availability=availability, lower=lower,
+        upper=upper, matrix=matrix, terms=terms, closure=closure)
+    qualified = partial(r._reconciliation_qualified, feasible_flux=feasible, free=free,
+        variable_scale=scales, terms=terms, low=low, high=high, closure=closure,
+        availability=availability, tangent=tangent, equality=equality,
+        narrow=np.zeros(len(lower), dtype=bool), certified=certified)
+    constraints = [LinearConstraint(equality, rhs, rhs)]
+    if availability is not None:
+        constraints.append(NonlinearConstraint(availability.residual, 0., np.inf,
+                                               jac=availability.jacobian))
+    optimize = partial(r._reconciliation_optimize, constraints=constraints, low=low,
+        high=high, tangent=tangent, reduced=equality, reduced_rhs=rhs, expand=expand,
+        terms=terms, qualified=qualified, equality=equality, availability=availability,
+        closure=closure, free=free, variable_scale=scales)
+    return optimize, qualified, terms
+
+
+def constraint_solve_small(closure, value, scale=1.):
+    """Run the actual small closure with an explicit scaled target.
+
+    Parameters
+    ----------
+    closure : RateReconciledMFAClosure
+        Actual closure under qualification, with its declared flux basis.
+    value : float
+        Target flux in the closure's declared model flux unit.
+    scale : float or ndarray
+        Positive normalization in the corresponding flux or observation component units.
+
+    Returns
+    -------
+    FluxSolution
+        Actual reaction fluxes in closure reaction order and declared units.
+    """
+    from PharmaPy.Metabolic.closures.base import MetabolicEnvironment
+    from PharmaPy.Metabolic.closures.reconciled import ReconciliationTarget
+    return closure.solve(MetabolicEnvironment({}, {}),
+                         targets=(ReconciliationTarget('r0', value, scale),), internal_scale=1.)
+
+
+def operation_load(name, backend='fixed-step', step=.001):
+    """Configure one real operating-transition qualification campaign.
+
+    Parameters
+    ----------
+    name : str
+        Fixture name or requested property identifier.
+    backend : str
+        Native integrator selector; scipy or fixed-step.
+    step : float
+        Fixed integration horizon [day].
+
+    Returns
+    -------
+    tuple
+        Case, biological mappings with explicit units, and thermophysical JSON path.
+    """
+    folder = OPERATION_BASE/'inputs'/name
+    case = read_input_json(folder/'case.json')
+    config = read_input_json(folder/'mechanism.json')
+    case['numerics']['step']['value'] = step
+    if backend == 'scipy':
+        case['numerics'].update(backend='scipy', relative_tolerance=1e-10,
+            absolute_tolerance=1e-15, maximum_step={'value':.002,'unit':'day'},
+            jacobian_relative_step=1e-5, jacobian_state_scale=1e-6)
+    return case, config, folder/'thermo.json'
+
+
+def operation_initial(config):
+    """Read the eight-state operating-transition initial condition.
+
+    Parameters
+    ----------
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+
+    Returns
+    -------
+    ndarray
+        Initial state in NETWORK_FIELDS order and component units.
+    """
+    state = config['state']
+    return np.array([state['species']['amounts'][n] for n in ('nutrient_a','nutrient_b','byproduct')]
+        +[state['product_g'],state['viable_cells_million'],state['dead_cells_million'],1.,state['integral']])
+
+
+def operation_reference(case, config, histories, continuous=False, precision=1.):
+    """Piecewise exact inventories/jumps; independent tight ODE only for growth.
+
+    Parameters
+    ----------
+    case : dict
+        Operating input with explicit time, volume, temperature, and recipe units.
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+    histories : sequence of DynamicResult
+        Native segment histories; time [s], masses [kg], and declared biological auxiliary states.
+    continuous : bool
+        Use the independent continuous ODE; False uses the original finite-step equations.
+    precision : int
+        Decimal significant-digit count [-] for independent elimination.
+
+    Returns
+    -------
+    list of ndarray
+        Independent segment samples in NETWORK_FIELDS order and documented physical component units.
+    """
+    state, inlets, answer = operation_initial(config), {}, []
+    native = case['operation']['volume_policy'] == 'native'
+    growth = config['parameters']['rates']['g'] > 0.
+    for history in histories:
+        times = history.time/86400.
+        for event in config['recipes']['benchmark']:
+            if abs(event['time']['value']-times[0]) > 1e-12:
+                continue
+            kind = event['event_type']
+            if kind == 'flow':
+                flow = event['volume_flow']['value']
+                conc = event['concentrations']['values']
+                inlets[event.get('inlet','inlet')] = (flow,flow*np.array([conc.get(n,0.) for n in ('nutrient_a','nutrient_b')]))
+            elif kind == 'sample':
+                volume = event['volume']['value']
+                state[:6] *= 1.-volume/state[6]
+                state[6] -= volume
+            else:
+                volume = event['volume']['value']
+                state[:2] += volume*np.array([event['concentrations']['values'].get(n,0.) for n in ('nutrient_a','nutrient_b')])
+                state[6] += volume
+        flow = sum(v[0] for v in inlets.values())
+        supply = sum((v[1] for v in inlets.values()),start=np.zeros(2))
+        if growth and continuous:
+            death = config['parameters']['rates']['death']
+            rhs = partial(_operation_rhs, supply=supply, config=config, death=death, flow=flow)
+            solution = solve_ivp(rhs,(times[0],times[-1]),state,t_eval=times,
+                                 method='DOP853',rtol=3e-13,atol=3e-15*precision,max_step=.001*precision)
+            assert solution.success
+            rows = solution.y.T
+        else:
+            rows = [state.copy()]
+            for dt in np.diff(times):
+                remaining = dt
+                while remaining > 1e-14:
+                    limits = (np.where(state[:2] <= 1e-12,supply/state[4],np.inf) if continuous
+                              else (np.maximum(state[:2],0.)/remaining+supply)/state[4])
+                    ua,ub,p,q,g = operation_optimum(config,limits)
+                    death = config['parameters']['rates']['death']
+                    if growth:
+                        capacity = np.maximum(state[:2],0.)/remaining+supply
+                        exposure_balance = partial(_operation_exposure_balance, config=config, capacity=capacity, state=state, death=death, remaining=remaining)
+                        average = brentq(exposure_balance,.5*state[4],
+                            .5*state[4]*(1.+np.exp(5.*remaining)),xtol=1e-14)
+                        ua,ub,p,q,g = operation_optimum(config,capacity/average)
+                    end_viable = state[4]*np.exp((g/2.-death)*remaining) if growth else state[4]
+                    exposure = .5*(state[4]+end_viable)
+                    derivative = np.r_[supply-exposure*np.array([ua,ub]),q*exposure,.1*p*exposure]
+                    duration = remaining
+                    if continuous:
+                        consuming = (derivative[:2] < -1e-12) & (state[:2] > 1e-12)
+                        duration = min(duration,np.min(state[:2][consuming]/-derivative[:2][consuming],initial=np.inf))
+                    volume_rate = flow-(.0001*(p+g)*exposure if native else 0.)
+                    if continuous and abs(volume_rate)>1e-15:
+                        state[7] += exposure/(1000.*volume_rate)*np.log1p(volume_rate*duration/state[6])
+                    else:
+                        state[7] += duration*exposure/(1000.*state[6])
+                    state[:4] += duration*derivative
+                    state[6] += volume_rate*duration
+                    if growth:
+                        state[5] += state[4]*(1.-np.exp(-death*duration))
+                        state[4] = end_viable
+                    remaining -= duration
+                rows.append(state.copy())
+            rows = np.asarray(rows)
+        answer.append(rows)
+        state = rows[-1].copy()
+    return answer
+
+
+def operation_run(case, config, thermo):
+    """Run the real campaign while observing every returned closure solution.
+
+    Parameters
+    ----------
+    case, config : dict
+        Operating and biological declarations; units are explicit in the inputs.
+    thermo : Path
+        Native thermophysical-property input.
+
+    Returns
+    -------
+    tuple
+        Assembly, native histories, and a report of closure counts [-], maximum
+        scaled feasibility error [-], and elapsed wall time [s].
+
+    Raises
+    ------
+    TimeoutError
+        The real campaign exceeds the existing wall-time budget at a profiling
+        event. Native calls must return to Python before this guard can fire.
+    AssertionError
+        Any returned closure solution violates the qualification bound.
+
+    Notes
+    -----
+    The standard profiling hook observes actual return values and arguments;
+    it never replaces a model callable. Its previous registration is restored
+    even on failure. The portable clock guard retains the old cooperative
+    deadline: neither it nor a Python signal handler interrupts a native call
+    that has not returned control to Python.
+    """
+    assembly = build_bioreactor(case, config, thermo)
+    report = dict(closure_calls=0, max_scaled_feasibility=0.)
+    start = time.perf_counter()  # [s], monotonic wall clock
+    observer = _ClosureObserver(assembly.mechanism.closure, start, report)
+    previous = sys.getprofile()
+    try:
+        sys.setprofile(observer)
+        histories = assembly.solve()
+    finally:
+        sys.setprofile(previous)
+        report['runtime_s'] = time.perf_counter() - start  # [s]
+    return assembly, histories, report
+
+
+def operation_error(assembly,histories,expected):
+    """Measure the existing component-scaled operating-transition error.
+
+    Parameters
+    ----------
+    assembly : BioreactorAssembly
+        Actual input-built biological model and native reactor.
+    histories : sequence of DynamicResult
+        Native segment histories; time [s], masses [kg], and declared biological auxiliary states.
+    expected : sequence of ndarray
+        Independent component-wise observations in the same units and order as the native observations.
+
+    Returns
+    -------
+    float
+        Largest absolute reference discrepancy divided by OPERATION_SCALES [-].
+    """
+    return max(float(np.max(abs(network_observed(assembly,h)-r)/OPERATION_SCALES)) for h,r in zip(histories,expected))
+
+
+def operation_record_refinement(name, values):
+    """Write optional refinement evidence to the explicitly selected output directory.
+
+    Parameters
+    ----------
+    name : str
+        Fixture name or requested property identifier.
+    values : array-like
+        Reference target values or refinement records; normalized errors are dimensionless.
+    """
+    if os.environ.get('BIOREACTOR_VERIFICATION_OUTPUT'):
+        path = Path(os.environ['BIOREACTOR_VERIFICATION_OUTPUT'])/'refinement.json'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        report = read_input_json(path) if path.exists() else {}
+        report[name] = values
+        path.write_text(json.dumps(report,indent=2)+'\n')
+
+
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('variant', ['growth', 'growth_death', 'constrained_growth', 'monod'])
 def test_population_adaptive_trajectories(variant):
     a = build_bioreactor(*population_load(variant))
@@ -180,15 +1400,6 @@ def test_population_equivalent_specific_growth_basis():
         assert np.max(abs(population_observed(a, x)-population_observed(a, y))/POPULATION_SCALES) < 1e-6
 
 
-# Network qualification
-
-NETWORK_BASE = Path(__file__).parents[2] / 'tests/Bioreactor/fixtures/reconciliation/network_structure'
-NETWORK_FIELDS = ['nutrient_a_mmol', 'nutrient_b_mmol', 'byproduct_mmol', 'product_g',
-          'viable_cells_million', 'dead_cells_million', 'volume_l', 'ivcd_million_cell_day_per_ml']
-NETWORK_SCALES = np.array([10., 10., 2., .1, 1., .1, 1., .001])
-NETWORK_VARIANTS = ['compatible', 'conflicting', 'switching', 'growth', 'nonunique']
-
-
 @pytest.mark.parametrize('policy', ['unweighted', 'relative-regularized'])
 def test_reconciliation_copy_preserves_policy(policy):
     case, config, thermo = network_load('compatible')
@@ -205,97 +1416,6 @@ def test_reconciliation_copy_preserves_policy(policy):
     targets = {name:config['parameters']['rates'][name] for name in ('ua', 'ub', 'p', 'q', 'g')}
     np.testing.assert_allclose(copied._solve(targets).fluxes, original._solve(targets).fluxes,
                                atol=1e-9, rtol=1e-9)
-
-
-def network_load(variant):
-    folder = NETWORK_BASE/'inputs'/variant
-    return (read_input_json((folder/'case.json')),
-            read_input_json((folder/'mechanism.json')), folder/'thermo.json')
-
-
-def network_projection(variant, limits=(np.inf, np.inf)):
-    """Enumerate all possible active sets in an independently reduced 2-D QP."""
-    b = .2 if variant == 'growth' else 0.
-    mapping = np.array([[1., 1.], [0., 1.], [1.-b, 0.], [0., 2.-b], [b, b]])
-    target = np.array([4., 1., 1., 4., 0.] if variant == 'conflicting'
-                      else [1.5, .5, 1.-b, (2.-b)*.5, 1.5*b])
-    constraints = np.vstack((-np.eye(2), mapping, [1., 1.], [0., 1.]))
-    bounds = np.array([0., 0., 10., 10., 10., 10., 10., *limits])
-    finite = np.isfinite(bounds)
-    constraints, bounds = constraints[finite], bounds[finite]
-    hessian, linear = mapping.T@mapping, mapping.T@target
-    candidates = []
-    for size in range(3):
-        for subset in combinations(range(len(bounds)), size):
-            rows = constraints[list(subset)]
-            system = np.block([[hessian, rows.T], [rows, np.zeros((size, size))]])
-            if np.linalg.matrix_rank(system) < len(system):
-                continue
-            solution = np.linalg.solve(system, np.r_[linear, bounds[list(subset)]])
-            z = solution[:2]
-            if np.max(constraints@z-bounds) <= 1e-9 and np.all(solution[2:] >= -1e-9):
-                candidates.append(z)
-    assert candidates
-    z = min(candidates, key=lambda z: np.sum((mapping@z-target)**2))
-    return z, mapping@z, float(np.sum((mapping@z-target)**2))
-
-
-def network_observed(assembly, history, names=('nutrient_a', 'nutrient_b', 'byproduct')):
-    indexes = [list(assembly.phase.name_species).index(n) for n in names]
-    return np.column_stack((history.mass_j_liquid0[:, indexes]*10000.,
-                            history.product_g_liquid0, history.viable_cells_million_liquid0,
-                            history.dead_cells_million_liquid0,
-                            np.asarray(history.vessel_vol).reshape(-1)*1000.,
-                            history.ivcd_million_cell_day_per_ml_liquid0))
-
-
-def network_reference(histories, variant, continuous=False):
-    """Exact finite-step balances for zero growth; independent ODE for growth."""
-    state = np.array([.6, .1, 0., 0., 1., 0., 1., 0.] if variant == 'switching'
-                     else [10., 10., 0., 0., 1., 0., 1., 0.])
-    answer = []
-    for history in histories:
-        times = history.time/86400.
-        if np.isclose(times[0], .5):
-            state[:2] += [.6, .2]
-            state[6] += .1
-        if np.isclose(times[0], .75):
-            state[:6] *= 1.-.1/state[6]
-            state[6] -= .1
-        if variant == 'growth':
-            _, fluxes, _ = network_projection(variant)
-            ua, ub, p, q, g = fluxes
-            def rhs(t, y):
-                return [-ua*y[4], -ub*y[4], q*y[4], .1*p*y[4],
-                        (g/2.-.05)*y[4], .05*y[4], .1, y[4]/(1000.*y[6])]
-            result = solve_ivp(rhs, (times[0], times[-1]), state, t_eval=times,
-                               method='DOP853', rtol=2e-13, atol=2e-15, max_step=.0025)
-            assert result.success
-            rows = result.y.T
-        else:
-            rows = [state.copy()]
-            for dt in np.diff(times):
-                remaining = dt
-                while remaining > 1e-13:
-                    limits = (np.where(state[:2] > 1e-10, np.inf, 0.) if continuous
-                              else np.maximum(state[:2], 0.)/(state[4]*remaining))
-                    _, fluxes, _ = network_projection(variant, limits)
-                    ua, ub, p, q, _ = fluxes
-                    consumption = state[4]*np.array([ua, ub])
-                    duration = remaining
-                    if continuous:
-                        positive = consumption > 1e-10
-                        duration = min(duration, np.min(state[:2][positive]/consumption[positive], initial=np.inf))
-                    state[:4] += duration*state[4]*np.array([-ua, -ub, q, .1*p])
-                    state[7] += (state[4]/100.*np.log1p(.1*duration/state[6]) if continuous
-                                 else duration*state[4]/(1000.*state[6]))
-                    state[6] += .1*duration
-                    remaining -= duration
-                rows.append(state.copy())
-            rows = np.asarray(rows)
-        answer.append(rows)
-        state = rows[-1].copy()
-    return answer
 
 
 @pytest.mark.parametrize('variant', NETWORK_VARIANTS)
@@ -350,12 +1470,7 @@ def test_network_rename_and_permute(variant, tmp_path):
     names = ['nutrient_a', 'nutrient_b', 'byproduct']
     identifiers = names+config['network']['internal_metabolites']+[r['identifier'] for r in config['network']['reactions']]
     rename = {name:'renamed_'+str(i) for i,name in enumerate(identifiers)}
-    def transform(value):
-        if isinstance(value, dict):
-            return {rename.get(k,k):transform(v) for k,v in reversed(list(value.items()))}
-        if isinstance(value, list):
-            return [transform(v) for v in value]
-        return rename.get(value, value) if isinstance(value, str) else value
+    transform = partial(_rename_network_inputs, rename=rename)
     config, thermo = transform(config), transform(read_input_json(thermo))
     for key in ('reactions', 'internal_metabolites', 'exchange_reactions'):
         config['network'][key].reverse()
@@ -417,75 +1532,6 @@ def test_network_adaptive_refinement(change):
     histories = a.solve()
     assert max(np.max(abs(network_observed(a,h)-r)/NETWORK_SCALES)
                for h,r in zip(histories, network_reference(histories, 'growth'))) < 1e-6
-
-
-# Constraint qualification
-
-CONSTRAINT_BASE = Path(__file__).parents[2]/'tests/Bioreactor/fixtures/reconciliation/optimization_constraints'
-CONSTRAINT_CASES = ['relative', 'relaxed', 'untargeted', 'normalization', 'near_zero',
-         'redundant', 'equivalent_units']
-CONSTRAINT_IDS = ['ua', 'ub', 'p', 'q', 'g']
-CONSTRAINT_MAPPING = np.array([[1., 1.], [0., 1.], [1., 0.], [0., 2.], [0., 0.]])
-
-
-def constraint_load(name):
-    folder = CONSTRAINT_BASE/'inputs'/name
-    return (read_input_json((folder/'case.json')),
-            read_input_json((folder/'mechanism.json')), folder/'thermo.json')
-
-
-def constraint_reference(config, solve=np.linalg.solve):
-    """Enumerate unconstrained, edge and vertex minima, independently of SLSQP."""
-    policy = config['model']['reconciliation']
-    targets = np.array([config['parameters']['rates'][n] for n in CONSTRAINT_IDS])
-    selected = np.array([n not in policy['untargeted_exchanges'] for n in CONSTRAINT_IDS])
-    # All campaign fixtures declare the same physical mmol floor, independently
-    # converted here without calling the production unit converter.
-    amount_unit = config['model']['kinetics']['flux_basis']['exchange']['amount_unit']
-    floor = 1e-6 * {'mmol': 1., 'umol': 1000.}[amount_unit]
-    scales = np.maximum(abs(targets[selected]), floor)
-    total = max(abs(sum(t for n,t,keep in zip(CONSTRAINT_IDS,targets,selected)
-                        if keep and n not in policy['normalization_exclusions'])), floor)
-    rows, values = CONSTRAINT_MAPPING[selected]/scales[:,None], targets[selected]/scales
-    hessian, linear = rows.T@rows+np.eye(2)/total**2, rows.T@values
-    coordinate = 1./np.sqrt(np.diag(hessian))
-    hessian = coordinate[:,None]*hessian*coordinate
-    linear = coordinate*linear
-    reaction_rows = dict(zip(CONSTRAINT_IDS, CONSTRAINT_MAPPING))
-    reaction_rows.update(x=np.array([1.,0.]), y=np.array([0.,1.]))
-    # These fixtures declare envelopes 0.5 or 1.0 with increment 0.5.
-    envelopes = [.5] if policy['reconciliation_relative_bound'] == .5 else [.5,1.]
-    for envelope in envelopes:
-        constraints, bounds = [], []
-        for reaction in config['network']['reactions']:
-            name = reaction['identifier']
-            low, high = reaction['lower'], reaction['upper']
-            if name in CONSTRAINT_IDS and selected[CONSTRAINT_IDS.index(name)]:
-                t = targets[CONSTRAINT_IDS.index(name)]
-                low, high = max(low,(1.-envelope)*t), min(high,(1.+envelope)*t)
-            constraints.extend([reaction_rows[name], -reaction_rows[name]])
-            bounds.extend([high, -low])
-        a, b = np.array(constraints)*coordinate, np.array(bounds)
-        norm = np.linalg.norm(a,axis=1)
-        if np.any(b[norm == 0.] < 0.):
-            continue
-        keep = norm > 0.
-        a, b = a[keep]/norm[keep,None], b[keep]/norm[keep]
-        candidates = [solve(hessian,linear)]
-        for row,bound in zip(a,b):
-            system = np.block([[hessian,row[:,None]],[row[None,:],np.zeros((1,1))]])
-            candidates.append(solve(system,np.r_[linear,bound])[:2])
-        for i,j in combinations(range(len(b)),2):
-            matrix = a[[i,j]]
-            if abs(np.linalg.det(matrix)) > 1e-12:
-                candidates.append(solve(matrix,b[[i,j]]))
-        feasible = [z*coordinate for z in candidates if np.max(a@z-b) <= 1e-9]
-        if feasible:
-            def objective(z):
-                return float(np.sum((rows@z-values)**2)+np.sum(z**2)/total**2)
-            z = min(feasible,key=objective)
-            return z, objective(z), envelope
-    raise ValueError('Independent reference is infeasible')
 
 
 @pytest.mark.parametrize('name', CONSTRAINT_CASES)
@@ -575,25 +1621,6 @@ def test_constraint_recovery_retains_problem_or_fails():
     assert mechanism.closure._acceptable(values, lower, upper, None)
 
 
-def constraint_decimal_solver(precision):
-    def solve(matrix, vector):
-        with localcontext() as ctx:
-            ctx.prec = precision
-            a = [[Decimal(str(v)) for v in row]+[Decimal(str(b))] for row,b in zip(matrix,vector)]
-            n = len(a)
-            for i in range(n):
-                pivot = max(range(i,n),key=lambda k:abs(a[k][i]))
-                a[i],a[pivot] = a[pivot],a[i]
-                value = a[i][i]
-                a[i] = [v/value for v in a[i]]
-                for k in range(n):
-                    if k != i:
-                        value = a[k][i]
-                        a[k] = [v-value*w for v,w in zip(a[k],a[i])]
-            return np.array([float(row[-1]) for row in a])
-    return solve
-
-
 @pytest.mark.parametrize('name', CONSTRAINT_CASES)
 def test_constraint_reference_precision(name):
     _, config, _ = constraint_load(name)
@@ -606,22 +1633,6 @@ def test_constraint_reference_precision(name):
         assert normal[2] == refined[2]
 
 
-def constraint_floor_case(factor):
-    case, config, thermo = constraint_load('relative')
-    config['parameters']['rates'].update(ua=1.5e-7,ub=5e-8,p=1e-7,q=2e-7,g=0.)
-    if factor != 1.:
-        for name in CONSTRAINT_IDS:
-            config['parameters']['rates'][name] *= factor
-        for reaction in config['network']['reactions']:
-            reaction['lower'] *= factor
-            reaction['upper'] *= factor
-        for name,basis in config['model']['kinetics']['flux_basis'].items():
-            basis['amount_unit'] = 'umol'
-            if name == 'growth':basis['amount_per_million_cells'] *= factor
-        for name in CONSTRAINT_IDS:config['rate_provider']['output_units'][name]='umol/(10^6 cell day)'
-    return case,config,thermo
-
-
 def test_constraint_floor_unit_equivalence():
     physical = []
     for factor in (1.,1000.):
@@ -632,36 +1643,6 @@ def test_constraint_floor_unit_equivalence():
         physical.append(np.array([flux['x'],flux['y']])/factor)
     # Scale to the small physical target, not to one mmol: expose floor dependence.
     assert np.max(abs(physical[0]-physical[1]))/1e-7 < 1e-6
-
-
-def constraint_nonlinear_reference(points=257):
-    """Reduce the nonlinear QP to total uptake s=x+y and solve each y exactly."""
-    mapping = np.array([[1.,1.],[0.,1.],[.8,0.],[0.,1.8],[.2,.2]])
-    target = np.array([1.5,.5,.8,.9,.3])
-    rows = mapping/target[:,None]
-    h = rows.T@rows+np.eye(2)/target.sum()**2
-    linear = rows.T@np.ones(5)
-    exposure = lambda s:.05*(1.+np.exp((.1*s-.05)*.1))
-    top = brentq(lambda s:s*exposure(s)-.12,.75,2.25,xtol=1e-14)
-    direction = np.array([-1.,1.])
-    def candidate(s):
-        low = max(.25,s-1.5)
-        high = min(.75,s-.5,.04/exposure(s))
-        if low > high+1e-12:return np.array([np.nan,np.nan]),np.inf
-        origin = np.array([s,0.])
-        y = np.clip(direction@(linear-h@origin)/(direction@h@direction),low,high)
-        z = np.array([s-y,y])
-        objective = np.sum((rows@z-1.)**2)+np.sum(z*z)/target.sum()**2
-        return z,float(objective)
-    grid = np.linspace(.75,top,points)
-    choices = [candidate(s) for s in grid]
-    for i in range(1,len(grid)-1):
-        if choices[i][1] <= min(choices[i-1][1],choices[i+1][1]):
-            opt = minimize_scalar(lambda s:candidate(s)[1],bounds=(grid[i-1],grid[i+1]),
-                                  method='bounded',options={'xatol':1e-14})
-            choices.append(candidate(opt.x))
-    z,obj = min(choices,key=lambda c:c[1])
-    return z,obj,exposure(z.sum())
 
 
 @pytest.mark.parametrize('seed', [None,(.5,.25),(.6,.3),(1.,.5)])
@@ -703,80 +1684,6 @@ def test_constraint_forward_floor_unit_equivalence():
         y = (h.mass_j_liquid0[1,j]-h.mass_j_liquid0[0,j])*10000./(2.*dt)
         physical.append(np.array([x,y]))
     assert np.max(abs(physical[0]-physical[1]))/1e-7 < 1e-6
-
-
-def constraint_small_closure(matrix, lower, upper, internal=()):
-    from PharmaPy.Metabolic.network import MetabolicNetworkDefinition, ReactionDefinition
-    from PharmaPy.Metabolic.closures.reconciled import RateReconciledMFAClosure
-    matrix = np.asarray(matrix, dtype=float)
-    metabolites = tuple(f'm{i}' for i in range(len(matrix)))
-    reactions = tuple(ReactionDefinition(
-        f'r{j}', dict(zip(metabolites, matrix[:, j])), lo, hi)
-        for j, (lo, hi) in enumerate(zip(lower, upper)))
-    network = MetabolicNetworkDefinition('edge', '1', metabolites, reactions, {'r0': 1.})
-    return RateReconciledMFAClosure(network, internal)
-
-
-def constraint_problem(closure, value, availability=None, targets=None):
-    """Bind real optimizer and qualification contracts for small synthetic QPs.
-
-    Parameters
-    ----------
-    closure : RateReconciledMFAClosure
-        Synthetic network with dimensionless flux coordinates.
-    value : float
-        Target for r0 [-], when explicit targets are absent.
-    availability : InventoryAvailability or None
-        Additional declared inventory constraints.
-    targets : sequence or None
-        Explicit residual targets with unit scales [-].
-
-    Returns
-    -------
-    tuple
-        Real optimization callback, candidate qualification callback, and
-        quadratic terms. No solver or constraint is replaced by a test double.
-    """
-    from functools import partial
-    from scipy.linalg import null_space
-    from scipy.optimize import LinearConstraint, NonlinearConstraint
-    from PharmaPy.Metabolic.closures import reconciled as r
-    lower, upper = closure.network.lower_bounds, closure.network.upper_bounds  # [-]
-    targets = targets if targets is not None else (r.ReconciliationTarget('r0', value, 1.),)
-    terms = r._make_terms(closure.network, closure.internal_reaction_ids, targets, 1.)
-    free = lower != upper
-    offset = np.where(free, 0., lower)  # [-]
-    scales = np.ones(len(lower))  # [-], fixtures use unit coordinate scales
-    matrix = closure.network.stoichiometric_matrix  # [-]
-    equality, rhs = matrix[:, free], -matrix @ offset  # [-]
-    low, high = lower[free], upper[free]  # [-]
-    tangent = null_space(equality)  # [-]
-    expand = partial(r._reconciliation_expand, offset=offset, free=free, variable_scale=scales)
-    feasible = partial(r._reconciliation_feasible_flux, free=free, variable_scale=scales,
-        closure=closure, lower=lower, upper=upper, availability=availability,
-        equality=equality, rhs=rhs, low=low, high=high)
-    certified = partial(r._reconciliation_certified, availability=availability, lower=lower,
-        upper=upper, matrix=matrix, terms=terms, closure=closure)
-    qualified = partial(r._reconciliation_qualified, feasible_flux=feasible, free=free,
-        variable_scale=scales, terms=terms, low=low, high=high, closure=closure,
-        availability=availability, tangent=tangent, equality=equality,
-        narrow=np.zeros(len(lower), dtype=bool), certified=certified)
-    constraints = [LinearConstraint(equality, rhs, rhs)]
-    if availability is not None:
-        constraints.append(NonlinearConstraint(availability.residual, 0., np.inf,
-                                               jac=availability.jacobian))
-    optimize = partial(r._reconciliation_optimize, constraints=constraints, low=low,
-        high=high, tangent=tangent, reduced=equality, reduced_rhs=rhs, expand=expand,
-        terms=terms, qualified=qualified, equality=equality, availability=availability,
-        closure=closure, free=free, variable_scale=scales)
-    return optimize, qualified, terms
-
-
-def constraint_solve_small(closure, value, scale=1.):
-    from PharmaPy.Metabolic.closures.base import MetabolicEnvironment
-    from PharmaPy.Metabolic.closures.reconciled import ReconciliationTarget
-    return closure.solve(MetabolicEnvironment({}, {}),
-                         targets=(ReconciliationTarget('r0', value, scale),), internal_scale=1.)
 
 
 @pytest.mark.parametrize('factor', [1e-10, 1., 1e10])
@@ -919,187 +1826,6 @@ def test_flux_variability_retains_analytical_intervals():
     # J=x^2+(x-2)^2=2+2(x-1)^2; the 10% ceiling is 2.2.
     np.testing.assert_allclose(result.fva_intervals['r0'],
                                [1.-np.sqrt(.1), 1.+np.sqrt(.1)], atol=1e-7)
-
-
-# Operation qualification
-
-OPERATION_BASE = Path(__file__).parents[2]/'tests/Bioreactor/fixtures/reconciliation/operating_transitions'
-OPERATION_CASES = sorted(p.name for p in (OPERATION_BASE/'inputs').iterdir() if p.is_dir())
-OPERATION_SCALES = np.array([1.,1.,1.,.1,1.,1.,1.,.0001])
-
-
-def operation_load(name, backend='fixed-step', step=.001):
-    folder = OPERATION_BASE/'inputs'/name
-    case = read_input_json((folder/'case.json'))
-    config = read_input_json((folder/'mechanism.json'))
-    case['numerics']['step']['value'] = step
-    if backend == 'scipy':
-        case['numerics'].update(backend='scipy', relative_tolerance=1e-10,
-            absolute_tolerance=1e-15, maximum_step={'value':.002,'unit':'day'},
-            jacobian_relative_step=1e-5, jacobian_state_scale=1e-6)
-    return case, config, folder/'thermo.json'
-
-
-def operation_optimum(config, limits=(np.inf,np.inf)):
-    """Enumerate the unconstrained minimum, edges and vertices of a 2-D QP."""
-    growth = config['parameters']['rates']['g'] > 0.
-    b = .2 if growth else 0.
-    mapping = np.array([[1.,1.],[0.,1.],[1.-b,0.],[0.,2.-b],[b,b]])
-    target = np.array([config['parameters']['rates'][n] for n in ('ua','ub','p','q','g')])
-    relative = config['model']['reconciliation']['reconciliation_policy'] == 'relative-regularized'
-    weights = 1./np.maximum(abs(target),1e-6) if relative else np.ones(5)
-    rows = weights[:,None]*mapping
-    hessian = rows.T@rows + (np.eye(2)/max(abs(sum(target)),1e-6)**2 if relative else 0.)
-    linear = rows.T@(weights*target)
-    constraints = np.vstack((-np.eye(2),mapping,[1.,1.],[0.,1.]))
-    bounds = np.r_[0.,0.,np.full(5,10.),limits]
-    if relative:
-        constraints = np.vstack((constraints,mapping,-mapping))
-        bounds = np.r_[bounds,1.5*target,-.5*target]
-    keep = np.isfinite(bounds) & (np.linalg.norm(constraints,axis=1)>0.)
-    constraints,bounds = constraints[keep],bounds[keep]
-    candidates = [np.linalg.solve(hessian,linear)]
-    for row,bound in zip(constraints,bounds):
-        system = np.block([[hessian,row[:,None]],[row[None,:],np.zeros((1,1))]])
-        candidates.append(np.linalg.solve(system,np.r_[linear,bound])[:2])
-    for i,j in combinations(range(len(bounds)),2):
-        if abs(np.linalg.det(constraints[[i,j]])) > 1e-12:
-            candidates.append(np.linalg.solve(constraints[[i,j]],bounds[[i,j]]))
-    candidates = [z for z in candidates if np.max(constraints@z-bounds) <= 1e-11]
-    if not candidates:
-        raise ValueError('independent policy infeasible')
-    z = min(candidates,key=lambda z:z@hessian@z-2*linear@z)
-    return mapping@z
-
-
-def operation_initial(config):
-    state = config['state']
-    return np.array([state['species']['amounts'][n] for n in ('nutrient_a','nutrient_b','byproduct')]
-        +[state['product_g'],state['viable_cells_million'],state['dead_cells_million'],1.,state['integral']])
-
-
-def operation_reference(case, config, histories, continuous=False, precision=1.):
-    """Piecewise exact inventories/jumps; independent tight ODE only for growth."""
-    state, inlets, answer = operation_initial(config), {}, []
-    native = case['operation']['volume_policy'] == 'native'
-    growth = config['parameters']['rates']['g'] > 0.
-    for history in histories:
-        times = history.time/86400.
-        for event in config['recipes']['benchmark']:
-            if abs(event['time']['value']-times[0]) > 1e-12:
-                continue
-            kind = event['event_type']
-            if kind == 'flow':
-                flow = event['volume_flow']['value']
-                conc = event['concentrations']['values']
-                inlets[event.get('inlet','inlet')] = (flow,flow*np.array([conc.get(n,0.) for n in ('nutrient_a','nutrient_b')]))
-            elif kind == 'sample':
-                volume = event['volume']['value']
-                state[:6] *= 1.-volume/state[6]
-                state[6] -= volume
-            else:
-                volume = event['volume']['value']
-                state[:2] += volume*np.array([event['concentrations']['values'].get(n,0.) for n in ('nutrient_a','nutrient_b')])
-                state[6] += volume
-        flow = sum(v[0] for v in inlets.values())
-        supply = sum((v[1] for v in inlets.values()),start=np.zeros(2))
-        if growth and continuous:
-            death = config['parameters']['rates']['death']
-            def rhs(t,y):
-                limits = np.where(y[:2] <= 1e-12,supply/y[4],np.inf)
-                ua,ub,p,q,g = operation_optimum(config,limits)
-                net = supply-y[4]*np.array([ua,ub])
-                net[abs(net)<1e-13] = 0.
-                return [*net,q*y[4],.1*p*y[4],
-                        (g/2.-death)*y[4],death*y[4],flow,y[4]/(1000.*y[6])]
-            solution = solve_ivp(rhs,(times[0],times[-1]),state,t_eval=times,
-                                 method='DOP853',rtol=3e-13,atol=3e-15*precision,max_step=.001*precision)
-            assert solution.success
-            rows = solution.y.T
-        else:
-            rows = [state.copy()]
-            for dt in np.diff(times):
-                remaining = dt
-                while remaining > 1e-14:
-                    limits = (np.where(state[:2] <= 1e-12,supply/state[4],np.inf) if continuous
-                              else (np.maximum(state[:2],0.)/remaining+supply)/state[4])
-                    ua,ub,p,q,g = operation_optimum(config,limits)
-                    death = config['parameters']['rates']['death']
-                    if growth:
-                        capacity = np.maximum(state[:2],0.)/remaining+supply
-                        def exposure_balance(average):
-                            growth_flux = operation_optimum(config,capacity/average)[4]
-                            return average-.5*state[4]*(1.+np.exp((growth_flux/2.-death)*remaining))
-                        average = brentq(exposure_balance,.5*state[4],
-                            .5*state[4]*(1.+np.exp(5.*remaining)),xtol=1e-14)
-                        ua,ub,p,q,g = operation_optimum(config,capacity/average)
-                    end_viable = state[4]*np.exp((g/2.-death)*remaining) if growth else state[4]
-                    exposure = .5*(state[4]+end_viable)
-                    derivative = np.r_[supply-exposure*np.array([ua,ub]),q*exposure,.1*p*exposure]
-                    duration = remaining
-                    if continuous:
-                        consuming = (derivative[:2] < -1e-12) & (state[:2] > 1e-12)
-                        duration = min(duration,np.min(state[:2][consuming]/-derivative[:2][consuming],initial=np.inf))
-                    volume_rate = flow-(.0001*(p+g)*exposure if native else 0.)
-                    if continuous and abs(volume_rate)>1e-15:
-                        state[7] += exposure/(1000.*volume_rate)*np.log1p(volume_rate*duration/state[6])
-                    else:
-                        state[7] += duration*exposure/(1000.*state[6])
-                    state[:4] += duration*derivative
-                    state[6] += volume_rate*duration
-                    if growth:
-                        state[5] += state[4]*(1.-np.exp(-death*duration))
-                        state[4] = end_viable
-                    remaining -= duration
-                rows.append(state.copy())
-            rows = np.asarray(rows)
-        answer.append(rows)
-        state = rows[-1].copy()
-    return answer
-
-
-def operation_run(case, config, thermo):
-    assembly = build_bioreactor(case,config,thermo)
-    report = dict(closure_calls=0,max_scaled_feasibility=0.)
-    solve = assembly.mechanism.closure.solve
-    def checked(*args,**kwargs):
-        solution = solve(*args,**kwargs)
-        report['closure_calls'] += 1
-        scale = max(1.,max(abs(solution.fluxes)))
-        operation_error = max(solution.mass_balance_residual_inf,solution.bound_violation_inf)/scale
-        availability = kwargs.get('availability')
-        if availability is not None:
-            operation_error = max(operation_error,-np.min(availability.residual(solution.fluxes)))
-        report['max_scaled_feasibility'] = max(report['max_scaled_feasibility'],float(operation_error))
-        assert operation_error <= 1e-8
-        return solution
-    assembly.mechanism.closure.solve = checked
-    previous = signal.getsignal(signal.SIGALRM)
-    def timeout(*args):
-        raise TimeoutError('Operating-transition small-system run exceeded the 60-second campaign guard')
-    signal.signal(signal.SIGALRM,timeout)
-    signal.alarm(60)
-    start = time.perf_counter()
-    try:
-        histories = assembly.solve()
-    finally:
-        report['runtime_s'] = time.perf_counter()-start
-        signal.alarm(0)
-        signal.signal(signal.SIGALRM,previous)
-    return assembly,histories,report
-
-
-def operation_error(assembly,histories,expected):
-    return max(float(np.max(abs(network_observed(assembly,h)-r)/OPERATION_SCALES)) for h,r in zip(histories,expected))
-
-
-def operation_record_refinement(name, values):
-    if os.environ.get('BIOREACTOR_VERIFICATION_OUTPUT'):
-        path = Path(os.environ['BIOREACTOR_VERIFICATION_OUTPUT'])/'refinement.json'
-        path.parent.mkdir(parents=True, exist_ok=True)
-        report = read_input_json(path) if path.exists() else {}
-        report[name] = values
-        path.write_text(json.dumps(report,indent=2)+'\n')
 
 
 @pytest.mark.parametrize('name',OPERATION_CASES)
@@ -1246,12 +1972,7 @@ def test_operation_equivalent_units_and_names(name,backend,tmp_path):
     names=['nutrient_a','nutrient_b','byproduct']
     identifiers=names+config['network']['internal_metabolites']+[r['identifier'] for r in config['network']['reactions']]+['first','second']
     rename={name:'renamed_'+str(i) for i,name in enumerate(identifiers)}
-    def transform(value):
-        if isinstance(value,dict):
-            return {rename.get(k,k):transform(v) for k,v in reversed(list(value.items()))}
-        if isinstance(value,list):
-            return [transform(v) for v in value]
-        return rename.get(value,value) if isinstance(value,str) else value
+    transform = partial(_rename_operation_inputs, rename=rename)
     config=transform(config)
     for rule in config['model']['kinetics']['rule_graph']:
         rule['expression']['parameter']='.'.join(rename.get(x,x) for x in rule['expression']['parameter'].split('.'))
@@ -1282,8 +2003,8 @@ def test_operation_continuation_does_not_replay_old_events():
 @pytest.mark.parametrize('backend',['fixed-step','scipy'])
 def test_operation_pathway_receives_native_continuous_supply(backend):
     folder=Path(__file__).parents[2]/'examples/bioreactors/generic_fed_batch/inputs'
-    case=read_input_json((folder/'case.json'))
-    config=read_input_json((folder/'mechanism.json'))
+    case=read_input_json(folder/'case.json')
+    config=read_input_json(folder/'mechanism.json')
     case['operation']['runtime']={'value':.06,'unit':'h'}
     case['operation']['volume_policy']='working-volume'
     case['numerics']=operation_load('combined',backend)[0]['numerics']
@@ -1475,3 +2196,39 @@ def test_reference_comparison_preserves_event_sides_and_requires_coverage():
     assert compare(rows,reference,np.array([1.]),require_all=True)==.25
     with pytest.raises(ValueError,match='every saved time'):
         compare(np.array([[0.,.5,1.5]]),reference,np.array([1.]),require_all=True)
+
+
+def test_operation_budget_retains_the_deadline_boundary():
+    _check_operation_budget(OPERATION_TIMEOUT_S)
+    with pytest.raises(TimeoutError, match='60-second campaign guard'):
+        _check_operation_budget(OPERATION_TIMEOUT_S + 1.)
+
+
+def test_operation_observer_counts_every_real_closure_return_and_restores_profile():
+    case, config, thermo = operation_load('single')
+    previous = sys.getprofile()
+    _, observed, report = operation_run(case, config, thermo)
+    assert sys.getprofile() is previous
+    assembly = build_bioreactor(case, config, thermo)
+    profile = cProfile.Profile()
+    reference = profile.runcall(assembly.solve)
+    code = assembly.mechanism.closure.solve.__func__.__code__
+    count = sum(entry.callcount for entry in profile.getstats() if entry.code is code)
+    assert count > 0
+    assert report['closure_calls'] == count
+    assert len(observed) == len(reference)
+    for actual, expected in zip(observed, reference):
+        np.testing.assert_array_equal(actual.time, expected.time)
+        np.testing.assert_array_equal(actual.mass_j_liquid0, expected.mass_j_liquid0)
+
+
+def test_operation_observer_restores_profile_after_real_infeasibility():
+    case, config, thermo = operation_load('single')
+    for reaction in config['network']['reactions']:
+        # [model flux unit], fix an unbalanced uptake and close every other reaction.
+        flux = 1. if reaction['identifier'] == 'ua' else 0.
+        reaction['lower'] = reaction['upper'] = flux
+    previous = sys.getprofile()
+    with pytest.raises(MetabolicInfeasibleError, match='rate-reconciled MFA failed: all fluxes fixed'):
+        operation_run(case, config, thermo)
+    assert sys.getprofile() is previous

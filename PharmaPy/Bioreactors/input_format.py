@@ -58,6 +58,7 @@ STATE_V2_FIELDS = (
 )
 
 
+# Validate fields and normalize the supported input layouts.
 def _parameters(values, prefix=""):
     """Read compact coefficient groups as the solvers' named scalar parameters.
 
@@ -132,6 +133,58 @@ def _provider_input(value):
     return result
 
 
+def _keys(value, fields, name):
+    """Require a mapping to contain exactly the declared fields.
+
+    Parameters
+    ----------
+    value : object
+        Candidate mapping.
+    fields : Iterable[str]
+        Required field names.
+    name : str
+        Section label for error messages.
+
+    Raises
+    ------
+    ValueError
+        ``value`` is not a mapping, or its keys differ from ``fields``.
+    """
+    if not isinstance(value, dict) or set(value) != set(fields):
+        unknown = sorted(set(value) - set(fields)) if isinstance(value, dict) else []
+        detail = f"; unsupported {unknown}" if unknown else ""
+        raise ValueError(f"{name} requires exactly {list(fields)}{detail}")
+
+
+def _active(value, fields, name):
+    """Keep active fields and require every inactive field to be null.
+
+    Parameters
+    ----------
+    value : Mapping
+        Section declaration.
+    fields : Iterable[str]
+        Fields used by the selected mechanism.
+    name : str
+        Section label for error messages.
+
+    Returns
+    -------
+    dict
+        Active, non-null fields only.
+
+    Raises
+    ------
+    ValueError
+        An inactive field carries a value.
+    """
+    inactive = [key for key, item in value.items() if key not in fields and item is not None]
+    if inactive:
+        raise ValueError(f"inactive {name} fields must be null: {inactive}")
+    return {key: item for key, item in value.items() if key in fields and item is not None}
+
+
+# Translate version-two declarations without introducing model defaults.
 def _version_two(case, definition):
     """Translate a schema-version-2 mechanism declaration in place.
 
@@ -221,57 +274,7 @@ def _version_two(case, definition):
     definition["schema_version"] = 1
 
 
-def _keys(value, fields, name):
-    """Require a mapping to contain exactly the declared fields.
-
-    Parameters
-    ----------
-    value : object
-        Candidate mapping.
-    fields : Iterable[str]
-        Required field names.
-    name : str
-        Section label for error messages.
-
-    Raises
-    ------
-    ValueError
-        ``value`` is not a mapping, or its keys differ from ``fields``.
-    """
-    if not isinstance(value, dict) or set(value) != set(fields):
-        unknown = sorted(set(value) - set(fields)) if isinstance(value, dict) else []
-        detail = f"; unsupported {unknown}" if unknown else ""
-        raise ValueError(f"{name} requires exactly {list(fields)}{detail}")
-
-
-def _active(value, fields, name):
-    """Keep active fields and require every inactive field to be null.
-
-    Parameters
-    ----------
-    value : Mapping
-        Section declaration.
-    fields : Iterable[str]
-        Fields used by the selected mechanism.
-    name : str
-        Section label for error messages.
-
-    Returns
-    -------
-    dict
-        Active, non-null fields only.
-
-    Raises
-    ------
-    ValueError
-        An inactive field carries a value.
-    """
-    inactive = [key for key, item in value.items() if key not in fields and item is not None]
-    if inactive:
-        raise ValueError(f"inactive {name} fields must be null: {inactive}")
-    return {key: item for key, item in value.items() if key in fields and item is not None}
-
-
+# Expose the common forward-input contract to all callers.
 def split_forward_inputs(document: dict) -> tuple[dict, dict]:
     """Unpack a combined schema-3 declaration without changing model values.
 
@@ -328,6 +331,8 @@ def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> t
     -------
     tuple of dict
         ``(case, definition)`` deep copies in the internal schema-1 layout.
+        Normalized pathway inputs retain parameters inside ``model``; this
+        layout can be passed back through the same public construction API.
         Relationship families are expanded; units are converted only where the
         internal layout fixes them (see ``_version_two``).
 
@@ -360,7 +365,9 @@ def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> t
     if definition.get("schema_version") == 2:
         _version_two(case, definition)
     if definition['model'].get('rule_graph') is not None:
-        definition['model'] = expand_relationships(definition['model'], definition['parameters'])
+        parameters = (definition['parameters'] if 'parameters' in definition
+                      else definition['model']['parameters'])  # [declared parameter units]
+        definition['model'] = expand_relationships(definition['model'], parameters)
     if "schema_version" not in definition:
         return case, definition
     _keys(definition, MECHANISM_FIELDS, "mechanism")

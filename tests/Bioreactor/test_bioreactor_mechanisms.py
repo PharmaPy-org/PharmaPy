@@ -1,3 +1,4 @@
+from functools import partial
 import copy
 import json
 from .input_helpers import read_input_json
@@ -15,7 +16,123 @@ from PharmaPy.Phases_Refactored import LiquidPhase
 from PharmaPy.Reactors_Refactored import BatchReactor, SemiBatchReactor
 
 
+from PharmaPy.Metabolic import MetabolicNetworkDefinition, ReactionDefinition
+
+
+# Real fixture construction and independent qualification helpers.
+class _AlgebraicTestMechanism(Mechanism):
+    def __init__(self):
+        """Initialize the real analytical fixture and its declared native state contract.
+
+        """
+        super().__init__()
+        self.constraint = 2.0
+        self.solver_states = (
+            StateVariable("constraint", 1, "-", state_type="alg"),
+        )
+        self._update_exposed_attributes(); self._timers = {}
+
+    def get_overrides(self, name=None):
+        """Preserve the native no-property-override contract.
+
+        Parameters
+        ----------
+        name : str or None
+            Requested native property; None enumerates overrides.
+
+        Returns
+        -------
+        dict or None
+            Empty mapping for enumeration, otherwise no named override.
+        """
+        return {} if name is None else None
+
+    def get_solver_state_rates(self, process, phase, **kwargs):
+        """Evaluate the analytical fixture's actual material-rate equations.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Native process and phase reference for returned species rates [kg/s].
+        phase : LiquidPhase
+            Real liquid phase carrying component masses [kg] and temperature [K].
+        **kwargs : dict
+            Additional native call options; unused options do not alter this analytical fixture.
+
+        Returns
+        -------
+        TransferResult
+            Species mass rates [kg/s], native auxiliary handoff, and net mass rate [kg/s].
+        """
+        return TransferResult({StateKey("mass_j", process.phaseref):
+                               np.zeros(phase.num_species)}, {}, 0.0)
+
+    def get_solver_state_residuals(self, completed_state, **kwargs):
+        """Evaluate the analytical algebraic mass constraint.
+
+        Parameters
+        ----------
+        completed_state : dict
+            Native named state mapping; species masses [kg], temperature [K], and auxiliary states in their declared units.
+        **kwargs : dict
+            Additional native call options; unused options do not alter this analytical fixture.
+
+        Returns
+        -------
+        dict
+            Named algebraic residuals [kg], in the native constraint order.
+        """
+        key = self.solver_state_keys[0]
+        return {key: completed_state[key] - 2.0}
+def _conservation_network(stoichiometry, exchanges=()):
+    """Construct the real two-species conservation-audit network.
+
+    Parameters
+    ----------
+    stoichiometry : dict
+        Species-to-stoichiometric-coefficient mapping [-].
+    exchanges : sequence of str
+        Reaction identifiers declared as boundary exchanges.
+
+    Returns
+    -------
+    MetabolicNetworkDefinition
+        Synthetic network with bounds in its declared model flux unit.
+    """
+    return MetabolicNetworkDefinition(
+        'audit', '1', ('A', 'B'),
+        [ReactionDefinition('convert', stoichiometry, 0., 10.),
+         ReactionDefinition('feed', {'A': 1.}, 0., 10.)],
+        {'convert': 1.}, exchanges)
+
+
+def _closed_uptake_network(reactions, **kwargs):
+    """Construct the real network for resource-free-production checks.
+
+    Parameters
+    ----------
+    reactions : sequence of ReactionDefinition
+        Real native metabolic-network reaction declarations and flux bounds.
+    **kwargs : dict
+        Additional native call options; unused options do not alter this analytical fixture.
+
+    Returns
+    -------
+    MetabolicNetworkDefinition
+        Synthetic network preserving the supplied reaction and boundary declarations.
+    """
+    return MetabolicNetworkDefinition('test', '1', ('A', 'B'), reactions,
+                                      {'export': 1.}, ('feed', 'export'), **kwargs)
+
+
 def _definition():
+    """Declare the synthetic model used by this module's real collaborators.
+
+    Returns
+    -------
+    dict
+        Model declaration; scientific units and bases follow the explicit fixture fields.
+    """
     return {
         "state_ids": ["glucose", "acetate", "oxygen"],
         "pathway_ids": ["v1", "v2", "v3", "v4"],
@@ -62,6 +179,7 @@ def _definition():
     }
 
 
+# Public-path regressions, independent balances, and failure qualification.
 def test_pathway_mechanism_is_dimension_independent():
     payload = _definition()
     payload["pathway_ids"] = ["growth"]
@@ -162,26 +280,6 @@ def test_adaptive_backend_enforces_depletion_as_a_hard_boundary():
     assert glucose[-1] == 0.0
 
 
-class _AlgebraicTestMechanism(Mechanism):
-    def __init__(self):
-        super().__init__()
-        self.constraint = 2.0
-        self.solver_states = (
-            StateVariable("constraint", 1, "-", state_type="alg"),
-        )
-        self._update_exposed_attributes(); self._timers = {}
-
-    def get_overrides(self, name=None): return {} if name is None else None
-
-    def get_solver_state_rates(self, process, phase, **kwargs):
-        return TransferResult({StateKey("mass_j", process.phaseref):
-                               np.zeros(phase.num_species)}, {}, 0.0)
-
-    def get_solver_state_residuals(self, completed_state, **kwargs):
-        key = self.solver_state_keys[0]
-        return {key: completed_state[key] - 2.0}
-
-
 def test_native_vessel_assembles_differential_algebraic_residual():
     thermo = Path(__file__).parents[2] / "examples/bioreactors/batch_ecoli_dfba/inputs/thermo.json"
     phase = LiquidPhase(thermo, mass=1.0, mass_frac=np.full(4, 0.25), verbose=False)
@@ -200,12 +298,7 @@ def test_native_vessel_assembles_differential_algebraic_residual():
 def test_network_conservation_audit_distinguishes_internal_and_boundary_reactions():
     from PharmaPy.Metabolic import MetabolicNetworkDefinition, ReactionDefinition
 
-    def network(stoichiometry, exchanges=()):
-        return MetabolicNetworkDefinition(
-            'audit', '1', ('A', 'B'),
-            [ReactionDefinition('convert', stoichiometry, 0., 10.),
-             ReactionDefinition('feed', {'A': 1.}, 0., 10.)],
-            {'convert': 1.}, exchanges)
+    network = _conservation_network
 
     balanced = network({'A': -1., 'B': 2.}, ('feed',))
     before = balanced.stoichiometric_matrix.copy()
@@ -269,9 +362,7 @@ def test_closed_uptake_audit_detects_resource_free_production():
     export = ReactionDefinition('export', {'B': -1.}, 0., 10.)
     balanced = ReactionDefinition('convert', {'A': -1., 'B': 1.}, 0., 10.)
     source = ReactionDefinition('source', {'B': 1.}, 0., 10.)
-    def network(reactions, **kwargs):
-        return MetabolicNetworkDefinition('test', '1', ('A', 'B'), reactions,
-                                          {'export': 1.}, ('feed', 'export'), **kwargs)
+    network = _closed_uptake_network
     assert network([feed, export, balanced]).audit_closed_uptake()['status'] == 'PASS'
     audit = network([feed, export, balanced, source]).audit_closed_uptake()
     assert audit['status'] == 'FAIL'
@@ -299,3 +390,13 @@ def test_closed_uptake_audit_does_not_pass_an_infeasible_closed_model():
         ReactionDefinition('export', {'A': -1.}, 0., 10.)],
         {'export': 1.}, ('feed', 'export'))
     assert n.audit_closed_uptake()['status'] == 'NOT_ASSESSED'
+
+
+def test_pathway_policy_annotation_resolves_on_supported_python():
+    """Resolve the optional policy on real supported interpreters, including 3.9."""
+    from collections.abc import Mapping
+    from typing import get_args, get_type_hints
+    from PharmaPy.Metabolic.pathways import PathwayModelDefinition
+
+    annotation = get_type_hints(PathwayModelDefinition)["secondary_optimization"]
+    assert set(get_args(annotation)) == {Mapping, type(None)}

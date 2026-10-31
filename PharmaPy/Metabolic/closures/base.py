@@ -17,6 +17,7 @@ from numpy.typing import NDArray
 FloatArray = NDArray[np.float64]
 
 
+# Declare shared metabolic inputs and immutable solution outputs.
 @dataclass(frozen=True)
 class MetabolicEnvironment:
     """Describe bound overrides and context for one closure evaluation.
@@ -122,6 +123,7 @@ class FluxSolution:
                     active_lower=list(self.active_lower), active_upper=list(self.active_upper))
 
 
+# Keep numerical failure distinct from a physically infeasible model.
 class MetabolicNumericalError(RuntimeError):
     """Report an unresolved solve, not evidence of physical infeasibility."""
 

@@ -8,6 +8,7 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   TransferResult,StateEvent
 )
 from PharmaPy.Phases_Refactored import BasePhase
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from time import perf_counter
 
 eps = np.finfo(float).eps
@@ -725,21 +726,29 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         self,
         liquid,
     ):
-        "Express the liquid in whatever basis the solubility is stated in."
+        """Evaluate concentration, supersaturation driving force, and solubility.
+
+        Parameters
+        ----------
+        liquid : BasePhase
+            Liquid phase containing the crystallizing species and solvent.
+
+        Returns
+        -------
+        conc : ndarray
+            Species concentrations in the declared solubility basis.
+        supersat : float or ndarray
+            Supersaturation driving force on the declared ``sup_sat_type``
+            basis (``c - c_sat`` for ``'absolute'``, ``(c - c_sat) / c_sat``
+            for ``'relative'`` and deprecated ``'ratio'``).
+        solubility : float or ndarray
+            Equilibrium solubility in the declared solubility basis.
+        """
         conc = self.liquid_in_solubility_basis(liquid)
-        
         conc_target = conc.T[self.target_ind]
-        
-        # Supersaturation
         solubility = self.mechanism_kinetics.get_solubility(liquid.temp, conc)
-        supersat = (conc_target - solubility)
+        supersat = self.mechanism_kinetics._driving_force(conc_target, solubility)
 
-        if self.mechanism_kinetics.sup_sat_type == 'relative':
-            supersat = supersat / solubility
-
-        if self.mechanism_kinetics.sup_sat_type == 'ratio':
-            supersat = supersat / solubility + 1
-        
         return conc, supersat, solubility
 
     # ------------------------------------------------------------------
@@ -767,6 +776,45 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         rates[mask] = -crystal_mass_rate/ len(mask)
 
         return rates
+
+    def transfer_volume_rate(self, crystal_mass_rate, species_rates, liquid):
+        """Rate at which the transfer changes the slurry volume.
+
+        Parameters
+        ----------
+        crystal_mass_rate : float
+            Mass rate into the crystals [kg/s], negative for dissolution.
+        species_rates : ndarray
+            Mass rates of the liquid species [kg/s], shape
+            ``(num_species,)``, as ``compute_species_transfer`` returns them.
+        liquid : BasePhase
+            Liquid the crystals are suspended in.
+
+        Returns
+        -------
+        float
+            Rate of change of the slurry volume [m**3/s]: the crystal volume
+            gained at the crystal density plus the liquid volume lost at the
+            pure-species liquid densities.
+
+        Notes
+        -----
+        Exact for the ideal-volume mixing rule of
+        ``ThermoModule.getDensityMix``, under which the liquid volume is
+        ``sum(mass_i / rho_i)``, at constant temperature. The population is
+        carried per m**3 of slurry, so this volume change dilutes or
+        concentrates it; see ``get_dilution_contributions``. With the crystal
+        density equal to the solute's liquid density the two terms cancel,
+        which is why an equal-density fixture never showed the missing term.
+        """
+        rho_liquid_pure, _ = liquid.getDensityPure(
+            'liquid', liquid.temp)  # [kg/m**3] per species
+
+        vol_rate_solid = crystal_mass_rate / self.density  # [m**3/s]
+        vol_rate_liquid = float(np.sum(
+            np.asarray(species_rates, dtype=float) / rho_liquid_pure))  # [m**3/s]
+
+        return vol_rate_solid + vol_rate_liquid
 
     # ------------------------------------------------------------------
     # API for child classes
@@ -1207,8 +1255,9 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         Parameters
         ----------
         net_vol_flow : float
-            Rate of change of the slurry volume, taken as the volumetric
-            inflow minus outflow [m**3/s].
+            Rate of change of the slurry volume [m**3/s]: the volumetric
+            inflow minus outflow, plus the volume the cross-phase transfers
+            create or consume (``transfer_volume_rate``).
         completed_state : dict
             Solver and derived states keyed by ``StateKey``.
 
@@ -1226,15 +1275,21 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             dn/dt = (Q_in n_in - Q_out n) / V  -  n (dV/dt) / V
 
         The inlet and outlet hooks give the first term. This one is the
-        second, with dV/dt = Q_in - Q_out (``net_vol_flow``). It vanishes in
-        an MSMPR whose volume is held, but in a semibatch crystallizer fed
-        with liquid it is what keeps the growing volume from multiplying the
-        crystal mass.
+        second, with dV/dt = Q_in - Q_out + dV_transfer/dt (``net_vol_flow``).
+        It vanishes in an MSMPR whose volume is held, but in a semibatch
+        crystallizer fed with liquid it is what keeps the growing volume
+        from multiplying the crystal mass, and in a closed batch it is what
+        keeps the crystal mass equal to the liquid's loss: solute leaving the
+        liquid at its liquid density and arriving as crystals at the crystal
+        density changes the slurry volume, and without this term the solid
+        mass reconstructed from the per-volume population drifted from the
+        liquid loss by ``phi / (1 - phi) * (1 - rho_crystal / rho_solute)``
+        of the transfer rate.
 
-        dV/dt = Q_in - Q_out holds while the slurry density does not change,
-        so n V is conserved exactly for a feed of the vessel's own liquid. A
-        feed of another density, a temperature change and the volume change
-        of crystallization itself are not counted in dV/dt.
+        The flow part, Q_in - Q_out, holds while the slurry density does not
+        change, so n V is conserved exactly for a feed of the vessel's own
+        liquid. A feed of another density and a temperature change are not
+        counted in dV/dt.
         """
         if not net_vol_flow:
             return {}
@@ -1790,13 +1845,18 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         t0 = perf_counter()
         species_rates_out = self.compute_species_transfer(mass_transfer,liquid)
         self._timers['pop_balance_compute_species_transfer'] = self._timers.get('pop_balance_compute_species_transfer',0)+perf_counter()-t0
+        # The transfer changes the slurry volume, which dilutes the
+        # per-volume population; the vessel adds it to the flow terms.
+        vol_rate = self.transfer_volume_rate(
+            mass_transfer, species_rates_out, liquid)  # [m**3/s]
         t0 = perf_counter()
         state_rates = {StateKey(self.solver_states[0].name,self.owning_phase): dcsd_dt} #if phaseref is a phase instead of a PhaseRef, the vessel will determine the phaseref
         # Species leave or enter the LIQUID, which is the connection's source
         # for crystallization but its sink for dissolution. Keying off the
         # source unconditionally would return dissolved mass to the solid.
         state_rates.update({StateKey('mass_j',self._liquid_phaseref(connection)):species_rates_out})
-        result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer)
+        result = TransferResult(state_rates=state_rates,aux=aux,net_mass_rate=mass_transfer,
+                                net_vol_rate=vol_rate)
         self._timers['pop_balance_format'] = self._timers.get('pop_balance_format',0)+perf_counter()-t0
         return result
 
@@ -1843,7 +1903,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
             ``(num_mom,)``.
         kinetics : CrystKinetics, optional
             Crystallization kinetics, usually set later through the vessel's
-            ``CrystKinetics`` property.
+            ``CrystKinetics`` property. Growth must be size independent.
         density : float, optional
             Crystal density [kg/m3]. None uses the owning phase's density.
         kv : float, optional
@@ -1859,6 +1919,11 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
             scalar or one value per moment. None, the default, keeps the
             integrator's own tolerance.
 
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If ``kinetics`` has size-dependent growth.
+
         Notes
         -----
         Unlike ``OneDFVMMechanism``, the moments declare no tolerance of
@@ -1867,6 +1932,10 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         to the final moments let CVode hold the third moment just below zero
         on a leaner case-study feed, and that batch never crystallized.
         """
+        # The base class stores kinetics without going through the setter.
+        if kinetics is not None:
+            self._reject_size_dependent_growth(kinetics)
+
         super().__init__(
             owning_phase=owning_phase,
             target_components=target_components,
@@ -1910,6 +1979,61 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         )
 
         self._update_exposed_attributes()
+
+    @PopulationBalanceMechanism.mechanism_kinetics.setter
+    def mechanism_kinetics(self, value):
+        """Attach crystallization kinetics the moment closure can carry.
+
+        Parameters
+        ----------
+        value : CrystKinetics or None
+            Kinetics to attach; None leaves the current ones.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If ``value`` has size-dependent growth.
+        """
+        if value is not None:
+            self._reject_size_dependent_growth(value)
+            self._mechanism_kinetics = value
+
+    @staticmethod
+    def _reject_size_dependent_growth(kinetics):
+        """Refuse kinetics whose growth rate depends on crystal size.
+
+        Parameters
+        ----------
+        kinetics : CrystKinetics
+            Kinetics to check. Growth entries past the first three are the
+            size factor ``(1 + beta*L)**alpha`` that ``OneDFVMMechanism``
+            applies: alpha [-], then beta [1/um].
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If those entries are all nonzero, so the size factor is not
+            identically one.
+
+        Notes
+        -----
+        ``dmu_k/dt = k*G*mu_(k-1) + B*rad**k`` closes only for a growth rate G
+        that does not depend on size; a size-dependent G brings in the
+        integral of L**(k-1)*G(L)*n(L), which the moments do not carry. The
+        moment form used to ignore alpha and beta without a warning. With
+        either of them zero the factor is exactly one, so that growth is
+        still size independent.
+        """
+        growth = getattr(kinetics, 'params', {}).get('growth', ())
+        size_factor = np.atleast_1d(np.asarray(growth, dtype=float))[3:5]  # alpha [-], beta [1/um]
+
+        if size_factor.size and np.all(size_factor != 0):
+            raise PharmaPyNonImplementedError(
+                'MomentsPopulationBalance cannot carry size-dependent growth '
+                '(alpha, beta = %s): the moment equations close only for a '
+                'size-independent growth rate. Use OneDFVMMechanism for '
+                'size-dependent growth, or give growth only its first three '
+                'parameters.' % size_factor.tolist())
 
     # ---------------- legacy conversion ----------------
 
@@ -2142,6 +2266,11 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         species_rates_out = self.compute_species_transfer(mass_transfer,
                                                           liquid)
 
+        # The transfer changes the slurry volume, which dilutes the
+        # per-volume moments; the vessel adds it to the flow terms.
+        vol_rate = self.transfer_volume_rate(
+            mass_transfer, species_rates_out, liquid)  # [m**3/s]
+
         aux = {
             'supersat': supersat,
             'solubility': solubility,
@@ -2157,120 +2286,5 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         }
 
         return TransferResult(state_rates=state_rates, aux=aux,
-                              net_mass_rate=mass_transfer)
-
-
-
-
-
-
-
-
-
-def method_of_moments(self, mu, conc, temp, params, rho_cry, vol=1):
-        kv = self.Solid_1.kv # shape factor
-
-        # Kinetics
-        if self.basis == 'mass_frac':
-            rho_liq = self.Liquid_1.getDensity()
-            comp_kin = conc / rho_liq
-        else:
-            comp_kin = conc
-
-        # Kinetic terms
-        mu_susp = mu*(1e-6)**np.arange(self.num_distr) / vol  # m**n/m**3_susp
-        nucl, growth, dissol = self.CrystKinetics.get_kinetics(comp_kin, temp, kv,
-                                                          mu_susp)
-
-        growth = growth * self.CrystKinetics.alpha_fn(conc)
-
-        ind_mom = np.arange(1, len(mu))
-
-        # Model
-        dmu_zero_dt = np.atleast_1d(nucl * vol)
-        dmu_1on_dt = ind_mom * (growth + dissol) * mu[:-1] + \
-            nucl * self.rad**ind_mom
-        dmu_dt = np.concatenate((dmu_zero_dt, dmu_1on_dt))
-
-        # Material balance in kg_API/s --> G in um, u_2 in um**2 (or m**2/m**3)
-        mass_transf = np.atleast_1d(rho_cry * kv * (
-            3*(growth + dissol)*mu[2] + nucl*self.rad**3)) * (1e-6)**3
-
-        return dmu_dt, mass_transf
-
-def fvm_method(self, csd, moms, conc, temp, params, rho_cry,
-                   output='dstates', vol=1):
-
-    mu_2 = moms[2]
-    #assumes solid1 is target
-    kv_cry = self.Solid_1.kv # volumetric shape factor
-
-    # Kinetic terms
-    if self.basis == 'mass_frac':
-        rho_liq = self.Liquid_1.getDensity()
-        comp_kin = conc / rho_liq
-    else:
-        comp_kin = conc
-
-    nucl, growth, dissol = self.CrystKinetics.get_kinetics(comp_kin, temp,
-                                                        kv_cry, moms)
-
-    nucl = nucl * self.scale * vol 
-
-    impurity_factor = self.CrystKinetics.alpha_fn(conc)
-    growth = growth * impurity_factor  # um/s 
-    gparams = self.CrystKinetics.params['growth']
-    
-
-    # dissol = dissol  # um/s
-    boundary_cond = nucl / np.maximum(growth, eps) # num/um or num/um/m**3 initial
-    f_aug = np.concatenate(([boundary_cond]*2, csd, [csd[-1]])) # TODO adjust for reaction or handled by concentration? 
-
-    # Flux source terms
-    f_diff = np.diff(f_aug)
-    
-    # f_diff[f_diff == 0] = eps  # avoid division by zero for theta
-
-    if growth > 0:
-        theta = f_diff[:-1] / (f_diff[1:] + eps*10)
-        # theta = f_diff[:-1] / (f_diff[1:] + eps)
-        # theta = f_diff[:-1] / f_diff[1:]
-    else:
-        theta = f_diff[1:] / (f_diff[:-1] + eps*10)
-        # theta = f_diff[:-1] / (f_diff[1:] + eps)
-        # theta = f_diff[:-1] / f_diff[1:]
-    # Van-Leer limiter
-    limiter = np.zeros_like(f_diff)
-    limiter[:-1] = (np.abs(theta) + theta) / (1 + np.abs(theta))
-    if len(gparams)==3:
-    
-        growth_term = growth * (f_aug[1:-1] + 0.5 * f_diff[1:] * limiter[:-1])
-        dissol_term = dissol * (f_aug[2:] - 0.5 * f_diff[1:] * limiter[1:])
-    else:
-        growth_dependent = growth * (1 + self.x_grid * gparams[4])**gparams[3]
-        dissol_dependent = dissol * (1 + self.x_grid * 0) # TODO add size-dependent dissol params
-        growth_pad = np.append(growth_dependent,growth_dependent[-1])
-        dissol_pad = np.append(dissol_dependent, dissol_dependent[-1])
-        growth_term = growth_pad * (f_aug[1:-1] + 0.5 * f_diff[1:] * limiter[:-1])
-        dissol_term = dissol_pad * (f_aug[2:] - 0.5 * f_diff[1:] * limiter[1:])
-    flux = growth_term + dissol_term
-
-        
-    if output == 'flux':
-        return flux  # TODO: isn't it necessary to divide by dx?
-    elif output=='dstates':
-        dcsd_dt = -np.diff(flux) / self.dx
-
-        # Material bce in kg_API/s --> G in um, mu_2 in m**2 (or m**2/m**3)
-        # AKA R_v (rho_c*kv*d_mu3_d_t)
-        # Handle stoich in material balance
-        if len(gparams)==3:
-            mass_transfer = rho_cry * kv_cry * (
-                3*(growth + dissol)*mu_2 + nucl*self.rad**3) * (1e-6)
-        else:
-            r_m = self.x_grid
-            mass_transfer_growth = np.trapezoid(growth_dependent*csd*r_m**2,r_m)
-            mass_transfer_dissol = np.trapezoid(dissol_dependent*csd*r_m**2,r_m)
-            mass_transfer_nucl = nucl*self.rad**3
-            mass_transfer = rho_cry*kv_cry*3*(mass_transfer_dissol+mass_transfer_growth+mass_transfer_nucl)*1e-18
-        return dcsd_dt, np.array(mass_transfer)
+                              net_mass_rate=mass_transfer,
+                              net_vol_rate=vol_rate)

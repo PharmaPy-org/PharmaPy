@@ -6,6 +6,7 @@ from types import MappingProxyType
 import numpy as np
 
 
+# Flatten configured parameter groups without changing their values.
 def _flatten(values, prefix=""):
     """Flatten nested parameter or constant groups into dotted scalar names.
 
@@ -36,6 +37,7 @@ def _flatten(values, prefix=""):
     return result
 
 
+# Declare ordered biological inputs and the live-state snapshot contract.
 @dataclass(frozen=True)
 class CultureModelDefinition:
     """Declare species-independent kinetics, reconciliation, and rate mappings.
@@ -253,6 +255,7 @@ class CultureSnapshot:
         return self.viable_cells_million / (self.volume_l * 1000.0)
 
 
+# Validate graph dependencies before evaluating any kinetic output.
 def _references(expression, key="ref"):
     """Collect every value stored under one reference key in an expression.
 
@@ -316,6 +319,7 @@ def _validate_graph(definition, outputs=None):
         raise ValueError("kinetic outputs reference undeclared rules")
 
 
+# Evaluate explicit graph operations on the declared physical bases.
 def _evaluate(expr, values, definition, state, conditions, accepted_fluxes=None):
     """Evaluate one rule-graph expression.
 
@@ -406,6 +410,7 @@ def _evaluate(expr, values, definition, state, conditions, accepted_fluxes=None)
     raise ValueError(f"unsupported kinetic operator {op!r}")
 
 
+# Evaluate the validated rate graph in dependency order.
 def evaluate_rule_graph(definition, state, conditions):
     """Evaluate all input-declared scalar kinetic equations in dependency order.
 

@@ -6,6 +6,7 @@ biological ``Mechanism``, and a native ``BatchReactor``,
 ordinary native ``solve_unit`` calls.
 """
 
+from operator import itemgetter
 import json
 from copy import deepcopy
 from collections.abc import Mapping
@@ -36,6 +37,7 @@ _REACTORS = {
 }
 
 
+# Validate declarations and convert only explicitly declared physical units.
 def _require_keys(mapping, required, name, optional=()):
     """Reject missing and inactive configuration fields at each input boundary.
 
@@ -136,6 +138,7 @@ def _quantity_liters(quantity, name):
     return value
 
 
+# Construct native phases and biological mechanisms from normalized inputs.
 def _phase(thermo_path, mass_kg, species_amounts, amount_scale, carrier_species,
            temperature_k=298.15, amount_unit=None):
     """Build the native liquid phase from declared initial solute amounts.
@@ -311,6 +314,7 @@ def _reconciled_mechanism(definition, conditions):
     )
 
 
+# Keep numerical grids and backend choices separate from physical operations.
 def _time_grid(operation, numerics):
     """Build the reporting grid from the runtime and step.
 
@@ -388,6 +392,7 @@ def _integrator(numerics):
     raise ValueError(f"unsupported native bioreactor backend {backend!r}")
 
 
+# Normalize scheduled operations and their physical material handoffs.
 def _event_time_seconds(event, time_unit):
     """Return a recipe event time in seconds.
 
@@ -475,6 +480,45 @@ def _normalize_event(event, phase):
                                                   molecular_weight_g_mol=phase.mw[names.index(name)])
             for name, value in values.items()}
     return event
+
+
+# Build feed compositions before applying material and sensible-heat events.
+def _feed_composition(event):
+    """Validate completeness metadata without inventing unreported nutrients.
+
+    Parameters
+    ----------
+    event : Mapping
+        Recipe event with optional ``composition`` and
+        ``concentrations_mmol_l`` [mmol/L].
+
+    Returns
+    -------
+    str
+        ``'supplied'``, ``'nutrient-free'``, ``'unknown'`` or
+        ``'unspecified'``.
+
+    Raises
+    ------
+    ValueError
+        The status is unsupported or inconsistent with the declared
+        concentrations, or concentrations are negative or nonfinite.
+    """
+    status = event.get("composition", "unspecified")
+    if status not in {"supplied", "nutrient-free", "unknown", "unspecified"}:
+        raise ValueError("feed composition must be supplied, nutrient-free, or unknown")
+    if "composition" in event and event["event_type"] not in {"feed", "stock_to_target", "flow"}:
+        raise ValueError("composition applies only to feed and stock additions")
+    concentrations = event.get("concentrations_mmol_l", {})
+    if not isinstance(concentrations, Mapping) or any(
+            not np.isfinite(float(x)) or float(x) < 0. for x in concentrations.values()):
+        raise ValueError("feed concentrations must be a mapping of finite nonnegative values")
+    if status == "nutrient-free" and any(float(x) != 0. for x in concentrations.values()):
+        raise ValueError("nutrient-free additions cannot contain declared solutes")
+    if status == "supplied" and not concentrations:
+        raise ValueError("supplied composition requires concentrations; use nutrient-free for solvent")
+    return status
+
 
 
 def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
@@ -631,43 +675,9 @@ def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
     phase.updatePhase(mass_j=mass)
 
 
-def _feed_composition(event):
-    """Validate completeness metadata without inventing unreported nutrients.
-
-    Parameters
-    ----------
-    event : Mapping
-        Recipe event with optional ``composition`` and
-        ``concentrations_mmol_l`` [mmol/L].
-
-    Returns
-    -------
-    str
-        ``'supplied'``, ``'nutrient-free'``, ``'unknown'`` or
-        ``'unspecified'``.
-
-    Raises
-    ------
-    ValueError
-        The status is unsupported or inconsistent with the declared
-        concentrations, or concentrations are negative or nonfinite.
-    """
-    status = event.get("composition", "unspecified")
-    if status not in {"supplied", "nutrient-free", "unknown", "unspecified"}:
-        raise ValueError("feed composition must be supplied, nutrient-free, or unknown")
-    if "composition" in event and event["event_type"] not in {"feed", "stock_to_target", "flow"}:
-        raise ValueError("composition applies only to feed and stock additions")
-    concentrations = event.get("concentrations_mmol_l", {})
-    if not isinstance(concentrations, Mapping) or any(
-            not np.isfinite(float(x)) or float(x) < 0. for x in concentrations.values()):
-        raise ValueError("feed concentrations must be a mapping of finite nonnegative values")
-    if status == "nutrient-free" and any(float(x) != 0. for x in concentrations.values()):
-        raise ValueError("nutrient-free additions cannot contain declared solutes")
-    if status == "supplied" and not concentrations:
-        raise ValueError("supplied composition requires concentrations; use nutrient-free for solvent")
-    return status
 
 
+# Preserve saved-time and event-side reporting contracts.
 def _report_grid(time_grid, report_times, fixed_step):
     """Merge requested report times into the native output grid.
 
@@ -712,6 +722,7 @@ def _report_grid(time_grid, report_times, fixed_step):
     return np.union1d(time_grid, new)
 
 
+# Coordinate native segment solves and scheduled state transitions.
 @dataclass
 class NativeBioreactorAssembly:
     """Hold a native reactor and the input-declared schedule used to solve it.
@@ -967,7 +978,7 @@ class NativeBioreactorAssembly:
             return (self.unit.result,)
         scheduled = sorted(
             ((_event_time_seconds(event, self.event_time_unit), index, event)
-             for index, event in enumerate(self.events)), key=lambda item: item[0])
+             for index, event in enumerate(self.events)), key=itemgetter(0))
         # Unit conversion may separate the same instant by a few floating-point
         # ulps. Preserve recipe order within that numerical instant.
         canonical = None
@@ -1008,6 +1019,7 @@ class NativeBioreactorAssembly:
         return tuple(histories)
 
 
+# Assemble the validated declarations through the existing native reactor API.
 def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
                     thermo_path: Optional[Union[str, Path]] = None) -> NativeBioreactorAssembly:
     """Build one input-declared process as an ordinary native reactor object.

@@ -7,9 +7,9 @@ convex; growth-dependent inventory constraints can make it nonlinear, so a
 successful constrained solve is not a certificate of global optimality.
 """
 
+from functools import partial
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from functools import partial
 from types import MappingProxyType
 from typing import Tuple
 
@@ -20,6 +20,36 @@ from scipy.optimize import Bounds, LinearConstraint, NonlinearConstraint, linpro
 from .base import (FluxSolution, MetabolicEnvironment, MetabolicInfeasibleError,
                    MetabolicNumericalError)
 from ..network import MetabolicNetworkDefinition
+
+
+
+
+
+
+# Declare optimizer results, objective terms, and public reconciliation records.
+@dataclass(frozen=True)
+class _QPResult:
+    """Store the subset of optimizer output used by the closure."""
+
+    x: np.ndarray
+    fun: float
+    success: bool
+    status: int
+    message: str
+    stage: str = 'SLSQP'
+
+
+@dataclass(frozen=True)
+class _QuadraticTerms:
+    """Store the precomputed terms of the reconciliation objective."""
+
+    diagonal: np.ndarray
+    linear: np.ndarray
+    target_positions: np.ndarray
+    target_values: np.ndarray
+    target_scales: np.ndarray
+    internal_positions: np.ndarray
+    internal_scale: float
 
 
 @dataclass(frozen=True)
@@ -75,33 +105,75 @@ class ReconciliationDiagnostics:
             "fva_intervals",
             MappingProxyType(dict(self.fva_intervals)),
         )
+# Evaluate original objectives, coordinate maps, and inventory constraints.
+def _reconciliation_objective(
+        flux, terms):
+    """Evaluate the reconciliation objective.
+
+    Parameters
+    ----------
+    flux : ndarray
+        Fluxes.
+    terms : _QuadraticTerms
+        Precomputed objective terms.
+
+    Returns
+    -------
+    float
+        Sum of squared scaled internal fluxes and target residuals [-].
+    """
+    internal = np.sum((flux[terms.internal_positions] / terms.internal_scale) ** 2)
+    reconciled = np.sum(
+        ((flux[terms.target_positions] - terms.target_values) / terms.target_scales) ** 2
+    )
+    return float(internal + reconciled)
 
 
-@dataclass(frozen=True)
-class _QuadraticTerms:
-    """Store the precomputed terms of the reconciliation objective."""
+def _inventory_residual(z: np.ndarray, *, availability, expand) -> np.ndarray:
+    """Evaluate the real inventory contract in free coordinates.
 
-    diagonal: np.ndarray
-    linear: np.ndarray
-    target_positions: np.ndarray
-    target_values: np.ndarray
-    target_scales: np.ndarray
-    internal_positions: np.ndarray
-    internal_scale: float
+    Parameters
+    ----------
+    z : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    availability : LinearInventoryAvailability
+        Real inventory contract; residuals are scaled dimensionless margins.
+    expand : callable
+        Existing map from normalized free coordinates [-] to full model fluxes.
 
-
-@dataclass(frozen=True)
-class _QPResult:
-    """Store the subset of optimizer output used by the closure."""
-
-    x: np.ndarray
-    fun: float
-    success: bool
-    status: int
-    message: str
-    stage: str = 'SLSQP'
+    Returns
+    -------
+    ndarray
+        Scaled inventory margins [-].
+    """
+    return availability.residual(expand(z))
 
 
+def _inventory_jacobian(z: np.ndarray, *, availability, expand, free, variable_scale) -> np.ndarray:
+    """Restrict and scale the real inventory Jacobian.
+
+    Parameters
+    ----------
+    z : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    availability : LinearInventoryAvailability
+        Real inventory contract; residuals are scaled dimensionless margins.
+    expand : callable
+        Existing map from normalized free coordinates [-] to full model fluxes.
+    free : ndarray of bool
+        Mask selecting free full-flux coordinates, shape (n_fluxes,).
+    variable_scale : ndarray
+        Physical flux per normalized coordinate [model flux unit], shape (n_fluxes,).
+
+    Returns
+    -------
+    ndarray
+        Scaled residual derivatives with respect to free coordinates [-].
+    """
+    return availability.jacobian(expand(z))[:, free] * variable_scale[free]
+
+
+# Qualify candidates against original feasibility and optimality contracts.
 def _reconciliation_certified(
         flux, *, availability, lower, upper, matrix, terms, closure):
     """Certify a candidate against the uncollapsed problem's dual bound.
@@ -203,6 +275,26 @@ def _reconciliation_feasible_flux(
             and np.max(z - high, initial=0.) <= closure.tolerance)
 
 
+def _reconciliation_gradient(
+        flux, terms):
+    """Evaluate the reconciliation objective gradient.
+
+    Parameters
+    ----------
+    flux : ndarray
+        Fluxes.
+    terms : _QuadraticTerms
+        Precomputed objective terms.
+
+    Returns
+    -------
+    ndarray
+        ``2 (diagonal * flux + linear)`` [1/flux unit].
+    """
+    return 2.0 * (terms.diagonal * flux + terms.linear)
+
+
+# Qualify reduced-coordinate candidates without weakening original constraints.
 def _reconciliation_qualified(
         flux, *, feasible_flux, free, variable_scale, terms, low, closure, high, availability,
         tangent, equality, narrow, certified):
@@ -277,6 +369,112 @@ def _reconciliation_qualified(
         # candidate. Certify it against the uncollapsed problem.
         return certified(flux)
     return True
+def _projected_objective(w: np.ndarray, *, expand, origin, transform, terms) -> float:
+    """Evaluate the original objective on the equality tangent space.
+
+    Parameters
+    ----------
+    w : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    expand : callable
+        Existing map from normalized free coordinates [-] to full model fluxes.
+    origin : ndarray
+        Affine origin: full physical fluxes in the boundary recovery, normalized free coordinates [-] in reconciliation.
+    transform : ndarray
+        Affine basis from optimizer coordinates to the origin's coordinate basis; row/column order is unchanged.
+    terms : _QuadraticTerms
+        Dimensionless quadratic objective with coefficients on the declared flux basis.
+
+    Returns
+    -------
+    float
+        Original dimensionless objective [-].
+    """
+    return _reconciliation_objective(expand(origin + transform @ w), terms)
+
+
+def _projected_gradient(
+    w: np.ndarray, *, transform, expand, origin, terms, free, variable_scale,
+) -> np.ndarray:
+    """Project the scaled full-flux gradient onto the equality tangent.
+
+    Parameters
+    ----------
+    w : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    transform : ndarray
+        Affine basis from optimizer coordinates to the origin's coordinate basis; row/column order is unchanged.
+    expand : callable
+        Existing map from normalized free coordinates [-] to full model fluxes.
+    origin : ndarray
+        Affine origin: full physical fluxes in the boundary recovery, normalized free coordinates [-] in reconciliation.
+    terms : _QuadraticTerms
+        Dimensionless quadratic objective with coefficients on the declared flux basis.
+    free : ndarray of bool
+        Mask selecting free full-flux coordinates, shape (n_fluxes,).
+    variable_scale : ndarray
+        Physical flux per normalized coordinate [model flux unit], shape (n_fluxes,).
+
+    Returns
+    -------
+    ndarray
+        Gradient in the optimizer's normalized coordinates [-].
+    """
+    return transform.T @ (_reconciliation_gradient(expand(origin + transform @ w), terms)[free] * variable_scale[free])
+
+
+def _projected_inventory_residual(w: np.ndarray, *, availability, expand, origin, transform) -> np.ndarray:
+    """Evaluate inventory margins on the equality tangent space.
+
+    Parameters
+    ----------
+    w : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    availability : LinearInventoryAvailability
+        Real inventory contract; residuals are scaled dimensionless margins.
+    expand : callable
+        Existing map from normalized free coordinates [-] to full model fluxes.
+    origin : ndarray
+        Affine origin: full physical fluxes in the boundary recovery, normalized free coordinates [-] in reconciliation.
+    transform : ndarray
+        Affine basis from optimizer coordinates to the origin's coordinate basis; row/column order is unchanged.
+
+    Returns
+    -------
+    ndarray
+        Scaled inventory residuals [-], one per availability constraint.
+    """
+    return availability.residual(expand(origin + transform @ w))
+
+
+def _projected_inventory_jacobian(
+    w: np.ndarray, *, availability, expand, origin, transform, free, variable_scale,
+) -> np.ndarray:
+    """Apply both coordinate maps to the real inventory Jacobian.
+
+    Parameters
+    ----------
+    w : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+    availability : LinearInventoryAvailability
+        Real inventory contract; residuals are scaled dimensionless margins.
+    expand : callable
+        Existing map from normalized free coordinates [-] to full model fluxes.
+    origin : ndarray
+        Affine origin: full physical fluxes in the boundary recovery, normalized free coordinates [-] in reconciliation.
+    transform : ndarray
+        Affine basis from optimizer coordinates to the origin's coordinate basis; row/column order is unchanged.
+    free : ndarray of bool
+        Mask selecting free full-flux coordinates, shape (n_fluxes,).
+    variable_scale : ndarray
+        Physical flux per normalized coordinate [model flux unit], shape (n_fluxes,).
+
+    Returns
+    -------
+    ndarray
+        Scaled residual derivatives in tangent-coordinate order [-].
+    """
+    return availability.jacobian(expand(origin + transform @ w))[:, free] * variable_scale[free] @ transform
 
 
 def _restore_flux_bounds(z, low, high, tolerance):
@@ -302,6 +500,7 @@ def _restore_flux_bounds(z, low, high, tolerance):
     return z
 
 
+# Run the unchanged constrained numerical optimization.
 def _reconciliation_optimize(
         seed, eliminate=False, *, constraints, low, high, tangent, reduced, reduced_rhs,
         expand, terms, qualified, equality, availability, closure, free, variable_scale):
@@ -363,16 +562,13 @@ def _reconciliation_optimize(
             (high - origin)[keep] / norms[keep])]
         if availability is not None:
             local_constraints.append(NonlinearConstraint(
-                lambda w: availability.residual(expand(origin + transform @ w)), 0., np.inf,
-                jac=lambda w: (availability.jacobian(expand(origin + transform @ w))[:, free]
-                               * variable_scale[free]) @ transform))
+                partial(_projected_inventory_residual, availability=availability, expand=expand, origin=origin, transform=transform), 0., np.inf,
+                jac=partial(_projected_inventory_jacobian, availability=availability, expand=expand, origin=origin, transform=transform, free=free, variable_scale=variable_scale)))
         bounds = Bounds(-np.inf, np.inf)
     result = minimize(
-        lambda w: _reconciliation_objective(expand(origin + transform @ w), terms),
+        partial(_projected_objective, expand=expand, origin=origin, transform=transform, terms=terms),
         transform.T @ (seed - origin),
-        jac=lambda w: transform.T @ (
-            _reconciliation_gradient(expand(origin + transform @ w), terms)[free]
-            * variable_scale[free]),
+        jac=partial(_projected_gradient, transform=transform, expand=expand, origin=origin, terms=terms, free=free, variable_scale=variable_scale),
         bounds=bounds, constraints=local_constraints,
         method="SLSQP", options={"ftol": 1e-15, "maxiter": 1000},
     )
@@ -385,6 +581,144 @@ def _reconciliation_optimize(
                      result.status, result.message)
 
 
+def _selected_flux(flux, position, direction):
+    """Return one signed flux, the FVA objective.
+
+    Parameters
+    ----------
+    flux : ndarray
+        Fluxes.
+    position : int
+        Reaction index.
+    direction : float
+        ``1`` to minimize or ``-1`` to maximize.
+
+    Returns
+    -------
+    float
+        ``direction * flux[position]``.
+    """
+    return float(direction * flux[position])
+
+
+def _objective_slack(flux, terms, ceiling):
+    """Return the remaining objective allowance for FVA.
+
+    Parameters
+    ----------
+    flux : ndarray
+        Fluxes.
+    terms : _QuadraticTerms
+        Objective terms.
+    ceiling : float
+        Largest allowed objective [-].
+
+    Returns
+    -------
+    float
+        ``ceiling - objective`` [-]; nonnegative when feasible.
+    """
+    return float(ceiling - _reconciliation_objective(flux, terms))
+
+
+def _independent_matrix(matrix):
+    """Remove linearly dependent rows from a balance matrix.
+
+    Parameters
+    ----------
+    matrix : ndarray
+        Stoichiometric matrix.
+
+    Returns
+    -------
+    ndarray
+        Rows of full row rank, in original order.
+    """
+    rank = int(np.linalg.matrix_rank(matrix))
+    if rank == len(matrix):
+        return matrix
+    _, _, pivots = qr(matrix.T, mode="economic", pivoting=True)
+    return matrix[np.sort(pivots[:rank])]
+
+
+def _index_targets(reaction_ids, targets):
+    """Return target positions, values and scales in reaction order.
+
+    Parameters
+    ----------
+    reaction_ids : Sequence[str]
+        Network reaction order.
+    targets : Sequence[ReconciliationTarget]
+        Targets.
+
+    Returns
+    -------
+    tuple of ndarray
+        ``(positions, values, scales)``.
+
+    Raises
+    ------
+    ValueError
+        Targets repeat a reaction or reference an unknown reaction.
+    """
+    index = {name: position for position, name in enumerate(reaction_ids)}
+    if len({target.reaction_id for target in targets}) != len(targets):
+        raise ValueError("reconciliation target reaction IDs must be unique.")
+    unknown = sorted(target.reaction_id for target in targets if target.reaction_id not in index)
+    if unknown:
+        raise ValueError(f"reconciliation targets reference unknown reactions {unknown}.")
+    positions = np.asarray([index[target.reaction_id] for target in targets], dtype=int)
+    values = np.asarray([target.value for target in targets], dtype=float)
+    scales = np.asarray([target.scale for target in targets], dtype=float)
+    return positions, values, scales
+
+
+# Build objective weights only from the explicitly supplied target scales.
+def _make_terms(network, internal_reaction_ids, targets, internal_scale):
+    """Precompute the diagonal quadratic reconciliation objective.
+
+    Parameters
+    ----------
+    network : MetabolicNetworkDefinition
+        Network supplying reaction order.
+    internal_reaction_ids : Sequence[str]
+        Regularized reactions.
+    targets : Sequence[ReconciliationTarget]
+        Targets.
+    internal_scale : float
+        Internal regularization scale.
+
+    Returns
+    -------
+    _QuadraticTerms
+        Diagonal and linear coefficients with target metadata.
+
+    Raises
+    ------
+    ValueError
+        An internal reaction or target is unknown.
+    """
+    index = {name: position for position, name in enumerate(network.reaction_ids)}
+    unknown = set(internal_reaction_ids) - set(index)
+    if unknown:
+        raise ValueError(
+            "internal regularization references unknown reactions "
+            f"{sorted(unknown)}."
+        )
+    diagonal = np.zeros(len(network.reaction_ids), dtype=float)
+    linear = np.zeros(len(network.reaction_ids), dtype=float)
+    internal_positions = np.asarray([index[name] for name in internal_reaction_ids], dtype=int)
+    diagonal[internal_positions] += 1.0 / internal_scale ** 2
+    positions, values, scales = _index_targets(network.reaction_ids, targets)
+    for position, value, scale in zip(positions, values, scales):
+        diagonal[position] += 1.0 / scale ** 2
+        linear[position] -= value / scale ** 2
+    return _QuadraticTerms(
+        diagonal, linear, positions, values, scales, internal_positions, internal_scale
+    )
+
+
+# Expose the real closure solve and its original flux-variability diagnostics.
 class RateReconciledMFAClosure:
     """Solve rate reconciliation, optionally constrained by end inventories."""
 
@@ -414,6 +748,7 @@ class RateReconciledMFAClosure:
         self.closure_id = "scipy-slsqp:rate-reconciled-mfa"
         self.last_diagnostics = None
 
+    # Construct and solve the original constrained quadratic problem.
     def _solve_problem(self, lower, upper, targets, internal_scale, initial=None,
                        availability=None, _reduce_intervals=True, _presolve=True):
         """Solve the reconciliation QP, optionally with inventory constraints.
@@ -576,8 +911,8 @@ class RateReconciledMFAClosure:
         constraints = [LinearConstraint(reduced, reduced_rhs, reduced_rhs)] if rank else []
         if availability is not None:
             constraints.append(NonlinearConstraint(
-                lambda z: availability.residual(expand(z)), 0.0, np.inf,
-                jac=lambda z: availability.jacobian(expand(z))[:, free] * variable_scale[free]))
+                partial(_inventory_residual, availability=availability, expand=expand), 0.0, np.inf,
+                jac=partial(_inventory_jacobian, availability=availability, expand=expand, free=free, variable_scale=variable_scale)))
         start = feasible.x
         if initial is not None:
             proposed = np.clip(initial[free] / variable_scale[free], low, high)
@@ -636,6 +971,7 @@ class RateReconciledMFAClosure:
         return _QPResult(result.x, result.fun, False, result.status,
                          f'{result.message}; stationarity/feasibility or boundary recovery not qualified'), terms
 
+    # Audit physical bounds and declared inventory feasibility.
     def _acceptable(self, flux, lower, upper, availability):
         """Check the full original constraints, including dependent balance rows.
 
@@ -665,6 +1001,7 @@ class RateReconciledMFAClosure:
         residual = availability.residual(flux)
         return np.isfinite(residual).all() and np.min(residual) >= -self.tolerance
 
+    # Preserve the primary objective when selecting an explicit secondary policy.
     def _tie_break(self, flux, terms, lower, upper, availability):
         """Select minimum capacity-normalized flux on the primary optimal face.
 
@@ -724,6 +1061,7 @@ class RateReconciledMFAClosure:
                                            - _reconciliation_objective(flux, terms))))
         return result.x, -value, diagnostic
 
+    # Expose the qualified full-flux result and diagnostic contract.
     def solve(self, environment: MetabolicEnvironment, previous_solution=None, *,
               targets: Sequence[ReconciliationTarget], internal_scale: float,
               fva_reactions: Sequence[str] = (), fva_fraction=0.05,
@@ -837,6 +1175,7 @@ class RateReconciledMFAClosure:
             tie_break=tie_break,
         )
 
+    # Compute ranges without changing the accepted original problem.
     def flux_variability(self, environment, targets, internal_scale, nominal_fluxes,
                          optimum, reaction_ids, fraction, availability=None):
         """Compute flux ranges within an objective tolerance of the optimum.
@@ -907,181 +1246,3 @@ class RateReconciledMFAClosure:
                 raise RuntimeError(f"inventory-constrained FVA failed for {name!r}.")
             intervals[name] = (float(low.x[position]), float(high.x[position]))
         return intervals
-
-
-def _index_targets(reaction_ids, targets):
-    """Return target positions, values and scales in reaction order.
-
-    Parameters
-    ----------
-    reaction_ids : Sequence[str]
-        Network reaction order.
-    targets : Sequence[ReconciliationTarget]
-        Targets.
-
-    Returns
-    -------
-    tuple of ndarray
-        ``(positions, values, scales)``.
-
-    Raises
-    ------
-    ValueError
-        Targets repeat a reaction or reference an unknown reaction.
-    """
-    index = {name: position for position, name in enumerate(reaction_ids)}
-    if len({target.reaction_id for target in targets}) != len(targets):
-        raise ValueError("reconciliation target reaction IDs must be unique.")
-    unknown = sorted(target.reaction_id for target in targets if target.reaction_id not in index)
-    if unknown:
-        raise ValueError(f"reconciliation targets reference unknown reactions {unknown}.")
-    positions = np.asarray([index[target.reaction_id] for target in targets], dtype=int)
-    values = np.asarray([target.value for target in targets], dtype=float)
-    scales = np.asarray([target.scale for target in targets], dtype=float)
-    return positions, values, scales
-
-
-def _selected_flux(flux, position, direction):
-    """Return one signed flux, the FVA objective.
-
-    Parameters
-    ----------
-    flux : ndarray
-        Fluxes.
-    position : int
-        Reaction index.
-    direction : float
-        ``1`` to minimize or ``-1`` to maximize.
-
-    Returns
-    -------
-    float
-        ``direction * flux[position]``.
-    """
-    return float(direction * flux[position])
-
-
-def _reconciliation_objective(
-        flux, terms):
-    """Evaluate the reconciliation objective.
-
-    Parameters
-    ----------
-    flux : ndarray
-        Fluxes.
-    terms : _QuadraticTerms
-        Precomputed objective terms.
-
-    Returns
-    -------
-    float
-        Sum of squared scaled internal fluxes and target residuals [-].
-    """
-    internal = np.sum((flux[terms.internal_positions] / terms.internal_scale) ** 2)
-    reconciled = np.sum(
-        ((flux[terms.target_positions] - terms.target_values) / terms.target_scales) ** 2
-    )
-    return float(internal + reconciled)
-
-
-def _reconciliation_gradient(
-        flux, terms):
-    """Evaluate the reconciliation objective gradient.
-
-    Parameters
-    ----------
-    flux : ndarray
-        Fluxes.
-    terms : _QuadraticTerms
-        Precomputed objective terms.
-
-    Returns
-    -------
-    ndarray
-        ``2 (diagonal * flux + linear)`` [1/flux unit].
-    """
-    return 2.0 * (terms.diagonal * flux + terms.linear)
-
-
-def _objective_slack(flux, terms, ceiling):
-    """Return the remaining objective allowance for FVA.
-
-    Parameters
-    ----------
-    flux : ndarray
-        Fluxes.
-    terms : _QuadraticTerms
-        Objective terms.
-    ceiling : float
-        Largest allowed objective [-].
-
-    Returns
-    -------
-    float
-        ``ceiling - objective`` [-]; nonnegative when feasible.
-    """
-    return float(ceiling - _reconciliation_objective(flux, terms))
-
-
-def _independent_matrix(matrix):
-    """Remove linearly dependent rows from a balance matrix.
-
-    Parameters
-    ----------
-    matrix : ndarray
-        Stoichiometric matrix.
-
-    Returns
-    -------
-    ndarray
-        Rows of full row rank, in original order.
-    """
-    rank = int(np.linalg.matrix_rank(matrix))
-    if rank == len(matrix):
-        return matrix
-    _, _, pivots = qr(matrix.T, mode="economic", pivoting=True)
-    return matrix[np.sort(pivots[:rank])]
-
-
-def _make_terms(network, internal_reaction_ids, targets, internal_scale):
-    """Precompute the diagonal quadratic reconciliation objective.
-
-    Parameters
-    ----------
-    network : MetabolicNetworkDefinition
-        Network supplying reaction order.
-    internal_reaction_ids : Sequence[str]
-        Regularized reactions.
-    targets : Sequence[ReconciliationTarget]
-        Targets.
-    internal_scale : float
-        Internal regularization scale.
-
-    Returns
-    -------
-    _QuadraticTerms
-        Diagonal and linear coefficients with target metadata.
-
-    Raises
-    ------
-    ValueError
-        An internal reaction or target is unknown.
-    """
-    index = {name: position for position, name in enumerate(network.reaction_ids)}
-    unknown = set(internal_reaction_ids) - set(index)
-    if unknown:
-        raise ValueError(
-            "internal regularization references unknown reactions "
-            f"{sorted(unknown)}."
-        )
-    diagonal = np.zeros(len(network.reaction_ids), dtype=float)
-    linear = np.zeros(len(network.reaction_ids), dtype=float)
-    internal_positions = np.asarray([index[name] for name in internal_reaction_ids], dtype=int)
-    diagonal[internal_positions] += 1.0 / internal_scale ** 2
-    positions, values, scales = _index_targets(network.reaction_ids, targets)
-    for position, value, scale in zip(positions, values, scales):
-        diagonal[position] += 1.0 / scale ** 2
-        linear[position] -= value / scale ** 2
-    return _QuadraticTerms(
-        diagonal, linear, positions, values, scales, internal_positions, internal_scale
-    )

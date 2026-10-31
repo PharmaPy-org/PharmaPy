@@ -17,6 +17,59 @@ from .test_bioreactor_qualification import network_load as load_small
 from .test_bioreactor_qualification import constraint_problem
 
 
+# Real fixture construction and independent qualification helpers.
+def _growth_boundary_residual(a):
+    """Evaluate the independently derived dimensionless growth boundary.
+
+    Parameters
+    ----------
+    a : float
+        Dimensionless growth/exposure coordinate [-].
+
+    Returns
+    -------
+    float
+        Signed residual of the synthetic exponential inventory equation [-].
+    """
+    return a * (1.0 + np.exp(a)) / 2.0 - 0.1
+
+
+def _optimal_face_ranges(network, fixed, outputs):
+    """Independent LP ranges with penalized coordinates fixed at their optimum.
+
+    Parameters
+    ----------
+    network : MetabolicNetworkDefinition
+        Actual model network with its stoichiometry and finite reaction bounds.
+    fixed : dict
+        Explicitly fixed reaction fluxes in the declared network flux basis.
+    outputs : sequence of str
+        Flux identifiers to audit on the unchanged primary-optimal face.
+
+    Returns
+    -------
+    ndarray
+        Per-output lower/upper fluxes in the declared network units, preserving the primary-optimal face.
+    """
+    from scipy.optimize import linprog
+    bounds = list(zip(network.lower_bounds, network.upper_bounds))
+    for name, value in fixed.items():
+        bounds[network.reaction_ids.index(name)] = (value, value)
+    intervals = []
+    for row in outputs:
+        ends = []
+        for sign in (1., -1.):
+            result = linprog(sign * row, A_eq=network.stoichiometric_matrix,
+                             b_eq=np.zeros(len(network.internal_metabolite_ids)),
+                             bounds=bounds, method='highs',
+                             options={'primal_feasibility_tolerance': 1e-9})
+            assert result.success, result.message
+            ends.append(row @ result.x)
+        intervals.append(ends)
+    return np.asarray(intervals)
+
+
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('scale',[1.,1e-12,1e12])
 def test_sparse_exact_recovery_retains_affine_identities(scale):
     from fractions import Fraction
@@ -234,26 +287,6 @@ def test_reference_upper_bound_at_depleted_nutrients(name):
     assert 0.<=proof['objective_gap_bound']<=1e-9*max(1.,proof['objective'])
 
 
-def _optimal_face_ranges(network, fixed, outputs):
-    """Independent LP ranges with penalized coordinates fixed at their optimum."""
-    from scipy.optimize import linprog
-    bounds = list(zip(network.lower_bounds, network.upper_bounds))
-    for name, value in fixed.items():
-        bounds[network.reaction_ids.index(name)] = (value, value)
-    intervals = []
-    for row in outputs:
-        ends = []
-        for sign in (1., -1.):
-            result = linprog(sign * row, A_eq=network.stoichiometric_matrix,
-                             b_eq=np.zeros(len(network.internal_metabolite_ids)),
-                             bounds=bounds, method='highs',
-                             options={'primal_feasibility_tolerance': 1e-9})
-            assert result.success, result.message
-            ends.append(row @ result.x)
-        intervals.append(ends)
-    return np.asarray(intervals)
-
-
 @pytest.mark.parametrize('reverse', [False, True])
 @pytest.mark.parametrize('target_output', [False, True])
 @pytest.mark.parametrize('separate_outputs', [False, True])
@@ -393,7 +426,7 @@ def test_automatic_tie_break_preserves_inventory_constraints(kind):
         availability = InventoryAvailability([.1], matrix, [0.], viable=1., step_day=1.,
             cell_flux_scale=1., growth=0., death=0.,
             growth_index=1 if kind == 'growth-dependent' else None)
-    expected = (brentq(lambda a: a * (1. + np.exp(a))/2. - .1, 0., 1.)
+    expected = (brentq(_growth_boundary_residual, 0., 1.)
                 if kind == 'growth-dependent' else .1)
     closure = reconciled.RateReconciledMFAClosure(network, ())
     for seed in ([1., 0., 1.], [1., .09, .91]):
