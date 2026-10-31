@@ -233,6 +233,9 @@ class CultureSnapshot:
         Integral of viable cell density [10^6 cell day/mL].
     biomass_kg : float, optional
         Dry biomass [kgDW] for biomass-basis cultures. Default 0.0.
+    temperature_k : float, optional
+        Live liquid temperature [K]. Default 298.15 K preserves standalone
+        snapshots made before thermal support.
     """
 
     concentrations_mmol_l: dict
@@ -242,6 +245,7 @@ class CultureSnapshot:
     product_g: float
     ivcd_million_cell_day_per_ml: float
     biomass_kg: float = 0.0
+    temperature_k: float = 298.15  # [K]; established native phase default
 
     @property
     def viable_cell_density_million_ml(self):
@@ -327,7 +331,8 @@ def _evaluate(expr, values, definition, state, conditions, accepted_fluxes=None)
     ----------
     expr : float or Mapping
         Literal, reference node (``ref``, ``parameter``, ``constant``,
-        ``concentration``, ``state``, ``condition``, ``accepted_flux``) or
+        ``concentration``, ``state``, ``condition``, ``accepted_flux``,
+        ``source_rate``) or
         operator node.
     values : Mapping[str, float]
         Previously evaluated rules.
@@ -335,7 +340,8 @@ def _evaluate(expr, values, definition, state, conditions, accepted_fluxes=None)
         Object exposing ``parameters`` and ``constants``.
     state : object
         Reactor snapshot; ``concentration`` nodes read
-        ``concentrations_mmol_l`` [mmol/L].
+        ``concentrations_mmol_l`` [mmol/L]. Thermal expressions additionally
+        accept ``source_rate`` leaves from ``source_rates_kg_s`` [kg/s].
     conditions : Mapping[str, float]
         Declared operating conditions.
     accepted_fluxes : Mapping[str, float], optional
@@ -370,6 +376,8 @@ def _evaluate(expr, values, definition, state, conditions, accepted_fluxes=None)
         return state.concentrations_mmol_l[expr["concentration"]]
     if set(expr) == {"state"}:
         return float(getattr(state, expr["state"]))
+    if set(expr) == {"source_rate"}:
+        return float(state.source_rates_kg_s[expr["source_rate"]])
     if set(expr) == {"condition"}:
         return float(conditions[expr["condition"]])
     if set(expr) == {'accepted_flux'}:

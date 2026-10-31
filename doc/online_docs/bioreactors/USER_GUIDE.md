@@ -70,6 +70,155 @@ the existing alphabetical tie-break and all current example configurations.
 This option does not add automatic flux-variability/ambiguity screening or claim
 that a unique numerical allocation is a biologically validated prediction.
 
+### Non-isothermal operation in the same input file
+
+Omitting `operation.thermal`, or selecting `{"mode": "isothermal"}`, preserves
+the existing fixed-temperature calculation. `operation.temperature_k` is the
+initial liquid temperature [K]. To integrate temperature, add to the **existing**
+`operation` object:
+
+```json
+"thermal": {
+  "mode": "adiabatic",
+  "heat_generation_w": {
+    "op": "multiply",
+    "args": [{"parameter": "coefficients.substrate_enthalpy_j_kg"},
+             {"source_rate": "substrate"}]
+  }
+}
+```
+
+Define that coefficient in the existing `parameters.coefficients` group, with
+its source, physical basis and valid temperature range documented. In this
+example it is reaction enthalpy per kg of substrate **consumed** [J/kg]: a
+negative exothermic value times a negative substrate source [kg/s] gives
+positive heat generation [W]. The example is a configuration pattern, not a
+universal biological heat yield. Do not sum enthalpy-per-conversion estimates
+for both a substrate and its product and thereby count the same heat twice.
+
+`heat_generation_w` is a declarative expression in watts, positive into the
+liquid. Explicit `0.0` means intentionally neglecting biological heat. The
+expression uses the existing arithmetic, parameter and constant leaves;
+`source_rate` reads the current mechanism's **accepted** species source [kg/s]
+after optimization/reconciliation, never its unconstrained kinetic target.
+These sources exclude inlet/outlet withdrawal but include any physical transfer
+represented inside that mechanism. Choose the heat basis accordingly. These
+are net biological heat models: account explicitly for temperature-dependent
+reaction enthalpy and untracked biomass/gas streams if relevant. Formation
+enthalpies and heats of mixing are not inferred from reduced metabolic maps.
+
+All three biological formulations expose live `{"state": "temperature_k"}`
+[K] to their kinetic providers. Use it in an explicitly parameterized Arrhenius
+or other justified biological relationship; no temperature law is applied
+automatically. `conditions.temperature_k`, if supplied, remains static metadata
+and is not a substitute for the live state. Existing provider validity-domain
+rules can bound a graph node exposing temperature and reject extrapolation.
+The heat expression additionally exposes `{"state": "time_s"}` [s].
+
+For heating/cooling, select `"mode": "heat-transfer"` and add `heat_transfer`
+inside the same thermal object. Use the actual native constructor names:
+
+```json
+"heat_transfer": {
+  "h_conv": 100.0,
+  "diam": 0.1,
+  "area_base": 0.0,
+  "utility": {"temp_in": 290.0, "mass_flow": 0.1, "h_conv": 100.0}
+}
+```
+
+These numbers are a **synthetic configuration example**, not recommended design
+coefficients. They construct an overall coefficient of 50 W/(m2 K) from two
+100 W/(m2 K) film coefficients. Supply values appropriate to your equipment.
+
+| Native key | Meaning |
+| --- | --- |
+| `h_conv` | Vessel-side film coefficient [W/(m2 K)], positive. |
+| `diam` | Vessel diameter [m], positive. |
+| `area_base` | Additional wetted base area [m2], nonnegative; omitted uses the native zero default. |
+| `ht_mode` | Optional native `jacket` (default) or `bath`; native coil geometry remains unsupported. |
+| `utility.temp_in` | Fixed utility inlet temperature [K], positive. |
+| `utility.h_conv` | Utility-side film coefficient [W/(m2 K)], positive. |
+| `utility.mass_flow` or `utility.vol_flow` | Exactly one positive flow, [kg/s] or [m3/s], passed to `CoolingWater`. |
+
+The earlier local flat spellings (`vessel_coefficient_w_m2_k`,
+`utility_coefficient_w_m2_k`, `diameter_m`, `base_area_m2`,
+`utility_temperature_k`, `utility_mass_flow_kg_s`) remain accepted as a complete
+legacy declaration; mixed naming schemes are rejected.
+
+This uses the existing water utility, its documented constant properties,
+`1/U = 1/h_vessel + 1/h_utility`, and native wetted area `A = 4V/diameter +
+base_area`. The vessel receives `-UA(T-T_utility)` [W]. It is the native
+constant-inlet utility model, not a finite-capacity dynamic jacket or coil.
+Adiabatic means no utility heat exchange; feeds may still carry enthalpy.
+
+For an imposed temperature ramp, select the existing native controller rather
+than solving a second temperature equation:
+
+```json
+"thermal": {
+  "mode": "prescribed-temperature",
+  "temperature_profile": {"temp_zero": 300.0, "rate": 0.02}
+}
+```
+
+This synthetic example requests 300 K at zero time, increasing by 0.02 K/s.
+The profile passes the native `Commons.temp_ufun` parameters unchanged:
+`T(t) = temp_zero + rate * (t - t_zero)`, with optional `t_zero` [s] defaulting
+to the native zero. Time is always seconds, independently of recipe/runtime
+units. Set `operation.temperature_k` to the profile's value at time zero;
+inconsistent initial conditions or nonpositive temperatures during the run
+are rejected. A zero rate specifies a constant prescribed temperature.
+`SimpleTemperatureController` handles batch/fed-batch; the existing
+`ContinuousVesselController` combines the same temperature profile with native
+level control for continuous culture. Reset restores the controller's seed.
+
+As in native PharmaPy, prescribed temperature **replaces** the energy balance
+and assumes adequate external temperature control. This mode does not require
+unused Cp correlations, accepts neither a heat-generation expression nor a
+utility declaration, and does not calculate required control duty or prove
+cooling capacity. Physical boluses are brought to the prescribed temperature
+by that ideal-control assumption. Use the energy-balanced modes to predict
+thermal excursions. General control schedules beyond the exposed native linear
+ramp and dynamic utility models remain separate parity work.
+
+Populate actual applicable `cp_liq` correlations in the **existing**
+`thermo.json`; the shipped isothermal examples intentionally leave them blank.
+Native coefficients use the native database's molar polynomial convention,
+not mass-specific Cp. Missing properties raise an error rather than acquiring
+fabricated values. Positive heat capacity and the liquid-phase property model's
+validity over the simulated range are scientific prerequisites. The native
+balance is `sum(m_i Cp_i) dT/dt = Q_biology + Q_utility + Q_flows`.
+The thermal holdup is the native liquid phase: auxiliary cell-count or dry-
+biomass bookkeeping states do not automatically add a separate heat capacity.
+The chosen liquid property model must represent the intended culture holdup.
+
+`flow`, `feed`, and `stock_to_target` recipe entries may specify `temperature_k`.
+Omission means the liquid temperature when that feed is started/added; a
+continuous inlet then retains that inlet temperature until changed. Bolus
+additions conserve integrated sensible enthalpy, including temperature-dependent
+Cp, through the unchanged native `Containers.Mixer.solve_unit` and its
+no-heat-of-mixing assumption. Sampling leaves temperature
+unchanged. Isothermal operation continues to hold the specified temperature.
+
+Native histories report `global_temp` [K] and, with a utility, `q_ht` [W], positive
+out of the vessel. An existing observation declaration can select a temperature
+field using `"quantity": "temperature", "species": null, "unit": "K"` (or
+`"degC"`); its usual time columns, field ordering and pre/post-event selection
+are unchanged. No new user input file or solver is required.
+
+Prefer the adaptive SciPy backend for coupled thermal kinetics and qualify its
+tolerances against independent balances. The existing fixed-step backend also
+integrates temperature, with first-order accuracy requiring step refinement;
+an exact population update does not make the coupled thermal step exact.
+`tests/Bioreactor/test_bioreactor_thermal.py` verifies analytical adiabatic
+conversion, bath cooling, continuous/fed-batch sensible heating, bolus mixing,
+temperature feedback, Kirchhoff heat with changing mixture Cp, all twelve
+mode/process combinations against directly constructed native `RxnKinetics`
+reactors, prescribed control/reset, missing-Assimulo operation, and native
+optimization-to-heat handoffs. These synthetic
+cases establish numerical contracts, not organism-specific thermal validation.
+
 ## 3. Replace kinetics without replacing the reactor
 
 The built-in `rule-graph` provider evaluates declared kinetic expressions and

@@ -85,6 +85,23 @@ Adaptive integration, fixed-step propagation and optional IDA retain their exist
 roles; IDA tests depend on the installed environment. Rate providers supply sources through the native balance interfaces. Isothermal examples do not qualify
 thermodynamic or dynamic gas-headspace models.
 
+Optional `operation.thermal` now connects all three biological formulations to
+the existing native energy balance, with explicit biological heat [W], live
+temperature [K], and adiabatic or constant-inlet utility operation. Omission
+preserves isothermal behavior. Heat can read accepted native species sources
+[kg/s]; thermal coefficients and temperature-dependent kinetics remain declared
+in the existing JSON rather than inferred from organism identity. Physical feed
+temperatures and enthalpy-conserving bolus mixing use the existing recipe.
+The [configuration guide](../../doc/online_docs/bioreactors/USER_GUIDE.md#non-isothermal-operation-in-the-same-input-file)
+states units, signs, property requirements and limitations. Synthetic thermal
+qualification does not qualify experimental heat yields, gas enthalpy closure,
+dynamic jackets or the physical capacity of temperature control. Prescribed
+temperature reuses `Commons.temp_ufun` and the native simple/continuous
+temperature controllers, with their existing ideal-control semantics. Bolus
+mixing delegates to the unchanged native `Containers.Mixer`, rather than a
+bioreactor-specific enthalpy inversion. Utility settings use native constructor
+names; the earlier local flat spellings remain compatible.
+
 ## Qualification and limits
 
 `tests/Bioreactor/test_bioreactor_qualification.py` retains separate parameterized
