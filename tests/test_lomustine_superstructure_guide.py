@@ -177,6 +177,24 @@ def test_lomustine_solubility_input_validation_and_precedence() -> None:
         assert sol_2d.shape == (2,)
         assert sol_2d[1] == pytest.approx(from_conc, rel=1e-12)
 
+        # Verify low-temperature quadratic vertex floor clamp (t_vertex = 254.58 K)
+        t_vertex = 2.53376972e0 / (2.0 * 4.97645771e-3)  # [K], quadratic minimum (254.58 K)
+        assert solub_fn(250.0, mole_frac=mole_frac_1d) == pytest.approx(
+            solub_fn(t_vertex, mole_frac=mole_frac_1d), rel=1e-12
+        )
+
+        # Verify tolerated negative DAE roundoff (-1e-6) projects cleanly to 0.0
+        roundoff_x = mole_frac_1d.copy()  # [-]
+        roundoff_x[0] = -1.0e-6  # [-], within solver_roundoff_floor = 1e-4
+        assert solub_fn(temp_scalar, mole_frac=roundoff_x) == pytest.approx(
+            from_mole_frac, rel=1e-12
+        )
+        roundoff_c = conc_1d.copy()  # [kg/m**3]
+        roundoff_c[0] = -1.0e-6  # [kg/m**3], within solver_roundoff_floor = 1e-4
+        assert solub_fn(temp_scalar, conc=roundoff_c) == pytest.approx(
+            from_conc, rel=1e-12
+        )
+
         # Invalid inputs must raise ValueError
         with pytest.raises(ValueError, match="finite"):
             solub_fn(np.nan)
@@ -194,6 +212,14 @@ def test_lomustine_solubility_input_validation_and_precedence() -> None:
             bad_x = mole_frac_1d.copy()
             bad_x[8] = -0.1
             solub_fn(temp_scalar, mole_frac=bad_x)
+        with pytest.raises(ValueError, match="bounded by 1.0"):
+            bad_x_upper = mole_frac_1d.copy()
+            bad_x_upper[7] = 2.0
+            solub_fn(temp_scalar, mole_frac=bad_x_upper)
+        with pytest.raises(ValueError, match="sum to 1.0"):
+            solub_fn(temp_scalar, mole_frac=np.zeros(9))
+        with pytest.raises(ValueError, match="sum to 1.0"):
+            solub_fn(temp_scalar, mole_frac=mole_frac_1d * 0.5)
     finally:
         os.chdir(original_directory)
 
@@ -254,10 +280,13 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
                 r02_iso_moiety, r02_iso_moiety[0], rtol=solver_rtol, atol=0.0
             )
 
-            # Lomustine formed in R02 must equal the drop in intermediate concentration
+            # Lomustine formed in R02 must equal the drop in intermediate concentration;
+            # because Damkohler number k_2 * C_TBN_0 * t_R02 = 0.07 * 0.336 * 3600 = 84.7 >> 1,
+            # R02 converts >90% of initial intermediate into lomustine:
+            min_r02_yield_frac = 0.90  # [-], analytical bimolecular conversion lower bound for Da > 80
             lom_formed = r02_conc[-1, 4] - r02_conc[0, 4]  # [mol/L]
             interm_consumed = r02_conc[0, 2] - r02_conc[-1, 2]  # [mol/L]
-            assert lom_formed > 0.1  # [mol/L]
+            assert lom_formed >= min_r02_yield_frac * r02_conc[0, 2]  # [mol/L]
             assert lom_formed == pytest.approx(interm_consumed, rel=solver_rtol)
 
             vap_x = np.asarray(sim.VAP01.result.x_liq)  # [-]
@@ -268,9 +297,35 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
             cake_lom_moles = sim.F01.result.mass_cake_dry[-1] / lom_mw_kg_per_mol  # [mol]
             assert 0.0 < cake_lom_moles < campaign_cha_moles
 
-        # 2. Verify all-batch crystallization and filter recovery
+        # 2. Verify high-temperature solubility extrapolation regime (T > 305.0 K) in CR01:
+        # Throughout T > 305.0 K, the post-evaporation solution is strictly undersaturated
+        # (mass_conc[:, 4] < solubility, supersat < 0) and crystal volume moment mu_3 == 0,
+        # so nucleation and growth occur exclusively inside the calibrated [255.0, 305.0] K window.
+        calibrated_upper_temp = 305.0  # [K], upper bound of solubility calibration (Casas-Orozco et al., 2023b)
+        calibrated_lower_temp = 255.0  # [K], lower bound of solubility calibration (Casas-Orozco et al., 2023b)
+        cryst_temps = np.asarray(sim_batch.CR01.result.temp)  # [K]
+        cryst_lom_conc = np.asarray(sim_batch.CR01.result.mass_conc)[:, 4]  # [kg/m**3]
+        cryst_solub = np.asarray(sim_batch.CR01.result.solubility)  # [kg/m**3]
+        cryst_supersat = np.asarray(sim_batch.CR01.result.supersat)  # [-]
+        cryst_mu3 = np.asarray(sim_batch.CR01.result.mu_n)[:, 3]  # [m**3]
+        extrapolated_mask = cryst_temps > calibrated_upper_temp
+        assert np.any(extrapolated_mask)
+        assert np.all(cryst_lom_conc[extrapolated_mask] < cryst_solub[extrapolated_mask])
+        assert np.all(cryst_supersat[extrapolated_mask] < 0.0)
+        assert np.all(cryst_mu3[extrapolated_mask] == 0.0)
+        active_cryst_temps = cryst_temps[cryst_mu3 > 0.0]  # [K]
+        assert active_cryst_temps.size > 0
+        assert np.all(
+            (active_cryst_temps >= calibrated_lower_temp)
+            & (active_cryst_temps <= calibrated_upper_temp)
+        )
+
+        # 3. Verify all-batch crystallization and filter recovery
         # Deterministic regression baselines at combo "0" of optimal_points_2.json
-        # (SECQUOIA/pd_ising; Park & Bernal Neira, 2026) evaluated on PharmaPy master:
+        # (SECQUOIA/pd_ising; Park & Bernal Neira, 2026) evaluated at PharmaPy base commit
+        # 3194efd0a41b7f290bfe0ba9e8e998a8f7145625 (tolerances: solver_rtol = 1e-4 matching
+        # SUNDIALS CVode/IDA default rtol = 1e-4; fvm_size_rtol = 1e-3 for 25-bin 1D-FVM quadrature):
+        fvm_size_rtol = 1e-3  # [-], 25-bin geometric 1D-FVM moment quadrature relative tolerance
         batch_cryst_mass = sim_batch.CR01.Outlet.Solid_1.mass  # [kg]
         batch_cake_mass = sim_batch.F01.result.mass_cake_dry[-1]  # [kg]
         assert batch_cryst_mass > 0.0
@@ -278,13 +333,14 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
             batch_cryst_mass, rel=roundoff_rtol, abs=0.0
         )
         assert namespace["productivity_batch"] == pytest.approx(
-            0.00191265, rel=1e-4
+            0.00191265, rel=solver_rtol
         )  # [kg/s]
-        assert namespace["d10_batch"] == pytest.approx(52.0012, rel=1e-3)  # [um]
+        assert namespace["d10_batch"] == pytest.approx(52.0012, rel=fvm_size_rtol)  # [um]
 
-        # 3. Verify hybrid BatchToFlowConnector discharge, actual MSMPR residence time, and recovery
+        # 4. Verify hybrid BatchToFlowConnector discharge, actual MSMPR residence time, and recovery
         # Deterministic regression baselines at combo "1" of optimal_points_2.json
-        # (SECQUOIA/pd_ising; Park & Bernal Neira, 2026) evaluated on PharmaPy master:
+        # (SECQUOIA/pd_ising; Park & Bernal Neira, 2026) evaluated at PharmaPy base commit
+        # 3194efd0a41b7f290bfe0ba9e8e998a8f7145625:
         b2f_cycle_time = namespace["b2f_cycle_time"]  # [s]
         expected_b2f_mass_flow = (
             sim_hybrid.BatchToFlow01.Liquid_1.mass / b2f_cycle_time
@@ -298,11 +354,20 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
         assert sim_hybrid.BatchToFlow01.Outlet.vol_flow == pytest.approx(
             expected_b2f_vol_flow, rel=roundoff_rtol, abs=0.0
         )
+        # Verify MSMPR unit holdup volume and actual hydraulic residence time tau_actual = vol_slurry / vol_flow
+        assert sim_hybrid.CR01.vol_slurry == pytest.approx(
+            namespace["vol_cryst_hybrid"], rel=roundoff_rtol, abs=0.0
+        )  # [m**3], 30.0 L holdup volume set by tau_nom_cr01_hybrid = 5399.64 s
+        assert sim_hybrid.CR01.Inlet.vol_flow == pytest.approx(
+            expected_b2f_vol_flow, rel=roundoff_rtol, abs=0.0
+        )  # [m**3/s]
+        unit_hydraulic_tau = (
+            sim_hybrid.CR01.vol_slurry / sim_hybrid.CR01.Inlet.vol_flow
+        )  # [s], inverse of tau_inv in MSMPR.material_balances
         assert namespace["tau_actual_cr01"] == pytest.approx(
-            namespace["vol_cryst_hybrid"] / expected_b2f_vol_flow,
-            rel=roundoff_rtol,
-            abs=0.0,
+            unit_hydraulic_tau, rel=roundoff_rtol, abs=0.0
         )  # [s]
+        assert unit_hydraulic_tau == pytest.approx(748.9310, rel=solver_rtol)  # [s]
 
         hybrid_held_solids = sim_hybrid.HOLD01.Solid_1.mass  # [kg]
         hybrid_cake_mass = sim_hybrid.F01.result.mass_cake_dry[-1]  # [kg]
@@ -311,8 +376,8 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
             hybrid_held_solids, rel=roundoff_rtol, abs=0.0
         )
         assert namespace["productivity_hybrid"] == pytest.approx(
-            0.00141187, rel=1e-4
+            0.00141187, rel=solver_rtol
         )  # [kg/s]
-        assert namespace["d10_hybrid"] == pytest.approx(46.9849, rel=1e-3)  # [um]
+        assert namespace["d10_hybrid"] == pytest.approx(46.9849, rel=fvm_size_rtol)  # [um]
     finally:
         os.chdir(original_directory)

@@ -14,6 +14,9 @@ and hybrid superstructure alternatives are drawn from the published lomustine
 kinetic, techno-economic, superstructure-synthesis, and discrete optimization
 studies (see also :doc:`../publications`):
 
+- **PharmaPy simulation-optimization framework**:
+  Laky et al. (2022), *Industrial & Engineering Chemistry Research*, 61(44),
+  16128--16140 (`doi:10.1021/acs.iecr.2c01636 <https://doi.org/10.1021/acs.iecr.2c01636>`_).
 - **Reaction kinetics and uncertainty analysis**:
   Casas-Orozco et al. (2023a), *Chemical Engineering Science*, 275, 118591
   (`doi:10.1016/j.ces.2023.118591 <https://doi.org/10.1016/j.ces.2023.118591>`_).
@@ -112,11 +115,16 @@ Kinetics and Solvent-Dependent Solubility
 =========================================
 
 Reaction rates in ``R01`` and ``R02`` follow elementary bimolecular mass-action
-kinetics :math:`r_i = k_i \exp(-E_{a,i} / (R T)) C_A C_B` with negligible heat
-of reaction (:math:`\Delta H_{\text{rxn}, i} = 0\text{ J/mol}`) under jacketed
-temperature control, as formulated in the superstructure simulation module
-(``ds-mfg/simulation/code/helper.py`` in ``SECQUOIA/pd_ising``; Casas-Orozco et
-al., 2023a, 2023b; Barhate et al., 2025; Park & Bernal Neira, 2026).
+kinetics :math:`r_i = k_i \exp(-E_{a,i} / (R T)) C_A C_B`. Following the
+superstructure simulation benchmark (``ds-mfg/simulation/code/helper.py`` in
+``SECQUOIA/pd_ising``; Casas-Orozco et al., 2023a, 2023b; Barhate et al., 2025;
+Park & Bernal Neira, 2026), heats of reaction are set to
+:math:`\Delta H_{\text{rxn}, i} = 0\text{ J/mol}` as a simplifying model
+assumption that decouples reaction heat release from the reactor energy balance
+(whereas the calorimetric study of Casas-Orozco et al., 2023a models non-zero
+reaction enthalpies explicitly; under this zero-enthalpy assumption, reactor
+temperature remains at :math:`323.15\text{ K}` when feed and jacket utilities
+are held at :math:`323.15\text{ K}`).
 
 The equilibrium solubility of lomustine (:math:`C_{\text{sat}}` in
 :math:`\text{kg/m}^3`) is modeled as the product of a pure-*n*-heptane
@@ -129,19 +137,41 @@ factor:
    = \left(a_0 + a_1 T + a_2 T^2\right)\left(1 + m_{\text{THF}} x_{\text{THF}}\right)
 
 The quadratic polynomial is calibrated over :math:`255\text{--}305\text{ K}`
-(Casas-Orozco et al., 2023b). During the initial segment of batch cooling from
-the upstream reactor temperature (:math:`323.15\text{ K}` down to
-:math:`305\text{ K}`), the polynomial is smoothly extrapolated; in that high-temperature
-region the post-evaporation solution is undersaturated (:math:`C < C_{\text{sat}}`),
-so nucleation and growth rates are identically zero until cooling brings the
-slurry into the calibrated supersaturated regime.
+(Casas-Orozco et al., 2023b). Two boundary regimes are handled explicitly:
 
-Crystallization rates in ``CrystKinetics`` use relative supersaturation
-:math:`S = (C - C_{\text{sat}}) / C_{\text{sat}}` with parameter tuples
-``(A, E_a, order)`` for primary nucleation (:math:`B_p = A_p \exp(-E_{a,p}/(RT)) S^{b_p}`
-in :math:`\text{\#/m}^3\text{/s}`), crystal growth (:math:`G = A_g \exp(-E_{a,g}/(RT)) S^{g}`
-in :math:`\mu\text{m/s}`), and dissolution, and ``(A, E_a, order, s_crit)`` for
-secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
+1. **High-temperature cooling start** (:math:`305\text{--}323.15\text{ K}`):
+   During the initial segment of batch cooling from the upstream evaporator
+   temperature (:math:`307.15\text{ K}` in ``VAP01``, or up to the reactor
+   temperature :math:`323.15\text{ K}`), the quadratic polynomial is smoothly
+   extrapolated. Across :math:`305\text{--}323.15\text{ K}`, the post-evaporation
+   liquid (:math:`C_{\text{lom}}(0) \approx 56.0\text{ kg/m}^3`,
+   :math:`x_{\text{THF}} \approx 0.739`) is strictly undersaturated
+   (:math:`C_{\text{sat}} \in [89.4, 152.9]\text{ kg/m}^3 > C_{\text{lom}}(0)`),
+   so relative supersaturation :math:`S < 0` and nucleation/growth rates are
+   identically zero until cooling brings the slurry below :math:`305\text{ K}`
+   (saturation is crossed at :math:`T \approx 291.0\text{ K}`, well inside the
+   calibrated :math:`255\text{--}305\text{ K}` range).
+2. **Low-temperature quadratic vertex floor** (:math:`T_{\text{vertex}} = -a_1 / (2 a_2) \approx 254.58\text{ K}`):
+   As a defensive numerical guard below the :math:`255\text{ K}` lower calibration
+   bound, temperatures passed to ``lomustine_solubility`` are clamped at
+   :math:`T_{\text{vertex}} = 254.58\text{ K}` so the correlation cannot turn
+   upward if a solver step probes below :math:`254.58\text{ K}`.
+
+Crystallization rates in ``CrystKinetics`` (``PharmaPy/Kinetics.py``) use
+relative supersaturation :math:`S = (C - C_{\text{sat}}) / C_{\text{sat}}` with
+parameter tuples:
+
+- ``nucl_prim = (k_bp, E_bp, b)``: primary nucleation
+  :math:`B_p = k_{bp} \exp(-E_{bp}/(RT)) \max(S, 0)^{b}` in :math:`\text{\#/m}^3\text{/s}`.
+- ``nucl_sec = (k_bs, E_bs, s_1, s_2)``: secondary nucleation
+  :math:`B_s = k_{bs} \exp(-E_{bs}/(RT)) \max(S, 0)^{s_1} (k_v \mu_3)^{s_2}` in
+  :math:`\text{\#/m}^3\text{/s}`, where :math:`k_v \mu_3` is the crystal volume
+  fraction (:math:`\text{m}^3_{\text{cryst}}/\text{m}^3_{\text{slurry}}`, selected
+  by default ``mu_sec_nucl='volume'``) and :math:`s_2` is the moment exponent.
+- ``growth = (k_g, E_g, g)``: crystal growth
+  :math:`G = k_g \exp(-E_g/(RT)) \max(S, 0)^{g}` in :math:`\mu\text{m/s}`.
+- ``dissolution = (k_d, E_d, d)``: crystal dissolution
+  :math:`D = -k_d \exp(-E_d/(RT)) \max(-S, 0)^{d}` in :math:`\mu\text{m/s}`.
 
 .. testcode::
 
@@ -165,16 +195,21 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
        Parameters
        ----------
        temp : float or numpy.ndarray
-           Liquid temperature [K]. Calibrated over 255.0 to 305.0 K and
-           extrapolated up to 323.15 K during initial cooling while undersaturated.
+           Liquid temperature [K]. Calibrated over 255.0 to 305.0 K,
+           extrapolated up to 323.15 K during initial cooling while
+           undersaturated, and clamped below the quadratic minimum
+           ``t_vertex = 254.58 K`` as a defensive numerical guard.
        conc : numpy.ndarray, optional
            Species mass concentrations [kg/m**3], shape ``(9,)`` or
            ``(num_times, 9)``. Takes precedence over ``mole_frac`` when both
-           are supplied.
+           are supplied. Trace negative solver roundoff down to
+           ``-1.0e-4 kg/m**3`` on depleted species is projected to ``0.0``.
        mole_frac : numpy.ndarray, optional
            Species liquid mole fractions [-], shape ``(9,)`` or
-           ``(num_times, 9)``. Used when ``conc`` is ``None``; if both ``conc``
-           and ``mole_frac`` are ``None``, ``x_thf = 0.0`` is assumed.
+           ``(num_times, 9)``, with row sums equal to ``1.0`` within
+           ``1.0e-3``. Used when ``conc`` is ``None``; trace negative solver
+           roundoff down to ``-1.0e-4`` is projected to ``0.0``. If both
+           ``conc`` and ``mole_frac`` are ``None``, ``x_thf = 0.0`` is assumed.
 
        Returns
        -------
@@ -189,8 +224,10 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
            If ``temp``, ``conc``, or ``mole_frac`` contains non-finite values,
            if ``conc`` or ``mole_frac`` does not have 1 or 2 dimensions with
            9 species along the last axis, if any entry of ``conc`` or
-           ``mole_frac`` is negative, or if any row of ``conc`` has a
-           non-positive total mass concentration.
+           ``mole_frac`` is below ``-1.0e-4`` (or above ``1.0 + 1.0e-4`` for
+           ``mole_frac``), if any row of ``conc`` has a non-positive total mass
+           concentration, or if any row of ``mole_frac`` does not sum to ``1.0``
+           within ``1.0e-3``.
 
        Notes
        -----
@@ -209,6 +246,7 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
        t_vertex = -poly_coeffs[1] / (2.0 * poly_coeffs[2])  # [K], quadratic minimum (254.58 K)
        temp_eval = np.maximum(temp_arr, t_vertex)  # [K]
        solver_roundoff_floor = 1.0e-4  # [kg/m**3] or [-], DAE solver absolute tolerance floor on depleted species
+       mole_frac_sum_tol = 1.0e-3  # [-], allowed normalization tolerance on liquid mole fractions
 
        if conc is not None:
            conc_arr = np.asarray(conc, dtype=float)  # [kg/m**3]
@@ -243,9 +281,18 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
                    "'mole_frac' must have shape (9,) or (num_times, 9); "
                    f"got {mole_frac_arr.shape}."
                )
-           if not np.all(np.isfinite(mole_frac_arr)) or np.any(mole_frac_arr < -solver_roundoff_floor):
-               raise ValueError("'mole_frac' must contain finite, non-negative mole fractions.")
+           if (
+               not np.all(np.isfinite(mole_frac_arr))
+               or np.any(mole_frac_arr < -solver_roundoff_floor)
+               or np.any(mole_frac_arr > 1.0 + solver_roundoff_floor)
+           ):
+               raise ValueError(
+                   "'mole_frac' must contain finite, non-negative mole fractions bounded by 1.0."
+               )
            mole_frac_arr = np.maximum(mole_frac_arr, 0.0)  # [-], project trace solver roundoff
+           row_sums = mole_frac_arr.sum(axis=-1)  # [-]
+           if not np.all(np.abs(row_sums - 1.0) <= mole_frac_sum_tol):
+               raise ValueError("'mole_frac' rows must sum to 1.0 within 1.0e-3.")
            x_thf = (
                float(mole_frac_arr[THF_INDEX])
                if mole_frac_arr.ndim == 1
@@ -305,15 +352,17 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
 
        Notes
        -----
-       Parameter tuples ``(A, E_a, order)`` and ``(A, E_a, order, s_crit)`` from
-       ``get_cryst_kinetics`` in ``ds-mfg/simulation/code/helper.py``
-       (``SECQUOIA/pd_ising``; Casas-Orozco et al., 2023b; Barhate et al., 2025;
-       Park & Bernal Neira, 2026).
+       Parameter tuples ``(k_bp, E_bp, b)``, ``(k_bs, E_bs, s_1, s_2)``,
+       ``(k_g, E_g, g)``, and ``(k_d, E_d, d)`` from ``get_cryst_kinetics`` in
+       ``ds-mfg/simulation/code/helper.py`` (``SECQUOIA/pd_ising``;
+       Casas-Orozco et al., 2023b; Barhate et al., 2025; Park & Bernal Neira,
+       2026), where ``s_2 = 1.0e-5`` is the exponent on the crystal volume
+       fraction ``kv * mu_3`` in ``CrystKinetics``.
        """
-       prim_params = (3.0e8, 0.0, 3.0)  # [#/m**3/s], [J/mol], [-]
-       sec_params = (4.46e10, 0.0, 2.0, 1.0e-5)  # [#/m**3/s], [J/mol], [-], [-]
-       growth_params = (5.0, 0.0, 1.32)  # [um/s], [J/mol], [-]
-       dissol_params = (1.0, 0.0, 1.0)  # [um/s], [J/mol], [-]
+       prim_params = (3.0e8, 0.0, 3.0)  # [#/m**3/s], [J/mol], [-] (k_bp, E_bp, b)
+       sec_params = (4.46e10, 0.0, 2.0, 1.0e-5)  # [#/m**3/s], [J/mol], [-], [-] (k_bs, E_bs, s_1, s_2)
+       growth_params = (5.0, 0.0, 1.32)  # [um/s], [J/mol], [-] (k_g, E_g, g)
+       dissol_params = (1.0, 0.0, 1.0)  # [um/s], [J/mol], [-] (k_d, E_d, d)
        return CrystKinetics(
            solub_fn=lomustine_solubility,
            nucl_prim=prim_params,
@@ -468,15 +517,24 @@ In this hybrid campaign model:
    :math:`Q_{\text{in}} = V_{\text{VAP01, out}} / t_{\text{cycle}}` that feeds the
    continuous ``MSMPR`` across the 10-hour ``campaign_horizon`` (:math:`36000\text{ s}`,
    corresponding to 10 consecutive upstream batches).
-2. **Pre-solve vs. actual MSMPR residence time**: Because ``SimulationExec``
-   requires ``CR01.Phases`` to be initialized before ``VAP01`` is solved, the
-   superstructure formulation in ``make_units.py`` (``add_crystallizer``) sizes
-   the initial ``CR01`` liquid holdup volume using the nominal pre-solve flow
-   proxy ``effective_flow = vol_drum_hybrid / campaign_horizon``:
-   ``vol_cryst_hybrid = effective_flow * tau_cr01_hybrid``. Once ``VAP01`` and
-   ``BatchToFlow01`` execute, the actual hydraulic residence time in ``CR01`` is
-   :math:`\tau_{\text{actual}} = V_{\text{CR01}} / Q_{\text{in}}`, which we compute
-   explicitly below.
+2. **Drum-scaled holdup-volume design parameter vs. actual MSMPR residence time**:
+   Because ``SimulationExec`` requires ``CR01.Phases`` to be initialized before
+   ``VAP01`` and ``BatchToFlow01`` are solved, the superstructure formulation in
+   ``make_units.py`` (``add_crystallizer``) uses the fixed pre-solve scaling
+   factor ``effective_flow = vol_drum_hybrid / campaign_horizon``
+   (:math:`5.5556\times 10^{-6}\text{ m}^3\text{/s}`) to map the optimizer's
+   nominal time-scaled decision variable ``tau_nom_cr01_hybrid = 5399.64 s``
+   (:math:`1.4999\text{ h}`) to a physical crystallizer liquid holdup volume
+   ``vol_cryst_hybrid = effective_flow * tau_nom_cr01_hybrid``
+   (:math:`0.029998\text{ m}^3 \approx 30.0\text{ L}`). In ``MSMPR.material_balances``
+   (``PharmaPy/Crystallizers.py``), the crystallizer dilution rate is governed
+   directly by ``tau_inv = input_flow / vol_slurry`` (:math:`\text{s}^{-1}`)
+   without reading a stored ``tau`` attribute. Once ``VAP01`` and
+   ``BatchToFlow01`` execute (:math:`Q_{\text{in}} \approx 4.0055\times 10^{-5}\text{ m}^3\text{/s}`),
+   the unit's actual hydraulic residence time is
+   :math:`\tau_{\text{actual}} = V_{\text{slurry}} / Q_{\text{in}} \approx 748.93\text{ s}`,
+   so the 10-hour campaign spans :math:`\sim 48.1` hydraulic residence times and
+   reaches steady state.
 
 .. testcode::
 
@@ -489,7 +547,7 @@ In this hybrid campaign model:
    ratio_hept_hybrid = 0.5  # [-], C7-to-batch volume ratio in MIX02
    time_vap_hybrid = 3600.0  # [s], VAP01 batch evaporation duration
    pressure_vap_hybrid = 25000.0  # [Pa], VAP01 operating pressure
-   tau_cr01_hybrid = 5399.64  # [s], nominal CR01 MSMPR residence-time parameter
+   tau_nom_cr01_hybrid = 5399.64  # [s], drum-referenced holdup-volume design parameter (make_units.py)
    temp_cr01_hybrid = 260.00096  # [K], CR01 MSMPR operating temperature
    dp_filt_hybrid = 100000.0  # [Pa], F01 filtration pressure driving force
    diam_filt_hybrid = 0.5  # [m], F01 filter station diameter
@@ -543,9 +601,10 @@ In this hybrid campaign model:
    )  # [s], upstream batch train cycle time (make_units.py add_b2f)
    sim_hybrid.BatchToFlow01 = BatchToFlowConnector(cycle_time=b2f_cycle_time)
 
-   # Pre-solve superstructure holdup parameterization (make_units.py add_crystallizer)
+   # Pre-solve superstructure holdup volume parameterization (make_units.py add_crystallizer)
    effective_flow = vol_drum_hybrid / campaign_horizon  # [m**3/s]
-   vol_cryst_hybrid = effective_flow * tau_cr01_hybrid  # [m**3]
+   vol_cryst_hybrid = effective_flow * tau_nom_cr01_hybrid  # [m**3], 30.0 L holdup volume
+   tau_cr01_hybrid = tau_nom_cr01_hybrid  # [s], alias retained for backward compatibility
    sim_hybrid.CR01 = MSMPR(
        target_comp="lom", method="1D-FVM", scale=cryst_scale,
    )
