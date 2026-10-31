@@ -206,6 +206,9 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
        poly_coeffs = np.array([
            3.24643349e2, -2.53376972e0, 4.97645771e-3,
        ])  # [kg/m**3], [kg/m**3/K], [kg/m**3/K**2] (helper.py solub_fn)
+       t_vertex = -poly_coeffs[1] / (2.0 * poly_coeffs[2])  # [K], quadratic minimum (254.58 K)
+       temp_eval = np.maximum(temp_arr, t_vertex)  # [K]
+       solver_roundoff_floor = 1.0e-4  # [kg/m**3] or [-], DAE solver absolute tolerance floor on depleted species
 
        if conc is not None:
            conc_arr = np.asarray(conc, dtype=float)  # [kg/m**3]
@@ -213,8 +216,9 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
                raise ValueError(
                    f"'conc' must have shape (9,) or (num_times, 9); got {conc_arr.shape}."
                )
-           if not np.all(np.isfinite(conc_arr)) or np.any(conc_arr < 0.0):
+           if not np.all(np.isfinite(conc_arr)) or np.any(conc_arr < -solver_roundoff_floor):
                raise ValueError("'conc' must contain finite, non-negative mass concentrations.")
+           conc_arr = np.maximum(conc_arr, 0.0)  # [kg/m**3], project trace solver roundoff
            if conc_arr.ndim == 1:
                total_conc = float(conc_arr.sum())  # [kg/m**3]
                if total_conc <= 0.0:
@@ -239,8 +243,9 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
                    "'mole_frac' must have shape (9,) or (num_times, 9); "
                    f"got {mole_frac_arr.shape}."
                )
-           if not np.all(np.isfinite(mole_frac_arr)) or np.any(mole_frac_arr < 0.0):
+           if not np.all(np.isfinite(mole_frac_arr)) or np.any(mole_frac_arr < -solver_roundoff_floor):
                raise ValueError("'mole_frac' must contain finite, non-negative mole fractions.")
+           mole_frac_arr = np.maximum(mole_frac_arr, 0.0)  # [-], project trace solver roundoff
            x_thf = (
                float(mole_frac_arr[THF_INDEX])
                if mole_frac_arr.ndim == 1
@@ -250,7 +255,7 @@ secondary nucleation (:math:`\text{\#/m}^3\text{/s}`).
            x_thf = 0.0  # [-]
 
        base_solub = (
-           poly_coeffs[0] + poly_coeffs[1] * temp + poly_coeffs[2] * temp**2
+           poly_coeffs[0] + poly_coeffs[1] * temp_eval + poly_coeffs[2] * temp_eval**2
        )  # [kg/m**3]
        return base_solub * (1.0 + thf_solubility_multiplier * x_thf)  # [kg/m**3]
 

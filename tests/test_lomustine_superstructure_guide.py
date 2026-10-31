@@ -221,9 +221,14 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
         liters_per_m3 = 1000.0  # [L/m**3], exact volume conversion
 
         # 1. Verify R01 and R02 moiety conservation and Evaporator solvent switch
-        for sim, expected_c_in, init_vol in (
-            (sim_batch, namespace["c_in_batch"], namespace["vol_batch"]),
-            (sim_hybrid, namespace["c_in_hybrid"], namespace["vol_hybrid"]),
+        for sim, expected_c_in, init_vol, num_batches in (
+            (sim_batch, namespace["c_in_batch"], namespace["vol_batch"], 1.0),
+            (
+                sim_hybrid,
+                namespace["c_in_hybrid"],
+                namespace["vol_hybrid"],
+                namespace["campaign_horizon"] / namespace["b2f_cycle_time"],
+            ),
         ):
             r01_conc = np.asarray(sim.R01.result.mole_conc)  # [mol/L]
             iso_plus_interm = r01_conc[:, 0] + r01_conc[:, 2]  # [mol/L]
@@ -258,10 +263,10 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
             vap_x = np.asarray(sim.VAP01.result.x_liq)  # [-]
             assert vap_x[-1, 8] > vap_x[0, 8]  # [-], C7 mole fraction increases during THF evaporation
 
-            # Total lomustine moles recovered in F01 cake cannot exceed initial CHA moles (35 mol)
-            initial_cha_moles = expected_c_in * init_vol * liters_per_m3  # [mol]
+            # Total lomustine moles recovered in F01 cake cannot exceed total CHA moles fed across the campaign
+            campaign_cha_moles = expected_c_in * init_vol * liters_per_m3 * num_batches  # [mol]
             cake_lom_moles = sim.F01.result.mass_cake_dry[-1] / lom_mw_kg_per_mol  # [mol]
-            assert 0.0 < cake_lom_moles < initial_cha_moles
+            assert 0.0 < cake_lom_moles < campaign_cha_moles
 
         # 2. Verify all-batch crystallization and filter recovery
         # Deterministic regression baselines at combo "0" of optimal_points_2.json
