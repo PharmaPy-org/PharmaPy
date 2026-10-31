@@ -22,6 +22,7 @@ ROOT = Path(__file__).parents[2]
 ECOLI = ROOT / 'examples/bioreactors/ecoli_ye_fed_batch'
 
 
+# Real fixture construction and independent qualification helpers.
 def _record(run='F10'):
     """Assemble a record from the original case and processed observations.
 
@@ -48,6 +49,7 @@ def _record(run='F10'):
                        model_revision='test-working-tree')
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('run', ['F10', 'F11'])
 def test_original_observations_round_trip_without_reordering(run, tmp_path):
     """JSON key sorting cannot change experiment, field or parameter order.

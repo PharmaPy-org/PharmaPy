@@ -1,4 +1,3 @@
-from functools import partial
 import copy
 import json
 from .input_helpers import read_input_json

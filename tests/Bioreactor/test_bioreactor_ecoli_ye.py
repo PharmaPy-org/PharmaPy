@@ -1,5 +1,6 @@
 """Independent balances verify the configured native fed-batch demonstration."""
 
+from functools import partial
 import json
 from .input_helpers import read_input_json
 from PharmaPy.Bioreactors.input_format import split_forward_inputs
@@ -16,8 +17,84 @@ EXAMPLE = ROOT / 'examples/bioreactors/ecoli_ye_fed_batch'
 DIRECT = Path(__file__).parent / 'fixtures/ecoli_ye_direct'
 
 
+# Real fixture construction and independent qualification helpers.
+def _culture_reference_rhs(t, y, *, p, flow, feed):
+    """Evaluate independent concentration and volume balances.
+
+    Parameters
+    ----------
+    t : float
+        Integration time [h].
+    y : ndarray
+        Ordered state vector; component units and order are specified in Notes.
+    p : dict
+        Declared uptake capacities [g/(g biomass h)], concentration constants [g/L], and yields [g/g] on the example's stated mass bases.
+    flow : float
+        Inlet volume flow [L/h].
+    feed : ndarray
+        Ordered inlet species concentrations [g/L].
+
+    Returns
+    -------
+    list of float
+        Species concentration derivatives [g/(L h)] and volume derivative [L/h].
+
+    Notes
+    -----
+    State columns are biomass, glucose, acetate, fraction_a, fraction_b
+    [g/L], followed by volume [L]; the independent time basis is h.
+    """
+    x, s, a, ya, yb = np.maximum(y[:5], 0.)
+    qs = p['qS_max']*s/(s+p['K_S'])
+    qa = p['qYEF_A_max']*ya/(ya+p['K_YEF_A'])
+    qb = p['qYEF_B_max']*yb/(yb+p['K_YEF_B'])
+    ox = qs/(1+qa/p['Ki_YEA_qSox']+qb/p['Ki_YEB_qSox']) * p['K_qSox']/(p['K_qSox']+qs)
+    ac = p['qAc_max']*a/(a+p['K_A'])/(1+s/p['Ki_AS'])
+    mu = ((ox-p['qm'])*p['Y_XSem']+qa*p['Y_XYEF_A']
+          +qb*p['Y_XYEF_B']+ac*p['Y_XA'])
+    reaction = x*np.array([mu, -qs, (qs-ox)*p['Y_AS']-ac, -qa, -qb])
+    return np.r_[reaction+flow/y[-1]*(feed-y[:5]), flow]
+
+
+def _rename_culture_inputs(value, *, renamed):
+    """Rename configured species without changing the process equations.
+
+    Parameters
+    ----------
+    value : object
+        JSON-compatible content; numeric physical values are preserved.
+    renamed : dict of str
+        Original-to-new identifier mapping; numeric physical values are unchanged.
+
+    Returns
+    -------
+    object
+        Input content with species identifiers consistently renamed.
+    """
+    if isinstance(value, dict):
+        return {renamed.get(k, k): _rename_culture_inputs(v, renamed=renamed) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_rename_culture_inputs(v, renamed=renamed) for v in value]
+    return renamed.get(value, value) if isinstance(value, str) else value
+
+
 def independent_solution(case, config, times):
-    """Source equations in concentrations, independent of native rule evaluation."""
+    """Source equations in concentrations, independent of native rule evaluation.
+
+    Parameters
+    ----------
+    case : dict
+        Operating input with explicit time, volume, temperature, and recipe units.
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+    times : ndarray
+        Requested sampling times [h] for the independent concentration oracle.
+
+    Returns
+    -------
+    ndarray
+        Rows at requested times [h]; columns are five concentrations [g/L] followed by volume [L].
+    """
     p = config['parameters']['coefficients']
     species = ['biomass', 'glucose', 'acetate', 'fraction_a', 'fraction_b']
     thermo = read_input_json(EXAMPLE / 'inputs/thermo.json')
@@ -43,17 +120,7 @@ def independent_solution(case, config, times):
                 y[:5] = (y[:5]*y[-1] + stock*added)/(y[-1]+added)
                 y[-1] += added
 
-        def rhs(t, y):
-            x, s, a, ya, yb = np.maximum(y[:5], 0.)
-            qs = p['qS_max']*s/(s+p['K_S'])
-            qa = p['qYEF_A_max']*ya/(ya+p['K_YEF_A'])
-            qb = p['qYEF_B_max']*yb/(yb+p['K_YEF_B'])
-            ox = qs/(1+qa/p['Ki_YEA_qSox']+qb/p['Ki_YEB_qSox']) * p['K_qSox']/(p['K_qSox']+qs)
-            ac = p['qAc_max']*a/(a+p['K_A'])/(1+s/p['Ki_AS'])
-            mu = ((ox-p['qm'])*p['Y_XSem']+qa*p['Y_XYEF_A']
-                  +qb*p['Y_XYEF_B']+ac*p['Y_XA'])
-            reaction = x*np.array([mu, -qs, (qs-ox)*p['Y_AS']-ac, -qa, -qb])
-            return np.r_[reaction+flow/y[-1]*(feed-y[:5]), flow]
+        rhs = partial(_culture_reference_rhs, p=p, flow=flow, feed=feed)
 
         solved = solve_ivp(rhs, (start, stop), y, method='Radau', rtol=1e-10,
                            atol=1e-12, max_step=.05, dense_output=True)
@@ -68,6 +135,18 @@ def independent_solution(case, config, times):
 
 @pytest.fixture(scope='module')
 def native_runs(tmp_path_factory):
+    """Run both real example backends in isolated temporary directories.
+
+    Parameters
+    ----------
+    tmp_path_factory : pytest.TempPathFactory
+        Factory for isolated temporary artifact directories.
+
+    Yields
+    ------
+    dict
+        Notebook execution namespace containing actual native results, inputs, and their explicit units.
+    """
     output = tmp_path_factory.mktemp('ecoli_ye')
     namespace = {'__name__': '__notebook__'}
     notebook = read_input_json(DIRECT / 'workflow.ipynb')
@@ -79,6 +158,7 @@ def native_runs(tmp_path_factory):
     plt.close('all')
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('run', ['F10', 'F11'])
 def test_native_feed_inventory_and_independent_kinetics(native_runs, run):
     case, config = next((c, m) for c, m in map(split_forward_inputs, native_runs['configurations']) if c['recipe']['name'] == run)
@@ -127,12 +207,7 @@ def test_notebook_adapter_accepts_renamed_species_and_new_recipe(tmp_path):
     names = list(namespace['thermo'])
     renamed = {n: f'component_{i}' for i, n in enumerate(names)}
 
-    def rename(value):
-        if isinstance(value, dict):
-            return {renamed.get(k, k): rename(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [rename(v) for v in value]
-        return renamed.get(value, value) if isinstance(value, str) else value
+    rename = partial(_rename_culture_inputs, renamed=renamed)
 
     config = rename(namespace['configurations'][0])
     config['operation']['runtime']['value'] = .4

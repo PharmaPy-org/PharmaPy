@@ -97,6 +97,28 @@ def run_native(mechanism, refined=False):
     return np.concatenate(times), np.vstack(states), np.concatenate(volumes), time.perf_counter()-started
 
 
+def equilibrium_residual(state, dilution, parameters, feed):
+    """Return the steady-state balance residual.
+
+    Parameters
+    ----------
+    state : array_like
+        Concentrations [g/L].
+    dilution : float
+        Dilution [1/h].
+    parameters : dict
+        Source kinetic parameters with declared units.
+    feed : float
+        Feed concentration [g/L].
+
+    Returns
+    -------
+    ndarray
+        Residual [g/(L h)].
+    """
+    return reference_rates(0., state, dilution, parameters, feed)
+
+
 def linearized_evidence(state, dilution, parameters, feed):
     """Calculate local dynamics at an equation-consistent equilibrium.
 
@@ -147,28 +169,6 @@ def linearized_evidence(state, dilution, parameters, feed):
     zeros = np.roots(numerator[0, 1:])  # [1/h]; includes uncancelled numerical pairs
     return dict(equilibrium_g_l=solution.x.tolist(), poles_h=[str(x) for x in np.linalg.eigvals(matrix)],
                 zeros_h=[str(x) for x in zeros], gain_g_l_per_h_inv=float(-np.linalg.solve(matrix, forcing)[0]))
-
-
-def equilibrium_residual(state, dilution, parameters, feed):
-    """Return the steady-state balance residual.
-
-    Parameters
-    ----------
-    state : array_like
-        Concentrations [g/L].
-    dilution : float
-        Dilution [1/h].
-    parameters : dict
-        Source kinetic parameters with declared units.
-    feed : float
-        Feed concentration [g/L].
-
-    Returns
-    -------
-    ndarray
-        Residual [g/(L h)].
-    """
-    return reference_rates(0., state, dilution, parameters, feed)
 
 
 def run_scenario(scenario, specification, output):

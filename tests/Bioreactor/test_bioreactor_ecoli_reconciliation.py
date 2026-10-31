@@ -1,5 +1,6 @@
 """Frozen experimental model through native biomass-based reconciliation."""
 
+from functools import partial
 import json
 from .input_helpers import read_input_json
 from PharmaPy.Bioreactors.input_format import split_forward_inputs
@@ -22,8 +23,43 @@ FOLDER = EXAMPLE / 'reconciliation'
 SPECIES = ['biomass', 'glucose', 'acetate', 'fraction_a', 'fraction_b']
 
 
+# Real fixture construction and independent qualification helpers.
+def _rename_reconciliation_inputs(value, *, names):
+    """Rename all configured species while preserving numeric inputs.
+
+    Parameters
+    ----------
+    value : object
+        JSON-compatible content; numeric physical values are preserved.
+    names : dict of str or sequence of str
+        Consistent renaming map, or ordered requested species identifiers for observation extraction.
+
+    Returns
+    -------
+    object
+        Input content with species identifiers consistently renamed.
+    """
+    if isinstance(value, dict):
+        return {names.get(k, k): _rename_reconciliation_inputs(v, names=names) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_rename_reconciliation_inputs(v, names=names) for v in value]
+    return names.get(value, value) if isinstance(value, str) else value
+
+
 @pytest.fixture(scope='module')
 def reconciled_runs(tmp_path_factory):
+    """Run both real reconciliation backends in isolated temporary directories.
+
+    Parameters
+    ----------
+    tmp_path_factory : pytest.TempPathFactory
+        Factory for isolated temporary artifact directories.
+
+    Yields
+    ------
+    dict
+        Notebook execution namespace containing actual native results, inputs, and their explicit units.
+    """
     namespace = {}
     output = Path(os.environ.get('BIOREACTOR_RECONCILIATION_OUTPUT',
                                 tmp_path_factory.mktemp('ecoli_reconciliation')))
@@ -38,6 +74,7 @@ def reconciled_runs(tmp_path_factory):
     plt.close('all')
 
 
+# Public-path regressions, independent balances, and failure qualification.
 def test_frozen_forward_campaign(reconciled_runs, native_runs):
     """Preserve carbon parameters and trajectories across the two mechanisms.
 
@@ -172,12 +209,7 @@ def test_biomass_basis_units_and_sampling(tmp_path):
         build_bioreactor(case, bad, str(EXAMPLE/'inputs/thermo.json'))
     thermo = read_input_json(EXAMPLE/'inputs/thermo.json')
     names = {name: f'species_{i}' for i, name in enumerate(thermo)}
-    def rename(value):
-        if isinstance(value, dict):
-            return {names.get(k, k): rename(v) for k, v in value.items()}
-        if isinstance(value, list):
-            return [rename(v) for v in value]
-        return names.get(value, value) if isinstance(value, str) else value
+    rename = partial(_rename_reconciliation_inputs, names=names)
     path = tmp_path/'thermo.json'
     path.write_text(json.dumps(rename(thermo)))
     renamed = build_bioreactor(rename(case), rename(config), str(path)).solve(verbose=False)

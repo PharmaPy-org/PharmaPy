@@ -20,6 +20,7 @@ INPUTS = Path(__file__).parent / 'fixtures/ecoli_ye_direct/inputs'
 THERMO = Path(__file__).parents[2] / 'examples/bioreactors/ecoli_ye_fed_batch/inputs/thermo.json'
 
 
+# Real fixture construction and independent qualification helpers.
 def _inputs(run='F10'):
     """Load a short source-configured case without feed events.
 
@@ -78,6 +79,7 @@ def _specific_demand(concentrations, parameters):
             + 1.163 * (uptake_a + uptake_b - growth_ye * 0.0364 * 30.))
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('run', ['F10', 'F11'])
 def test_native_oxygen_outputs_match_independent_equation_and_preserve_carbon(run):
     """Reported rates use accepted replay states and leave solver states unchanged.

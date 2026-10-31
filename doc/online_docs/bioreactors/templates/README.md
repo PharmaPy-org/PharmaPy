@@ -27,13 +27,13 @@ fill `model.kinetics.rule_graph`, `species_mass_rates`, and `rate_unit`; leave
 network, transport and flux_time_unit null. Leave rate_provider null for default direct kinetics, or declare a provider to substitute outputs. Pathway models also accept providers for explicitly selected uptake constraints; see ../USER_GUIDE.md. Leave inactive sections blank or
 `{}` and inactive scalar values null. Initial species amounts share
 `state.species.unit` and `state.species.amounts`; initial volume is specified only
-in `case.operation.initial_volume`. Null means absent, not a physical zero.
+in `operation.initial_volume`. Null means absent, not a physical zero.
 
 Feed and stock records can declare `composition` as `supplied`, `nutrient-free`,
 or `unknown`. Supplied means the concentration map is complete; unlisted solutes
 are zero. Unknown may include partial known concentrations. Legacy omitted
 composition is reported as unspecified. Only declared material is added.
-Set `case.recipe.require_complete_inputs` to true to reject incomplete feeds
+Set `operation.recipe.require_complete_inputs` to true to reject incomplete feeds
 before solving; its compatibility default is false.
 
 `stock_to_target` calculates stock volume and dilution under the declared constant

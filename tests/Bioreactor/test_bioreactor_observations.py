@@ -29,6 +29,25 @@ NUTRIENT_MW = 100.  # [g/mol], generic thermo.json
 OFF_GRID_H = [0.05, 1.234, 2.71]  # [h]
 
 
+# Real fixture construction and independent qualification helpers.
+def _fixed_step_options(case):
+    """Select fixed-step settings through the real case configuration.
+
+    Parameters
+    ----------
+    case : dict
+        Operating input with explicit time, volume, temperature, and recipe units.
+
+    Notes
+    -----
+    Updates the supplied case in place; the original test selects fixed-step
+    settings through this explicit configuration, without replacing collaborators.
+    """
+    case['numerics'] = {'backend': 'fixed-step', 'step': case['numerics']['step'],
+                        **{key: None for key in case['numerics']
+                           if key not in {'backend', 'step'}}}
+
+
 def _generic(name):
     """Load one generic example.
 
@@ -150,6 +169,7 @@ def _predict(name, declaration, data, report=True, case_edit=None):
     return predict_measurements(assembly, histories, declaration, observations), observations, mechanism, histories
 
 
+# Public-path regressions, independent balances, and failure qualification.
 def test_off_grid_samples_match_closed_form_and_are_not_interpolated():
     prediction, observations, mechanism, histories = _predict(
         'generic_batch', _declaration(), _data(OFF_GRID_H))
@@ -220,10 +240,7 @@ def test_unequal_grids_per_field_keep_source_order():
 
 
 def test_fixed_step_rejects_off_grid_sampling():
-    def fixed(case):
-        case['numerics'] = {'backend': 'fixed-step', 'step': case['numerics']['step'],
-                            **{key: None for key in case['numerics']
-                               if key not in {'backend', 'step'}}}
+    fixed = _fixed_step_options
     with pytest.raises(ValueError, match='fixed-step report times'):
         _predict('generic_batch', _declaration(), _data([0.05]), case_edit=fixed)
     prediction, _, mechanism, _ = _predict(
