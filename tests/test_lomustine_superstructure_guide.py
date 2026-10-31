@@ -280,14 +280,20 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
                 r02_iso_moiety, r02_iso_moiety[0], rtol=solver_rtol, atol=0.0
             )
 
-            # Lomustine formed in R02 must equal the drop in intermediate concentration;
-            # because Damkohler number k_2 * C_TBN_0 * t_R02 = 0.07 * 0.336 * 3600 = 84.7 >> 1,
-            # R02 converts >90% of initial intermediate into lomustine:
-            min_r02_yield_frac = 0.90  # [-], analytical bimolecular conversion lower bound for Da > 80
+            # At 323.15 K with E_a2 = 2000 J/mol and k_2 = 0.07 L/(mol*s), the effective
+            # rate constant is k_2_eff = 0.07 * exp(-2000 / (8.3145 * 323.15)) = 0.03325 L/(mol*s).
+            # After MIX01 dilution (V_MIX01 = 0.10256 m**3), C_interm_0 = 0.3407 mol/L and
+            # C_TBN_0 = 0.3413 mol/L, giving Damkohler number Da_2 = k_2_eff * C_interm_0 * t_R02
+            # = 0.03325 * 0.3407 * 3600 = 40.78 and equimolar second-order conversion
+            # X_2 = Da_2 / (1 + Da_2) = 40.78 / 41.78 = 97.6% > 90%:
+            min_r02_yield_frac = 0.90  # [-], conservative bound below Da_2 / (1 + Da_2) = 0.976
             lom_formed = r02_conc[-1, 4] - r02_conc[0, 4]  # [mol/L]
-            interm_consumed = r02_conc[0, 2] - r02_conc[-1, 2]  # [mol/L]
+            residual_r1_in_r02 = r02_conc[0, 1] - r02_conc[-1, 1]  # [mol/L], residual CHA -> interm in R02
+            interm_consumed = (r02_conc[0, 2] - r02_conc[-1, 2]) + residual_r1_in_r02  # [mol/L]
+            tbn_consumed = r02_conc[0, 3] - r02_conc[-1, 3]  # [mol/L]
             assert lom_formed >= min_r02_yield_frac * r02_conc[0, 2]  # [mol/L]
             assert lom_formed == pytest.approx(interm_consumed, rel=solver_rtol)
+            assert lom_formed == pytest.approx(tbn_consumed, rel=solver_rtol)
 
             vap_x = np.asarray(sim.VAP01.result.x_liq)  # [-]
             assert vap_x[-1, 8] > vap_x[0, 8]  # [-], C7 mole fraction increases during THF evaporation

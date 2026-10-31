@@ -31,6 +31,17 @@ studies (see also :doc:`../publications`):
   (`doi:10.1002/aic.70656 <https://doi.org/10.1002/aic.70656>`_; simulation
   benchmark files in ``ds-mfg/simulation/`` of ``SECQUOIA/pd_ising``).
 
+.. note::
+
+   The DOIs listed above and in :doc:`../publications` match the published
+   journal records verified via Crossref: ``10.1016/j.ces.2023.118591`` for
+   Casas-Orozco et al. (2023a) (replacing earlier draft string
+   ``10.1016/j.ces.2023.118987``), ``10.1002/aic.18888`` for Barhate et al.
+   (2025) (replacing earlier draft string ``10.1002/aic.18820``), and
+   ``10.1021/acs.iecr.2c01636`` for Laky et al. (2022) (replacing earlier draft
+   string ``10.1002/aic.18061``, which belongs to an unrelated 2023 *AIChE
+   Journal* article).
+
 Process Chemistry and Superstructure Overview
 ---------------------------------------------
 
@@ -140,10 +151,13 @@ The quadratic polynomial is calibrated over :math:`255\text{--}305\text{ K}`
 (Casas-Orozco et al., 2023b). Two boundary regimes are handled explicitly:
 
 1. **High-temperature cooling start** (:math:`305\text{--}323.15\text{ K}`):
-   During the initial segment of batch cooling from the upstream evaporator
-   temperature (:math:`307.15\text{ K}` in ``VAP01``, or up to the reactor
-   temperature :math:`323.15\text{ K}`), the quadratic polynomial is smoothly
-   extrapolated. Across :math:`305\text{--}323.15\text{ K}`, the post-evaporation
+   Although ``VAP01`` operates under vacuum (:math:`25\text{--}29.4\text{ kPa}`)
+   with a :math:`307.15\text{ K}` heating utility (`evap_utility_temp`), the
+   prescribed batch crystallizer cooling profile (`temp_program`) starts at
+   ``rxn_temp = 323.15 K`` (`[[323.15, T_1], [T_1, T_2], [T_2, T_f]]`). During
+   this initial cooling segment from :math:`323.15\text{ K}` down to
+   :math:`305\text{ K}`, the quadratic polynomial is smoothly extrapolated.
+   Across :math:`305\text{--}323.15\text{ K}`, the post-evaporation
    liquid (:math:`C_{\text{lom}}(0) \approx 56.0\text{ kg/m}^3`,
    :math:`x_{\text{THF}} \approx 0.739`) is strictly undersaturated
    (:math:`C_{\text{sat}} \in [89.4, 152.9]\text{ kg/m}^3 > C_{\text{lom}}(0)`),
