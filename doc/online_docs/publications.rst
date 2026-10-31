@@ -17,6 +17,7 @@ Application papers
    Laky2022
    Casas-Orozco2023
    Casas-Orozco2023a
+   Barhate2025
 
 Conference papers 
 
