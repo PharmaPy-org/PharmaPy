@@ -18,6 +18,49 @@ EXAMPLES = ROOT / "examples/bioreactors"
 NAMES = ("fed_batch_cho", "generic_batch", "generic_fed_batch")
 
 
+
+
+# Real fixture construction and independent qualification helpers.
+def _load(name):
+    """Read the ordered input declarations for one named example.
+
+    Parameters
+    ----------
+    name : str
+        Fixture name or requested property identifier.
+
+    Returns
+    -------
+    list of dict
+        Case, mechanism, and thermophysical mappings; units remain explicit in each input.
+    """
+    folder = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / "inputs"
+    return [read_input_json((folder / file))
+            for file in ("case.json", "mechanism.json", "thermo.json")]
+
+
+def _explicit_culture_inputs():
+    """Declare a small explicit-rate culture through the normal input contract.
+
+    Returns
+    -------
+    tuple
+        Case and biological declarations with explicit units; the caller supplies native thermophysical properties.
+    """
+    case, definition, _ = _load('fed_batch_cho')
+    kinetics = definition['model']['kinetics']
+    kinetics['flux_basis'] = {
+        'exchange': dict(amount_unit='nmol', normalization='10^6 cell', time_unit='day'),
+        'growth': dict(amount_unit='1', normalization='none', time_unit='day'),
+        'product': dict(amount_unit='nmol', normalization='10^6 cell', time_unit='day')}
+    for key in ('cell_flux_to_mmol', 'growth_flux_to_per_day', 'cell_product_scale'):
+        kinetics['constants'].pop(key, None)
+    units = definition['rate_provider']['output_units']
+    for reaction, output in kinetics['kinetic_outputs']['exchange_fluxes'].items():
+        units[output] = '1/day' if reaction == kinetics['kinetic_outputs']['growth_reaction'] else 'nmol/(10^6 cell day)'
+    case['operation']['runtime']['value'] = .025
+    return case, definition
+# Public-path regressions, independent balances, and failure qualification.
 def test_reported_temperature_and_stock_feed_material_balance():
     case, definition, thermo = _load("fed_batch_cho")
     assembly = build_bioreactor(case, definition, Path(__file__).parent / "fixtures/fed_batch_cho/inputs/thermo.json")
@@ -52,12 +95,6 @@ def test_invalid_stock_is_rejected_without_changing_inventory(stock):
     with pytest.raises(ValueError):
         _apply_material_event(assembly.phase, event, 1., "water")
     np.testing.assert_array_equal(assembly.phase.mass_j, before)
-
-
-def _load(name):
-    folder = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / "inputs"
-    return [read_input_json((folder / file))
-            for file in ("case.json", "mechanism.json", "thermo.json")]
 
 
 def test_all_examples_use_the_same_ordered_forward_template():
@@ -210,22 +247,6 @@ def test_strict_supplied_feed_preserves_forward_solution():
     for reference, result in zip(expected, actual):
         np.testing.assert_array_equal(result.mass_j_liquid0, reference.mass_j_liquid0)
         np.testing.assert_array_equal(result.biomass_kg_liquid0, reference.biomass_kg_liquid0)
-
-
-def _explicit_culture_inputs():
-    case, definition, _ = _load('fed_batch_cho')
-    kinetics = definition['model']['kinetics']
-    kinetics['flux_basis'] = {
-        'exchange': dict(amount_unit='nmol', normalization='10^6 cell', time_unit='day'),
-        'growth': dict(amount_unit='1', normalization='none', time_unit='day'),
-        'product': dict(amount_unit='nmol', normalization='10^6 cell', time_unit='day')}
-    for key in ('cell_flux_to_mmol', 'growth_flux_to_per_day', 'cell_product_scale'):
-        kinetics['constants'].pop(key, None)
-    units = definition['rate_provider']['output_units']
-    for reaction, output in kinetics['kinetic_outputs']['exchange_fluxes'].items():
-        units[output] = '1/day' if reaction == kinetics['kinetic_outputs']['growth_reaction'] else 'nmol/(10^6 cell day)'
-    case['operation']['runtime']['value'] = .025
-    return case, definition
 
 
 def test_explicit_flux_basis_preserves_equivalent_legacy_sources():

@@ -17,11 +17,40 @@ from PharmaPy.Metabolic.closures.base import MetabolicEnvironment
 from PharmaPy.Metabolic.closures.reconciled import RateReconciledMFAClosure, ReconciliationTarget
 
 
+# Real fixture construction and independent qualification helpers.
 def relation(name, **inputs):
+    """Declare a named relationship through the normal configuration shape.
+
+    Parameters
+    ----------
+    name : str
+        Fixture name or requested property identifier.
+    **inputs : dict
+        Relationship inputs with the family's declared matching concentration and rate bases.
+
+    Returns
+    -------
+    dict
+        Relationship input expression, with the selected family's physical unit contract.
+    """
     return {'relationship': name, 'inputs': inputs}
 
 
 def evaluate(expression, parameters=None):
+    """Evaluate the real named-rate or expression contract.
+
+    Parameters
+    ----------
+    expression : dict or float
+        Explicit rate expression; physical output units follow the selected relationship.
+    parameters : dict or None
+        Graph parameter values with the units required by the supplied expression.
+
+    Returns
+    -------
+    object
+        Evaluated result retaining the provider or relationship's declared output units.
+    """
     model = {'rule_graph': [{'identifier': 'answer', 'expression': expression}]}
     original = deepcopy(model)
     expanded = expand_relationships(model, parameters or {})
@@ -32,6 +61,7 @@ def evaluate(expression, parameters=None):
     return evaluate_rule_graph(definition, SimpleNamespace(), {})['answer']
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('substrate', [0., .001, 1., 1000.])
 def test_saturating_uptake_against_equation(substrate):
     expression = relation('saturating-uptake', maximum={'parameter': 'v'},

@@ -15,25 +15,9 @@ NOTEBOOKS = tuple(EXAMPLES / name / "workflow.ipynb" for name in (
     "generic_batch", "generic_fed_batch"))
 
 
-@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=lambda p: p.parent.name)
-def test_workflow_notebook_executes_from_repository_root(tmp_path, notebook):
-    """Execute native example workflow cells in an isolated process.
-
-    Parameters
-    ----------
-    tmp_path : Path
-        Disposable output directory.
-    notebook : Path
-        Notebook source to verify.
-    """
-    result = subprocess.run([sys.executable, '-c',
-        "import runpy, pathlib, sys; "
-        "runpy.run_path(sys.argv[1])['_check_notebook'](pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))",
-        str(Path(__file__).resolve()), str(tmp_path), str(notebook)],
-        cwd=ROOT, capture_output=True, text=True, timeout=120)
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
+# Real fixture construction and independent qualification helpers.
 def _check_notebook(tmp_path, notebook):
     """Execute the notebook and check exported values in an isolated process.
 
@@ -71,6 +55,24 @@ def _check_notebook(tmp_path, notebook):
             assert np.min(segment.vessel_vol) > 0.
     finally:
         plt.close('all')
+# Public-path regressions, independent balances, and failure qualification.
+@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=lambda p: p.parent.name)
+def test_workflow_notebook_executes_from_repository_root(tmp_path, notebook):
+    """Execute native example workflow cells in an isolated process.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Disposable output directory.
+    notebook : Path
+        Notebook source to verify.
+    """
+    result = subprocess.run([sys.executable, '-c',
+        "import runpy, pathlib, sys; "
+        "runpy.run_path(sys.argv[1])['_check_notebook'](pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]))",
+        str(Path(__file__).resolve()), str(tmp_path), str(notebook)],
+        cwd=ROOT, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("notebook", NOTEBOOKS, ids=lambda p: p.parent.name)

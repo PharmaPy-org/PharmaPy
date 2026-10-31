@@ -13,7 +13,26 @@ from PharmaPy.Bioreactors.construction import build_bioreactor, _apply_material_
 EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
 
 
+# Real fixture construction and independent qualification helpers.
 def build(name='generic_batch', policy='working-volume', mode=None, backend=None):
+    """Build a real example with an explicitly selected volume policy.
+
+    Parameters
+    ----------
+    name : str
+        Fixture name or requested property identifier.
+    policy : str
+        Input-declared working-volume policy.
+    mode : str or None
+        Native operation selector; None preserves the fixture selection.
+    backend : str
+        Native integrator selector; scipy or fixed-step.
+
+    Returns
+    -------
+    BioreactorAssembly
+        Input-built native reactor and biological mechanism.
+    """
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
     case, definition = [read_input_json((p / f)) for f in ('case.json', 'mechanism.json')]
     case['operation']['volume_policy'] = policy
@@ -28,6 +47,37 @@ def build(name='generic_batch', policy='working-volume', mode=None, backend=None
     return build_bioreactor(case, definition, p / 'thermo.json')
 
 
+def _check_working_volume(name):
+    """Run working-volume notebook assertions in a dedicated process.
+
+    Parameters
+    ----------
+    name : str
+        Generic example folder; expected working volumes are in L.
+    """
+    import matplotlib.pyplot as plt
+    notebook = read_input_json((EXAMPLES / name / 'workflow.ipynb'))
+    namespace = {'__name__': '__notebook__'}
+    try:
+        for cell in notebook['cells']:
+            if cell['cell_type'] != 'code':
+                continue
+            source = ''.join(cell['source'])
+            exec(compile(source, name, 'exec'), namespace)
+            if source.startswith('# STEP 1:'):
+                namespace['WRITE_ARTIFACTS'] = False
+            if source.startswith('# STEP 2:'):
+                namespace['config']['operation']['volume_policy'] = 'working-volume'
+                if name == 'generic_fed_batch':
+                    namespace['config']['recipes']['fed_batch'][0]['volume_basis'] = 'solution'
+        assert all(np.isfinite(list(row.values())).all() for row in namespace['rows'])
+        assert namespace['rows'][-1]['liquid_volume_l'] == pytest.approx(
+            1. if name == 'generic_batch' else 1.1)
+    finally:
+        plt.close('all')
+
+
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'fed_batch_cho'])
 @pytest.mark.parametrize('mode', ['batch', 'fed-batch'])
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])
@@ -196,36 +246,6 @@ def test_generic_notebook_with_working_volume(name):
         str(Path(__file__).resolve()), name], cwd=EXAMPLES.parents[1],
         capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-def _check_working_volume(name):
-    """Run working-volume notebook assertions in a dedicated process.
-
-    Parameters
-    ----------
-    name : str
-        Generic example folder; expected working volumes are in L.
-    """
-    import matplotlib.pyplot as plt
-    notebook = read_input_json((EXAMPLES / name / 'workflow.ipynb'))
-    namespace = {'__name__': '__notebook__'}
-    try:
-        for cell in notebook['cells']:
-            if cell['cell_type'] != 'code':
-                continue
-            source = ''.join(cell['source'])
-            exec(compile(source, name, 'exec'), namespace)
-            if source.startswith('# STEP 1:'):
-                namespace['WRITE_ARTIFACTS'] = False
-            if source.startswith('# STEP 2:'):
-                namespace['config']['operation']['volume_policy'] = 'working-volume'
-                if name == 'generic_fed_batch':
-                    namespace['config']['recipes']['fed_batch'][0]['volume_basis'] = 'solution'
-        assert all(np.isfinite(list(row.values())).all() for row in namespace['rows'])
-        assert namespace['rows'][-1]['liquid_volume_l'] == pytest.approx(
-            1. if name == 'generic_batch' else 1.1)
-    finally:
-        plt.close('all')
 
 
 @pytest.mark.parametrize('event_type', ['feed', 'stock_to_target'])

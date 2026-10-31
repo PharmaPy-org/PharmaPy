@@ -12,7 +12,20 @@ from PharmaPy.Bioreactors import build_bioreactor
 ROOT = Path(__file__).parents[2] / 'examples/bioreactors'
 
 
+# Real fixture construction and independent qualification helpers.
 def inputs(kind):
+    """Load real collaborators for each public provider route.
+
+    Parameters
+    ----------
+    kind : str
+        Direct, pathway or reconciled route.
+
+    Returns
+    -------
+    tuple
+        Case, mechanism and thermo path in their declared physical units.
+    """
     folder = (Path(__file__).parent/'fixtures/reconciliation/analytic_balances/inputs/consistent'
               if kind == 'reconciled' else ROOT/'generic_batch/inputs')
     case = read_input_json((folder/'case.json'))
@@ -76,6 +89,7 @@ def replacement(kind, model):
     return provider
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('kind', ['direct', 'pathway', 'reconciled'])
 def test_all_routes_preserve_equivalent_provider_trajectories(kind):
     case, model, thermo = inputs(kind)

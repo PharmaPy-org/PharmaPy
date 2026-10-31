@@ -10,6 +10,7 @@ import numpy as np
 from .culture import evaluate_rule_graph, _validate_graph
 
 
+# Declare immutable rate outputs together with units and validity information.
 @dataclass(frozen=True)
 class RateProviderResult:
     """Return validated rates, units, identity, and validity diagnostics.
@@ -85,6 +86,7 @@ class RateProviderResult:
                           self.inside_validity_domain, deepcopy(dict(self.diagnostics), memo))
 
 
+# Adapt the existing configured rule graph to the named-rate provider contract.
 class RuleGraphRateProvider:
     """Supply biological rates from the existing declarative kinetic graph.
 
@@ -176,11 +178,13 @@ class RuleGraphRateProvider:
                                   not outside, {"provider_type": "rule-graph", "outside_rules": outside})
 
 
+# This registry binds the provider class above; independent declarations stay at the top.
 _PROVIDER_FACTORIES: dict[str, Callable] = {
     "rule-graph": RuleGraphRateProvider,
 }
 
 
+# Register and construct providers through the public extension boundary.
 def register_rate_provider(provider_type, factory):
     """Register one new provider constructor without replacing existing types.
 

@@ -21,6 +21,74 @@ from .closures.base import FluxSolution, MetabolicInfeasibleError, MetabolicNume
 FloatArray = NDArray[np.float64]
 
 
+
+
+# Validate and freeze input arrays before constructing model declarations.
+def _readonly_vector(values, name, length=None):
+    """Return one finite immutable vector with an optional required length.
+
+    Parameters
+    ----------
+    values : array_like
+        One-dimensional values.
+    name : str
+        Label for error messages.
+    length : int, optional
+        Required length.
+
+    Returns
+    -------
+    ndarray
+        Read-only float copy.
+
+    Raises
+    ------
+    ValueError
+        The array is not one-dimensional, is nonfinite, or has the wrong length.
+    """
+    result = np.asarray(values, dtype=float)
+    if result.ndim != 1 or not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must be a finite one-dimensional sequence.")
+    if length is not None and len(result) != length:
+        raise ValueError(f"{name} must contain {length} values; got {len(result)}.")
+    result = result.copy()
+    result.setflags(write=False)
+    return result
+
+
+def _readonly_matrix(values, name, shape=None):
+    """Return one finite immutable matrix with an optional required shape.
+
+    Parameters
+    ----------
+    values : array_like
+        Two-dimensional values.
+    name : str
+        Label for error messages.
+    shape : tuple of int, optional
+        Required shape.
+
+    Returns
+    -------
+    ndarray
+        Read-only float copy.
+
+    Raises
+    ------
+    ValueError
+        The array is not two-dimensional, is nonfinite, or has the wrong shape.
+    """
+    result = np.asarray(values, dtype=float)
+    if result.ndim != 2 or not np.all(np.isfinite(result)):
+        raise ValueError(f"{name} must be a finite two-dimensional array.")
+    if shape is not None and result.shape != shape:
+        raise ValueError(f"{name} must have shape {shape}; got {result.shape}.")
+    result = result.copy()
+    result.setflags(write=False)
+    return result
+
+
+# Declare the input-defined pathway model and its immutable outputs.
 @dataclass(frozen=True)
 class PathwayModelDefinition:
     """Describe a dimension-independent extracellular pathway optimization.
@@ -280,8 +348,40 @@ class PathwayOptimizationResult(FluxSolution):
             Primary or secondary solver message.
         """
         return self.solver_message
+# Evaluate the explicitly selected secondary minimum-norm objective.
+def _squared_norm(z):
+    """Evaluate the selected minimum-norm secondary objective.
+
+    Parameters
+    ----------
+    z : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+
+    Returns
+    -------
+    float
+        Squared normalized flux norm [-].
+    """
+    return float(z @ z)
 
 
+def _squared_norm_gradient(z):
+    """Differentiate the selected minimum-norm secondary objective.
+
+    Parameters
+    ----------
+    z : ndarray
+        Normalized optimizer coordinates [-], in the unchanged free/tangent-coordinate order.
+
+    Returns
+    -------
+    ndarray
+        Derivative in normalized flux-coordinate order [-].
+    """
+    return 2.0 * z
+
+
+# Solve the configured primary problem and qualify secondary choices.
 class ConfiguredPathwayModel:
     """Solve an arbitrary input-declared pathway LP without biological identities.
 
@@ -366,6 +466,7 @@ class ConfiguredPathwayModel:
             raise ValueError("transfer-cap parameters have invalid signs.")
         return min(maximum, mass_transfer * saturation / biomass / self.exchange_scale)
 
+    # Solve the declared primary pathway objective.
     def solve_fluxes(self, concentrations, biomass=None, *, availability=None, uptake_limits=None):
         """Maximize the declared objective under configured uptake and pathway bounds.
 
@@ -544,6 +645,7 @@ class ConfiguredPathwayModel:
                                      float(max(0., -np.min(availability.residual(fluxes))))),
         )
 
+    # Audit the unchanged primary-optimal face before selecting a secondary result.
     @staticmethod
     def _check_primary_face(fluxes, objective, optimum):
         """Reject a secondary point that loses the normalized primary optimum.
@@ -569,6 +671,7 @@ class ConfiguredPathwayModel:
         if not np.isfinite(value) or abs(value - optimum) > 1e-8 * scale:
             raise MetabolicNumericalError('Pathway secondary solve changed the primary optimum.')
 
+    # Select and qualify the requested secondary minimum-norm solution.
     def _minimum_norm(self, initial, optimum, matrix, capacity, lower, upper):
         """Minimize declared squared normalized flux on the primary optimal face.
 
@@ -631,8 +734,8 @@ class ConfiguredPathwayModel:
             if selected.any():
                 constraints.append(LinearConstraint(inequality[selected], -np.inf, capacity[selected]))
         bounds = list(zip(lower / coordinates, upper / coordinates))
-        result = minimize(lambda z: float(z @ z), initial / coordinates,
-                          jac=lambda z: 2. * z, bounds=bounds, constraints=constraints,
+        result = minimize(_squared_norm, initial / coordinates,
+                          jac=_squared_norm_gradient, bounds=bounds, constraints=constraints,
                           method='SLSQP', options={'ftol': 1e-12, 'maxiter': 1000})
         z = result.x
         self._check_minimum_norm(result, inequality, capacity, equality, rhs,
@@ -675,6 +778,7 @@ class ConfiguredPathwayModel:
                 or 2. * z @ (z - certificate.x) > 1e-7 * max(1., z @ z)):
             raise MetabolicNumericalError(f'Pathway minimum-norm selection failed: {result.message}')
 
+    # Audit resource-free production independently of a simulated trajectory.
     def audit_closed_uptake(self):
         """Screen for growth or secretion without net uptake; not elemental closure.
 
@@ -698,67 +802,3 @@ class ConfiguredPathwayModel:
             maxima[name] = max(0., float(-result.fun))
         return dict(status='FAIL' if max(maxima.values()) > 1e-7 else 'PASS',
                     maximum_exports=maxima, scope='Normalized total pathway activity <= 1; no net uptake.')
-
-
-def _readonly_vector(values, name, length=None):
-    """Return one finite immutable vector with an optional required length.
-
-    Parameters
-    ----------
-    values : array_like
-        One-dimensional values.
-    name : str
-        Label for error messages.
-    length : int, optional
-        Required length.
-
-    Returns
-    -------
-    ndarray
-        Read-only float copy.
-
-    Raises
-    ------
-    ValueError
-        The array is not one-dimensional, is nonfinite, or has the wrong length.
-    """
-    result = np.asarray(values, dtype=float)
-    if result.ndim != 1 or not np.all(np.isfinite(result)):
-        raise ValueError(f"{name} must be a finite one-dimensional sequence.")
-    if length is not None and len(result) != length:
-        raise ValueError(f"{name} must contain {length} values; got {len(result)}.")
-    result = result.copy()
-    result.setflags(write=False)
-    return result
-
-
-def _readonly_matrix(values, name, shape=None):
-    """Return one finite immutable matrix with an optional required shape.
-
-    Parameters
-    ----------
-    values : array_like
-        Two-dimensional values.
-    name : str
-        Label for error messages.
-    shape : tuple of int, optional
-        Required shape.
-
-    Returns
-    -------
-    ndarray
-        Read-only float copy.
-
-    Raises
-    ------
-    ValueError
-        The array is not two-dimensional, is nonfinite, or has the wrong shape.
-    """
-    result = np.asarray(values, dtype=float)
-    if result.ndim != 2 or not np.all(np.isfinite(result)):
-        raise ValueError(f"{name} must be a finite two-dimensional array.")
-    if shape is not None and result.shape != shape:
-        raise ValueError(f"{name} must have shape {shape}; got {result.shape}.")
-    result = result.copy()
-    result.setflags(write=False)
-    return result

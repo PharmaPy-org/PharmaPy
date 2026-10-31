@@ -13,6 +13,7 @@ from PharmaPy.Bioreactors import BioreactorUnitConverter as Units, build_bioreac
 EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
 
 
+# Real fixture construction and independent qualification helpers.
 @pytest.mark.parametrize('value, source, target, expected, properties', [
     (2., 'h', 's', 7200., {}),
     (750., 'mL', 'm3', .00075, {}),

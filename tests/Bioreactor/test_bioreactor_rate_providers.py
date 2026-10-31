@@ -14,7 +14,53 @@ from PharmaPy.Bioreactors import (RateProviderResult, build_bioreactor,
 from PharmaPy.Bioreactors.culture import CultureModelDefinition, CultureSnapshot
 
 
+
+
+# Real fixture construction and independent qualification helpers.
+class ConstantProvider:
+    """Real registered extension fixture returning a declared constant 0.25 /day."""
+
+    def __init__(self, declaration, definition, expected_outputs):
+        """Store output identities for the real registered synthetic provider.
+
+        Parameters
+        ----------
+        declaration : dict
+            Provider configuration and output-unit declarations.
+        definition : CultureModelDefinition
+            Validated species/rate declaration, including the model flux and population bases.
+        expected_outputs : sequence of str
+            Requested rate identifiers, in their declared order.
+        """
+        self.outputs = tuple(expected_outputs)
+    def evaluate(self, snapshot, conditions):
+        """Evaluate the real named-rate or expression contract.
+
+        Parameters
+        ----------
+        snapshot : CultureSnapshot
+            Current concentrations [mmol/L], volume [L], populations [10^6 cells], integrated viable concentration [10^6 cell day/mL], and temperature [K].
+        conditions : dict
+            Input-declared operating conditions, preserving each quantity's units.
+
+        Returns
+        -------
+        RateProviderResult
+            Evaluated result retaining the provider or relationship's declared output units.
+        """
+        return RateProviderResult(
+            {name: 0.25 for name in self.outputs},
+            {name: "1/day" for name in self.outputs},
+            "registered-fixture", "1", True, {},
+        )
 def _definition():
+    """Declare the synthetic model used by this module's real collaborators.
+
+    Returns
+    -------
+    CultureModelDefinition
+        Model declaration; scientific units and bases follow the explicit fixture fields.
+    """
     return CultureModelDefinition.from_mapping({
         "extracellular_species": ["substrate"],
         "internal_reactions": ["uptake"],
@@ -42,10 +88,34 @@ def _definition():
 
 
 def _snapshot(substrate=2.0):
+    """Construct the real synthetic culture snapshot.
+
+    Parameters
+    ----------
+    substrate : float
+        Substrate concentration [mmol/L].
+
+    Returns
+    -------
+    CultureSnapshot
+        Substrate [mmol/L], volume [L], populations [10^6 cells], product [g], integrated viable concentration [10^6 cell day/mL], and temperature [K].
+    """
     return CultureSnapshot({"substrate": substrate}, 1.0, 1.0, 0.0, 0.0, 0.0)
 
 
 def _rule_provider(identifier="mechanistic"):
+    """Declare the real rule-graph provider and explicit output units.
+
+    Parameters
+    ----------
+    identifier : str
+        Provider identifier used in the returned provenance.
+
+    Returns
+    -------
+    dict
+        Provider declaration retaining the model flux and time bases.
+    """
     return {"type": "rule-graph", "identifier": identifier, "version": "1",
             "output_units": {"growth": "1/day", "death": "1/day",
                              "uptake": "model flux/day"}}
@@ -53,6 +123,7 @@ def _rule_provider(identifier="mechanistic"):
 
 
 
+# Public-path regressions, independent balances, and failure qualification.
 def test_rule_graph_provider_satisfies_named_rate_contract():
     provider = build_rate_provider(
         _rule_provider(), _definition(), ("growth", "death", "uptake")
@@ -164,8 +235,8 @@ def test_untargeted_rates_do_not_change_penalties_bounds_or_normalization():
 
 def test_native_untargeted_exchange_run_is_independent_of_omitted_target_values():
     folder = Path(__file__).parents[2] / "tests/Bioreactor/fixtures/fed_batch_cho"
-    case = read_input_json((folder / "inputs/case.json"))
-    declaration = read_input_json((folder / "inputs/mechanism.json"))
+    case = read_input_json(folder / "inputs/case.json")
+    declaration = read_input_json(folder / "inputs/mechanism.json")
     case["operation"]["runtime"] = {"unit": "day", "value": 0.1}
     declaration["model"]["reconciliation"]["untargeted_exchanges"] = ["R046", "R050"]
     first = build_bioreactor(case, declaration, folder / "inputs/thermo.json")
@@ -200,15 +271,6 @@ def test_unknown_provider_fails_before_use():
 
 
 def test_external_provider_can_be_registered_without_changing_reactor_code():
-    class ConstantProvider:
-        def __init__(self, declaration, definition, expected_outputs):
-            self.outputs = tuple(expected_outputs)
-        def evaluate(self, snapshot, conditions):
-            return RateProviderResult(
-                {name: 0.25 for name in self.outputs},
-                {name: "1/day" for name in self.outputs},
-                "registered-fixture", "1", True, {},
-            )
     register_rate_provider("registered-test-provider", ConstantProvider)
     provider = build_rate_provider(
         {"type": "registered-test-provider"}, _definition(), ("growth",)

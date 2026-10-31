@@ -23,6 +23,29 @@ from PharmaPy.Phases_Refactored import LiquidPhase
 EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
 
 
+
+
+# Real fixture construction and independent qualification helpers.
+def _model(matrix=((-1.,), (-1.,), (0.,))):
+    """Construct the real synthetic resource-constrained pathway model.
+
+    Parameters
+    ----------
+    matrix : ndarray
+        Declared stoichiometric/constraint coefficients; row units divided by their corresponding coordinate units.
+
+    Returns
+    -------
+    PathwayModelDefinition
+        Pathway declaration with the supplied exchange coefficients and explicit flux basis.
+    """
+    return PathwayModelDefinition(
+        state_ids=('glucose', 'acetate', 'oxygen'), pathway_ids=('growth',),
+        exchange_matrix=matrix, growth_coefficients=[1.], objective_coefficients=[1.],
+        parameters={'maximum': 1.}, uptake_constraints=(
+            dict(identifier='glucose', type='constant', species='glucose',
+                 maximum_parameter='maximum'),))
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('coordinate_scale', [1., 1e10])
 def test_pathway_tie_break_preserves_small_physical_flux(coordinate_scale):
     """Rescaling a pathway coordinate must preserve its physical optimum.
@@ -44,15 +67,6 @@ def test_pathway_tie_break_preserves_small_physical_flux(coordinate_scale):
     # Independent capacities uniquely imply these physical exchange rates.
     np.testing.assert_allclose(result.extracellular_rates, [-.5, -1.], atol=1e-8)
     assert result.primary_objective == pytest.approx(1.5, abs=1e-8)
-
-
-def _model(matrix=((-1.,), (-1.,), (0.,))):
-    return PathwayModelDefinition(
-        state_ids=('glucose', 'acetate', 'oxygen'), pathway_ids=('growth',),
-        exchange_matrix=matrix, growth_coefficients=[1.], objective_coefficients=[1.],
-        parameters={'maximum': 1.}, uptake_constraints=(
-            dict(identifier='glucose', type='constant', species='glucose',
-                 maximum_parameter='maximum'),))
 
 
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])

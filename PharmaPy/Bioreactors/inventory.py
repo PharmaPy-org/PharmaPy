@@ -3,6 +3,7 @@
 import numpy as np
 
 
+# Represent finite-step linear inventory constraints on their declared bases.
 class LinearInventoryAvailability:
     """Require nonnegative inventories or boundary rates under an affine source map.
 
@@ -97,6 +98,7 @@ class LinearInventoryAvailability:
         return cls(np.zeros(rows.sum()), np.asarray(source_matrix)[rows],
                    np.asarray(other_rates)[rows], growth_index=growth_index)
 
+    # Evaluate the original scaled inventory margins and derivatives.
     def residual(self, fluxes):
         """Return scaled constraint values, which must all be nonnegative.
 
@@ -161,6 +163,7 @@ class LinearInventoryAvailability:
         return -self.matrix / self.scale[:, None], (self.amounts + self.other) / self.scale
 
 
+# Include growth-dependent viable-population exposure in inventory feasibility.
 class InventoryAvailability(LinearInventoryAvailability):
     """Constrain end amounts using the same population exposure as propagation.
 
@@ -249,6 +252,7 @@ class InventoryAvailability(LinearInventoryAvailability):
         self.death = float(death)
         self.growth_conversion = float(growth_conversion)
 
+    # Evaluate growth-dependent exposure before residuals and linear relaxations.
     def _exposure(self, fluxes):
         """Return trapezoidal population exposure and its exponential part.
 

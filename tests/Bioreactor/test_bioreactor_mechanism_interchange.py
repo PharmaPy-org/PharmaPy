@@ -42,6 +42,7 @@ NUTRIENT_ATOL_MOL = 1e-9  # [mol], 1e-6 of the 1 mmol scale of the inventories
 BIOMASS_ATOL_KG = 1e-12  # [kgDW], 1e-8 of the 0.1 gDW initial biomass
 
 
+# Real fixture construction and independent qualification helpers.
 def _load(name):
     """Read one shipped generic example.
 
@@ -56,7 +57,7 @@ def _load(name):
         ``(case, mechanism, thermo)`` JSON mappings.
     """
     folder = EXAMPLES / name / 'inputs'
-    return tuple(read_input_json((folder / f'{part}.json'))
+    return tuple(read_input_json(folder / f'{part}.json')
                  for part in ('case', 'mechanism', 'thermo'))
 
 
@@ -214,6 +215,7 @@ def _closed_form(mechanism, time_h):
     return nutrient0 + fed - (biomass - biomass0) / yield_, biomass
 
 
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('nutrient', [0., 1e-6])
 def test_configured_consumption_rejects_empty_inventory(tmp_path, nutrient):
     """Reject constant uptake at initial or subsequently depleted substrate.

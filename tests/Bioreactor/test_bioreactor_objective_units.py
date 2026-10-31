@@ -10,7 +10,23 @@ from PharmaPy.Bioreactors.inventory import LinearInventoryAvailability
 from .test_bioreactor_qualification import network_load as load, network_observed as observed
 
 
+
+
+VARIANTS = ['product-umol', 'product-mg', 'growth-umol', 'exchange-umol', 'hours', 'cells']
+# Real fixture construction and independent qualification helpers.
 def configured(variant='conflicting'):
+    """Configure the module's real input-built qualification case.
+
+    Parameters
+    ----------
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+
+    Returns
+    -------
+    tuple
+        Case and model declarations with explicit units, and native thermophysical input path.
+    """
     case, config, thermo = load(variant)
     kinetics = config['model']['kinetics']
     scales = {}
@@ -23,7 +39,20 @@ def configured(variant='conflicting'):
 
 
 def convert_coordinates(config, variant):
-    """Independent coordinate changes; keep the physical reference metric fixed."""
+    """Independent coordinate changes; keep the physical reference metric fixed.
+
+    Parameters
+    ----------
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+    variant : str
+        Named synthetic qualification case or coordinate conversion.
+
+    Returns
+    -------
+    tuple
+        Converted configuration and reaction-coordinate scale factors [-], preserving physical rates and the objective metric.
+    """
     config = deepcopy(config)
     basis = config['model']['kinetics']['flux_basis']
     factors = {item['identifier']: 1. for item in config['network']['reactions']}
@@ -65,13 +94,23 @@ def convert_coordinates(config, variant):
 
 
 def targets(config):
+    """Read explicitly configured reconciliation targets in reaction order.
+
+    Parameters
+    ----------
+    config : dict
+        Biological input; species, coefficients, bounds, and flux bases retain their declared units.
+
+    Returns
+    -------
+    dict
+        Target declarations in their input-declared model flux units.
+    """
     return {name: config['parameters']['rates'][name]
             for name in config['model']['kinetics']['kinetic_outputs']['exchange_fluxes']}
 
 
-VARIANTS = ['product-umol', 'product-mg', 'growth-umol', 'exchange-umol', 'hours', 'cells']
-
-
+# Public-path regressions, independent balances, and failure qualification.
 @pytest.mark.parametrize('variant', VARIANTS)
 @pytest.mark.parametrize('limited', [False, True])
 def test_primary_projection_preserves_physical_units_and_inventory_limits(variant, limited):
