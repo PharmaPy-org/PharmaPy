@@ -11,13 +11,102 @@ from PharmaPy.DataClasses import (IntraPhaseProcess, MaterialContributionBuffer,
                                   StateCollection, StateKey, StateVariable, TransferResult)
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import RxnKinetics
-from PharmaPy.Mechanisms import CrossPhaseTransferMechanism, ReactionMechanism
+from PharmaPy.Mechanisms import CrossPhaseTransferMechanism, Mechanism, ReactionMechanism
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Phases_Refactored import LiquidPhase
 from PharmaPy.Streams_Refactored import LiquidStream
 
 
 # Real fixture construction and independent qualification helpers.
+class Conversion(Mechanism):
+    """Analytical first-order A-to-B mass conversion with coefficient 0.5 /s."""
+
+    def get_overrides(self, name=None):
+        """Preserve the native no-property-override contract.
+
+        Parameters
+        ----------
+        name : str
+            Fixture name or requested property identifier.
+
+        Returns
+        -------
+        dict or None
+            Empty mapping for enumeration; None for any named property.
+        """
+        return {} if name is None else None
+
+    def get_solver_state_rates(self, process, phase, **kwargs):
+        """Evaluate the analytical fixture's actual material-rate equations.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Native process and phase reference for returned species rates [kg/s].
+        phase : LiquidPhase
+            Real liquid phase carrying component masses [kg] and temperature [K].
+        **kwargs : dict
+            Additional native call options; unused options do not alter this analytical fixture.
+
+        Returns
+        -------
+        TransferResult
+            Species mass rates [kg/s], native auxiliary handoff, and net mass rate [kg/s].
+        """
+        rate = .5 * phase.mass_j[0]
+        return TransferResult({StateKey("mass_j", process.phaseref):
+                               np.array([-rate, rate, 0., 0.])}, {}, 0.)
+
+
+class Exchange(CrossPhaseTransferMechanism):
+    """Analytical paired species transfer with coefficient 2 /s and no generated heat."""
+
+    def __init__(self):
+        """Initialize the real analytical fixture and its declared native state contract.
+        """
+        super().__init__()
+        self.aux = {}
+
+    def get_overrides(self, name=None):
+        """Preserve the native no-property-override contract.
+
+        Parameters
+        ----------
+        name : str
+            Fixture name or requested property identifier.
+
+        Returns
+        -------
+        dict or None
+            Empty mapping for enumeration; None for any named property.
+        """
+        return {} if name is None else None
+
+    def get_solver_state_rates(self, source_phase, connection, **kwargs):
+        """Evaluate the analytical fixture's actual material-rate equations.
+
+        Parameters
+        ----------
+        source_phase : LiquidPhase
+            Real donor phase carrying current species masses [kg].
+        connection : PhaseConnection
+            Actual source/sink phase references for the paired material rates.
+        **kwargs : dict
+            Additional native call options; unused options do not alter this analytical fixture.
+
+        Returns
+        -------
+        TransferResult
+            Species mass rates [kg/s], native auxiliary handoff, and net mass rate [kg/s].
+        """
+        rate = np.array([2. * source_phase.mass_j[0], 0., 0., 0.])
+        self.aux["connection"] = connection
+        return TransferResult({StateKey("mass_j", connection.source_phaseref): -rate,
+                               StateKey("mass_j", connection.sink_phaseref): rate},
+                              self.aux, rate.sum())
+
+
+
 class ReactiveExchange(CrossPhaseTransferMechanism):
     """Consume donor reactants and release products into a receiving phase.
 
@@ -419,3 +508,44 @@ def test_native_reactive_transfer_conserves_mass_and_reaction_heat():
     expected_rise = .1 * 1000. * converted / (2. * heat_capacity)  # [K], released reaction energy / thermal holdup
     np.testing.assert_allclose(unit.result.global_temp[-1] - unit.result.global_temp[0],
                                expected_rise, rtol=comparison_rtol)
+
+
+def test_native_batch_reactor_through_solve_unit():
+    from PharmaPy.DataClasses import IntraPhaseProcess, TransferResult
+    from PharmaPy.IntegratorBackends import FixedStepBackend
+    from PharmaPy.Mechanisms import Mechanism
+    from PharmaPy.Reactors_Refactored import BatchReactor
+
+
+    thermo = Path(__file__).parents[1] / "tests/fixtures/native_four_species.json"
+    unit = BatchReactor(isothermal=True, integrator=FixedStepBackend())
+    unit.Phases = LiquidPhase(thermo, mass=1., mass_frac=np.full(4, .25), verbose=False)
+    unit.intraphase_processes = [IntraPhaseProcess(PhaseRef("liquid", 0), Conversion())]
+    times, states = unit.solve_unit(time_grid=np.linspace(0., 1., 11), verbose=False)
+    expected = .25 * .95 ** np.arange(11)
+    np.testing.assert_allclose(states[:, 0], expected)
+    np.testing.assert_allclose(states[:, 1], .5 - expected)
+    np.testing.assert_allclose(states.sum(axis=1), 1.)
+    np.testing.assert_allclose(unit.result.mass_j_liquid0, states)
+
+
+def test_native_paired_transfer_through_solve_unit():
+    from PharmaPy.DataClasses import PhaseConnection, TransferResult
+    from PharmaPy.IntegratorBackends import FixedStepBackend
+    from PharmaPy.Mechanisms import CrossPhaseTransferMechanism
+
+
+    thermo = Path(__file__).parents[1] / "tests/fixtures/native_four_species.json"
+    unit = MultiPhaseVessel(isothermal=True, integrator=FixedStepBackend())
+    unit.Phases = [LiquidPhase(thermo, mass=1., mass_frac=np.full(4, .25), verbose=False)
+                   for _ in range(2)]
+    unit.phase_connections = [PhaseConnection(PhaseRef("liquid", 0), PhaseRef("liquid", 1),
+                                              None, mechanism=Exchange())]
+    times, states = unit.solve_unit(time_grid=np.arange(3.), verbose=False)
+    np.testing.assert_allclose(states.sum(axis=1), 2.)
+    np.testing.assert_allclose(states[1:, 0], 0.)
+    np.testing.assert_allclose(states[1:, 4], .5)
+    assert np.all(states >= 0.)
+    buffer = unit._material_contributions
+    assert buffer.aux[buffer.CROSSPHASE][0]["transfer_scale"] == 1.
+

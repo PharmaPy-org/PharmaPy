@@ -447,6 +447,18 @@ class StateCollection:
         if not self._compiled:
             self.compile()
         return self._material_keys
+
+    @property
+    def differential_mask(self):
+        """Identify differential entries in the compiled solver ordering.
+
+        Returns
+        -------
+        ndarray of bool
+            True for differential states, False for algebraic states.
+        """
+        return ~self.algebraic_mask
+
     def unpack(self, y):
         if not self._compiled:
             self.compile()

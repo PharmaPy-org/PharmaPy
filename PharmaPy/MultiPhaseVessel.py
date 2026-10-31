@@ -1278,8 +1278,7 @@ class MultiPhaseVessel():
 
     def pack_state_rates(self, material_rates=None, global_rates=None,
                          algebraic_residuals=None):
-        """
-        Pack one vector the solver can consume.
+        """Pack one vector the solver can consume.
 
         Differential slots carry the derivative; algebraic slots carry the
         residual g(y), which must be zero at a consistent solution. Keeping
@@ -1294,6 +1293,26 @@ class MultiPhaseVessel():
         is optional because unit_model requests the energy balance on its
         own, in which case only global_rates is supplied and the material
         slots stay zero.
+
+        Parameters
+        ----------
+        material_rates : ndarray, optional
+            Packed material rates [native state units/s].
+        global_rates : dict, optional
+            Rates of states without an owning phase, such as temperature [K/s].
+        algebraic_residuals : dict, optional
+            Residual per algebraic state key, in each constraint's units.
+
+        Returns
+        -------
+        ndarray
+            Shared work buffer in solver ordering.
+
+        Raises
+        ------
+        KeyError
+            An algebraic state has no residual, or a differential state has no
+            rate while both rate sources are supplied.
         """
 
         buffer = self._solver_rate_buffer
@@ -1304,10 +1323,13 @@ class MultiPhaseVessel():
 
         for key in self.solver_state_collection.keys:
 
-            if algebraic_residuals is not None and key in algebraic_residuals:
-                buffer[solver_slices[key]] = np.asarray(
-                    algebraic_residuals[key]
-                ).reshape(-1)
+            if key in self.solver_state_collection.algebraic_keys:
+                if algebraic_residuals is not None:
+                    if key not in algebraic_residuals:
+                        raise KeyError(f"No algebraic residual was produced for {key}.")
+                    buffer[solver_slices[key]] = np.asarray(
+                        algebraic_residuals[key]
+                    ).reshape(-1)
                 continue
 
             if material_rates is not None and key in material_slices:
@@ -1327,7 +1349,7 @@ class MultiPhaseVessel():
             # packing error and still raises.
             if material_rates is not None and global_rates is not None:
                 raise KeyError(
-                    f"StateKey {key} not found in material_rates or "
+                    f"No differential rate: StateKey {key} not found in material_rates or "
                     "global_rates"
                 )
 
@@ -1357,7 +1379,35 @@ class MultiPhaseVessel():
 
         return completed_state
     def unit_model(self, time, states, params=None, sw=None,
-                    mat_bce=False, enrgy_bce=False,alg_bce=False, limiter_dt=None):
+                    mat_bce=False, enrgy_bce=False,alg_bce=False, limiter_dt=None,
+                    differential_only=False):
+        """Evaluate the vessel right-hand side in solver ordering.
+
+        Parameters
+        ----------
+        time : float
+            Absolute simulation time [s].
+        states : ndarray
+            Packed solver states [native state units].
+        params, sw : object, optional
+            Native solver arguments; unused here.
+        mat_bce, enrgy_bce : bool, optional
+            Return only material or only energy rates. Default False.
+        alg_bce : bool, optional
+            Return only the algebraic residual mapping. Default False.
+        limiter_dt : float, optional
+            Inventory-limiting horizon [s]; defaults to ``positivity_horizon``.
+            Zero or negative disables rate throttling.
+        differential_only : bool, optional
+            Skip algebraic constraints, used to initialize IDA derivatives.
+            Default False.
+
+        Returns
+        -------
+        ndarray or dict
+            Rates [state units/s] with algebraic residuals in their slots, or
+            the partial result requested by a ``*_bce`` flag.
+        """
         if not hasattr(self, "model_call_count"):
             self.model_call_count = 0
         self.model_call_count += 1
@@ -1392,7 +1442,7 @@ class MultiPhaseVessel():
         # carries a residual vector.
         algebraic_residuals = None
 
-        if self.has_algebraic_balance:
+        if self.has_algebraic_balance and not differential_only:
             algebraic_residuals = self.algebraic_balances(time, completed_state)
 
             if alg_bce:
@@ -1883,6 +1933,52 @@ class MultiPhaseVessel():
             atol[state_slice] = abs_tol
 
         return atol
+    def dae_residual(self, time, states, derivatives, sw=None):
+        """Combine differential balances and algebraic constraints for IDA.
+
+        Parameters
+        ----------
+        time : float
+            Absolute simulation time [s].
+        states : ndarray
+            Native packed solver states, in metadata-declared units.
+        derivatives : ndarray
+            State derivatives [native state units/s], in solver ordering.
+        sw : object, optional
+            Native event switches passed to the balance evaluator.
+
+        Returns
+        -------
+        ndarray
+            Differential entries are derivative minus rate [state units/s];
+            algebraic entries retain each constraint's declared units.
+
+        Raises
+        ------
+        KeyError
+            A declared solver state has no corresponding equation.
+        """
+        values = self.unit_model(time, states, sw=sw)
+        return np.where(self.solver_state_collection.algebraic_mask,
+                        values, derivatives - values)
+
+    def create_solver_init_derivatives(self, states=None):
+        """Initialize differential derivatives without evaluating constraints.
+
+        Parameters
+        ----------
+        states : ndarray, optional
+            Packed native initial states. Defaults to the current solver state.
+
+        Returns
+        -------
+        ndarray
+            Independent copy of differential rates [state units/s], with zero
+            algebraic entries because their derivatives do not enter IDA.
+        """
+        if states is None:
+            states = self.create_solver_init_states()
+        return self.unit_model(self.elapsed_time, states, differential_only=True).copy()
 
     def solve_unit(
         self,
