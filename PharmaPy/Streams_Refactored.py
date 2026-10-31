@@ -1,11 +1,15 @@
 from PharmaPy.Phases_Refactored import BasePhase
+from PharmaPy.Commons import trapezoidal_rule
 from PharmaPy.Interpolation import local_newton_interpolation
 from PharmaPy.Results import DynamicResult
 from PharmaPy.DataClasses import StateVariable,StateKey
 import copy
+import warnings
 
 from scipy.interpolate import CubicSpline
 import numpy as np
+
+eps = np.finfo(float).eps
 
 # ===========================
 # Legacy Streams content
@@ -13,19 +17,81 @@ import numpy as np
 
 
 def Interpolation(t_data, y_data, time, newton=True, num_points=3):
-    """Kept as a module-level name; the implementation now lives in
-    PharmaPy.Interpolation so the local-stencil logic exists once.
+    """Interpolate upstream profile data at the requested time.
+
+    Kept as a module-level name; the implementation now lives in
+    ``PharmaPy.Interpolation`` so the local-stencil logic exists once.
     This file used to carry its own copy, complete with the
     off-by-one that collapsed the stencil to a single node at the end
-    of the data."""
+    of the data.
+
+    Parameters
+    ----------
+    t_data : numpy.ndarray
+        Monotonically increasing time grid [s], shape ``(num_times,)``.
+    y_data : numpy.ndarray
+        Profile values on ``t_data``, shape ``(num_times, ...)``.
+    time : float or numpy.ndarray
+        Query time(s) [s].
+    newton : bool, optional
+        Legacy flag kept for signature compatibility.
+    num_points : int, optional
+        Number of stencil points [-]; default 3.
+
+    Returns
+    -------
+    numpy.ndarray
+        Interpolated values at ``time``.
+
+    .. deprecated::
+        Use :func:`PharmaPy.Interpolation.local_newton_interpolation` directly.
+    """
+    warnings.warn(
+        "Interpolation in PharmaPy.Streams_Refactored is deprecated; "
+        "use PharmaPy.Interpolation.local_newton_interpolation instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return local_newton_interpolation(time, t_data, y_data,
                                       num_points=num_points)
 
 
 class BatchToFlowConnector:
+    """Legacy batch-to-flow connector compatibility shim.
+
+    Parameters
+    ----------
+    cycle_time : float
+        Batch cycle duration [s].
+    flow_mult : float, optional
+        Dimensionless discharge flow multiplier [-]; default 1.
+
+    .. deprecated::
+        Use :class:`PharmaPy.Containers.BatchToFlowConnector` instead.
+    """
+
     def __init__(self, cycle_time, flow_mult=1):
-        self.flow_mult = flow_mult
-        self.cycle_time = cycle_time
+        """Initialize the deprecated batch-to-flow connector shim.
+
+        Parameters
+        ----------
+        cycle_time : float
+            Batch cycle duration [s].
+        flow_mult : float, optional
+            Dimensionless discharge flow multiplier [-]; default 1.
+
+        .. deprecated::
+            Use :class:`PharmaPy.Containers.BatchToFlowConnector` instead.
+        """
+        warnings.warn(
+            "BatchToFlowConnector in PharmaPy.Streams_Refactored is "
+            "deprecated; use PharmaPy.Containers.BatchToFlowConnector "
+            "instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.flow_mult = flow_mult  # [-]
+        self.cycle_time = cycle_time  # [s]
 
         self._Phases = None
         self._Inlet = None
@@ -100,6 +166,13 @@ class BatchToFlowConnector:
 
 
 class BaseStream(BasePhase):
+    """Refactored material stream with flow-rate aliases and dynamic inlet support.
+
+    Flow properties map onto the underlying :class:`BasePhase` extensive state
+    variables on a per-second rate basis: ``mass_flow`` [kg/s], ``mole_flow``
+    [mol/s], ``vol_flow`` [m**3/s], and ``mass_j_flow`` [kg/s].
+    """
+
     phase_class = None
     def __init__(
         self,
@@ -126,6 +199,57 @@ class BaseStream(BasePhase):
         verbose=True,
         **kwargs,
     ):
+        """Initialize a refactored material stream.
+
+        Parameters
+        ----------
+        path_thermo : str or pathlib.Path, optional
+            Path to the thermodynamic property database JSON file.
+        temp : float or numpy.ndarray, optional
+            Stream temperature [K]; default 298.15 K.
+        pressure : float or numpy.ndarray, optional
+            Stream pressure [Pa]; default 101325 Pa.
+        mass_flow : float or numpy.ndarray, optional
+            Total mass flow rate [kg/s].
+        mole_flow : float or numpy.ndarray, optional
+            Total molar flow rate [mol/s] (issue #156).
+        vol_flow : float or numpy.ndarray, optional
+            Total volumetric flow rate [m**3/s].
+        mass_j_flow : numpy.ndarray, optional
+            Species mass flow rates [kg/s], shape ``(num_species,)``.
+        mass, moles, vol, mass_j : float or numpy.ndarray, optional
+            Aliases for ``mass_flow`` [kg/s], ``mole_flow`` [mol/s],
+            ``vol_flow`` [m**3/s], and ``mass_j_flow`` [kg/s].
+        mass_frac, mole_frac : numpy.ndarray, optional
+            Species mass or mole fractions [-], shape ``(num_species,)``.
+        mass_conc : numpy.ndarray, optional
+            Species mass concentrations [kg/m**3], shape ``(num_species,)``.
+        mole_conc : numpy.ndarray, optional
+            Species molar concentrations [mol/L], shape ``(num_species,)``.
+        name_solv : str, optional
+            Solvent species name for concentration-to-fraction closure.
+        controls : dict, optional
+            Deprecated callable controls mapping state names to functions of
+            time; use ``stream.DynamicInlet`` instead.
+        args_control : dict, optional
+            Deprecated extra positional arguments for ``controls``.
+        num_interpolation_points : int, optional
+            Number of points for local Newton interpolation [-]; default 3.
+        check_input : bool, optional
+            Validate composition inputs when ``True``.
+        verbose : bool, optional
+            Emit informational messages when ``True``.
+        **kwargs
+            Forwarded to :class:`BasePhase` (including ``temp_ref`` [K]).
+
+        Raises
+        ------
+        ValueError
+            If invalid flow or composition specifications are supplied.
+        TypeError
+            If :class:`BaseStream` is instantiated directly without a concrete
+            ``phase_family``.
+        """
         self.is_stream=True
         if mass_flow is not None:
             mass = mass_flow
@@ -157,6 +281,17 @@ class BaseStream(BasePhase):
         self.time_upstream = None
         self.bipartite = None
         ## Deprecated control logic for compatibility
+        if controls is not None or args_control is not None:
+            caller_stacklevel = (
+                2 if type(self).__init__ is BaseStream.__init__ else 3
+            )
+            warnings.warn(
+                "Passing 'controls' or 'args_control' to BaseStream.__init__ "
+                "is deprecated; assign a DynamicInput instance to "
+                "stream.DynamicInlet instead.",
+                DeprecationWarning,
+                stacklevel=caller_stacklevel,
+            )
         # Controls
         if controls is None:
             controls = {}
@@ -186,32 +321,61 @@ class BaseStream(BasePhase):
         return 'mass_flow'
     @property
     def mass_flow(self):
-        return self.mass
+        """Total mass flow rate of the stream [kg/s].
+
+        Returns
+        -------
+        float, numpy.ndarray, or None
+            Total mass flow rate [kg/s].
+        """
+        return self.mass  # [kg/s]
     @mass_flow.setter
     def mass_flow(self,value):
         if value is not None:
-            self.mass = value
+            self.mass = value  # [kg/s]
     @property
     def mole_flow(self):
-        return self.moles
+        """Total molar flow rate of the stream [mol/s] (issue #156).
+
+        Returns
+        -------
+        float, numpy.ndarray, or None
+            Total molar flow rate [mol/s].
+        """
+        return self.moles  # [mol/s]
     @mole_flow.setter
     def mole_flow(self,value):
         if value is not None:
-            self.moles = value
+            self.moles = value  # [mol/s]
     @property
     def vol_flow(self):
-        return self.vol
+        """Total volumetric flow rate of the stream [m**3/s].
+
+        Returns
+        -------
+        float, numpy.ndarray, or None
+            Total volumetric flow rate [m**3/s].
+        """
+        return self.vol  # [m**3/s]
     @vol_flow.setter
     def vol_flow(self,value):
         if value is not None:
-            self.vol = value
+            self.vol = value  # [m**3/s]
     @property
     def mass_j_flow(self):
-        return self.mass_j
+        """Species mass flow rates of the stream [kg/s].
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Species mass flow rates [kg/s], shape ``(num_species,)`` or
+            ``(num_points, num_species)``.
+        """
+        return self.mass_j  # [kg/s]
     @mass_j_flow.setter
     def mass_j_flow(self,value):
         if value is not None:
-            self.mass_j = value
+            self.mass_j = value  # [kg/s]
 
 
     # ========================================
@@ -333,7 +497,24 @@ class BaseStream(BasePhase):
     LEGACY_QUANTITY_NAME = 'mass_flow'
 
     def to_legacy(self):
-        """An equivalent stream from the pre-refactor PharmaPy.Streams."""
+        """Build an equivalent stream from the pre-refactor ``PharmaPy.Streams``.
+
+        Returns
+        -------
+        object
+            Instance of the corresponding class in :mod:`PharmaPy.Streams`
+            preserving temperature [K], pressure [Pa], reference temperature
+            [K], mass flow rate [kg/s], composition [-], solvent, and attached
+            mechanism state.
+
+        Raises
+        ------
+        TypeError
+            If this stream class has no pre-refactor counterpart.
+        NotImplementedError
+            If an attached mechanism cannot express its state in the
+            pre-refactor representation.
+        """
         import PharmaPy.Streams as legacy
 
         if self.LEGACY_CLASS_NAME is None:
@@ -345,10 +526,14 @@ class BaseStream(BasePhase):
         kwargs = {
             'path_thermo': self.path_thermo,
             'temp': self.temp,
+            'pres': self.pres,
             'mass_frac': np.asarray(self.mass_frac).copy(),
             self.LEGACY_QUANTITY_NAME: float(self.mass_flow)
             if self.mass_flow is not None else 0,
         }
+
+        if self.phase_family == 'solid':
+            kwargs['temp_ref'] = getattr(self, 'temp_ref', 298.15)  # [K]
 
         if self.LEGACY_ACCEPTS_NAME_SOLV and self.name_solv is not None:
             kwargs['name_solv'] = self.name_solv
@@ -356,7 +541,10 @@ class BaseStream(BasePhase):
         mechanism_state = self._legacy_mechanism_state()
         kwargs.update(mechanism_state)
 
-        return legacy_cls(**kwargs)
+        legacy_stream = legacy_cls(**kwargs)
+        if hasattr(self, 'temp_ref') and not hasattr(legacy_stream, 'temp_ref'):
+            legacy_stream.temp_ref = self.temp_ref  # [K]
+        return legacy_stream
 
     def to_phase(self):
         phase = copy.copy(self)
@@ -376,6 +564,9 @@ class BaseStream(BasePhase):
 class LiquidStream(BaseStream):
     LEGACY_CLASS_NAME = 'LiquidStream'
     LEGACY_ACCEPTS_NAME_SOLV = True
+    phase_family = 'liquid'
+    from PharmaPy.Phases_Refactored import LiquidPhase
+    phase_class = LiquidPhase
     def __init__(
         self,
         path_thermo=None,
@@ -441,13 +632,48 @@ class SolidStream(BaseStream):
     # ===========================================================
     def getPorosity(self, distrib=None, diam_filter=1, AR=None,
                     sphericity=None):
+        """Estimate packed-bed porosity with the legacy linear packing model.
+
+        Parameters
+        ----------
+        distrib : array-like, optional
+            Number distribution [#/um], shape ``(num_sizes,)``. Defaults to
+            ``self.distrib``.
+        diam_filter : float, optional
+            Filter diameter [m]; default 1 m.
+        AR : float, optional
+            Legacy unused aspect ratio [-].
+        sphericity : float, optional
+            Particle sphericity [-]; default 0.7.
+
+        Returns
+        -------
+        float
+            Estimated packed-bed void fraction [-].
+
+        .. deprecated::
+            Particle size distributions belong to the crystallization
+            mechanism in the refactored architecture.
+        """
+        warnings.warn(
+            "getPorosity on refactored SolidStream is deprecated; particle "
+            "size distributions belong to the crystallization mechanism.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
 
         if distrib is None:
             distrib = self.distrib
             mom_zero = self.moments[0]
             mom_one = self.moments[1]
-        else:
+        elif hasattr(self, "getMoments"):
             mom_zero, mom_one = self.getMoments(mom_num=(0, 1))
+        else:
+            mom_zero = trapezoidal_rule(self.x_distrib, distrib)  # [#]
+            mom_one = (
+                trapezoidal_rule(self.x_distrib, distrib * self.x_distrib)
+                * 1e-6
+            )  # [m], exact um-to-m conversion
 
         # mom_one *= 1e-6  # m
         x_dist = self.x_distrib * 1e-6  # m
@@ -518,7 +744,33 @@ class SolidStream(BaseStream):
 
 
 def classify_phases(instance, names=None):
+    """Classify phases on an instance using legacy 1-indexed attribute names.
 
+    Parameters
+    ----------
+    instance : object
+        Instance holding ``Phases`` as an iterable of phase or stream objects.
+    names : Sequence[str], optional
+        Explicit attribute names to assign to ``instance.Phases`` in order.
+        When ``None``, 1-indexed family names (``Liquid_1``, ``Solid_1``,
+        ``Vapor_1``, ...) are generated.
+
+    Returns
+    -------
+    None
+        Installs ``name`` on each phase and the corresponding attribute on
+        ``instance`` in place.
+
+    .. deprecated::
+        Use :class:`~PharmaPy.MixedPhases_Refactored.MixedPhase` or
+        :class:`~PharmaPy.DataClasses.PhaseStateCollection` instead.
+    """
+    warnings.warn(
+        "classify_phases in PharmaPy.Streams_Refactored is deprecated; "
+        "use MixedPhase or PhaseStateCollection phase indexing instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     phases = instance.Phases
 
     if names is None:
@@ -536,49 +788,103 @@ def classify_phases(instance, names=None):
                 solid_count += 1
 
             elif 'Vapor' in phase.__class__.__name__:
-                phase_name = 'Vapor_{}'.format(solid_count)
+                phase_name = 'Vapor_{}'.format(vapor_count)
                 vapor_count += 1
+            else:
+                phase_name = phase.__class__.__name__
 
             setattr(phase, 'name', phase_name)
             setattr(instance, phase_name, phase)
     else:
         for phase, name in zip(phases, names):
-            setattr(phase, 'name', phase_name)
+            setattr(phase, 'name', name)
             setattr(instance, name, phase)
 
 
 def getPropsPhaseMix(phases, basis='mass'):
-    # Empty containers
-    props_matrix = np.zeros((len(phases), 3))
+    """Aggregate phase properties using the legacy tuple contract.
+
+    Parameters
+    ----------
+    phases : Sequence[BasePhase]
+        Sequence of phases or streams containing one liquid phase and optional
+        solid phases.
+    basis : {'mass', 'mole'}, optional
+        Mixture basis for heat capacity, density, and enthalpy; default
+        ``'mass'``.
+
+    Returns
+    -------
+    cp : numpy.ndarray
+        Heat capacities of each phase, [J/kg/K] for ``basis='mass'`` or
+        [J/mol/K] for ``basis='mole'``, shape ``(num_phases,)``.
+    rho : numpy.ndarray
+        Densities of each phase, [kg/m**3] for ``basis='mass'`` or [mol/L]
+        for ``basis='mole'``, shape ``(num_phases,)``.
+    enthalpy : numpy.ndarray
+        Enthalpies of each phase, [J/kg] for ``basis='mass'`` or [J/mol] for
+        ``basis='mole'``, shape ``(num_phases,)``.
+    vfrac_phases : numpy.ndarray
+        Phase volume fractions [-], shape ``(num_phases,)``.
+    mfrac_phases : numpy.ndarray
+        Phase mass or molar fractions [-] matching ``basis``, shape
+        ``(num_phases,)``.
+
+    Raises
+    ------
+    ValueError
+        If ``basis`` is invalid for the underlying phase property methods.
+
+    .. deprecated::
+        Use :class:`~PharmaPy.MixedPhases_Refactored.MixedPhase` property
+        methods instead.
+    """
+    warnings.warn(
+        "getPropsPhaseMix in PharmaPy.Streams_Refactored is deprecated; "
+        "use MixedPhase property methods instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     vfrac_phases = []
     props_matrix = []
+    ind_liq = 0
+    total_vol = sum(
+        float(getattr(p, 'vol', 0.0) or 0.0) for p in phases
+    )  # [m**3] or [m**3/s]
 
     for ind, phase in enumerate(phases):
-        all_props = phase.getProps(basis=basis)
+        all_props = (
+            phase.getCp(basis=basis),
+            phase.getDensity(basis=basis),
+            phase.getEnthalpy(basis=basis),
+        )
         props_matrix.append(all_props[:3])
 
-        if phase.__class__.__name__ == 'LiquidPhase':
+        if 'Liquid' in phase.__class__.__name__:
             ind_liq = ind
-        if phase.__class__.__name__ == 'SolidPhase':
-            mom_solid = all_props[-2]
-            conv_exp = np.arange(len(mom_solid))
-            # num/m**3, m/m**3, m**2/m**3, ...
-            mom_meters = mom_solid * (1e-6)**conv_exp
-
-            vfrac_solid = mom_meters[-1] * phase.kv
+        if 'Solid' in phase.__class__.__name__:
+            if getattr(phase, 'moments', None) is not None and hasattr(phase, 'kv'):
+                mom_solid = np.asarray(phase.moments, dtype=float)
+                conv_exp = np.arange(len(mom_solid))
+                mom_meters = mom_solid * (1e-6)**conv_exp  # [m**k/m**3]
+                vfrac_solid = mom_meters[-1] * phase.kv  # [-]
+            elif total_vol > 0 and getattr(phase, 'vol', None) is not None:
+                vfrac_solid = float(phase.vol) / total_vol  # [-]
+            else:
+                vfrac_solid = 0.0  # [-]
             vfrac_phases.append(vfrac_solid)
 
     props_matrix = np.vstack(props_matrix)
 
     # Volume fraction and mass fractions of phases
-    vfrac_rest = 1 - sum(vfrac_phases)
+    vfrac_rest = 1 - sum(vfrac_phases)  # [-]
     vfrac_phases.insert(ind_liq, vfrac_rest)
 
     # to avoid internal casting next line
-    vfrac_phases = np.array(vfrac_phases)
+    vfrac_phases = np.array(vfrac_phases)  # [-]
 
     mass_phases = vfrac_phases * props_matrix[:, 1]
-    mfrac_phases = mass_phases / mass_phases.sum()
+    mfrac_phases = mass_phases / mass_phases.sum()  # [-]
 
     cp, rho, enthalpy = props_matrix.T
 

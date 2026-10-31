@@ -13,8 +13,13 @@ from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Phases_Refactored import LiquidPhase
 
 
+
+
+# Real fixture construction and independent qualification helpers.
 class _CoupledMechanism(Mechanism):
     def __init__(self):
+        """Initialize the real analytical fixture and its declared native state contract.
+        """
         super().__init__()
         self.constraint = 999.0
         self.solver_states = (StateVariable("constraint", 1, "kg", state_type="alg"),)
@@ -22,6 +27,18 @@ class _CoupledMechanism(Mechanism):
         self._timers = {}
 
     def get_overrides(self, name=None):
+        """Preserve the native no-property-override contract.
+
+        Parameters
+        ----------
+        name : str
+            Fixture name or requested property identifier.
+
+        Returns
+        -------
+        dict or None
+            Empty mapping for enumeration; None for any named property.
+        """
         return {} if name is None else None
 
     def get_solver_state_rates(self, process, phase, **kwargs):
@@ -46,6 +63,20 @@ class _CoupledMechanism(Mechanism):
                                np.array([-rate, rate, 0., 0.])}, {'process': process}, 0.)
 
     def get_solver_state_residuals(self, completed_state, **kwargs):
+        """Evaluate the analytical algebraic mass constraint.
+
+        Parameters
+        ----------
+        completed_state : dict
+            Native named state mapping; species masses [kg], temperature [K], and auxiliary states in their declared units.
+        **kwargs : dict
+            Additional native call options; unused options do not alter this analytical fixture.
+
+        Returns
+        -------
+        dict
+            Named algebraic residuals [kg], in the native constraint order.
+        """
         ref = self.solver_state_keys[0].phaseref
         return {StateKey("constraint", ref): completed_state[StateKey("constraint", ref)]
                 - 2. * completed_state[StateKey("mass_j", ref)][0]}
@@ -72,6 +103,24 @@ class HeatedCoupledMechanism(_CoupledMechanism):
             Heat input [W].
         """
         return 20.  # [W]
+def _event_time_offset(time, completed_state, unit):
+    """Locate the synthetic event at the declared interior time of 0.4 s.
+
+    Parameters
+    ----------
+    time : float
+        Absolute native integration time [s].
+    completed_state : dict
+        Native named state mapping; species masses [kg], temperature [K], and auxiliary states in their declared units.
+    unit : MultiPhaseVessel
+        Real native vessel used by the qualification.
+
+    Returns
+    -------
+    float
+        Signed time from the event [s].
+    """
+    return time - 0.4
 
 
 def make_vessel(mechanism):
@@ -109,6 +158,7 @@ def vessel():
     return make_vessel(_CoupledMechanism())
 
 
+# Public-path regressions, independent balances, and failure qualification.
 def test_unit_model_dae_modes_and_ode_guard(vessel):
     states = vessel.create_solver_init_states()
     rates = vessel.create_solver_init_derivatives(states)
@@ -240,7 +290,7 @@ def test_ida_continues_and_reinitializes_constraints(vessel):
 def test_ida_locates_parent_state_event(vessel):
     pytest.importorskip("assimulo.solvers.sundials")
     vessel.state_event_list = [StateEvent(
-        "stop", lambda time, completed_state, unit: time - .4, terminal=True)]
+        "stop", _event_time_offset, terminal=True)]
     vessel.integrator = AssimuloDAEBackend({"rtol": 1e-9, "atol": 1e-11})
     times, states = vessel.solve_unit(runtime=1., verbose=False)
     assert times[-1] == pytest.approx(.4, abs=1e-8)

@@ -361,7 +361,7 @@ class MixedStream(MixedPhase):
         for stream in streams:
 
             if isinstance(stream, MixedStream):
-                normalized.extend(self._normalize_streams(stream.Streams))
+                normalized.extend(self._normalize_phases(stream.Streams))
 
             elif isinstance(stream,BasePhase) and stream.is_stream:
                 normalized.append(stream)

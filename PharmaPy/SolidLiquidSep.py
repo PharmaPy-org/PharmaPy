@@ -763,7 +763,15 @@ class DeliquoringStep:
         Attached liquid composition remains a one-dimensional mass-fraction
         vector [-], weighted by the final species inventories:
         m_j = porosity * cake_vol * sum_i(delta_z_i * S_i * c_ij) [kg].
-        Thus local mixture density is sum_j(c_ij) [kg/m**3].
+        Thus local mixture density is sum_j(c_ij) [kg/m**3]. A liquid whose
+        concentrations are authoritative (``LiquidPhase.concentration_basis``,
+        issues #439 and #463) is instead handed back as the pore liquid
+        volume V = porosity * cake_vol * sum_i(delta_z_i * S_i) [m**3] with
+        mass concentrations m_j / V [kg/m**3], so its volume equals the
+        pores' and its concentrations their mean; earlier releases rebuilt
+        it from mass and fractions on the ideal-mixing density. Fractions
+        are kept for other liquids, whose ``name_solv`` a concentration
+        update would re-complete.
 
         ``liquid_removed`` [kg] and ``liquid_removed_mass_frac`` [-] measure
         species inventory decreases from the REMAPPED initial field to the
@@ -874,8 +882,18 @@ class DeliquoringStep:
             removal_diagnostics_valid=self.removal_diagnostics_valid,
             liquid_removed_species=self.liquid_removed_species.copy())
         self.mass_conc = concentration_field[-1].copy()  # [kg/m**3]
-        bulk_fractions = species_inventory[-1] / retained_mass[-1]  # [-]
-        self.Liquid_1.updatePhase(mass=float(retained_mass[-1]), mass_frac=bulk_fractions)
+        if self.Liquid_1.concentration_basis:
+            # Authoritative concentrations (issue #463): hand the pore liquid
+            # back as its own volume and mean concentrations.
+            pore_volume = (porosity * self.CakePhase.cake_vol
+                           * float(self.delta_z @ saturation[-1]))  # [m**3]
+            self.Liquid_1.updatePhase(
+                mass_conc=species_inventory[-1] / pore_volume,  # [kg/m**3]
+                vol=pore_volume)
+        else:
+            bulk_fractions = species_inventory[-1] / retained_mass[-1]  # [-]
+            self.Liquid_1.updatePhase(mass=float(retained_mass[-1]),
+                                      mass_frac=bulk_fractions)
         liquid_out = copy.deepcopy(self.Liquid_1)
         solid_out = copy.deepcopy(self.Solid_1)
         self.Outlet = self.CakePhase
@@ -1167,6 +1185,13 @@ class Filter:
         pressure-dependent callables, until solve_unit resolves them. The
         log_params option transforms only supplied estimation parameters.
 
+        The slurry is kept as a deep copy, ``__original_phase__``, the
+        initial-holdup snapshot that ``SimulationExec.get_holdup`` reports
+        per phase as raw materials, skipping phases transferred from an
+        upstream unit (``transferred_from_uo``), whose source is charged
+        instead. Earlier releases kept no snapshot, so a user charge was
+        missing from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
+
         Raises
         ------
         RuntimeError
@@ -1217,6 +1242,8 @@ class Filter:
         self.dim_states = [a['dim'] for a in self.states_di.values()]
 
         self.nomenclature()
+
+        self.__original_phase__ = copy.deepcopy(self.SlurryPhase)
 
     def nomenclature(self):
         self.names_states_in = ['mass', 'temp', 'mass_frac', 'total_distrib']
@@ -1443,8 +1470,11 @@ class Filter:
 
         self.c_solids = vol_slurry * solid_conc / vol_filtrate
 
-        # Physical properties
-        dens_liq = self.Liquid_1.getDensity()
+        # Physical properties. dens_liq converts this liquid's own volumes
+        # to masses (filtrate, holdup, cake), so it is the inventory density:
+        # sum(mass_conc) for authoritative concentrations, else ideal mixing
+        # as before (issue #439).
+        dens_liq = self.Liquid_1.getInventoryDensity()  # [kg/m**3]
         visc_liq = self.Liquid_1.getViscosityMix()
         surf_liq = self.Liquid_1.getSurfTension()
 
@@ -1562,7 +1592,8 @@ class Filter:
         states : ndarray
             Filtrate and remaining liquid masses [kg], shape (num_times, 2).
         dens_liq, dens_sol : float
-            Liquid and solid mixture densities [kg/m**3].
+            Liquid inventory density (``LiquidPhase.getInventoryDensity``)
+            and solid mixture density [kg/m**3].
         epsilon : float
             Packed-cake porosity [-].
         mass_solids : float
@@ -2244,7 +2275,12 @@ class DisplacementWashing:
         numerical roundoff allowance, since re-saturation supplies liquid
         outside the deliquoring model's inventory accounting.
         Attached liquid mass [kg] and one-dimensional bulk fractions [-] use
-        this washing grid's pore inventory. Cell faces lie halfway between
+        this washing grid's pore inventory; a liquid whose concentrations are
+        authoritative (``LiquidPhase.concentration_basis``, issues #439 and
+        #463) is handed back instead as the pore volume
+        porosity * cake_vol * sum(cell_widths * satur) [m**3] with the mean
+        mass concentrations [kg/m**3], so its volume equals the pores'.
+        Cell faces lie halfway between
         nodes, with exterior faces at 0 and cake_height [m]; endpoint nodes
         therefore have half-width control volumes. The spatial field remains
         on Cake.mass_concentr [kg/m**3]. No conservation is assumed during
@@ -2300,8 +2336,16 @@ class DisplacementWashing:
         if not np.isfinite(liquid_mass) or liquid_mass <= 0:
             raise ValueError("DisplacementWashing requires a finite, positive retained "
                              "liquid inventory [kg]")
-        self.Liquid_1.updatePhase(mass=liquid_mass,
-                                  mass_frac=species_mass / liquid_mass)
+        if self.Liquid_1.concentration_basis:
+            # Authoritative concentrations (issue #463): the pore liquid's
+            # own volume and mean concentrations.
+            pore_volume = (self.CakePhase.porosity * self.CakePhase.cake_vol
+                           * float(np.sum(cell_widths * self.satur)))  # [m**3]
+            self.Liquid_1.updatePhase(mass_conc=species_mass / pore_volume,
+                                      vol=pore_volume)  # [kg/m**3], [m**3]
+        else:
+            self.Liquid_1.updatePhase(mass=liquid_mass,
+                                      mass_frac=species_mass / liquid_mass)
 
         liquid_out = copy.deepcopy(self.Liquid_1)
         solid_out = copy.deepcopy(self.Solid_1)

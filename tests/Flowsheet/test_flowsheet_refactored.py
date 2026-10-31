@@ -214,7 +214,7 @@ def test_stage0_filter_alone():
     filt.Phases = slurry
     filt.solve_unit(deltaP=DELTA_P, verbose=False)
 
-    return 'filtration time = %.1f s' % filt.timeProf[-1]
+    assert filt.timeProf[-1] > 0
 
 
 # =====================================================================
@@ -248,7 +248,7 @@ def test_stage1_all_old():
     })
     flst.SolveFlowsheet(kwargs_run=run_kwargs, verbose=False)
 
-    return 'filtration time = %.1f s' % flst.F01.timeProf[-1]
+    assert flst.F01.timeProf[-1] > 0
 
 
 # =====================================================================
@@ -295,7 +295,7 @@ def test_stage2_new_new_old():
     })
     flst.SolveFlowsheet(kwargs_run=run_kwargs, verbose=False)
 
-    return 'filtration time = %.1f s' % flst.F01.timeProf[-1]
+    assert flst.F01.timeProf[-1] > 0
 
 
 # =====================================================================
@@ -390,8 +390,7 @@ def test_stage3_new_old_new_old():
             '%.6f kg but CR01 began with %.6f kg (rel %.3e)'
             % (collected, charged, drift))
 
-    return ('filtration time = %.1f s, CR01 charged with HOLD01 %.3f kg'
-            % (flst.F01.timeProf[-1], collected))
+    assert flst.F01.timeProf[-1] > 0
 
 
 
@@ -466,8 +465,6 @@ def test_stage4_new_batch_to_batch():
     if gap > 1e-5:
         raise AssertionError('split batch != single batch: rel %.3e' % gap)
 
-    return 'handoff exact (%.1e), split==single (%.1e)' % (drift, gap)
-
 
 def test_stage5_new_continuous_to_continuous():
     """The downstream unit must follow the upstream trajectory.
@@ -501,8 +498,6 @@ def test_stage5_new_continuous_to_continuous():
         raise AssertionError(
             'downstream still matches a constant snapshot (rel %.3e), so the '
             'upstream trajectory is being ignored' % divergence)
-
-    return 'differs from constant-snapshot control by %.3e' % divergence
 
 
 def test_stage6_new_continuous_to_semibatch():
@@ -580,9 +575,6 @@ def test_stage6_new_continuous_to_semibatch():
             'downstream still matches a constant snapshot (rel %.3e), so '
             'the upstream trajectory is being ignored' % divergence)
 
-    return ('R02 final mass %.6f kg, differs from constant-snapshot '
-            'control by %.3e' % (flst.R02.Phases.mass, divergence))
-
 
 def test_stage7_new_continuous_to_batch_refused():
     """Continuous -> Batch needs a hold, and must say so."""
@@ -594,13 +586,23 @@ def test_stage7_new_continuous_to_batch_refused():
         flst.SolveFlowsheet(kwargs_run=quiet({'R01': {'runtime': TIME_R01},
                                               'R02': {'runtime': TIME_R01}}),
                             verbose=False)
-    except TypeError as exc:
-        if 'holding vessel' not in str(exc):
+    except ValueError as exc:
+        if 'DynamicCollector' not in str(exc):
             raise AssertionError('refused, but not for the right reason: %s'
                                  % exc) from None
-        return 'refused, naming the holding vessel'
+    else:
+        raise AssertionError('accepted a continuous feed into a batch unit')
 
-    raise AssertionError('accepted a continuous feed into a batch unit')
+    # Direct assignment of a stream to a refactored vessel's Phases must
+    # also be rejected by MultiPhaseVessel._as_phases.
+    try:
+        flst.R02.Phases = _new_feed()
+    except TypeError as exc:
+        if 'holding vessel' not in str(exc) or 'DynamicCollector' not in str(exc):
+            raise AssertionError('refused, but not for the right reason: %s'
+                                 % exc) from None
+    else:
+        raise AssertionError('Phases setter accepted a stream')
 
 
 # =====================================================================
@@ -769,8 +771,7 @@ def test_stage8_continuous_to_semibatch_matrix():
         raise AssertionError(
             'a reactor accepted a solid phase it cannot hold')
 
-    return ('%d pairings connected, slurry flow conserved; '
-            'cryst -> reactor refused' % len(results))
+    assert len(results) == len(cases)
 
 
 # =====================================================================
@@ -884,9 +885,6 @@ def test_stage9_fvm_versus_moments():
             'the FVM is not converging to the moment closure: %.3f%% at 400 '
             'cells, %.3f%% at 800' % (100 * gaps[0], 100 * gaps[1]))
 
-    return ('moments closes exactly; FVM within %.2f%% and converging'
-            % (100 * gaps[-1]))
-
 
 def _batch_cryst(solid_fn=_cryst_solid):
     """A crystallizer with no ports at all, cooled on the standard profile."""
@@ -989,7 +987,7 @@ def test_stage10_standalone_all_modes():
         else:
             notes.append('%s %d pts' % (label, time.size))
 
-    return '; '.join(notes)
+    assert len(notes) == len(cases)
 
 
 # =====================================================================
@@ -1082,9 +1080,6 @@ def test_stage11_refactored_crystallizer_matches_legacy():
                 '%s differs from the legacy crystallizer by %.3f %% '
                 '(bound %.1f %%): refactored %s, legacy %s'
                 % (name, 100 * value, 100 * rtol, refactored, legacy))
-
-    return ('mass %.2e, count %.2e, L4,3 %.2e relative to legacy'
-            % tuple(gap))
 
 
 STAGES = (

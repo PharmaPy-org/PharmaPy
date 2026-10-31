@@ -10,6 +10,7 @@ reactions). Cost: three short solves.
 """
 
 import cProfile
+from functools import partial
 
 import numpy as np
 import pytest
@@ -22,12 +23,64 @@ pytestmark = pytest.mark.unit
 JACOBIAN = {"jacobian_relative_step": 1e-6, "jacobian_state_scale": 1e-8}  # [-], [state units]
 
 
+# Real fixture construction and independent qualification helpers.
+def _linear_rhs(t, y, *, matrix):
+    """Evaluate the declared linear ODE through a named callback.
+
+    Parameters
+    ----------
+    t : float
+        Integration time [s].
+    y : ndarray
+        Ordered state vector; component units and order are specified in Notes.
+    matrix : ndarray
+        Linear coefficients [1/s], shape (n_states, n_states).
+
+    Returns
+    -------
+    ndarray
+        State derivative in the supplied state unit per second.
+
+    Notes
+    -----
+    The synthetic state unit is arbitrary but consistent across each ODE.
+    The linear coefficient matrix is in 1/s; the quadratic coefficient
+    is implicitly one reciprocal state unit per second.
+    """
+    return matrix @ y
+
+
+def _square_rhs(t, y):
+    """Evaluate the declared quadratic ODE through a named callback.
+
+    Parameters
+    ----------
+    t : float
+        Integration time [s].
+    y : ndarray
+        Ordered state vector; component units and order are specified in Notes.
+
+    Returns
+    -------
+    ndarray
+        Quadratic synthetic derivative; the coefficient has reciprocal state/time units.
+
+    Notes
+    -----
+    The synthetic state unit is arbitrary but consistent across each ODE.
+    The linear coefficient matrix is in 1/s; the quadratic coefficient
+    is implicitly one reciprocal state unit per second.
+    """
+    return y ** 2
+
+
+# Public-path regressions, independent balances, and failure qualification.
 def test_linear_rhs_gives_its_exact_matrix():
     matrix = np.array([[-2.0, 0.5, 0.0], [1.0, -3.0, 0.25], [0.0, 4.0, -1.0]])  # [1/s]
     states = np.array([3.0, -0.2, 1e-9])  # [state units]; mixed signs and a tiny entry
     scale = np.array([1e-3, 1e-3, 1e-3])  # [state units]
     step = 1e-6  # [-]
-    jacobian = _controlled_difference_jacobian(lambda t, y: matrix @ y, step, scale, 0.0, states)
+    jacobian = _controlled_difference_jacobian(partial(_linear_rhs, matrix=matrix), step, scale, 0.0, states)
     # A forward difference of a linear map has no truncation error; only
     # roundoff remains, about eps * |f| / h per entry. Allow four times that.
     increments = step * np.maximum(np.abs(states), scale)  # [state units]
@@ -41,7 +94,7 @@ def test_increment_uses_the_larger_of_state_and_scale():
     states = np.array([10.0, 1e-12])  # [state units]
     scale = np.array([1e-3, 1e-3])  # [state units]
     step = 1e-4  # [-]
-    jacobian = _controlled_difference_jacobian(lambda t, y: y ** 2, step, scale, 0.0, states)
+    jacobian = _controlled_difference_jacobian(_square_rhs, step, scale, 0.0, states)
     expected_increment = step * np.maximum(np.abs(states), scale)  # [1e-3, 1e-7]
     np.testing.assert_allclose(np.diag(jacobian) - 2 * states, expected_increment, rtol=1e-6)
     assert jacobian[0, 1] == 0.0 and jacobian[1, 0] == 0.0

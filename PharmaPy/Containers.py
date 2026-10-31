@@ -6,7 +6,7 @@ Created on Mon Apr 27 14:26:50 2020
 """
 
 from typing import Mapping, Optional, Sequence, Tuple, Union
-from copy import copy
+from copy import copy, deepcopy
 
 from PharmaPy._assimulo import CVode, Explicit_Problem
 
@@ -19,6 +19,7 @@ from PharmaPy.Crystallizers import SemibatchCryst
 from PharmaPy.Connections import get_inputs_new
 
 from PharmaPy.Commons import unpack_states
+from PharmaPy.Errors import PharmaPyTypeError
 
 from PharmaPy.Results import DynamicResult
 
@@ -28,6 +29,15 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator
 
 eps = np.finfo(float).eps
+# [-], relative Newton step at which the collector's temperature inversion
+# h(T, w) = H/m stops: far above float64 roundoff of the enthalpy [J/kg] and
+# far below any physically meaningful temperature change.
+TEMP_INVERSION_RTOL = 1e-12
+MAX_TEMP_ITERATIONS = 50  # [-], Newton iterations of that inversion
+# [K], temperature unit of the collector's enthalpy scale: the scaled
+# enthalpy state counts seed heat capacities times one kelvin, so CVode's
+# absolute tolerance on it is a temperature tolerance in kelvin.
+ENTHALPY_SCALE_TEMP = 1.0
 
 
 class ContinuousHoldup:
@@ -65,18 +75,52 @@ class ContinuousHoldup:
 
     @property
     def Phases(self):
+        """Liquid inventory of the holdup, as a list, or None."""
         return self._Phases
 
     @Phases.setter
     def Phases(self, phase):
+        """Charge the holdup with its liquid inventory.
+
+        Parameters
+        ----------
+        phase : LiquidPhase or sequence of LiquidPhase
+            Liquid inventory with mass [kg], mass fractions [-] and
+            temperature [K]; its mass stays constant during the solve.
+
+        Raises
+        ------
+        PharmaPyTypeError
+            If ``phase`` is neither a list or tuple nor a
+            ``PharmaPy.Phases`` object, for example a stream, a dict or a
+            string; the message names the received type and the accepted
+            ones, and the held charge is unchanged (issue #461). It is a
+            ``TypeError``.
+
+        Notes
+        -----
+        A deep copy of ``Liquid_1`` is kept as ``__original_phase__``, the
+        initial-holdup snapshot that ``SimulationExec.get_holdup`` reports
+        as a raw material. It is taken before any solve, which updates
+        ``Liquid_1`` in place, so the reported charge keeps the charged
+        composition. Earlier releases kept no snapshot, so the charge was
+        missing from ``GetRawMaterials`` and ``GetOPEX`` (issue #456).
+        """
         if isinstance(phase, (list, tuple)):
             self._Phases = phase
-        elif phase.__module__ == 'PharmaPy.Phases':
+        elif getattr(phase, '__module__', None) == 'PharmaPy.Phases':
             self._Phases = [phase]
+        else:
+            raise PharmaPyTypeError(
+                'ContinuousHoldup.Phases takes a LiquidPhase (a '
+                'PharmaPy.Phases object) or a list or tuple of phases; got '
+                f'{type(phase).__name__}.')
 
         classify_phases(self)
         self.nomenclature()
-        self.mass = self.Liquid_1.mass
+        self.mass = self.Liquid_1.mass  # [kg]
+
+        self.__original_phase__ = deepcopy(self.Liquid_1)
 
     def nomenclature(self) -> None:
         """Declare holdup composition, temperature, and outlet-flow metadata.
@@ -301,6 +345,10 @@ class Mixer:
 
         Raises
         ------
+        NotImplementedError
+            If an inlet is a bare ``SolidPhase`` or ``SolidStream``
+            (crystals without their liquid); see
+            :meth:`_check_no_bare_solids`. The Mixer is then unchanged.
         ValueError
             If batch inventories and flow rates are combined without a
             duration contract. Supply batch phases or use only streams.
@@ -313,17 +361,162 @@ class Mixer:
         dimensionless ``mass_frac`` [-] with one entry per species, and the
         temperature [K]; ``dim_states`` therefore sums to
         ``num_species + 2``, the width of one packed liquid state.
+
+        Every assignment appends. A ``Connection`` that transfers again on
+        the same flowsheet edge replaces its earlier copy in place instead
+        (:meth:`_replace_inlet`, issue #441), so raw inlets are kept and
+        each connected source is mixed once.
         """
         incoming = list(inlets) if isinstance(inlets, (list, tuple)) else [inlets]
-        flow_flags = [hasattr(inlet, 'mass_flow')
-                      for inlet in self._Inlets + incoming]
+        self._check_no_bare_solids(incoming)
+        self._check_inlet_basis(self._Inlets + incoming)
+        self._Inlets += incoming
+
+        self.names_upstream.append(None)
+        self.bipartite.append(None)
+
+        self._refresh_inlet_metadata()
+
+    @staticmethod
+    def _check_no_bare_solids(inlets: list) -> None:
+        """Reject crystals assigned without their liquid.
+
+        Parameters
+        ----------
+        inlets : list of object
+            Candidate inlets: liquid or mixed-phase inventories [kg], or
+            streams [kg/s].
+
+        Raises
+        ------
+        NotImplementedError
+            If an inlet is a ``SolidPhase`` or ``SolidStream`` (or a
+            subclass). The message names each such inlet by position and
+            class and points to ``Slurry``, ``SlurryStream`` and ``Cake``.
+
+        Notes
+        -----
+        The Mixer mixes solids only inside a mixed-phase inlet; a bare
+        solid would be mixed as a liquid, turning the crystals into
+        dissolved solute without an error (issue #458). Mixing bare
+        solids is not implemented, as for the other unsupported physical
+        inputs of PharmaPy units.
+        """
+        solids = [f'{type(inlet).__name__} at position {position}'
+                  for position, inlet in enumerate(inlets)
+                  if isinstance(inlet, (SolidPhase, SolidStream))]
+        if solids:
+            raise NotImplementedError(
+                f'Mixer cannot mix bare solid inlets ({", ".join(solids)} of '
+                'the assigned inlets): it mixes crystals only with their '
+                'liquid, inside a Slurry or a Cake (a SlurryStream for '
+                'flows). Wrap the crystals and their liquid in one of them; '
+                'a bare solid would otherwise be mixed as a dissolved '
+                'liquid.')
+
+    @staticmethod
+    def _check_inlet_basis(inlets: list) -> None:
+        """Reject a set of inlets that mixes inventories and flow rates.
+
+        Parameters
+        ----------
+        inlets : list of object
+            Candidate inlets: liquid or mixed-phase inventories [kg], or
+            streams [kg/s].
+
+        Raises
+        ------
+        ValueError
+            If batch inventories and flow rates are combined without a
+            duration contract.
+        """
+        flow_flags = [hasattr(inlet, 'mass_flow') for inlet in inlets]
         if any(flow_flags) and not all(flow_flags):
             raise ValueError(
                 'Mixer cannot combine batch inventories [kg] with flow rates '
                 '[kg/s] without a duration contract; supply batch phases or '
                 'use only streams.')
-        self._Inlets += incoming
 
+    def _replace_inlet(self, previous: object, inlet: object) -> bool:
+        """Replace a held inlet object by another in the same positions.
+
+        Parameters
+        ----------
+        previous : object
+            Inlet to replace, matched by identity, for example the copy a
+            ``Connection`` transferred on an earlier solve.
+        inlet : object
+            Replacement inventory [kg] or stream [kg/s].
+
+        Returns
+        -------
+        bool
+            True if ``previous`` was held and every entry of it has been
+            replaced; False if it is not held, in which case the Mixer is
+            unchanged.
+
+        Raises
+        ------
+        NotImplementedError
+            If ``inlet`` is a bare ``SolidPhase`` or ``SolidStream`` (see
+            :meth:`_check_no_bare_solids`); the Mixer is then unchanged.
+        ValueError
+            If ``inlet`` and ``previous`` have different amount bases, a
+            batch inventory [kg] and a flow rate [kg/s]; the Mixer, including
+            ``Inlets``, ``oper_mode``, ``names_states_in`` and ``states_di``,
+            is then unchanged.
+
+        Notes
+        -----
+        The replacement keeps the inlet's position, so the inlet order, and
+        hence the evaluation grid taken from the first multi-sample inlet,
+        is the same as when ``previous`` was installed. Every entry
+        identical to ``previous`` is replaced, so an inlet assigned twice
+        by hand stays assigned twice and remains detectable as a duplicate
+        instead of leaving a stale copy beside the new one.
+
+        The first assignment fixes the Mixer's amount basis: it selects the
+        flow or non-flow ``names_states_in``. A replacement on the other
+        basis is therefore rejected, even when it would be the only inlet;
+        the held inlets share ``previous``'s basis, so an accepted
+        replacement keeps them consistent. ``names_upstream`` and
+        ``bipartite`` are not extended, because no inlet is added; the
+        state metadata is refreshed for the new set of inlets.
+        """
+        positions = [position for position, held in enumerate(self._Inlets)
+                     if held is previous]
+        if not positions:
+            return False
+        self._check_no_bare_solids([inlet])
+
+        bases = {False: 'a batch inventory [kg]', True: 'a flow rate [kg/s]'}
+        held_flow = hasattr(previous, 'mass_flow')
+        new_flow = hasattr(inlet, 'mass_flow')
+        if held_flow != new_flow:
+            raise ValueError(
+                f'Mixer cannot replace {bases[held_flow]} with '
+                f'{bases[new_flow]}: its operating mode and state names '
+                'were set for the first basis. Assign a new Mixer to the '
+                'flowsheet before solving it with the changed upstream unit.')
+
+        for position in positions:
+            self._Inlets[position] = inlet
+        self._refresh_inlet_metadata()
+        return True
+
+    def _refresh_inlet_metadata(self) -> None:
+        """Derive the operating mode and state metadata from the inlets.
+
+        Notes
+        -----
+        The mode follows the last inlet: flow rates [kg/s] give a
+        continuous Mixer, inventories [kg] a batch one. Species metadata
+        comes from the first inlet's liquid phase, whether supplied
+        directly or attached to a slurry or cake. The liquid ``states_di``
+        declares the amount [kg] or flow [kg/s], the dimensionless
+        ``mass_frac`` [-] with one entry per species, and the temperature
+        [K].
+        """
         flow_flag = hasattr(self.Inlets[-1], 'mass_flow')
 
         if flow_flag:
@@ -338,9 +531,6 @@ class Mixer:
                 self.names_states_in = self.names_states_in['flow']
             else:
                 self.names_states_in = self.names_states_in['non_flow']
-
-        self.names_upstream.append(None)
-        self.bipartite.append(None)
 
         liquid_inlet = getattr(self.Inlets[0], 'Liquid_1', self.Inlets[0])
         # Dimensionless per-species fractions, as in the solids branch.
@@ -1327,10 +1517,59 @@ class DynamicCollector:
 
     @property
     def Phases(self):
+        """Phases the collector built for its last solve, or None.
+
+        Returns
+        -------
+        list or tuple of phase objects, or None
+            The liquid (and, for a slurry inlet, solid) phases that
+            ``solve_unit`` starts from, or None before the first solve.
+        """
         return self._Phases
 
     @Phases.setter
     def Phases(self, phases):
+        """Reject an initial charge assigned by the user.
+
+        Parameters
+        ----------
+        phases : object
+            Any assigned value.
+
+        Raises
+        ------
+        NotImplementedError
+            Always; the collector is unchanged. ``solve_unit`` builds its
+            own starting phases from the ``Inlet`` (see
+            :meth:`_set_phases`): a provisional seed of 0.1 s of feed for a
+            liquid inlet, or of a sqrt(float64 epsilon) [m**3] slurry
+            volume for a slurry inlet (issue #342), so an assigned charge
+            would be silently ignored (issue #459). Starting from a user
+            initial holdup is tracked by issue #342.
+        """
+        raise NotImplementedError(
+            'DynamicCollector does not take an initial charge through '
+            'Phases: a collector starts from a small provisional seed that '
+            'it builds from its Inlet and collects the Inlet, so an '
+            'assigned charge would be ignored. Remove the Phases assignment; '
+            'starting from a user initial holdup is not implemented yet '
+            '(issue #342).')
+
+    def _set_phases(self, phases) -> None:
+        """Install the phases the collector starts its solve from.
+
+        Parameters
+        ----------
+        phases : phase object or list or tuple of phase objects
+            Liquid phase, or liquid and solid phases, built by
+            ``solve_unit`` from the inlet: amounts [kg], fractions [-] and
+            temperature [K]. A single phase is appended to the held ones.
+
+        Notes
+        -----
+        This is the collector's internal assignment; the public ``Phases``
+        setter rejects user charges (issue #459).
+        """
         if isinstance(phases, (list, tuple)):
             self._Phases = phases
         elif phases.__module__ == 'PharmaPy.Phases':
@@ -1460,66 +1699,156 @@ class DynamicCollector:
         return get_inputs_new(time, inlet, self.states_in_dict)
 
     def unit_model(self, time, states):
-        # Calculate inlets
-        u_values = self.get_inputs_new(time)['Inlet']
-
-        fracs = states[:self.num_species]
-
-        mass = states[self.num_species]
-        temp = states[self.num_species + 1]
-
-        material_balances = self.material_balances(time, fracs, mass, u_values)
-        energy_balance = self.energy_balance(time, fracs, mass, temp, u_values)
-
-        balances = np.append(material_balances, energy_balance)
-
-        return balances
-
-    def material_balances(self, time, fracs, mass, u_inputs):
-        inlet_flow = u_inputs['mass_flow']
-        inlet_fracs = u_inputs['mass_frac']
-
-        dfrac_dt = inlet_flow / mass * (inlet_fracs - fracs)
-        dm_dt = inlet_flow
-
-        dmaterial_dt = np.append(dfrac_dt, dm_dt)
-
-        return dmaterial_dt
-
-    def energy_balance(self, time: float, fracs: np.ndarray, mass: float,
-                       temp: float, u_inputs: Mapping[str, object]) -> float:
-        """Return the adiabatic collector temperature derivative.
+        """Return the liquid collector's inventory and enthalpy rates.
 
         Parameters
         ----------
         time : float
-            Current time [s], retained for the balance interface.
-        fracs : numpy.ndarray
-            Tank liquid mass fractions [-], shape (num_species,).
-        mass : float
-            Tank liquid inventory [kg].
-        temp : float
-            Tank temperature [K].
+            Current time [s].
+        states : numpy.ndarray
+            Scaled species masses M_i / m0 [-], shape (num_species,),
+            followed by the scaled holdup enthalpy H / (m0 cp0 K) [-]; m0
+            [kg] and cp0 [J/kg/K] are the seed's mass and heat capacity
+            (``_inventory_scale``, ``_enthalpy_scale``).
+
+        Returns
+        -------
+        numpy.ndarray
+            Scaled species mass rates [1/s] followed by the scaled enthalpy
+            rate [1/s], shape (num_species + 1,).
+
+        Notes
+        -----
+        A liquid collector accumulates its feed without outflow, reaction
+        or heat exchange, so every rate is the feed's: the right-hand side
+        does not depend on the states. Integrating the inventories keeps the
+        problem linear and free of the 1/m factor of a mass-fraction
+        formulation, dw/dt = F/m (w_in - w), whose error the default solver
+        tolerances did not control from the small 0.1 s seed: the collected
+        composition could leave the range of the feed compositions (issue
+        #467). The states are scaled by the seed, the smallest inventory of
+        the run, so CVode's default absolute tolerance bounds the error of
+        the mass fractions [-] and of the temperature [K] from the start,
+        when the species masses are smallest. Mass fractions, mass and
+        temperature are derived from the inventories afterwards (see
+        ``_published_states``).
+        """
+        u_values = self.get_inputs_new(time)['Inlet']
+
+        return np.append(
+            self.material_balances(u_values) / self._inventory_scale,
+            self.energy_balance(u_values) / self._enthalpy_scale)
+
+    def material_balances(self, u_inputs: Mapping[str, object]) -> np.ndarray:
+        """Return the species mass rates of the collected liquid.
+
+        Parameters
+        ----------
+        u_inputs : mapping of str to object
+            Feed mass flow [kg/s] and mass fractions [-].
+
+        Returns
+        -------
+        numpy.ndarray
+            dM_i/dt = F w_in,i [kg/s], shape (num_species,).
+        """
+        inlet_flow = u_inputs['mass_flow']  # [kg/s]
+        inlet_fracs = np.asarray(u_inputs['mass_frac'])  # [-]
+
+        return inlet_flow * inlet_fracs  # [kg/s]
+
+    def energy_balance(self, u_inputs: Mapping[str, object]) -> float:
+        """Return the enthalpy rate of the adiabatic collected liquid.
+
+        Parameters
+        ----------
         u_inputs : mapping of str to object
             Feed mass flow [kg/s], mass fractions [-], and temperature [K].
 
         Returns
         -------
         float
-            Temperature derivative [K/s], using mass-basis enthalpy and Cp.
+            dH/dt = F h_in [J/s], with the feed's mass-basis sensible
+            enthalpy h_in [J/kg] relative to ``getEnthalpy``'s default
+            reference temperature, the same reference as the inversion in
+            ``_temperatures``.
+
+        Notes
+        -----
+        The ideal-mixing enthalpy is a sum of species terms, so the
+        reference cancels in the temperature derived from H.
         """
-        inlet_flow = u_inputs['mass_flow']
-        inlet_fracs = u_inputs['mass_frac']
-        inlet_temp = u_inputs['temp']
+        inlet_flow = u_inputs['mass_flow']  # [kg/s]
+        h_in = self.Inlet.getEnthalpy(
+            temp=u_inputs['temp'], mass_frac=u_inputs['mass_frac'])  # [J/kg]
 
-        h_in = self.Inlet.getEnthalpy(temp=inlet_temp, mass_frac=inlet_fracs)
-        h_tank = self.Liquid_1.getEnthalpy(temp=temp, mass_frac=fracs)
-        cp_tank = self.Liquid_1.getCp(temp=temp, mass_frac=fracs,
-                                       basis='mass')  # [J/kg/K]
+        return inlet_flow * h_in  # [J/s]
 
-        dtemp_dt = inlet_flow / mass / cp_tank * (h_in - h_tank)
+    def _temperatures(self, fracs: np.ndarray,
+                      enthalpy: np.ndarray, guess: float) -> np.ndarray:
+        """Invert the holdup's specific enthalpy for its temperature.
 
-        return dtemp_dt
+        Parameters
+        ----------
+        fracs : numpy.ndarray
+            Holdup mass fractions [-], shape (num_times, num_species).
+        enthalpy : numpy.ndarray
+            Holdup specific enthalpy H/m [J/kg], shape (num_times,), on the
+            reference of ``energy_balance``.
+        guess : float
+            Starting temperature [K], the feed temperature at the start.
+
+        Returns
+        -------
+        numpy.ndarray
+            Temperatures [K], shape (num_times,), with
+            h(T, w) = H/m within ``TEMP_INVERSION_RTOL``.
+
+        Raises
+        ------
+        RuntimeError
+            If Newton's method on h(T, w), with the mass-basis heat
+            capacity [J/kg/K] as derivative, does not converge within
+            ``MAX_TEMP_ITERATIONS`` iterations.
+        """
+        temp = np.full(len(enthalpy), float(guess))  # [K]
+        for _ in range(MAX_TEMP_ITERATIONS):
+            residual = self.Liquid_1.getEnthalpy(
+                temp=temp, mass_frac=fracs) - enthalpy  # [J/kg]
+            cp = self.Liquid_1.getCp(temp=temp, mass_frac=fracs,
+                                     basis='mass')  # [J/kg/K]
+            step = residual / cp  # [K]
+            temp = temp - step  # [K]
+            if np.all(np.abs(step) <= TEMP_INVERSION_RTOL * np.abs(temp)):
+                return temp
+        raise RuntimeError(
+            'DynamicCollector could not invert the holdup enthalpy for its '
+            f'temperature within {MAX_TEMP_ITERATIONS} Newton iterations.')
+
+    def _published_states(self, inventory: np.ndarray,
+                          temp_guess: float) -> np.ndarray:
+        """Convert solved inventories to the published liquid states.
+
+        Parameters
+        ----------
+        inventory : numpy.ndarray
+            Solved scaled species masses [-] and scaled holdup enthalpy
+            [-] (see ``unit_model``), shape (num_times, num_species + 1).
+        temp_guess : float
+            Starting temperature [K] of the inversion.
+
+        Returns
+        -------
+        numpy.ndarray
+            Mass fractions [-], holdup mass [kg] and temperature [K], shape
+            (num_times, num_species + 2), the layout of ``states_di``.
+        """
+        species = inventory[:, :self.num_species] * self._inventory_scale  # [kg]
+        enthalpy = inventory[:, self.num_species] * self._enthalpy_scale  # [J]
+        mass = species.sum(axis=1)  # [kg]
+        fracs = species / mass[:, np.newaxis]  # [-]
+        temp = self._temperatures(fracs, enthalpy / mass, temp_guess)  # [K]
+        return np.column_stack((fracs, mass, temp))
 
     def _check_crystallization_settings(self) -> None:
         """Validate the settings a slurry feed's crystallizer delegate needs.
@@ -1657,8 +1986,10 @@ class DynamicCollector:
         states : numpy.ndarray
             State trajectory with shape ``(n_time, n_states)``. Liquid-mixer
             columns are mass fractions [-], holdup mass [kg], then
-            temperature [K]; crystallizer columns follow ``states_di`` from
-            the delegated crystallizer.
+            temperature [K], derived from the integrated species masses
+            [kg] and enthalpy [J] (see :meth:`unit_model`, issue #467);
+            crystallizer columns follow ``states_di`` from the delegated
+            crystallizer.
 
         Notes
         -----
@@ -1770,7 +2101,7 @@ class DynamicCollector:
 
             self.vol_phase = vol_phase
 
-            self.Phases = phases
+            self._set_phases(phases)
 
         elif self.model_type == 'liquid_mixer':
             if time_grid is not None:
@@ -1794,15 +2125,29 @@ class DynamicCollector:
             liquid = LiquidPhase(path, temp=temp_init, mass=mass_init,
                                  mass_frac=frac_init)
 
-            states_init = np.hstack((frac_init, mass_init, temp_init))
+            self._set_phases((liquid,))
 
-            self.Phases = (liquid,)
+            # Integrated states: species masses and enthalpy, scaled by
+            # the seed (see unit_model, issue #467).
+            self._inventory_scale = mass_init  # [kg]
+            self._enthalpy_scale = (
+                mass_init * liquid.getCp(temp=temp_init, mass_frac=frac_init,
+                                         basis='mass')
+                * ENTHALPY_SCALE_TEMP)  # [J]
+            enthalpy_init = mass_init * liquid.getEnthalpy(
+                temp=temp_init, mass_frac=frac_init)  # [J]
+            states_init = np.append(
+                mass_init * np.asarray(frac_init) / self._inventory_scale,
+                enthalpy_init / self._enthalpy_scale)  # [-]
 
+            # Published states, derived from the integrated ones: one
+            # differential equation per species mass and one for the
+            # enthalpy, which gives the temperature; the mass is their sum.
             self.states_di = {
                 'mass_frac': {'units': '', 'dim': self.num_species,
                               'index': self.Liquid_1.name_species,
                               'type': 'diff'},
-                'mass': {'units': 'kg', 'dim': 1, 'type': 'diff'},
+                'mass': {'units': 'kg', 'dim': 1},
                 'temp': {'units': 'K', 'dim': 1, 'type': 'diff'}
                 }
 
@@ -1823,7 +2168,9 @@ class DynamicCollector:
             if not verbose:
                 solver.verbosity = 50
 
-            time, states = solver.simulate(final_time, ncp_list=time_grid)
+            time, inventory = solver.simulate(final_time, ncp_list=time_grid)
+            states = self._published_states(np.atleast_2d(inventory),
+                                            temp_init)
 
             self.retrieve_results(time, states)
 

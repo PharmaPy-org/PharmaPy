@@ -15,32 +15,43 @@ class _BaseReactor(MultiPhaseVessel):
     @property
     def RxnKinetics(self):
         raise AttributeError(
-            "RxnKinetics is a convenience initializer only. Modify self.reaction_regions directly instead"
-            "Use reaction_regions[ind].kinetics if kinetics access are desired."
+            "RxnKinetics is a convenience initializer only. Modify "
+            "self.intraphase_processes directly instead. Use "
+            "self.intraphase_processes[ind].mechanism.kinetics if kinetics "
+            "access is desired."
         )
 
     @RxnKinetics.setter
     def RxnKinetics(self, instance):
-        """Conveniene initializer to instantiate reaction kinetics in their proper regimes"""
+        """Convenience initializer to instantiate reaction kinetics in their proper regimes."""
         if not isinstance(instance,list):
             instance = [instance]
         self._create_intraphaseProcesses_from_RxnKinetics(instance)
         self._post_RxnKinetics_setter(instance)
 
     def _create_intraphaseProcesses_from_RxnKinetics(self,RKs):
-        '''Creates intraphase_processes from RxnKinetics, assuming everything is in the liquid phase corresponding to the index of the RxnKinetic
-        This is because RxnKinetics handles multiple reactions, but assumes a single phase
-        If reaction_regions is already defined, this step is ignored
-        For reactions in other phases, the user must define reaction_regions directly
+        '''Creates intraphase_processes from RxnKinetics, assuming everything is in the liquid phase corresponding to the index of the RxnKinetic.
+        This is because RxnKinetics handles multiple reactions, but assumes a single phase.
+        For reactions in other phases, the user must define intraphase_processes directly.
         '''
         if len(self.intraphase_processes) >0:
             raise RuntimeError(
-                "reaction_regions already defined. "
+                "intraphase_processes already defined. "
                 "Cannot use RxnKinetics convenience API."
+            )
+        liquid_phases = (
+            self.Phases.phases_by_type.get("liquid", [])
+            if self.Phases is not None
+            else []
+        )
+        if len(liquid_phases) < len(RKs):
+            raise RuntimeError(
+                "The number of reaction kinetics must match or be less than "
+                "the number of liquid phases in self.Phases, or specify "
+                "self.intraphase_processes manually."
             )
         processes = []
         for i,rk in enumerate(RKs):
-            assert len(self.Phases.Liquids)>=i-1, "The number of reaction kinetics must match or be less than the number of liquid phases or you must specify reaction_regions manually"
             region = IntraPhaseProcess(phaseref=PhaseRef("liquid",i),
                                     mechanism=ReactionMechanism(rk,self.Phases.Liquids[i]))
             processes.append(region)
@@ -110,4 +121,8 @@ class ContinuousReactor(_BaseReactor):
                 phase_mappings=mappings,
             )
         ]
-    
+
+
+# Legacy-compatible class aliases for drop-in replacement of PharmaPy.Reactors
+SemibatchReactor = SemiBatchReactor
+CSTR = ContinuousReactor

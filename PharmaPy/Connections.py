@@ -8,6 +8,7 @@ Created on Mon Mar  2 15:36:35 2020
 from collections import deque
 from typing import Dict, List, Mapping, Sequence, Tuple, Union
 
+from PharmaPy.Errors import PharmaPySpecificationError, PharmaPyValueError
 from PharmaPy.NameAnalysis import NameAnalyzer, get_dict_states
 from PharmaPy.Interpolation import local_newton_interpolation
 
@@ -468,21 +469,404 @@ def convert_str_flowsheet(flowsheet):
     return out
 
 
-class Connection:
-    def __init__(self, source_uo, destination_uo):
+# Marks a held object without a ``name`` before a failed batch assignment.
+_UNNAMED = object()
 
+# Operating modes by which PassPhases routes matter into a destination other
+# than a Mixer, which derives its own mode from the basis of its inlets.
+DESTINATION_MODES = ('Batch', 'Semibatch', 'Continuous')
+
+# Attributes every flowsheet source must declare: FeedConnection reads its
+# outlet, published states and operating flags (issue #445).
+SOURCE_CONTRACT = ('Outlet', 'outputs', 'is_continuous', 'oper_mode')
+
+
+def _phase_kind(phase: object) -> str:
+    """Return the kind of a phase from its class name.
+
+    Parameters
+    ----------
+    phase : object
+        Phase or stream object.
+
+    Returns
+    -------
+    str
+        ``'Liquid'``, ``'Solid'`` or ``'Vapor'`` if the class name contains
+        it, as ``PharmaPy.Phases.classify_phases`` classifies phases;
+        otherwise the class name.
+    """
+    class_name = type(phase).__name__
+    return next((kind for kind in ('Liquid', 'Solid', 'Vapor')
+                 if kind in class_name), class_name)
+
+
+def _unit_label(unit: object, name: Union[str, None]) -> str:
+    """Return a unit's flowsheet name and class for error messages.
+
+    Parameters
+    ----------
+    unit : object
+        Unit operation instance.
+    name : str or None
+        Flowsheet name of the unit, if known.
+
+    Returns
+    -------
+    str
+        ``"'NAME' (Class)"``, or ``"Class"`` without a name.
+    """
+    class_name = type(unit).__name__
+    if name is None:
+        return class_name
+    return f"'{name}' ({class_name})"
+
+
+class Connection:
+    def __init__(self, source_uo, destination_uo, replaced_matter=None,
+                 replaced_phases=(), source_name=None, destination_name=None):
+        """Connect a solved source unit's outlet to a destination unit.
+
+        Parameters
+        ----------
+        source_uo : object
+            Solved unit operation whose ``Outlet`` is transferred.
+        destination_uo : object
+            Unit operation that receives a deep copy of the outlet.
+        replaced_matter : object, optional
+            Matter that an earlier transfer on the same source-destination
+            edge handed to ``destination_uo``, that is, the earlier
+            connection's ``transferred_matter``. If the destination still
+            holds it, :meth:`PassPhases` replaces it with the new copy
+            instead of adding the new copy to it (issue #441). The default,
+            None, keeps every input the destination holds.
+        replaced_phases : sequence, optional
+            Phase objects that ``replaced_matter`` carried when it was
+            transferred, that is, the earlier connection's
+            ``transferred_phases``. A batch destination drops them together
+            with ``replaced_matter``. They are given explicitly because a
+            destination may later add its own phases to the transferred
+            cake's live ``Phases`` list (``Drying`` keeps that list as its
+            own). Empty by default.
+        source_name, destination_name : str, optional
+            Flowsheet names of the two units, used only to name them in
+            error messages; by default the messages name their classes.
+        """
         self.source_uo = source_uo
         self.destination_uo = destination_uo
-        # Deep copy handed to the destination by PassPhases; SimulationExec
-        # records it to verify raw-material consumption.
+        self.replaced_matter = replaced_matter
+        self.replaced_phases = tuple(replaced_phases)
+        self.source_name = source_name
+        self.destination_name = destination_name
+        # Deep copy handed to the destination by PassPhases, and the phases
+        # it carried at that time; SimulationExec records both to replace
+        # the copy on a later transfer and to verify raw-material use.
         self.transferred_matter = None
+        self.transferred_phases = ()
 
-    def transfer_data(self):
+    def transfer_data(self) -> None:
+        """Check the connection, then hand the source outlet downstream.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If either unit lacks the connection contract; see
+            :meth:`_check_contract`.
+        PharmaPyValueError
+            If the destination cannot take the source's amount basis; see
+            :meth:`_check_route`.
+
+        Notes
+        -----
+        Both checks run before :meth:`FeedConnection`, so a rejected
+        connection leaves the source outlet and the destination unchanged.
+        Then :meth:`FeedConnection` attaches the source profile,
+        :meth:`ConvertUnits` converts it to the destination's input names
+        and :meth:`PassPhases` installs a copy in the destination.
+        """
+        self._check_contract()
+        self._check_route()
         self.FeedConnection()
         self.ConvertUnits()
         self.PassPhases()
 
-    def FeedConnection(self):
+    def _conversion_flags(self) -> Tuple[bool, bool]:
+        """Return which name conversion :meth:`ConvertUnits` applies.
+
+        Returns
+        -------
+        flow_flag : bool
+            True if the source's ``oper_mode`` is ``'Continuous'`` and the
+            destination's is not ``'Batch'``: stream states are converted
+            to the destination's ``names_states_in``.
+        btf_flag : bool
+            True if the source is a ``BatchToFlowConnector``, whose
+            discharge stream is converted likewise.
+        """
+        flow_flag = (self.source_uo.oper_mode == 'Continuous'
+                     and self.destination_uo.oper_mode != 'Batch')
+        btf_flag = (self.source_uo.__class__.__name__
+                    == 'BatchToFlowConnector')
+        return flow_flag, btf_flag
+
+    def _check_contract(self) -> None:
+        """Reject units that lack the attributes the connection reads.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If the source lacks ``Outlet``, ``outputs``, ``result.time``,
+            ``is_continuous`` or ``oper_mode``; if the destination lacks
+            ``oper_mode``; if the states are converted (see
+            :meth:`_conversion_flags`) and the source lacks
+            ``names_states_out`` or the destination ``names_states_in``.
+            The message names each unit, its class and the missing
+            attributes. Also if a destination other than a ``Mixer``
+            declares an ``oper_mode`` outside ``DESTINATION_MODES``, such
+            as the lowercase ``'batch'`` default of
+            ``PharmaPy.MetaModeler.MetaModelingClass``, for which
+            :meth:`PassPhases` would install nothing; that message names
+            the unit, its class and the mode.
+
+        Notes
+        -----
+        ``PharmaPySpecificationError`` subclasses ``AttributeError``, which
+        such connections raised before this check (issue #445), and the
+        defect is in the unit's specification for flowsheet use, not in
+        the values it holds. A unit whose outlet or published time profile
+        is missing, such as a flash or extractor, can still be the last
+        unit of a flowsheet, but not a source.
+
+        The check covers what real units can lack. Every PharmaPy unit
+        that declares a supported mode also declares the ``Inlet`` or
+        ``Phases`` setter of that mode (a ``Mixer`` its ``Inlets``), and
+        the only unit with a dictionary ``Outlet``, ``DynamicExtractor``,
+        declares its ``default_output``, so neither is checked.
+        """
+        source, destination = self.source_uo, self.destination_uo
+        is_mixer = destination.__class__.__name__ == 'Mixer'
+
+        missing_source = [name for name in SOURCE_CONTRACT
+                          if not hasattr(source, name)]
+        if not hasattr(getattr(source, 'result', None), 'time'):
+            missing_source.append('result.time')
+
+        missing_destination = [] if hasattr(destination, 'oper_mode') else [
+            'oper_mode']
+        mode = getattr(destination, 'oper_mode', None)
+        if not is_mixer and not missing_destination and (
+                mode not in DESTINATION_MODES):
+            raise PharmaPySpecificationError(
+                f'{_unit_label(destination, self.destination_name)} '
+                f'declares oper_mode {mode!r}; a flowsheet destination '
+                'other than a Mixer must declare one of '
+                f'{list(DESTINATION_MODES)} so that Connection can install '
+                'the transferred matter.')
+
+        if 'oper_mode' not in missing_source + missing_destination:
+            flow_flag, btf_flag = self._conversion_flags()
+            if flow_flag or btf_flag:
+                if not hasattr(source, 'names_states_out'):
+                    missing_source.append('names_states_out')
+                if not hasattr(destination, 'names_states_in'):
+                    missing_destination.append('names_states_in')
+
+        problems = []
+        if missing_source:
+            problems.append(
+                f'source {_unit_label(source, self.source_name)} lacks '
+                f'{missing_source}, which a flowsheet source must publish')
+        if missing_destination:
+            problems.append(
+                'destination '
+                f'{_unit_label(destination, self.destination_name)} lacks '
+                f'{missing_destination}, which a flowsheet destination must '
+                'declare')
+        if problems:
+            raise PharmaPySpecificationError(
+                'Cannot connect these units: ' + '; '.join(problems)
+                + '. The unit class does not implement the connection '
+                'contract for this role; use it standalone (assign its '
+                'Inlet or Phases and call solve_unit) or connect a unit '
+                'that implements it.')
+
+    def _check_route(self) -> None:
+        """Reject a source whose amount basis the destination cannot take.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a source that is not continuous (``is_continuous`` False)
+            feeds a continuous destination (``oper_mode`` ``'Continuous'``)
+            or a ``DynamicCollector``, or if a continuous source feeds a
+            batch destination (``oper_mode`` ``'Batch'``, including a
+            ``BatchToFlowConnector``). For another semibatch destination,
+            if a continuous source feeds one without an initial charge
+            (``Phases`` is None), or a source that is not continuous feeds
+            one that holds a charge assigned outside a connection (see
+            :meth:`_holds_user_charge`). The message names both
+            units, the basis mismatch and the remedy.
+
+        Notes
+        -----
+        The route is keyed on the source's ``is_continuous``, not its
+        ``oper_mode``: a ``BatchToFlowConnector`` has ``oper_mode`` 'Batch'
+        but publishes a stream. A continuous source hands over a stream
+        with a flow rate [kg/s]; any other source hands over its final
+        holdup, an amount [kg] with no flow (see :meth:`FeedConnection`).
+        A continuous destination and a ``DynamicCollector`` integrate a
+        feed flow, and a batch destination is charged with a holdup, so
+        neither can take the other basis: a holdup as ``Inlet`` failed
+        later on a missing ``vol_flow`` or ``DynamicInlet``, and a stream
+        as ``Phases`` was rejected by the setter, failed on a missing
+        ``vol``, or was charged as an amount (issue #436). The remedies
+        exist: a ``BatchToFlowConnector`` discharges a liquid holdup as a
+        stream over a cycle time (solids are not supported, issue #423),
+        and a ``DynamicCollector`` collects a stream for a duration into a
+        holdup that can charge a batch unit. ``PharmaPyValueError`` is used,
+        as for the fan-in check of ``SimulationExec``, because the
+        flowsheet specification is inconsistent and a remedy exists.
+
+        A semibatch destination other than a ``DynamicCollector``, such as
+        a ``SemibatchReactor`` or an ``Evaporator`` with an ``Inlet``, holds
+        an initial charge (``Phases``) and integrates a feed (``Inlet``)
+        (issue #438). A continuous source supplies the feed, so the
+        destination must already be charged: a stream is never installed
+        as an initial holdup. A source that is not continuous supplies the
+        charge, so the destination must not hold a charge of its own: two
+        initial holdups would otherwise be silently replaced or ignored. A
+        crystallizer's seed alone is not a charge of that kind: the
+        transferred liquid completes it (see :meth:`_holds_user_charge`).
+
+        A ``Mixer`` destination is not checked: it adopts the basis of its
+        inlets and rejects mixing inventories with flow rates itself.
+        """
+        destination = self.destination_uo
+        class_destination = destination.__class__.__name__
+        if class_destination == 'Mixer':
+            return
+
+        source_label = _unit_label(self.source_uo, self.source_name)
+        destination_label = _unit_label(destination, self.destination_name)
+        continuous_source = bool(self.source_uo.is_continuous)
+        mode = destination.oper_mode
+
+        if not continuous_source and (class_destination == 'DynamicCollector'
+                                      or mode == 'Continuous'):
+            raise PharmaPyValueError(
+                f'Source {source_label} is not continuous: its outlet is a '
+                'holdup, an amount [kg] without a flow rate, but '
+                f'destination {destination_label} takes a feed stream '
+                '[kg/s] as its Inlet. Insert a BatchToFlowConnector '
+                'between them to discharge the holdup as a stream over a '
+                'cycle time; it accepts a single liquid holdup only, '
+                'solids are not supported yet (issue #423).')
+
+        if continuous_source and mode == 'Batch':
+            raise PharmaPyValueError(
+                f'Source {source_label} is continuous: its outlet is a '
+                'stream, a flow rate [kg/s], but destination '
+                f'{destination_label} is a batch unit charged with a '
+                'holdup, an amount [kg], as its Phases. Collect the stream '
+                'for a duration in a DynamicCollector and connect the '
+                'collector, whose holdup can charge the batch unit.')
+
+        if mode != 'Semibatch' or class_destination == 'DynamicCollector':
+            return
+
+        charged = getattr(destination, 'Phases', None) is not None
+        if continuous_source and not charged:
+            raise PharmaPyValueError(
+                f'Destination {destination_label} is a semibatch unit '
+                'without an initial charge: the stream [kg/s] of continuous '
+                f'source {source_label} becomes its Inlet (feed), never its '
+                'initial holdup [kg]. Assign the initial charge to its '
+                'Phases before solving the flowsheet.')
+
+        if not continuous_source and charged and self._holds_user_charge():
+            raise PharmaPyValueError(
+                f'Destination {destination_label} already holds an initial '
+                'charge (Phases) assigned outside the flowsheet, and the '
+                f'holdup [kg] of source {source_label}, which is not '
+                'continuous, would be a second initial charge. Remove the '
+                "destination's own charge so that the transferred holdup "
+                'charges it, or mix both holdups in a batch Mixer connected '
+                'to it.')
+
+    def _holds_user_charge(self) -> bool:
+        """Return whether the destination holds a charge the user assigned.
+
+        Returns
+        -------
+        bool
+            True if the destination already holds an initial charge that
+            no connection installed, which the transferred holdup would
+            duplicate; False if its charge came from a connection, so the
+            transfer may replace it, or if it holds only part of a charge
+            that the transfer completes.
+
+        Notes
+        -----
+        A connection marks its copy ``transferred_from_uo = True``. The
+        ``Phases`` setters of the semibatch units keep a deep copy of a
+        complete charge as ``__original_phase__``, the reference that
+        raw-material accounting also uses to tell a transferred charge
+        from a raw one (``SimulationExec.get_holdup``). When that copy
+        exists, its flag decides, because a unit may replace its phase
+        objects while it solves, as an ``Evaporator`` with a nitrogen
+        blanket does.
+
+        A crystallizer keeps no such copy until it holds a liquid and a
+        solid, because its setter adds single phases to the held ones, as a
+        ``BatchCryst``'s does. A ``SemibatchCryst`` charged by the user
+        with its seed crystals alone is therefore completed by a
+        transferred liquid holdup, as a seeded ``BatchCryst`` is. Without
+        the copy, the destination holds a user charge if it holds a phase
+        of the same kind (liquid, solid or vapor, by class name, as
+        ``PharmaPy.Phases.classify_phases`` reads it) as a transferred
+        phase: a second liquid would otherwise be stacked beside the
+        user's liquid. A transfer that completed a charge leaves the copy,
+        so a re-solve is decided by its flag. A refactored
+        ``MultiPhaseVessel`` requires its phase topology in ``Phases``
+        before mechanisms are attached and merges a transferred holdup by
+        phase family, so its pre-configured ``Phases`` do not block an
+        upstream holdup transfer. ``SimulationExec`` rejects
+        several predecessors of a unit other than a ``Mixer`` (issue #444),
+        so a transferred charge comes from this edge.
+        """
+        destination = self.destination_uo
+        if self._is_refactored_unit(destination):
+            return False
+        original = getattr(destination, '__original_phase__', None)
+        if original is not None:
+            return not getattr(original, 'transferred_from_uo', False)
+
+        held = destination.Phases
+        held = held if isinstance(held, (list, tuple)) else [held]
+
+        matter = self.source_uo.Outlet
+        if isinstance(matter, dict):
+            matter = matter[self.source_uo.default_output]
+        incoming = getattr(matter, 'Phases', None) or [matter]
+
+        held_kinds = {_phase_kind(phase) for phase in held}
+        return any(_phase_kind(phase) in held_kinds for phase in incoming)
+
+    def FeedConnection(self) -> None:
+        """Select the source outlet and attach its upstream profile.
+
+        Notes
+        -----
+        ``self.Matter`` is the source's whole ``Outlet``, or
+        ``Outlet[default_output]`` when the outlet is a dictionary. Its
+        ``y_upstream`` is set to the source's ``outputs`` and its
+        ``time_upstream`` to the source's result times [s] (continuous
+        source) or final time [s] (batch source). The outlet is never
+        split, so a source connected to several destinations would hand
+        each of them the full flow [kg/s] or inventory [kg];
+        ``SimulationExec.SolveFlowsheet`` therefore rejects such fan-out
+        graphs before solving (issue #437).
+        """
         self.Matter = self.source_uo.Outlet
         if isinstance(self.Matter, dict):
             self.Matter = self.Matter[self.source_uo.default_output]
@@ -550,11 +934,7 @@ class Connection:
         A refactored stream of a single phase is converted through that
         phase, from :meth:`_conversion_matter`.
         """
-        mode_source = self.source_uo.oper_mode
-        mode_dest = self.destination_uo.oper_mode
-
-        flow_flag = (mode_source == 'Continuous' and mode_dest != 'Batch')
-        btf_flag = self.source_uo.__class__.__name__ == 'BatchToFlowConnector'
+        flow_flag, btf_flag = self._conversion_flags()
 
         if flow_flag or btf_flag:
             names_states_in = self.destination_uo.names_states_in
@@ -788,6 +1168,7 @@ class Connection:
             ``BatchToFlowConnector`` rejects anything other than one liquid
             batch holdup (issue #423), ``ValueError`` when a ``Mixer``
             rejects mixing batch inventories [kg] with flow rates [kg/s],
+            or replacing its connected copy with one on the other basis,
             or ``RuntimeError`` when a reactor, crystallizer or filter
             ``Phases`` setter receives a stream or a non-phase object.
 
@@ -795,7 +1176,8 @@ class Connection:
         -----
         The transferred matter is ``copy.deepcopy(self.Matter)``, so the
         source outlet is never shared, and it is marked
-        ``transferred_from_uo = True`` (raw-material reporting excludes it).
+        ``transferred_from_uo = True``, as is each phase of a mixture such
+        as a ``Slurry`` (raw-material reporting excludes them, issue #455).
         It is kept as ``self.transferred_matter`` so ``SimulationExec`` can
         verify that the destination actually uses it. When the source and
         the destination are on different phase stacks, the copy is first
@@ -811,17 +1193,54 @@ class Connection:
           source also sets ``KinCryst`` to its ``Kinetics`` and
           ``kwargs_cryst`` to its ``target_ind``, ``target_comp`` and
           ``scale``; for other sources caller-set values are kept.
-        * Semibatch ``MultiPhaseVessel`` units: a continuous source's
-          matter is assigned to ``Inlet`` (and to ``Phases`` if none are
-          set); a discontinuous source's is assigned to ``Phases``, as a
-          charge. Both set ``material_from_upstream = True``.
-        * Other semibatch units: assigned to ``Phases`` only if none are
-          set, with ``material_from_upstream = True``; a transfer to an
-          already-charged unit is ignored (issue #438).
+        * Other semibatch units (issue #438): the stream of a continuous
+          source is assigned to ``Inlet``, the feed of the already charged
+          unit, and replaces an ``Inlet`` assigned before, as for a
+          continuous unit. The holdup of any other source charges
+          ``Phases``, as for a batch unit, with
+          ``material_from_upstream = True``. :meth:`_check_route` has
+          rejected an uncharged destination of a stream and a
+          user-charged destination of a holdup.
         * Continuous units: assigned to ``Inlet`` (``{'feed': matter}`` for
-          a ``DynamicExtractor``). A batch or semibatch source is handed over
-          as its holdup, not converted to a flow (issue #436); insert a
-          ``BatchToFlowConnector`` to discharge a liquid holdup as a stream.
+          a ``DynamicExtractor``).
+
+        The matter keeps the source's amount basis, so :meth:`_check_route`
+        has already rejected the routes that would change it (issue #436):
+        the holdup [kg] of a source that is not continuous reaches a
+        continuous unit or a ``DynamicCollector`` only through a
+        ``BatchToFlowConnector`` (liquid holdups only), and the stream
+        [kg/s] of a continuous source reaches a batch unit only after a
+        ``DynamicCollector`` has collected it into a holdup.
+
+        A transfer replaces the destination's copy of ``replaced_matter``
+        rather than adding to it, keyed by object identity, so repeating a
+        transfer on the same edge gives the same inputs (issue #441):
+
+        * ``Mixer``: the copy is replaced in its position in ``Inlets``,
+          and the Mixer's other inlets, such as raw feeds, are kept.
+        * Batch units: the copy, and the phases a transferred ``Cake`` or
+          ``Slurry`` carried (``replaced_phases``), are removed from a
+          list-valued ``Phases`` before the assignment, so a ``BatchCryst``
+          or ``Drying`` unit, whose setter adds single phases or cake
+          phases to its holdup, does not stack the new transfer on the old
+          one. Phases set independently, such as a crystallizer's seed or a
+          dryer's gas, are kept. If the assignment raises, the destination's
+          attributes, phase list and phase names are restored.
+        * ``DynamicExtractor``: ``{'feed': matter}`` replaces the held
+          ``'feed'``, because its ``Inlet`` setter lets newly assigned keys
+          win (issue #449); its ``'solvent'`` is kept.
+
+        Without ``replaced_matter``, or when the destination no longer
+        holds it, the transfer is installed as described above.
+
+        Only a ``Mixer`` combines several transfers into one mass- and
+        energy-balanced mixture. A transfer from a further source to any
+        other destination replaces its ``Inlet`` or ``Phases``, or, for a
+        ``BatchCryst`` or ``Drying`` unit, is stacked with the earlier
+        phases into a holdup list that is not a mixture of the feeds (a
+        ``Slurry`` replaces a ``BatchCryst``'s phases instead).
+        ``SimulationExec.SolveFlowsheet`` therefore rejects several
+        predecessors of a non-``Mixer`` unit before solving (issue #444).
         """
         class_destination = self.destination_uo.__class__.__name__
         mode_dest = self.destination_uo.oper_mode
@@ -830,13 +1249,24 @@ class Connection:
         transfered_matter = self._match_stacks(transfered_matter)
 
         transfered_matter.transferred_from_uo = True
+        # Mark each phase of a mixture as well: a unit may hold the phases
+        # without the mixture, and raw-material accounting checks every
+        # phase of an initial holdup (issue #455).
+        for phase in getattr(transfered_matter, 'Phases', None) or ():
+            phase.transferred_from_uo = True
         self.transferred_matter = transfered_matter
+        # Snapshot before installation: a destination may extend the list.
+        self.transferred_phases = tuple(
+            getattr(transfered_matter, 'Phases', None) or ())
 
+        replaced = self.replaced_matter
         if class_destination == 'Mixer':
-            self.destination_uo.Inlets = transfered_matter
+            if replaced is None or not self.destination_uo._replace_inlet(
+                    replaced, transfered_matter):
+                self.destination_uo.Inlets = transfered_matter
 
         elif mode_dest == 'Batch':
-            self.destination_uo.Phases = transfered_matter
+            self._assign_batch_phases(transfered_matter)
 
         elif mode_dest == 'Semibatch':
             if class_destination == 'DynamicCollector':
@@ -850,36 +1280,11 @@ class Connection:
                         'target_comp': self.source_uo.target_comp,
                         'scale': self.source_uo.scale}
 
-            elif self._is_refactored_unit(self.destination_uo):
-                # The branch below only assigns Phases when the
-                # destination has none. A refactored vessel always has
-                # Phases, so a semibatch destination silently discarded
-                # everything handed to it: HOLD01 -> CR01 passed 32.6 kg
-                # and the crystallizer's holdup did not move, so it ran
-                # on its own initial charge and the flowsheet was really
-                # a set of disconnected units.
-                #
-                # What the material means depends on the source. A
-                # continuous source produces a flow, which is a feed; a
-                # discontinuous one discharges a quantity, which is a
-                # charge and merges into the holdup exactly as it does
-                # for a Batch destination.
-                #
-                # Scoped to refactored destinations on purpose: changing
-                # how an old semibatch unit is fed would move every
-                # existing old-unit flowsheet.
-                if self.source_uo.oper_mode == 'Continuous':
-                    self.destination_uo.Inlet = transfered_matter
-
-                    if self.destination_uo.Phases is None:
-                        self.destination_uo.Phases = transfered_matter
-                else:
-                    self.destination_uo.Phases = transfered_matter
-
-                self.destination_uo.material_from_upstream = True
-
-            elif self.destination_uo.Phases is None:
-                self.destination_uo.Phases = transfered_matter
+            elif self.source_uo.is_continuous:
+                # Fed-batch: the stream is the feed of the charged unit.
+                self.destination_uo.Inlet = transfered_matter
+            else:
+                self._assign_batch_phases(transfered_matter)
                 self.destination_uo.material_from_upstream = True
 
         elif mode_dest == 'Continuous':
@@ -887,3 +1292,70 @@ class Connection:
                 self.destination_uo.Inlet = {'feed': transfered_matter}
             else:
                 self.destination_uo.Inlet = transfered_matter
+
+    def _assign_batch_phases(self, matter) -> None:
+        """Charge transferred matter to a batch or semibatch ``Phases``.
+
+        Parameters
+        ----------
+        matter : object
+            Deep copy of the source outlet: a phase, or a ``Cake`` or
+            ``Slurry`` holding phases, with inventories [kg].
+
+        Raises
+        ------
+        Exception
+            Any exception raised by the destination's ``Phases`` setter
+            propagates after the destination is restored (see Notes).
+
+        Notes
+        -----
+        ``replaced_matter`` and ``replaced_phases`` are removed by identity
+        from the destination's ``Phases`` list in place, so setters that add
+        to the held list (``BatchCryst``, ``Drying``) do not keep the
+        earlier transfer. Setters that replace their phases are unaffected.
+        During that assignment only, the destination's
+        ``_retained_by_transfer`` lists the phases it keeps, so a
+        crystallizer can keep the records of a kept seed taken when it was
+        charged (see ``_BaseCryst._kept_from_charge``).
+        A destination whose ``Phases`` is not a list, or a transfer without
+        ``replaced_matter``, is assigned directly.
+
+        A setter can fail after it has changed the destination, as a
+        ``Drying`` unit does when the new cake lacks one of its
+        ``supercrit_names`` species after re-classifying its phases and
+        resizing its cake grid. The destination's attribute bindings (a
+        shallow copy of its ``__dict__``), the contents of its phase list
+        and the ``name`` of each held phase are therefore restored before
+        the exception propagates. Objects the setter changed in place
+        other than these are not restored.
+        """
+        destination = self.destination_uo
+        held = destination.Phases
+        replaced = self.replaced_matter
+        if replaced is None or not isinstance(held, list):
+            destination.Phases = matter
+            return
+
+        stale = (replaced,) + self.replaced_phases
+        attributes = dict(vars(destination))
+        original = list(held)
+        names = [(phase, getattr(phase, 'name', _UNNAMED))
+                 for phase in original]
+        held[:] = [phase for phase in held
+                   if not any(phase is old for old in stale)]
+        # The phases this re-transfer keeps, for this assignment only: a
+        # crystallizer keeps their charge-time records (_kept_from_charge).
+        destination._retained_by_transfer = tuple(held)
+        try:
+            destination.Phases = matter
+        except Exception:
+            vars(destination).clear()
+            vars(destination).update(attributes)
+            held[:] = original
+            for phase, name in names:
+                if name is not _UNNAMED:
+                    phase.name = name
+            raise
+        finally:
+            vars(destination).pop('_retained_by_transfer', None)
