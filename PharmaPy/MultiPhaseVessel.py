@@ -2189,6 +2189,9 @@ class MultiPhaseVessel():
         costs one vectorized comparison and no allocation of scale vectors.
         """
 
+        if limiter_dt <= 0.0:
+            return None
+
         contributions = buffer.contributions
 
         inventory = self.gather_inventory(completed_state)
@@ -2269,16 +2272,44 @@ class MultiPhaseVessel():
             buffer,
             completed_state,
             limiter_dt=1.0,
-        ):
-        """
-        Throttle consuming contributions to keep phase inventories positive.
+        ) -> bool:
+        """Throttle consuming contributions to keep phase inventories positive.
 
         ``limiter_dt`` is the horizon over which depletion is anticipated.
         Phases and nonlinear mechanisms are not re-evaluated: each mechanism
         that drains a throttled phase is scaled down at both ends, so the
         transfer stays closed even while it is being limited.
 
-        Returns True when the limiter engaged.
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions, modified in place when throttled.
+        completed_state : dict
+            Native completed state. Material arrays use their declared
+            inventory units (for example [kg]); these arrays are not modified.
+        limiter_dt : float, optional
+            Depletion horizon [s]. Default 1.0.
+
+        Returns
+        -------
+        bool
+            True when the limiter engaged.
+
+        Raises
+        ------
+        RuntimeError
+            After accounting for transfer/outlet scaling, proposed rates
+            consume more than the nonnegative available inventory over
+            ``limiter_dt``, beyond the existing 1e-12 inventory-unit allowance.
+
+        Notes
+        -----
+        This is a rate-feasibility check, not an acceptance test for solver
+        states. Adaptive solvers can evaluate slightly negative trial states.
+        Such a state provides zero available inventory but must not be
+        rejected solely for remaining negative with zero or positive rate.
+        State accuracy remains the integrator's responsibility. Neither the
+        state nor the reaction rates are clipped or replaced by this check.
         """
 
         scales = self.calculate_scale(
@@ -2287,6 +2318,29 @@ class MultiPhaseVessel():
             limiter_dt=limiter_dt,
         )
 
+        predicted_rates = buffer.contributions.sum(axis=0)
+        if scales is not None:
+            for aux in buffer.aux[buffer.CROSSPHASE]:
+                writes = aux.get("material_writes", ())
+                factor = self._transfer_scale(scales, writes)
+                for material_slice, rate in writes:
+                    predicted_rates[material_slice] -= (1.0 - factor) * rate
+            for transfer in buffer.aux[buffer.OUTLET]:
+                material_slice = self._material_slice_by_phase.get(transfer.mapping.sink_phaseref)
+                if material_slice is not None:
+                    factor = scales[material_slice.start]
+                    predicted_rates[material_slice] += (1.0 - factor) * transfer.species_flow
+                    for state_slice, rate in transfer.material_writes:
+                        predicted_rates[state_slice] += (1.0 - factor) * rate
+        if limiter_dt > 0.0:
+            for key, state_slice in self._positivity_groups:
+                # [declared inventory units] Bound for feasibility only;
+                # do not change the solver state or count negative mass as supply.
+                available_inventory = np.maximum(completed_state[key], 0.0)
+                if np.any(available_inventory
+                          + limiter_dt * predicted_rates[state_slice] < -1e-12):
+                    raise RuntimeError("Inventory depletion cannot be corrected by transfer/outlet "
+                                       "scaling; reduce the integration step or constrain the mechanism.")
         if scales is None:
             return False
 
@@ -2312,13 +2366,20 @@ class MultiPhaseVessel():
         return factor
 
     def scale_crossphase_transfers(self, buffer, scales):
-        """
-        Scale each cross-phase mechanism down by a single factor.
+        """Scale each cross-phase mechanism down by a single factor.
 
         Both ends of a transfer move together, so throttling the source
         drain also throttles what arrives in the sink. Scaling the flat
         contribution rows independently would credit the sink with material
-        the source never gave up.
+        the source never gave up. The applied factor is recorded as
+        ``aux['transfer_scale']`` so the energy balance scales the same transfer.
+
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions, modified in place.
+        scales : ndarray
+            Scale factor per material entry [-].
         """
 
         row = buffer.contributions[buffer.CROSSPHASE]
@@ -2335,6 +2396,7 @@ class MultiPhaseVessel():
             if factor >= 1.0:
                 continue
 
+            aux["transfer_scale"] = factor
             for material_slice, rate in material_writes:
                 row[material_slice] -= (1.0 - factor) * rate
 
@@ -2363,7 +2425,6 @@ class MultiPhaseVessel():
                 row[mechanism_slice] += (1.0 - factor) * rate
 
             transfer.scale(factor, self.basis)
-            transfer.vol_flow *= factor
 
     def sum_material_contributions(self,contributions):
         return contributions.sum(axis=0)
@@ -2915,6 +2976,24 @@ class MultiPhaseVessel():
             Solver and derived states keyed by ``StateKey``.
         """
 
+        """Add every active cross-phase mechanism's rates to the contribution buffer.
+
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material contributions; the cross-phase row is filled and each
+            mechanism's aux records ``material_writes`` and an initial
+            ``transfer_scale`` of 1.0.
+        time : float
+            Absolute simulation time [s].
+        completed_state : dict
+            Native completed state.
+
+        Raises
+        ------
+        RuntimeError
+            A mechanism writes to a phase that is not in the vessel.
+        """
         for connection in self.phase_connections:
 
             source_phase = self.phase_states.get_phase(connection.source_phaseref)
@@ -2961,6 +3040,7 @@ class MultiPhaseVessel():
                     material_writes.append((material_slice, rate))
 
             crossphase_result.aux["material_writes"] = material_writes
+            crossphase_result.aux["transfer_scale"] = 1.0
 
             buffer.transfer_vol_rate += crossphase_result.net_vol_rate  # [m**3/s]
 
@@ -3119,9 +3199,22 @@ class MultiPhaseVessel():
             completed_state
         ):
         
+        """Add cross-phase heat generation, scaled like the material transfer.
+
+        Parameters
+        ----------
+        contributions : dict
+            Energy contributions by source [W]; ``'crossphase'`` is updated.
+        aux : list of dict
+            Cross-phase auxiliary records, including ``transfer_scale`` [-].
+        time : float
+            Absolute simulation time [s].
+        completed_state : dict
+            Native completed state.
+        """
         for crossphase in aux:
             connection = crossphase['connection']
-            contributions['crossphase'] += connection.mechanism.get_heat_generation(aux=crossphase,
+            contributions['crossphase'] += crossphase.get('transfer_scale', 1.0) * connection.mechanism.get_heat_generation(aux=crossphase,
                                                              completed_state=completed_state,
                                                              time=time)
     def add_intraphase_energy_terms(self,
@@ -3420,13 +3513,17 @@ class MultiPhaseVessel():
         #backward compatibility
         return self.Phases.num_species
     def create_pseudo(self):
-        """
-        Create an independent vessel for replaying an accepted solver
-        trajectory.
+        """Create an independent vessel for replaying an accepted solver trajectory.
 
         The pseudo vessel contains the model structure, phases, mechanisms,
         connections, and controller, but does not contain the integrator or
-        other runtime solver objects.
+        other runtime solver objects. Numerical work buffers and timers are
+        recreated empty.
+
+        Returns
+        -------
+        MultiPhaseVessel
+            Reset replay copy of this vessel.
         """
 
         pseudo = object.__new__(type(self))
@@ -3443,6 +3540,9 @@ class MultiPhaseVessel():
             "derivatives",
             "elapsed_time",
             "outlet_conditions",
+            "_material_contributions",
+            "_solver_rate_buffer",
+            "_timers",
         }
 
         for name, value in self.__dict__.items():
@@ -3457,6 +3557,16 @@ class MultiPhaseVessel():
 
         # The pseudo is not an integratable vessel.
         pseudo.integrator = None
+
+        # Replay receives fresh numerical work buffers; accepted-step auxiliary
+        # diagnostics from the live solve are intentionally not copied.
+        pseudo._material_contributions = MaterialContributionBuffer(
+            pseudo.solver_state_collection.material_dim
+        )
+        pseudo._solver_rate_buffer = np.empty(
+            pseudo.solver_state_collection.dim
+        )
+        pseudo._timers = {}
 
         pseudo.reset()
 
