@@ -1,0 +1,6 @@
+{
+  "biomass": {"mw": 1000.0, "rho_liq": 1000.0},
+  "substrate": {"mw": 1000.0, "rho_liq": 1000.0},
+  "product": {"mw": 1000.0, "rho_liq": 1000.0},
+  "water": {"mw": 18.015, "rho_liq": 1000.0}
+}

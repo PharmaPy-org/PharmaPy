@@ -13,6 +13,10 @@ EXAMPLES = Path(__file__).parents[2]/'examples/bioreactors'
 INPUTS = tuple(EXAMPLES / folder / 'mechanism.json' for folder in (
     'generic_batch/inputs', 'generic_fed_batch/inputs',
     'generic_chemostat/inputs', 'generic_chemostat/inputs/kinetics',
+    'batch_ecoli_dfba/inputs',
+    'ecoli_ye_fed_batch/reconciliation/inputs',
+    'ecoli_ye_fed_batch/reconciliation/inputs/F11',
+    'Doyle_Exercise_4_15/inputs',
 ))
 
 

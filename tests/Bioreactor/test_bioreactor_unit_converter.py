@@ -61,8 +61,8 @@ def test_missing_properties_and_incompatible_units_fail(source, target, properti
 
 def test_arrays_native_phase_properties_and_invalid_values():
     p = EXAMPLES / 'generic_batch/inputs'
-    assembly = build_bioreactor(read_input_json((p/'case.json')),
-                                read_input_json((p/'mechanism.json')), p/'thermo.json')
+    assembly = build_bioreactor(read_input_json(p/'case.json'),
+                                read_input_json(p/'mechanism.json'), p/'thermo.json')
     phase = assembly.phase
     concentration = np.ones(len(phase.mw)) * .01
     original = concentration.copy()
@@ -79,10 +79,10 @@ def test_arrays_native_phase_properties_and_invalid_values():
         Units.convert(-274., 'degC', 'K')
 
 
-@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'fed_batch_cho'])
+@pytest.mark.parametrize('name', ['generic_batch', 'generic_fed_batch', 'batch_ecoli_dfba', 'fed_batch_cho'])
 def test_json_paths_and_mappings_share_native_converter(name):
     p = (Path(__file__).parent / 'fixtures' if name == 'fed_batch_cho' else EXAMPLES) / name / 'inputs'
-    case, mechanism = [read_input_json((p/file)) for file in ('case.json', 'mechanism.json')]
+    case, mechanism = [read_input_json(p/file) for file in ('case.json', 'mechanism.json')]
     before = json.dumps([case, mechanism], sort_keys=True)
     paths = (Units.from_inputs(p/'case.json', p/'mechanism.json')
              if name == 'fed_batch_cho' else Units.from_inputs(p/'mechanism.json'))
@@ -96,7 +96,7 @@ def test_json_paths_and_mappings_share_native_converter(name):
 
 def test_additional_json_volume_and_amount_units_preserve_initial_state():
     p = EXAMPLES / 'generic_batch/inputs'
-    case, definition = [read_input_json((p/file)) for file in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p/file) for file in ('case.json', 'mechanism.json')]
     original = build_bioreactor(case, definition, p/'thermo.json')
     case['operation']['initial_volume'] = {'unit': 'mL', 'value': 1000.}
     definition['state']['species']['unit'] = 'umol'
@@ -128,7 +128,7 @@ def test_rate_normalization_minutes_and_overflow():
 ])
 def test_equivalent_pathway_bases_preserve_native_simulation(amount, normalization, time, content, scale):
     p = EXAMPLES / 'generic_batch/inputs'
-    case, definition = [read_input_json((p/file)) for file in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p/file) for file in ('case.json', 'mechanism.json')]
     case['operation']['runtime']['value'] = .2
     reference = build_bioreactor(case, definition, p/'thermo.json').solve(verbose=False)[0]
     exchange = dict(amount_unit=amount, normalization=normalization, time_unit=time)
@@ -174,6 +174,25 @@ def test_ambiguous_or_incompatible_pathway_bases_fail(exchange, growth):
         Units(flux_time_unit='1/h', flux_basis=dict(exchange=exchange, growth=growth))
 
 
+def test_pathway_transfer_cap_uses_declared_exchange_basis():
+    p = EXAMPLES / 'batch_ecoli_dfba/inputs'
+    case, definition = [read_input_json(p/file) for file in ('case.json', 'mechanism.json')]
+    original = build_bioreactor(case, definition, p/'thermo.json').mechanism.model
+    model = definition['model']['pathways']
+    model['flux_basis'] = {
+        'exchange': dict(amount_unit='mmol', normalization='kgDW', time_unit='h'),
+        'growth': dict(amount_unit='1', normalization='none', time_unit='h')}
+    model['exchange_matrix'] = (np.asarray(model['exchange_matrix']) * 1000.).tolist()
+    uptake = definition['parameters']['rates']['uptake']
+    for name in uptake:
+        uptake[name] *= 1000.
+    converted = build_bioreactor(case, definition, p/'thermo.json').mechanism.model
+    for biomass in (.001, 1.):
+        first = original.solve_fluxes([10.8, .4, .21], biomass)
+        second = converted.solve_fluxes([10.8, .4, .21], biomass)
+        np.testing.assert_allclose(second.fluxes, first.fluxes, atol=1e-10)
+        np.testing.assert_allclose(second.extracellular_rates * converted.exchange_scale,
+                                   first.extracellular_rates, atol=1e-9)
 
 
 @pytest.mark.parametrize('source, target, value, expected', [

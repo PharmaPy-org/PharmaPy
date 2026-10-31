@@ -1,0 +1,307 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "sources": [
+      {
+        "uri": "https://doi.org/10.3390/bioengineering12101081",
+        "role": "model equations and experimental methods"
+      },
+      {
+        "uri": "https://git.tu-berlin.de/bvt-htbd/public/schroeder-kleeberg_2024_ye_model",
+        "revision": "c8d18b53105f695af0d99ee0126544a623b6ff65",
+        "path": "Results/FedBatch_Model_Comparison/allthedata_Sim_YEpaper_Messina_FedBatch.json",
+        "sha256": "f16afe77c515b84a74d7517823523b4567ed831ff8404d6c2365fb35584fd358",
+        "role": "processed observations, operating inputs and historical simulations"
+      },
+      {
+        "uri": "https://mdpi-res.com/d_attachment/bioengineering/bioengineering-12-01081/article_deploy/bioengineering-12-01081-s001.zip",
+        "path": "Supplementary Material/S3_Parameters_YE_Model.xlsx",
+        "sha256": "1d79672505bf32c501e0595d758dcc09c6672851fd917d5be67ccc438da53b3f",
+        "role": "parameter values, units interpreted through paper equations, source search bounds"
+      }
+    ],
+    "sharing_conditions": "Publicly accessible article and associated data repository. Article is CC BY 4.0; no separate software/data license was found in the source repository root. Public access alone is not a blanket relicensing grant. Published figures and upstream code are not redistributed here.",
+    "transformations": [
+      {
+        "field": "biomass",
+        "operation": "source OD600 multiplied by 0.37 gDW/L per OD unit; processed values already contain this conversion; do not apply twice"
+      },
+      {
+        "field": "all",
+        "operation": "select existing reference measurements; convert declared sample hours to seconds via 3600 s/h; preserve values and per-field sample order; omit missing samples as the existing adapter requires"
+      }
+    ],
+    "uncertainty": {
+      "status": "not_applied",
+      "meaning": "No measurement covariance or statistically justified standard deviations are supplied to this forward adapter. Source fit weights and source measurement_error settings are not reinterpreted as inverse covariance. See source variable records for the original estimation settings.",
+      "source_settings": {
+        "F10": {
+          "Biomass": {
+            "weight": 10,
+            "measurement_error": {
+              "consider": true,
+              "deviation": 0.05
+            },
+            "std": []
+          },
+          "Substrate": {
+            "weight": 6,
+            "measurement_error": {
+              "consider": true,
+              "deviation": 0.05
+            },
+            "std": []
+          },
+          "Acetate": {
+            "weight": 4,
+            "measurement_error": {
+              "consider": false,
+              "deviation": 0.05
+            },
+            "std": []
+          }
+        },
+        "F11": {
+          "Biomass": {
+            "weight": 10,
+            "measurement_error": {
+              "consider": true,
+              "deviation": 0.05
+            },
+            "std": []
+          },
+          "Substrate": {
+            "weight": 6,
+            "measurement_error": {
+              "consider": true,
+              "deviation": 0.05
+            },
+            "std": []
+          },
+          "Acetate": {
+            "weight": 4,
+            "measurement_error": {
+              "consider": false,
+              "deviation": 0.05
+            },
+            "std": []
+          }
+        }
+      }
+    },
+    "calibration": {
+      "status": "not_performed",
+      "fitted_values": null
+    },
+    "parameter_origin": "Published/source-configured coefficients reused without fitting in PharmaPy; source bounds are provenance, not new runtime constraints."
+  },
+  "parameter_metadata": {
+    "coefficients.qS_max": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.2,
+        1.5
+      ],
+      "source": "S3, 3L, row qS_max, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.K_S": {
+      "unit": "g/L",
+      "basis": "liquid concentration",
+      "bounds": [
+        0.01,
+        0.09
+      ],
+      "source": "S3, 3L, row K_S, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.qYEF_A_max": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.5,
+        3.0
+      ],
+      "source": "S3, 3L, row qYEF_A_max, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.K_YEF_A": {
+      "unit": "g/L",
+      "basis": "liquid concentration",
+      "bounds": [
+        0.01,
+        1.0
+      ],
+      "source": "S3, 3L, row K_YEF_A, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.qYEF_B_max": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.1,
+        2.0
+      ],
+      "source": "S3, 3L, row qYEF_B_max, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.K_YEF_B": {
+      "unit": "g/L",
+      "basis": "liquid concentration",
+      "bounds": [
+        0.01,
+        2.0
+      ],
+      "source": "S3, 3L, row K_YEF_B, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.K_qSox": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.01,
+        100.0
+      ],
+      "source": "S3, 3L, row K_qSox, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Ki_YEA_qSox": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.01,
+        100.0
+      ],
+      "source": "S3, 3L, row Ki_YEA_qSox, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Ki_YEB_qSox": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.01,
+        100.0
+      ],
+      "source": "S3, 3L, row Ki_YEB_qSox, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.qAc_max": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.1,
+        1.5
+      ],
+      "source": "S3, 3L, row qAc_max, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.K_A": {
+      "unit": "g/L",
+      "basis": "liquid concentration",
+      "bounds": [
+        0.01,
+        1.0
+      ],
+      "source": "S3, 3L, row K_A, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Ki_AS": {
+      "unit": "g/L",
+      "basis": "liquid concentration",
+      "bounds": [
+        0.001,
+        50.0
+      ],
+      "source": "S3, 3L, row Ki_AS, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.qm": {
+      "unit": "g/(gDW h)",
+      "basis": "dry biomass",
+      "bounds": [
+        0.01,
+        0.1
+      ],
+      "source": "S3, 3L, row qm, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_XSem": {
+      "unit": "g/g",
+      "basis": "dry biomass per glucose mass",
+      "bounds": [
+        0.3,
+        0.5
+      ],
+      "source": "S3, 3L, row Y_XSem, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_XYEF_A": {
+      "unit": "g/g",
+      "basis": "dry biomass per yeast-extract fraction A mass",
+      "bounds": [
+        0.05,
+        1.0
+      ],
+      "source": "S3, 3L, row Y_XYEF_A, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_XYEF_B": {
+      "unit": "g/g",
+      "basis": "dry biomass per yeast-extract fraction B mass",
+      "bounds": [
+        0.05,
+        0.2
+      ],
+      "source": "S3, 3L, row Y_XYEF_B, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_XA": {
+      "unit": "g/g",
+      "basis": "dry biomass per acetate mass",
+      "bounds": [
+        0.01,
+        0.45
+      ],
+      "source": "S3, 3L, row Y_XA, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_AS": {
+      "unit": "g/g",
+      "basis": "acetate mass per glucose mass",
+      "bounds": [
+        0.5,
+        0.8
+      ],
+      "source": "S3, 3L, row Y_AS, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_OS": {
+      "unit": "g/g",
+      "basis": "oxygen mass per glucose mass",
+      "bounds": null,
+      "bounds_status": "Source supplies no search bounds for fixed stoichiometric oxygen yields when null",
+      "source": "S3, 3L, row Y_OS, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_OA": {
+      "unit": "g/g",
+      "basis": "oxygen mass per acetate mass",
+      "bounds": null,
+      "bounds_status": "Source supplies no search bounds for fixed stoichiometric oxygen yields when null",
+      "source": "S3, 3L, row Y_OA, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    },
+    "coefficients.Y_OYE": {
+      "unit": "g/g",
+      "basis": "oxygen mass per yeast-extract mass",
+      "bounds": [
+        0.0,
+        1.5
+      ],
+      "source": "S3, 3L, row Y_OYE, column GSF_YE_Paper_FedBatch; C/D are source search bounds, not a validated domain"
+    }
+  },
+  "experiments": {
+    "F10": {
+      "reference": "../reference/F10.json",
+      "reference_sha256": "96f59e997336c2b052db892fdb4b4924b2754e679dde74ca46db5e6c1b255e84",
+      "source_experiment": "F10",
+      "measurement_order": [
+        "biomass",
+        "glucose",
+        "acetate"
+      ]
+    },
+    "F11": {
+      "reference": "../reference/F11.json",
+      "reference_sha256": "876cc4b063c67fa22ac3fb7d50399e4daa38d655d4311050643fe17b9430476e",
+      "source_experiment": "F11",
+      "measurement_order": [
+        "biomass",
+        "glucose",
+        "acetate"
+      ]
+    }
+  }
+}
