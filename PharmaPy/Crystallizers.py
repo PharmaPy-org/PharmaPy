@@ -17,6 +17,7 @@ from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 
 from PharmaPy.jac_module import numerical_jac, numerical_jac_central, dx_jac_x
 from PharmaPy.Connections import get_inputs, get_inputs_new
+from PharmaPy.Errors import PharmaPyNonImplementedError
 
 from PharmaPy.Results import DynamicResult
 from PharmaPy.Plotting import plot_function, plot_distrib
@@ -568,6 +569,35 @@ class _BaseCryst(StructuralPresenceMixin):
 
     @Kinetics.setter
     def Kinetics(self, instance):
+        """Attach crystallization kinetics and derive the estimation mask.
+
+        Parameters
+        ----------
+        instance : CrystKinetics
+            Kinetics whose ``name_params`` and ``num_params`` define the
+            estimable parameters; ``mask_params`` selects among them.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If the growth law is size dependent (alpha and beta both
+            nonzero). These units evaluate the size-independent rate
+            ``k_g * exp(-E_g/RT) * S**g`` and would silently drop the size
+            factor that only the refactored ``OneDFVMMechanism`` applies.
+        """
+        is_size_dependent = getattr(instance, 'has_size_dependent_growth',
+                                    None)
+
+        if is_size_dependent is not None and is_size_dependent():
+            size_factor = np.asarray(instance.params['growth'],
+                                     dtype=float)[3:5]  # alpha [-], beta [1/um]
+            raise PharmaPyNonImplementedError(
+                '%s cannot apply size-dependent growth (alpha, beta = %s): '
+                'the legacy crystallizers evaluate a size-independent growth '
+                'rate. Use the refactored OneDFVMMechanism for size-dependent '
+                'growth, or give growth only its first three parameters.'
+                % (type(self).__name__, size_factor.tolist()))
+
         self._Kinetics = instance
 
         name_params = self._Kinetics.name_params
@@ -2439,7 +2469,9 @@ class BatchCryst(_BaseCryst):
                 size_exponent = self.Kinetics.params['dissolution'][-1]  # [-]
             else:
                 size_rate = self.Kinetics.growth  # [um/s], nonnegative growth
-                size_exponent = self.Kinetics.params['growth'][-1]  # [-]
+                # Index 2 is the growth exponent g in both formulations; a
+                # five-entry law with a unit size factor ends in beta.
+                size_exponent = self.Kinetics.params['growth'][2]  # [-]
             bp_exp = self.Kinetics.params['nucl_prim'][-1]
             k_s, _, bs_exp, bs2_exp = self.Kinetics.params['nucl_sec']
 
