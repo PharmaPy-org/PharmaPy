@@ -333,6 +333,8 @@ def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> t
         ``(case, definition)`` deep copies in the internal schema-1 layout.
         Normalized pathway inputs retain parameters inside ``model``; this
         layout can be passed back through the same public construction API.
+        Optional physical-feed ``temperature_k`` [K] survives normalization
+        in both legacy and combined layouts.
         Relationship families are expanded; units are converted only where the
         internal layout fixes them (see ``_version_two``).
 
@@ -406,7 +408,8 @@ def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> t
     for recipe, events in definition["recipes"].items():
         for event in events:
             optional = {'composition', 'volume_basis', 'density_kg_l', 'volume_flow',
-                        'volume_l_h', 'inlet', 'volume', 'concentrations', 'concentrations_g_l', 'density'}
+                        'volume_l_h', 'inlet', 'volume', 'concentrations', 'concentrations_g_l', 'density',
+                        'temperature_k'}
             if (event.get('event_type') not in {'flow', 'sample'}
                     and not {'volume', 'concentrations', 'concentrations_g_l', 'density'} & set(event)):
                 _keys(event, (*EVENT_FIELDS, *(optional & set(event))), "recipe event")

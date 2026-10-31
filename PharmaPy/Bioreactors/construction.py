@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef
 from PharmaPy.IntegratorBackends import FixedStepBackend, ScipyBackend
@@ -26,6 +27,7 @@ from PharmaPy.Streams_Refactored import LiquidStream
 from .mechanisms import ConfiguredRates, PathwayMetabolism, RateReconciledCulture, WorkingVolume, DeclaredStreamDensity
 from .input_format import normalize_forward_inputs
 from .BioreactorUnitConverter import BioreactorUnitConverter
+from .thermal import thermal_options, attach_utility, positive_temperature, mixed_temperature
 
 
 _TIME_FACTORS = BioreactorUnitConverter.TIME
@@ -521,7 +523,9 @@ def _feed_composition(event):
 
 
 
-def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
+def _apply_material_event(phase: LiquidPhase, event: Mapping,
+                          carrier_density_kg_l: float, carrier_species: str,
+                          nonisothermal: bool = False) -> None:
     """Apply one scheduled feed, sample or target addition to the phase.
 
     Parameters
@@ -535,6 +539,9 @@ def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
         Carrier density [kg/L], unless the event declares ``density_kg_l``.
     carrier_species : str
         Solvent species name.
+    nonisothermal : bool, optional
+        Conserve sensible enthalpy for additions when True. Default False
+        preserves historical isothermal event handling.
 
     Raises
     ------
@@ -556,7 +563,10 @@ def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
     carrier_density_kg_l = float(event.get("density_kg_l", carrier_density_kg_l))
     if not np.isfinite(carrier_density_kg_l) or carrier_density_kg_l <= 0.:
         raise ValueError("feed density_kg_l must be finite and positive")
-    mass = np.asarray(phase.mass_j, dtype=float).copy()
+    initial_mass = np.asarray(phase.mass_j, dtype=float).copy()  # [kg]
+    initial_temperature = float(phase.temp)  # [K]
+    feed_temperature = positive_temperature(event.get("temperature_k", initial_temperature))  # [K]
+    mass = initial_mass.copy()  # [kg]
     volume_increment_l = 0.  # [L]
     names = tuple(phase.name_species)
     event_type = event["event_type"]
@@ -575,7 +585,7 @@ def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
         _require_keys(
             event, {"time", "event_type", "volume_l", "concentrations_mmol_l"},
             "feed event",
-            optional={"composition", "volume_basis", "density_kg_l"},
+            optional={"composition", "volume_basis", "density_kg_l", "temperature_k"},
         )
         volume_l = float(event["volume_l"])  # [L]
         if not np.isfinite(volume_l) or volume_l < 0.0:
@@ -612,7 +622,7 @@ def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
             event, {"time", "event_type", "concentrations_mmol_l",
                     "target_species", "target_concentration_mmol_l"},
             "stock-to-target event",
-            optional={"composition", "density_kg_l"},
+            optional={"composition", "density_kg_l", "temperature_k"},
         )
         concentrations = event["concentrations_mmol_l"]
         if set(concentrations) - (set(names) - {carrier_species}):
@@ -673,6 +683,10 @@ def _apply_material_event(phase, event, carrier_density_kg_l, carrier_species):
     if volume is not None:
         volume.set_volume(volume.get_volume() + volume_increment_l / 1000.)
     phase.updatePhase(mass_j=mass)
+    if nonisothermal and event_type != "sample":
+        temperature = mixed_temperature(phase, initial_temperature,  # [K]
+                                        mass - initial_mass, feed_temperature)
+        phase.updatePhase(temp=temperature)
 
 
 
@@ -773,15 +787,16 @@ class NativeBioreactorAssembly:
             volume.volume_rate = 0.
         self.unit.reset()
 
-    def _set_inlet(self, event):
+    def _set_inlet(self, event: Mapping) -> None:
         """Start, change or stop one continuous inlet flow.
 
         Parameters
         ----------
         event : Mapping
             ``flow`` event with ``volume_l_h`` [L/h] and optional ``inlet`` name,
-            ``concentrations_mmol_l`` [mmol/L], ``density_kg_l`` [kg/L] and
-            ``composition``.
+            ``concentrations_mmol_l`` [mmol/L], ``density_kg_l`` [kg/L],
+            ``composition`` and ``temperature_k`` [K]. An omitted temperature
+            uses the liquid temperature when the flow event is applied.
 
         Raises
         ------
@@ -791,7 +806,7 @@ class NativeBioreactorAssembly:
             density or disagrees with the native volume.
         """
         _require_keys(event, {'time', 'event_type', 'volume_l_h'}, 'flow event',
-                      {'inlet', 'concentrations_mmol_l', 'density_kg_l', 'composition'})
+                      {'inlet', 'concentrations_mmol_l', 'density_kg_l', 'composition', 'temperature_k'})
         if not isinstance(self.unit, (SemiBatchReactor, ContinuousReactor)):
             raise ValueError('continuous feed requires fed-batch or continuous operation')
         flow = BioreactorUnitConverter.convert(event['volume_l_h'], 'L/h', 'm3/s')  # [m3/s]
@@ -816,7 +831,8 @@ class NativeBioreactorAssembly:
                 raise ValueError('invalid inlet concentrations or solution density')
             conc[names.index(self.carrier_species)] = density - conc.sum()
             stream = LiquidStream(self.thermo_path, mass_flow=density*flow,
-                                  mass_frac=conc/density, temp=self.phase.temp)
+                                  mass_frac=conc/density,
+                                  temp=positive_temperature(event.get("temperature_k", self.phase.temp)))
             if isinstance(self.unit, ContinuousReactor) and self.phase.get_mechanism(WorkingVolume) is not None:
                 stream.mechanisms = [DeclaredStreamDensity(density)]
             if (self.phase.get_mechanism(WorkingVolume) is None
@@ -933,7 +949,8 @@ class NativeBioreactorAssembly:
             "Reaction dependencies are structural possibilities, not proof of active flux limitation.")
         return report
 
-    def solve(self, *, verbose=False, report_times=None):
+    def solve(self, *, verbose: bool = False,
+              report_times: Optional[ArrayLike] = None) -> tuple:
         """Execute scheduled operations between native reactor solves.
 
         Parameters
@@ -1008,7 +1025,7 @@ class NativeBioreactorAssembly:
                     else:
                         _apply_material_event(
                             self.phase, event, self.carrier_density_kg_l,
-                            self.carrier_species,
+                            self.carrier_species, nonisothermal=self.unit.has_energy_balance,
                         )
             tolerance = 8. * np.finfo(float).eps * max(1., abs(start), abs(end))  # [s]; 8 ulps covers unit-conversion roundoff
             grid = np.r_[start, time_grid[
@@ -1048,7 +1065,10 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     Notes
     -----
     The default temperature 298.15 K is used only when ``temperature_k`` is
-    absent; reactors are built isothermal.
+    absent. Omitted ``operation.thermal`` preserves isothermal operation;
+    explicit adiabatic or heat-transfer modes use the native energy balance.
+    Prescribed-temperature mode uses the native temperature controller instead
+    of integrating that balance, including the native continuous level control.
     Combined inputs use ``build_bioreactor(document, thermo_path=path)``.
     The original three-argument interface remains supported.
     """
@@ -1061,7 +1081,7 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
         case["operation"],
         {"carrier_density_kg_l", "carrier_species", "initial_mass_kg",
          "initial_volume", "mode", "runtime"},
-        "operation", optional={"temperature_k", "volume_policy"},
+        "operation", optional={"temperature_k", "volume_policy", "thermal"},
     )
     _require_keys(case["recipe"], {"name"}, "recipe", {"require_complete_inputs", "time_unit"})
     complete = case["recipe"].get("require_complete_inputs", False)
@@ -1151,9 +1171,10 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     if policy == "working-volume":
         mechanisms.append(WorkingVolume(phase, initial_volume_l / 1000., allow_outlets=mode == "continuous"))
     phase.mechanisms = mechanisms
-    unit = _REACTORS[mode](integrator=_integrator(case["numerics"]),
-                           isothermal=True)
+    thermal_kwargs, utility = thermal_options(operation, definition, phase, mechanism)
+    unit = _REACTORS[mode](integrator=_integrator(case["numerics"]), **thermal_kwargs)
     unit.Phases = phase
+    attach_utility(unit, utility)
     if mode == 'continuous':
         # Only requesting metabolic mechanisms receive signed outlet rates.
         mechanism.requires_outlet_rates = bool(getattr(mechanism, 'requires_inlet_rates', False))
@@ -1172,6 +1193,10 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     events = tuple(_normalize_event(event, phase) for event in definition["recipes"][recipe_name])
     for event in events:
         _feed_composition(event)
+        if "temperature_k" in event:
+            if event["event_type"] not in {"flow", "feed", "stock_to_target"}:
+                raise ValueError("event temperature_k applies only to physical feeds")
+            positive_temperature(event["temperature_k"])
     time_unit = case['recipe'].get('time_unit', case["numerics"]["step"]["unit"])
     if time_unit not in _TIME_FACTORS:
         raise ValueError('unsupported recipe time_unit')
