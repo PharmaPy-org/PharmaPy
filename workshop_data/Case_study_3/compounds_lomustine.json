@@ -103,8 +103,8 @@
      "tref_hvap": 355.5
     },
   "SUB1":
-    {"cas":     "75-65-0",
-     "formula": "C4H10O",
+    {"cas":     "N/A",
+     "formula": "C7H14ClNO2",
      "mw":      179.643,
      "t_crit": 506.2,
      "rho_liq": 775,
@@ -116,7 +116,7 @@
      "delta_hvap": 39070,
      "surf_tension": 0.02014,
      "tref_hvap": 355.5,
-     "source": "Product of ISO + TBA"
+     "source": "Product of ISO + TBA (surrogate thermophysical correlations from TBA)"
     },
   "THF":
     {"cas":     "109-99-9",
@@ -135,7 +135,7 @@
      "tref_hvap": 305
     },
   "C7":
-    {"cas":     "142-82-58",
+    {"cas":     "142-82-5",
      "formula": "C7H16",
      "mw":       100.205,
      "t_crit":   540,
