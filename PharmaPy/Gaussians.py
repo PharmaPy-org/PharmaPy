@@ -40,11 +40,46 @@ def multiple_gaussian(x, mus, sigmas, ampls, separated=False):
 
 
 def gaussian_dparam(x, mu=0, sigma=1, ampl=1):
-    gauss = gaussian(x, mu, sigma, ampl)
+    """Return the parameter derivatives of a normalized Gaussian peak.
 
-    df_dmu = gauss * (x - mu) / sigma**2
-    df_dsigma = gauss / sigma * (((x - mu) / sigma)**2 - 1)
-    df_dampl = gauss / ampl
+    The peak is
+    ``f(x) = ampl / (sigma * sqrt(2 pi)) * exp(-((x - mu) / sigma)**2 / 2)``,
+    so ``ampl`` is the peak area and ``f`` has units of [ampl]/[x].
+
+    Parameters
+    ----------
+    x : float or numpy.ndarray
+        Abscissa values at which the derivatives are evaluated [x], e.g.
+        wavelength [nm] or particle size [m]. Any shape.
+    mu : float, optional
+        Peak center, in the units of ``x`` [x]. Default is 0.
+    sigma : float, optional
+        Peak standard deviation, in the units of ``x`` [x]; must be nonzero.
+        Default is 1.
+    ampl : float, optional
+        Peak area [ampl] = [signal]*[x]. Any finite value, including zero.
+        Default is 1.
+
+    Returns
+    -------
+    df_dmu : float or numpy.ndarray
+        Derivative with respect to ``mu`` [ampl/x**2], shape of ``x``.
+    df_dsigma : float or numpy.ndarray
+        Derivative with respect to ``sigma`` [ampl/x**2], shape of ``x``.
+    df_dampl : float or numpy.ndarray
+        Derivative with respect to ``ampl`` [1/x], shape of ``x``.
+
+    Notes
+    -----
+    The peak is linear in ``ampl``, so ``df_dampl`` is the unit-area
+    Gaussian ``gaussian(x, mu, sigma, 1)``. Evaluating it directly, rather
+    than as ``f / ampl``, keeps the derivative finite at ``ampl = 0`` (#254).
+    """
+    gauss = gaussian(x, mu, sigma, ampl)  # [ampl/x]
+
+    df_dmu = gauss * (x - mu) / sigma**2  # [ampl/x**2]
+    df_dsigma = gauss / sigma * (((x - mu) / sigma)**2 - 1)  # [ampl/x**2]
+    df_dampl = gaussian(x, mu, sigma, 1)  # [1/x]
 
     return df_dmu, df_dsigma, df_dampl
 

@@ -2005,9 +2005,11 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         Parameters
         ----------
         kinetics : CrystKinetics
-            Kinetics to check. Growth entries past the first three are the
-            size factor ``(1 + beta*L)**alpha`` that ``OneDFVMMechanism``
-            applies: alpha [-], then beta [1/um].
+            Kinetics to check through ``has_size_dependent_growth``, the
+            predicate the legacy crystallizers share. Growth entries past
+            the first three are the size factor ``(1 + beta*L)**alpha`` that
+            ``OneDFVMMechanism`` applies: alpha [-], then beta [1/um]. An
+            object without the predicate is accepted.
 
         Raises
         ------
@@ -2024,10 +2026,12 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         either of them zero the factor is exactly one, so that growth is
         still size independent.
         """
-        growth = getattr(kinetics, 'params', {}).get('growth', ())
-        size_factor = np.atleast_1d(np.asarray(growth, dtype=float))[3:5]  # alpha [-], beta [1/um]
+        is_size_dependent = getattr(kinetics, 'has_size_dependent_growth',
+                                    None)
 
-        if size_factor.size and np.all(size_factor != 0):
+        if is_size_dependent is not None and is_size_dependent():
+            size_factor = np.asarray(kinetics.params['growth'],
+                                     dtype=float)[3:5]  # alpha [-], beta [1/um]
             raise PharmaPyNonImplementedError(
                 'MomentsPopulationBalance cannot carry size-dependent growth '
                 '(alpha, beta = %s): the moment equations close only for a '

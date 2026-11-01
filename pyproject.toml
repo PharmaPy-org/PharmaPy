@@ -83,7 +83,10 @@ include = ["PharmaPy", "PharmaPy.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-PharmaPy = ["data/minimum_modeling_objects.json"]
+PharmaPy = [
+    "data/minimum_modeling_objects.json",
+    "data/records/*.json",
+]
 
 # ---------------------------------------------------------------------------
 # pixi: reproducible conda-forge-backed development environments.
