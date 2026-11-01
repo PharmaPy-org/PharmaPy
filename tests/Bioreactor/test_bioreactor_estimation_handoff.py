@@ -359,4 +359,3 @@ def test_temperature_measurement_callback_retains_field_time_order_and_trials(th
         np.testing.assert_allclose(actual[:, 0], temperature, rtol=0.0, atol=1e-6)  # [K]
         np.testing.assert_allclose(actual[:, 1], substrate, rtol=0.0, atol=1e-6)  # [g/L]
     assert document == original
-
