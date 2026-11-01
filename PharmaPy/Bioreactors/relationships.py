@@ -44,6 +44,23 @@ _DESCRIPTIONS = {
 }
 
 
+# Required, positive and nonnegative slots; values retain their declared bases.
+_FAMILIES = {
+    'saturating-uptake': ({'maximum', 'substrate', 'half_saturation'},
+        {'half_saturation'}, {'maximum'}),
+    'substrate-inhibited-growth':
+        ({'maximum', 'substrate', 'half_saturation', 'inhibition_constant'},
+         {'half_saturation', 'inhibition_constant'}, {'maximum'}),
+    'first-order-death': ({'coefficient', 'population'}, set(), {'coefficient'}),
+    'additive-inhibition': ({'rate', 'inhibitors'}, set(), set()),
+    'yield-sum': ({'terms'}, set(), set()),
+    'capacity-limited-rate': ({'rate', 'capacity'}, {'capacity'}, set()),
+    'net-production': ({'yield', 'production', 'consumption'}, set(), {'yield'}),
+    'maintenance-uptake': ({'growth', 'yield', 'maintenance'}, {'yield'}, {'maintenance'}),
+    'linear-transfer': ({'coefficient', 'equilibrium', 'concentration'}, set(), {'coefficient'}),
+}
+
+
 # Build reusable equation graphs without organism-specific coefficients.
 def _op(name, *args):
     """Build one rule-graph operator node.
@@ -183,37 +200,50 @@ def _yield_sum(x):
     return _op('add', *[_op('multiply', item['rate'], item['yield']) for item in x['terms']])
 
 
-# This registry binds the equation helpers above, so its definition follows them.
-# Required slots, positive scalar slots, and nonnegative scalar slots. Scalars
-# may be literals or named parameters; state-dependent inputs are expressions.
-_FAMILIES = {
-    'saturating-uptake': (_uptake,
-        {'maximum', 'substrate', 'half_saturation'}, {'half_saturation'}, {'maximum'}),
-    'substrate-inhibited-growth': (_substrate_inhibited_growth,
-        {'maximum', 'substrate', 'half_saturation', 'inhibition_constant'},
-        {'half_saturation', 'inhibition_constant'}, {'maximum'}),
-    'first-order-death': (_first_order_death,
-        {'coefficient', 'population'}, set(), {'coefficient'}),
-    'additive-inhibition': (_inhibited, {'rate', 'inhibitors'}, set(), set()),
-    'yield-sum': (_yield_sum, {'terms'}, set(), set()),
-    'capacity-limited-rate': (lambda x: _op('multiply', x['rate'],
-        _op('divide', x['capacity'], _op('add', x['capacity'], x['rate']))),
-        {'rate', 'capacity'}, {'capacity'}, set()),
-    'net-production': (lambda x: _op('subtract',
-        _op('multiply', x['yield'], x['production']), x['consumption']),
-        {'yield', 'production', 'consumption'}, set(), {'yield'}),
-    'maintenance-uptake': (lambda x: _op('add',
-        _op('divide', x['growth'], x['yield']), x['maintenance']),
-        {'growth', 'yield', 'maintenance'}, {'yield'}, {'maintenance'}),
-    'linear-transfer': (lambda x: _op('multiply', x['coefficient'],
-        _op('subtract', x['equilibrium'], x['concentration'])),
-        {'coefficient', 'equilibrium', 'concentration'}, set(), {'coefficient'}),
-}
+# Dispatch only validated families to their existing operator expressions.
+def _family_expression(name: str, inputs: dict) -> dict:
+    """Build one canonical relationship without anonymous function registries.
 
+    Parameters
+    ----------
+    name : str
+        Canonical family identifier, after alias resolution.
+    inputs : dict
+        Expanded graph slots, in the units/bases documented by the catalog.
 
+    Returns
+    -------
+    dict
+        Operator graph in the family's declared output rate basis.
 
-
-
+    Raises
+    ------
+    ValueError
+        The canonical family is unsupported.
+    """
+    if name == 'saturating-uptake':
+        return _uptake(inputs)
+    if name == 'substrate-inhibited-growth':
+        return _substrate_inhibited_growth(inputs)
+    if name == 'first-order-death':
+        return _first_order_death(inputs)
+    if name == 'additive-inhibition':
+        return _inhibited(inputs)
+    if name == 'yield-sum':
+        return _yield_sum(inputs)
+    if name == 'capacity-limited-rate':
+        return _op('multiply', inputs['rate'], _op('divide', inputs['capacity'],
+            _op('add', inputs['capacity'], inputs['rate'])))
+    if name == 'net-production':
+        return _op('subtract', _op('multiply', inputs['yield'], inputs['production']),
+            inputs['consumption'])
+    if name == 'maintenance-uptake':
+        return _op('add', _op('divide', inputs['growth'], inputs['yield']),
+            inputs['maintenance'])
+    if name == 'linear-transfer':
+        return _op('multiply', inputs['coefficient'],
+            _op('subtract', inputs['equilibrium'], inputs['concentration']))
+    raise ValueError(f'unsupported biological relationship {name!r}')
 
 
 # Validate explicitly declared correction values before graph expansion.
@@ -246,7 +276,6 @@ def _scalar(value, parameters, name, positive=False):
             or not isfinite(value) or (value <= 0 if positive else value < 0)):
         bound = 'positive' if positive else 'nonnegative'
         raise ValueError(f'{name} requires a finite {bound} scalar or parameter')
-
 
 
 def _correction_value(value: object, parameters: Mapping, constants: Mapping,
@@ -405,7 +434,7 @@ def _expand(expr: object, parameters: Mapping, constants: Mapping) -> object:
         choices = ', '.join(sorted(set(_FAMILIES) | set(_ALIASES)))
         raise ValueError(f'unsupported biological relationship {name!r}; choose one of: {choices}')
     name = _ALIASES.get(name, name)
-    build, slots, positive, nonnegative = _FAMILIES[name]
+    slots, positive, nonnegative = _FAMILIES[name]
     values = expr['inputs']
     if not isinstance(values, dict) or set(values) != slots:
         missing = sorted(slots - set(values)) if isinstance(values, dict) else sorted(slots)
@@ -425,7 +454,7 @@ def _expand(expr: object, parameters: Mapping, constants: Mapping) -> object:
                 raise ValueError(f'{name}.{slot} entries require {sorted(fields)}')
             key = 'yield' if name == 'yield-sum' else 'constant'
             _scalar(item[key], parameters, f'{name}.{key}', key == 'constant')
-    return build(_expand(values, parameters, constants))
+    return _family_expression(name, _expand(values, parameters, constants))
 
 
 # Describe existing equation families without constructing a simulation.
@@ -450,7 +479,7 @@ def relationship_catalog() -> dict:
     supported. Catalog mutation cannot change the registry or later calls.
     """
     catalog = {}
-    for name, (_, slots, positive, nonnegative) in _FAMILIES.items():
+    for name, (slots, positive, nonnegative) in _FAMILIES.items():
         equation, units = _DESCRIPTIONS[name]
         catalog[name] = dict(
             aliases=sorted(alias for alias, target in _ALIASES.items() if target == name),
