@@ -323,6 +323,7 @@ def simulate_measurements(parameters: ArrayLike, time_s: ArrayLike, *,
     case_copy = deepcopy(case)
     model = case_copy if definition is None else deepcopy(definition)
     groups = model.get('parameters', model.get('model', {}).get('parameters', {}))
+    bound_scalars = set()
     for name, value in zip(names, values):
         container = groups
         parts = (name,) if name in groups else name.split('.')
@@ -335,6 +336,12 @@ def simulate_measurements(parameters: ArrayLike, time_s: ArrayLike, *,
             raise ValueError(f'unknown parameter scalar {name!r}') from None
         if not np.isscalar(container) or isinstance(container, (str, bool)):
             raise ValueError(f'unknown parameter scalar {name!r}')
+        # Equivalent list indices such as 0 and 00 must not overwrite one target.
+        location = (id(parent), key)
+        if location in bound_scalars:
+            raise ValueError('parameter_names must refer to distinct scalars; '
+                             f'{name!r} repeats a target')
+        bound_scalars.add(location)
         parent[key] = float(value)  # [selected parameter input unit/basis]
     assembly = build_bioreactor(case_copy, None if definition is None else model,
                                thermo_path=thermo_path)
