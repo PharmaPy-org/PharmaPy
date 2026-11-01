@@ -14,15 +14,17 @@ This module defines no experiment or measurement object hierarchy; that belongs
 to the shared estimation work (#346).
 """
 
-from collections.abc import Mapping, Sequence
-from typing import Optional, TYPE_CHECKING
+from collections.abc import Mapping
+from copy import deepcopy
+from pathlib import Path
+from typing import Optional, Sequence, Union
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from .BioreactorUnitConverter import BioreactorUnitConverter
+from .construction import NativeBioreactorAssembly, build_bioreactor
 
-if TYPE_CHECKING:
-    from .construction import NativeBioreactorAssembly
 
 # Declaration layout ----------------------------------------------------------
 _DECLARATION_FIELDS = {"schema_version", "time_unit", "fields"}
@@ -239,3 +241,103 @@ def predict_measurements(assembly: "NativeBioreactorAssembly", histories: Sequen
                        for name in fields},
             "values": predicted,
             "units": {name: fields[name]["unit"] for name in fields}}
+
+
+# Shared estimation handoff ----------------------------------------------------
+def simulate_measurements(parameters: ArrayLike, time_s: ArrayLike, *,
+                          case: Mapping, parameter_names: Sequence[str],
+                          declaration: Mapping, thermo_path: Union[str, Path],
+                          definition: Optional[Mapping] = None) -> np.ndarray:
+    """Connect native bioreactor observations to the shared estimation callback.
+
+    Parameters
+    ----------
+    parameters : array_like
+        Finite real scalar-parameter vector, shape ``(n_parameters,)``, in
+        ``parameter_names`` order and the original input units/bases.
+    time_s : array_like
+        Nonempty finite reporting times [s], shape ``(n_times,)``. Requested
+        order and replicates are preserved; every time must lie in the case's
+        simulated interval. Fixed-step runs require existing grid points.
+    case : Mapping
+        Combined schema-3 input, or a separate legacy case input.
+    parameter_names : sequence of str
+        Unique dotted scalar paths relative to mechanism ``parameters``.
+        Flattened legacy names and existing coefficient-list indices (e.g.
+        ``coefficients.response.0``) are also accepted. All other parameters
+        stay fixed. Legacy pathways store parameters under ``model``.
+    declaration : Mapping
+        Existing observation declaration. Its field insertion order defines
+        the returned columns; each field retains its declared unit/basis and
+        event side. ``time_s`` always uses seconds, independent of the source
+        observation declaration's time unit.
+    thermo_path : path-like
+        Existing native thermodynamic JSON input, read by the public builder.
+    definition : Mapping, optional
+        Separate legacy mechanism input; omit for combined input.
+
+    Returns
+    -------
+    numpy.ndarray
+        Predicted concentrations or temperatures, shape ``(n_times, n_fields)``,
+        in declaration field order and units. One sample or one field retains both axes.
+
+    Raises
+    ------
+    ValueError
+        Parameter names are empty, repeated or unknown, the vector is malformed
+        or nonfinite, requested times are invalid, or native input/domain
+        validation rejects the configured model.
+    RuntimeError
+        A native solve fails or a required reporting state is absent.
+
+    Notes
+    -----
+    Each evaluation copies input declarations, replaces only selected existing
+    scalars, and constructs a fresh native assembly. This retains builder
+    validation before graph expansion and isolates schedules, solver caches and
+    reconciliation history across parameter trials and failed evaluations.
+    No interpolation, residual alignment, optimizer or analytic sensitivity
+    implementation is added here. Use shared ``ParameterEstimation`` with
+    ``output_names=tuple(declaration['fields'])``. Numerical parameter steps must
+    be explicitly nonzero at zero-valued parameters (see issue #239).
+    """
+    values = np.asarray(parameters)  # [parameter-specific input units]
+    if (values.ndim != 1 or values.dtype.kind not in 'iuf'
+            or not np.isfinite(values).all()):
+        raise ValueError('parameter vector must be one-dimensional, finite and real')
+    if isinstance(parameter_names, str):
+        raise ValueError('parameter_names must be a nonempty sequence of unique paths')
+    names = tuple(parameter_names)
+    if (not names or any(not isinstance(name, str) or not name for name in names)
+            or len(set(names)) != len(names)):
+        raise ValueError('parameter_names must be nonempty unique scalar paths')
+    if values.shape != (len(names),):
+        raise ValueError('parameter vector must match parameter_names in length')
+    times = np.asarray(time_s)  # [s]
+    if (times.ndim != 1 or not times.size or times.dtype.kind not in 'iuf'
+            or not np.isfinite(times).all()):
+        raise ValueError('requested times must be a nonempty finite real vector [s]')
+    fields = _validate_declaration(declaration)
+    case_copy = deepcopy(case)
+    model = case_copy if definition is None else deepcopy(definition)
+    groups = model.get('parameters', model.get('model', {}).get('parameters', {}))
+    for name, value in zip(names, values):
+        container = groups
+        parts = (name,) if name in groups else name.split('.')
+        try:
+            for part in parts:
+                parent = container
+                key = int(part) if isinstance(parent, list) and part.isdecimal() else part
+                container = parent[key]
+        except (KeyError, IndexError, TypeError):
+            raise ValueError(f'unknown parameter scalar {name!r}') from None
+        if not np.isscalar(container) or isinstance(container, (str, bool)):
+            raise ValueError(f'unknown parameter scalar {name!r}')
+        parent[key] = float(value)  # [selected parameter input unit/basis]
+    assembly = build_bioreactor(case_copy, None if definition is None else model,
+                               thermo_path=thermo_path)
+    histories = assembly.solve(report_times=np.unique(times))
+    observations = {'time_s': {name: times for name in fields}}
+    prediction = predict_measurements(assembly, histories, declaration, observations)
+    return np.column_stack([prediction['values'][name] for name in fields])

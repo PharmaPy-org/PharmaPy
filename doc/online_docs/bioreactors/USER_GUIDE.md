@@ -221,6 +221,64 @@ cases establish numerical contracts, not organism-specific thermal validation.
 
 ## 3. Replace kinetics without replacing the reactor
 
+### Select a named relationship
+
+Use the [runnable kinetics-selection template](templates/README.md#select-kinetics-by-name)
+to start with `"relationship": "monod"`. Its graph already contains explicit
+species conversions and growth/consumption mappings. `monod` resolves to
+`saturating-uptake`; `haldane` and `andrews` resolve to
+`substrate-inhibited-growth`; `pirt` resolves to `maintenance-uptake`.
+All original names remain supported. Each selection must supply its required
+inputs; changing a name does not invent missing parameters or change the rate's
+physical role. `PharmaPy.Bioreactors.relationship_catalog()` returns the complete
+current catalog with fill-in expressions and unit contracts.
+
+The [relationship catalog](../../../PharmaPy/Bioreactors/TECHNICAL_SUMMARY.md#biological-relationships)
+defines the supported equations, slots, units, domains and boundary behavior.
+It includes Monod, Haldane–Andrews substrate inhibition, Pirt maintenance,
+Luedeking–Piret composition and first-order death. These are mathematical
+choices; they do not infer a metabolic network or activate biological processes.
+Named relationships normalize into the existing rule graph in both combined
+schema-3 and separate legacy inputs. Explicit and named expressions may coexist.
+
+For example, keep the existing mass-concentration conversion in the Doyle hybrid
+and replace only its mechanistic growth expression:
+
+```python
+folder = Path('examples/bioreactors/Doyle_Exercise_4_15/inputs')
+model = json.loads((folder / 'hybrid.json').read_text())
+graph = model['model']['kinetics']['rule_graph']
+growth_rule = next(rule for rule in graph if rule['identifier'] == 'mu_mechanistic')
+growth_rule['expression'] = {
+    'relationship': 'saturating-uptake',
+    'inputs': {
+        'maximum': {'parameter': 'rates.mu_max'},
+        'substrate': {'ref': 'substrate_g_l'},
+        'half_saturation': {'parameter': 'affinities.Ks'},
+    },
+}
+assembly = build_bioreactor(model, thermo_path=folder / 'thermo.json')
+histories = assembly.solve(verbose=False)
+```
+
+`mu_mechanistic` is gross specific growth [1/h]; `substrate_g_l` is already
+converted from the snapshot's mmol/L using that species' formal molecular
+weight. Keep `growth=mu*biomass` and its consistent substrate consumption mapping.
+For substrate inhibition select `substrate-inhibited-growth` and add the slot
+`inhibition_constant: {"parameter": "affinities.Ki"}`, with an explicitly supplied
+positive Ki [g/L]. This changes the scientific model; the Doyle textbook does not
+supply or validate Ki. Reassess its biological domain and uncertainty accordingly.
+
+For death, `first-order-death` takes `coefficient` [1/time] and `population` in
+the chosen viable amount/concentration basis. It returns a positive loss
+magnitude; explicitly subtract it from viable growth and declare any dead-pool
+destination. For maintenance or product formation use the catalog's existing
+`maintenance-uptake` and `yield-sum` recipes. Neither net dX/dt nor a rate already
+including dilution or death is a substitute for gross synthesis.
+
+### Provider substitution
+
+
 The built-in `rule-graph` provider evaluates declared kinetic expressions and
 returns `RateProviderResult`: named finite rates, matching units, provider identity,
 version, validity status and diagnostics. Declare `output_units` for every output.
@@ -245,9 +303,8 @@ population state, so biomass is declared as a phase species in an extended
 thermo file. Those runs end before nutrient depletion, so they do not compare
 the LP's depletion switching.
 
-Affine and hybrid provider implementations belong to WP3.2 and are not included.
-The registration interface is retained for later substitution without changing
-reactor balances.
+The optional correction below reuses this rule-graph provider. Other registered
+providers must implement the same explicit rate and validity contract.
 
 ## 4. Predict measured fields
 
@@ -387,3 +444,72 @@ for source inputs and a notebook. Its configured and pathway models encode the
 same Monod law and are checked against analytical dilution, yield balance,
 positive equilibrium and washout. Reconciliation receives the same transport
 contract; this is not experimental validation of a continuous biological model.
+
+## Optional configurable kinetic correction
+
+Any named relationship can include an optional `correction`. For example, with
+an earlier `substrate_g_l` rule explicitly converting the species concentration
+to g/L, the following expression selects Monod and a supplied log correction:
+
+```json
+{
+  "relationship": "monod",
+  "inputs": {
+    "maximum": {"parameter": "rates.mu_max"},
+    "substrate": {"ref": "substrate_g_l"},
+    "half_saturation": {"parameter": "affinities.Ks"}
+  },
+  "correction": {
+    "type": "exponential-saturation",
+    "parameters": {"theta": 0.15, "reference_concentration": 1.0},
+    "concentration_unit": "g/L",
+    "input": "substrate_g_l"
+  }
+}
+```
+
+Here 0.15 [-] and 1 g/L are illustrative user choices, not fitted coefficients
+or biological defaults. The result is `base * exp(theta*x/(x+reference_concentration))`.
+Theta must be finite and may be positive, negative or zero. The reference
+concentration must be finite and strictly positive. Theta zero recovers the base
+for valid finite inputs; a positive multiplier preserves its sign and zeros.
+All nine relationship families, aliases, and nested compositions are supported.
+
+`input` as a string names an earlier graph rule, **not automatically a species**.
+An ordinary graph expression is also accepted. `concentration_unit` declares the
+common basis of the input and reference concentration; it does not convert an
+arbitrary expression. Supported units are the existing mass/volume and
+molar/volume units. Concentration nodes still read mmol/L; perform any mass-basis
+conversion explicitly. Keep input concentrations in the declared physical domain
+(normally nonnegative), using the existing provider validity configuration.
+No extrapolation policy, biological validity interval or correction strength is
+inferred. Nonfinite evaluated rates remain errors.
+
+Correction parameters also accept `{"parameter": "corrections.theta"}` or a
+`{"constant": "feature_scale_g_l"}` reference. Parameter bindings stay live
+through native estimation: parameters are replaced before graph expansion.
+Unknown fields/types/units, missing bindings and invalid scalar values are errors.
+`relationship_catalog()` includes correction descriptions and fill-in templates.
+
+
+## Shared estimation callback
+
+`simulate_measurements(parameters, time_s, case=..., parameter_names=...,
+declaration=..., thermo_path=...)` builds a fresh native process for each
+parameter trial and returns an array of shape `(n_times, n_fields)`. Times are
+seconds; requested order and duplicates are preserved. Columns follow the
+observation declaration, in each field's declared concentration or temperature
+unit. Parameter names are existing dotted scalar paths in the original JSON
+parameter groups, in vector order; no parameter or physical basis is inferred.
+
+Use the existing `Experiment`, `Measurement` and `ParameterEstimation` APIs for
+observation identity, missing data, weighting, residual ordering and fitting.
+This callback supplies predictions; it does not implement a second estimator or
+analytic parameter sensitivities. Configure nonzero finite-difference increments
+at zero-valued parameters through the shared estimator's existing options.
+Native input, validity-domain, infeasibility and solver failures propagate; a
+failed trial does not modify the original inputs or a subsequent trial.
+
+The feature tests carry their own small synthetic fixtures, so this interface
+can be tested without the later demonstration/workbook slice. Numerical tests
+are not biological calibration or evidence of unique parameter recovery.

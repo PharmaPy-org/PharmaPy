@@ -231,3 +231,11 @@ existing behavior. Hybrid providers retain validity information from their child
 the extra death response and net growth. `assembly.diagnostics(histories)` includes
 these rates and provider validity, explicitly scoped to the last evaluation, not
 a trajectory-wide biological certificate. Use recorded-state replay for full traces.
+
+## Kinetics selection
+
+`kinetics-selection/mechanism.json` and `kinetics-selection/thermo.json` form a
+small, explicitly synthetic configuration for selecting named relationships.
+Use `relationship_catalog()` to inspect available names, required input slots,
+units and optional corrections. Keep physical coefficients and concentration
+bases in the input document; the selector adds no organism-specific defaults.

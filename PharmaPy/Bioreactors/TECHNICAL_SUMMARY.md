@@ -232,3 +232,19 @@ public builder. Both routes are checked independently against exponential biomas
 growth and the nutrient/feed balance, with two biomass formula weights testing
 the configured species basis. These cases end before depletion. They qualify
 this substitution boundary, not arbitrary biological equivalence.
+
+## WP3.2 kinetics and estimation handoff
+
+Named Monod, Haldane/Andrews and Pirt selections expand into the same existing
+operator graph as the corresponding mathematical relationships. Optional
+exponential-saturation corrections preserve the underlying rate's sign and
+zeros; zero log correction recovers the mechanistic declaration. Parameters,
+concentration bases and provider validity domains remain explicit inputs.
+
+`simulate_measurements` reuses native construction, solution histories and
+observation mapping. It binds existing parameter paths before graph expansion
+and returns declared field columns at exact requested times [s], with fresh
+input copies and native state for each trial. The shared estimator owns
+weighting, residual alignment and numerical parameter derivatives. The
+independent concentration-balance and constrained-fit tests qualify this
+handoff without introducing a new reactor, optimizer or sensitivity engine.

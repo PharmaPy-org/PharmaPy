@@ -5,8 +5,43 @@ retain their declared rate/concentration basis; yields must convert that basis.
 No relationship introduces a reconciliation target or a hard constraint implicitly.
 """
 
+from collections.abc import Mapping
 from copy import deepcopy
 from math import isfinite
+
+from .BioreactorUnitConverter import BioreactorUnitConverter
+
+
+# Familiar names resolve to the existing equations and input contracts.
+_ALIASES = {
+    'monod': 'saturating-uptake',
+    'haldane': 'substrate-inhibited-growth',
+    'andrews': 'substrate-inhibited-growth',
+    'pirt': 'maintenance-uptake',
+}
+
+
+# Human-readable unit contracts; the graph is not a dimensional-analysis engine.
+_DESCRIPTIONS = {
+    'saturating-uptake': ('maximum*S/(K+S)',
+        'maximum: output rate; substrate and half_saturation: same concentration basis'),
+    'substrate-inhibited-growth': ('maximum*S/(Ks+S+S*S/Ki)',
+        'maximum: 1/time; substrate, half_saturation, inhibition_constant: same concentration basis'),
+    'first-order-death': ('coefficient*population',
+        'coefficient: 1/time; population: declared amount or concentration; output: positive loss magnitude'),
+    'additive-inhibition': ('rate/(1+sum(concentration/constant))',
+        'rate: output rate; each inhibitor concentration and constant: same concentration basis'),
+    'yield-sum': ('sum(rate*yield)',
+        'each term rate*yield must have the same output units'),
+    'capacity-limited-rate': ('rate*capacity/(capacity+rate)',
+        'rate and capacity: same rate basis; smooth attenuation, not a hard cap'),
+    'net-production': ('production*yield-consumption',
+        'production*yield and consumption: same output rate basis'),
+    'maintenance-uptake': ('growth/yield+maintenance',
+        'growth/yield and maintenance: same uptake rate basis; growth means gross synthesis'),
+    'linear-transfer': ('coefficient*(equilibrium-concentration)',
+        'coefficient: 1/time; equilibrium and concentration: same concentration basis'),
+}
 
 
 # Build reusable equation graphs without organism-specific coefficients.
@@ -53,6 +88,65 @@ def _uptake(x):
                _op('monod', x['substrate'], x['half_saturation']))
 
 
+def _substrate_inhibited_growth(inputs: dict) -> dict:
+    """Expand Haldane–Andrews growth using the existing Monod operator.
+
+    Parameters
+    ----------
+    inputs : dict
+        Expanded slots: ``maximum`` [1/time], ``substrate`` [concentration],
+        ``half_saturation`` and ``inhibition_constant`` [same concentration].
+        Maximum is nonnegative; both concentration constants are positive.
+
+    Returns
+    -------
+    dict
+        Specific gross growth [1/time], ``maximum*S/(Ks+S+S**2/Ki)`` for
+        nonnegative substrate. No additional biological state is introduced.
+
+    Notes
+    -----
+    Andrews (1968), Biotechnology and Bioengineering 10, pp. 708–711,
+    equations (1) and (6), DOI: 10.1002/bit.260100602. ``maximum`` is the
+    uninhibited scale, not the attainable peak at finite Ki. The existing
+    Monod operator gives zero for nonpositive substrate; physical validity
+    bounds must still be declared by the provider. No analytic derivatives
+    are supplied; numerical differentiation inherits this boundary kink.
+    """
+    effective_affinity = _op('add', inputs['half_saturation'],  # [substrate concentration]
+        _op('divide', _op('multiply', inputs['substrate'], inputs['substrate']),
+            inputs['inhibition_constant']))
+    return _op('multiply', inputs['maximum'],
+               _op('monod', inputs['substrate'], effective_affinity))
+
+
+def _first_order_death(inputs: dict) -> dict:
+    """Expand a first-order loss magnitude without choosing its destination.
+
+    Parameters
+    ----------
+    inputs : dict
+        Expanded ``coefficient`` [1/time], finite and nonnegative, and
+        ``population`` [declared viable amount or concentration]. Population
+        must be nonnegative within the provider's declared physical domain.
+
+    Returns
+    -------
+    dict
+        Positive loss magnitude ``coefficient*population`` [population/time].
+        The caller explicitly subtracts this from viable growth and, if
+        modeled, adds the appropriate converted amount to a dead pool.
+
+    Notes
+    -----
+    Derived from a constant per-capita hazard, dN/dt = -k*N. This is a
+    modeling assumption, not an organism-specific mortality correlation.
+    Zero population or zero hazard gives zero loss. No state, lysis product,
+    recycling, clipping or analytic derivative is introduced implicitly.
+    """
+    return _op('multiply', inputs['coefficient'], inputs['population'])
+
+
 def _inhibited(x):
     """Expand additive inhibition, ``rate / (1 + sum(I_i / K_i))``.
 
@@ -89,11 +183,17 @@ def _yield_sum(x):
     return _op('add', *[_op('multiply', item['rate'], item['yield']) for item in x['terms']])
 
 
+# This registry binds the equation helpers above, so its definition follows them.
 # Required slots, positive scalar slots, and nonnegative scalar slots. Scalars
 # may be literals or named parameters; state-dependent inputs are expressions.
 _FAMILIES = {
     'saturating-uptake': (_uptake,
         {'maximum', 'substrate', 'half_saturation'}, {'half_saturation'}, {'maximum'}),
+    'substrate-inhibited-growth': (_substrate_inhibited_growth,
+        {'maximum', 'substrate', 'half_saturation', 'inhibition_constant'},
+        {'half_saturation', 'inhibition_constant'}, {'maximum'}),
+    'first-order-death': (_first_order_death,
+        {'coefficient', 'population'}, set(), {'coefficient'}),
     'additive-inhibition': (_inhibited, {'rate', 'inhibitors'}, set(), set()),
     'yield-sum': (_yield_sum, {'terms'}, set(), set()),
     'capacity-limited-rate': (lambda x: _op('multiply', x['rate'],
@@ -109,6 +209,11 @@ _FAMILIES = {
         _op('subtract', x['equilibrium'], x['concentration'])),
         {'coefficient', 'equilibrium', 'concentration'}, set(), {'coefficient'}),
 }
+
+
+
+
+
 
 
 # Validate explicitly declared correction values before graph expansion.
@@ -143,7 +248,118 @@ def _scalar(value, parameters, name, positive=False):
         raise ValueError(f'{name} requires a finite {bound} scalar or parameter')
 
 
-def _expand(expr, parameters):
+
+def _correction_value(value: object, parameters: Mapping, constants: Mapping,
+                      name: str, positive: bool = False) -> None:
+    """Validate a correction scalar while retaining its expression binding.
+
+    Parameters
+    ----------
+    value : float or dict
+        Literal or parameter/constant reference. Theta is dimensionless [-];
+        the reference concentration uses the declared concentration unit.
+    parameters, constants : Mapping
+        Named values in their configured units.
+    name : str
+        Parameter label for validation errors.
+    positive : bool, optional
+        Require a strictly positive concentration scale; theta may be signed.
+
+    Raises
+    ------
+    ValueError
+        The binding is unknown, nonfinite, nonscalar or has an invalid sign.
+    """
+    if isinstance(value, dict):
+        if set(value) == {'parameter'}:
+            source, key = parameters, value['parameter']
+        elif set(value) == {'constant'}:
+            source, key = constants, value['constant']
+        else:
+            raise ValueError(f'correction {name} requires a scalar, parameter or constant')
+        if not isinstance(key, str) or key not in source:
+            raise ValueError(f'unknown correction {name} binding {key!r}')
+        value = source[key]  # [declared concentration unit] or [-] for theta
+    if (isinstance(value, bool) or not isinstance(value, (int, float))
+            or not isfinite(value) or (positive and value <= 0.)):
+        raise ValueError(f'correction {name} requires a finite '
+                         + ('positive ' if positive else '') + 'real scalar')
+
+
+# Mutually recursive correction/relationship expansion preserves graph semantics.
+def _apply_correction(base: dict, correction: dict, parameters: Mapping,
+                      constants: Mapping) -> dict:
+    """Expand a declared dimensionless multiplier using existing graph operators.
+
+    Parameters
+    ----------
+    base : dict
+        Already expanded rate expression [its original output units].
+    correction : dict
+        Exactly type, parameters, concentration_unit and input. The supported
+        type is exponential-saturation: exp(theta*x/(x+reference_concentration)).
+        Theta [-] is finite and signed; reference concentration is positive.
+        Both may be literals or parameter/constant references. Input is an
+        expression or an earlier rule's identifier, with values in the declared
+        mass/volume or molar/volume unit. Numeric inputs must be nonnegative.
+    parameters, constants : Mapping
+        Named values in their configured units.
+
+    Returns
+    -------
+    dict
+        Ordinary graph expression with the same output units as base.
+
+    Raises
+    ------
+    ValueError
+        Fields, type, unit, scalar parameters or input are invalid.
+
+    Notes
+    -----
+    This is an explicitly selected mathematical hypothesis, not a fitted model.
+    Input and reference concentration must already use the same declared unit;
+    the unit label does not convert arbitrary expression values. Runtime inputs
+    must remain in the configured physical domain (normally x >= 0). Existing
+    provider validity checks and graph finite-value checks remain authoritative.
+    A positive multiplier preserves the base sign and zeros; it adds no states
+    or balance connections. Zero theta recovers the base for valid finite inputs.
+    """
+    fields = {'type', 'parameters', 'concentration_unit', 'input'}
+    if not isinstance(correction, dict) or set(correction) != fields:
+        raise ValueError('correction requires exactly type, parameters, concentration_unit and input')
+    if correction['type'] != 'exponential-saturation':
+        raise ValueError('unsupported correction type; choose exponential-saturation')
+    unit = correction['concentration_unit']
+    parts = unit.split('/') if isinstance(unit, str) else []
+    if (len(parts) != 2 or parts[0] not in
+            set(BioreactorUnitConverter.MASS) | set(BioreactorUnitConverter.MOLAR)
+            or parts[1] not in BioreactorUnitConverter.VOLUME):
+        raise ValueError('correction concentration_unit requires supported mass/volume or molar/volume units')
+    values = correction['parameters']
+    if not isinstance(values, dict) or set(values) != {'theta', 'reference_concentration'}:
+        raise ValueError('correction parameters require exactly theta and reference_concentration')
+    _correction_value(values['theta'], parameters, constants, 'theta')
+    _correction_value(values['reference_concentration'], parameters, constants,
+                      'reference_concentration', positive=True)
+    concentration = correction['input']  # [concentration_unit]
+    if isinstance(concentration, str):
+        if not concentration:
+            raise ValueError('correction input must name an earlier concentration rule')
+        concentration = {'ref': concentration}
+    elif isinstance(concentration, dict):
+        if not concentration:
+            raise ValueError('correction input must be a graph expression')
+    elif (isinstance(concentration, bool) or not isinstance(concentration, (int, float))
+          or not isfinite(concentration) or concentration < 0.):
+        raise ValueError('correction input must be a nonnegative finite concentration or graph expression')
+    concentration = _expand(concentration, parameters, constants)
+    feature = _op('divide', concentration,  # [-], concentration ratio
+                  _op('add', concentration, values['reference_concentration']))
+    return _op('multiply', base, _op('exp', _op('multiply', values['theta'], feature)))
+
+
+def _expand(expr: object, parameters: Mapping, constants: Mapping) -> object:
     """Recursively replace relationship declarations with ordinary operator nodes.
 
     Parameters
@@ -152,6 +368,9 @@ def _expand(expr, parameters):
         Rule-graph expression, list of expressions, or literal.
     parameters : Mapping[str, float]
         Flattened named model parameters used to validate scalar slots.
+
+    constants : Mapping[str, float]
+        Named model constants in their declared units.
 
     Returns
     -------
@@ -162,24 +381,37 @@ def _expand(expr, parameters):
     Raises
     ------
     ValueError
-        A relationship is unsupported, has missing or extra inputs, or a scalar
+        A relationship name (canonical or alias) is unsupported, has missing
+        or extra inputs, or a scalar
         slot violates its sign requirement.
     """
     if isinstance(expr, list):
-        return [_expand(item, parameters) for item in expr]
+        return [_expand(item, parameters, constants) for item in expr]
     if not isinstance(expr, dict):
         return expr
+    if 'correction' in expr:
+        base = {key: value for key, value in expr.items() if key != 'correction'}
+        if not set(base) & {'relationship', 'op', 'ref', 'parameter', 'constant',
+                            'concentration', 'state', 'condition', 'accepted_flux'}:
+            raise ValueError('correction requires a base rate expression')
+        return _apply_correction(_expand(base, parameters, constants),
+                                 expr['correction'], parameters, constants)
     if 'relationship' not in expr:
-        return {key: _expand(value, parameters) for key, value in expr.items()}
+        return {key: _expand(value, parameters, constants) for key, value in expr.items()}
     if set(expr) != {'relationship', 'inputs'}:
         raise ValueError('relationship expressions require only relationship and inputs')
     name = expr['relationship']
-    if not isinstance(name, str) or name not in _FAMILIES:
-        raise ValueError(f'unsupported biological relationship {name!r}')
+    if not isinstance(name, str) or name not in _FAMILIES and name not in _ALIASES:
+        choices = ', '.join(sorted(set(_FAMILIES) | set(_ALIASES)))
+        raise ValueError(f'unsupported biological relationship {name!r}; choose one of: {choices}')
+    name = _ALIASES.get(name, name)
     build, slots, positive, nonnegative = _FAMILIES[name]
     values = expr['inputs']
     if not isinstance(values, dict) or set(values) != slots:
-        raise ValueError(f'{name} requires inputs {sorted(slots)}')
+        missing = sorted(slots - set(values)) if isinstance(values, dict) else sorted(slots)
+        extra = sorted(set(values) - slots, key=repr) if isinstance(values, dict) else []
+        raise ValueError(f'{name} requires inputs {sorted(slots)}; '
+                         f'missing {missing}, unexpected {extra}')
     for slot in positive | nonnegative:
         _scalar(values[slot], parameters, f'{name}.{slot}', slot in positive)
     if name in {'yield-sum', 'additive-inhibition'}:
@@ -193,11 +425,56 @@ def _expand(expr, parameters):
                 raise ValueError(f'{name}.{slot} entries require {sorted(fields)}')
             key = 'yield' if name == 'yield-sum' else 'constant'
             _scalar(item[key], parameters, f'{name}.{key}', key == 'constant')
-    return build(_expand(values, parameters))
+    return build(_expand(values, parameters, constants))
+
+
+# Describe existing equation families without constructing a simulation.
+def relationship_catalog() -> dict:
+    """Describe every supported kinetic relationship without creating a model.
+
+    Returns
+    -------
+    dict
+        Independent JSON-serializable entries keyed by canonical name, each
+        containing aliases, required inputs, scalar sign constraints, equation,
+        unit contract, optional correction contracts and fill-in templates.
+        Null inputs require user-supplied values or graph expressions; no
+        parameter is inferred.
+
+    Notes
+    -----
+    Names are case-sensitive. Aliases and canonical names have identical input
+    contracts. Concentration expressions read mmol/L unless explicitly converted.
+    The selected equation does not infer biomass normalization, reaction targets,
+    yields or material destinations. Existing explicit operator graphs remain
+    supported. Catalog mutation cannot change the registry or later calls.
+    """
+    catalog = {}
+    for name, (_, slots, positive, nonnegative) in _FAMILIES.items():
+        equation, units = _DESCRIPTIONS[name]
+        catalog[name] = dict(
+            aliases=sorted(alias for alias, target in _ALIASES.items() if target == name),
+            required_inputs=sorted(slots), positive_scalar_inputs=sorted(positive),
+            nonnegative_scalar_inputs=sorted(nonnegative), equation=equation,
+            units=units,
+            corrections={'exponential-saturation': {
+                'equation': 'exp(theta*x/(x+reference_concentration))',
+                'theta_unit': '-', 'neutral_theta': 0.0,  # [-], exp(0)=1
+                'input_binding': 'earlier rule identifier or expression in concentration_unit',
+                'template': {'type': 'exponential-saturation',
+                             'parameters': {'theta': 0.0, 'reference_concentration': None},
+                             'concentration_unit': None, 'input': None}}},
+            expression_template={'relationship': name,
+                                 'inputs': dict.fromkeys(sorted(slots))})
+        if name == 'yield-sum':
+            catalog[name]['expression_template']['inputs']['terms'] = [{'rate': None, 'yield': None}]
+        elif name == 'additive-inhibition':
+            catalog[name]['expression_template']['inputs']['inhibitors'] = [{'concentration': None, 'constant': None}]
+    return catalog
 
 
 # Expose the validated relationship-to-graph translation.
-def expand_relationships(model, parameters):
+def expand_relationships(model: Mapping, parameters: Mapping) -> dict:
     """Return a private ordinary rule graph, preserving explicit equations and order.
 
     Parameters
@@ -212,7 +489,9 @@ def expand_relationships(model, parameters):
     -------
     dict
         Deep copy of ``model`` in which relationship families are expanded into
-        ordinary operator nodes. Rule order and identifiers are unchanged.
+        ordinary operator nodes, including optional correction multipliers.
+        Rule order and identifiers are unchanged. Correction input unit labels
+        declare a shared basis; they do not convert arbitrary graph expressions.
 
     Raises
     ------
@@ -228,5 +507,5 @@ def expand_relationships(model, parameters):
             or len(set(identifiers)) != len(identifiers)):
         raise ValueError('rule identifiers must be nonempty and unique')
     for rule in graph:
-        rule['expression'] = _expand(rule['expression'], parameters)
+        rule['expression'] = _expand(rule['expression'], parameters, result.get('constants', {}))
     return result

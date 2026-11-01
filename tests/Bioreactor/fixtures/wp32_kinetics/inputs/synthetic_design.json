@@ -1,0 +1,12 @@
+{
+  "seed": 4152026,
+  "realizations": 20,
+  "sample_times_h": [0, 0.5, 1, 2, 3, 4, 6, 8, 12, 16, 24, 36, 48, 72, 100],
+  "noise_fractions": {"noise_0pct": 0, "noise_1pct": 0.01, "noise_5pct": 0.05},
+  "absolute_sd_g_l": 0.001,
+  "experiments": [
+    {"name": "fit_low_dilution", "split": "fit", "dilution_h_inv": 0.06},
+    {"name": "fit_high_dilution", "split": "fit", "dilution_h_inv": 0.14},
+    {"name": "heldout_dilution", "split": "validation", "dilution_h_inv": 0.12}
+  ]
+}
