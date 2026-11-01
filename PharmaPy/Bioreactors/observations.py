@@ -299,8 +299,9 @@ def simulate_measurements(parameters: ArrayLike, time_s: ArrayLike, *,
     reconciliation history across parameter trials and failed evaluations.
     No interpolation, residual alignment, optimizer or analytic sensitivity
     implementation is added here. Use shared ``ParameterEstimation`` with
-    ``output_names=tuple(declaration['fields'])``. Numerical parameter steps must
-    be explicitly nonzero at zero-valued parameters (see issue #239).
+    ``output_names=tuple(declaration['fields'])``. Its current default parameter
+    steps remain nonzero at zero-valued parameters. Choose and refine explicit
+    model-scaled increments when qualifying numerical derivative accuracy.
     """
     values = np.asarray(parameters)  # [parameter-specific input units]
     if (values.ndim != 1 or values.dtype.kind not in 'iuf'

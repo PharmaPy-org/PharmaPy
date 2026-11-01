@@ -505,8 +505,9 @@ parameter groups, in vector order; no parameter or physical basis is inferred.
 Use the existing `Experiment`, `Measurement` and `ParameterEstimation` APIs for
 observation identity, missing data, weighting, residual ordering and fitting.
 This callback supplies predictions; it does not implement a second estimator or
-analytic parameter sensitivities. Configure nonzero finite-difference increments
-at zero-valued parameters through the shared estimator's existing options.
+analytic parameter sensitivities. The current shared estimator's default
+finite-difference steps remain nonzero at zero-valued parameters. Use its
+existing options for model-scaled increments and qualify them by refinement.
 Native input, validity-domain, infeasibility and solver failures propagate; a
 failed trial does not modify the original inputs or a subsequent trial.
 
