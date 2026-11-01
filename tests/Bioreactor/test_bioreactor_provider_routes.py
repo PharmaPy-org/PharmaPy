@@ -32,6 +32,7 @@ def inputs(kind):
     model = read_input_json((folder/'mechanism.json'))
     if kind == 'direct':
         model['mechanism'] = 'configured-kinetics'
+        model['rate_provider'] = None
         model['state']['biomass_kg'] = None
         model['flux_time_unit'] = None
         model['model'] = {'pathways': {}, 'reconciliation': {}, 'kinetics': {

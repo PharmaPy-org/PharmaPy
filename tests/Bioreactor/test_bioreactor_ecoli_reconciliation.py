@@ -103,6 +103,8 @@ def test_frozen_forward_campaign(reconciled_runs, native_runs):
                          for name in ('Y_OS', 'Y_OA', 'Y_OYE')}
         # S3 3L/FedBatch diagnostic yields [g O2/g substrate].
         assert oxygen_yields == {'Y_OS': 1.067, 'Y_OA': 1.067, 'Y_OYE': 1.163}
+        # [-], the sole added parameter is the exact neutral correction identity.
+        carbon_parameters['corrections'] = {'theta': 0.}
         assert config['parameters'] == carbon_parameters
         assert config['state']['species'] == source['state']['species']
         assert config['recipes'] == source['recipes']
