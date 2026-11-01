@@ -98,3 +98,14 @@ removed. The supplied forward trajectories are unchanged by this input cleanup.
 Populated case/model values, intentional zero rates, required mappings and
 construction/validation fields remain; unused optional model sections already
 use empty objects or `null`.
+
+## WP3.2 kinetics selection and synthetic learning
+
+The maintained workbooks expose `relationship_catalog()` and a Kinetics selection
+section. Neutral configured corrections preserve their original physical cases;
+changes to rates still pass through native material and inventory constraints.
+
+The Doyle example includes an optional hybrid input and a calibration companion.
+Its synthetic generator, training-only fit, held-out predictions and replay
+qualify the shared estimation handoff. They do not establish organism-specific
+accuracy. See `Doyle_Exercise_4_15/SYNTHETIC_DATA.md` for units and noise design.

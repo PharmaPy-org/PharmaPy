@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "$comment": "Schema 3: physical setup in operation; solver settings in numerical.",
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical. Optional exponential-saturation correction: parameters.corrections.theta=0 [-] preserves the baseline. Each corrected substrate-dependent rate uses its own substrate and half-saturation concentration as the explicit reference scale (same concentration units). This scale choice is a configuration assumption, not a fitted correction. Derived balances and yields remain linked to these rates.",
   "mechanism": "rate-reconciled-culture",
   "operation": {
     "carrier_density_kg_l": 1.0,
@@ -69,7 +69,9 @@
       "Y_XA": 0.4,
       "Y_AS": 0.667
     },
-    "corrections": {}
+    "corrections": {
+      "theta": 0.0
+    }
   },
   "model": {
     "pathways": {},
@@ -145,7 +147,7 @@
         {
           "identifier": "q_s",
           "expression": {
-            "relationship": "saturating-uptake",
+            "relationship": "monod",
             "inputs": {
               "maximum": {
                 "parameter": "coefficients.qS_max"
@@ -156,13 +158,28 @@
               "half_saturation": {
                 "parameter": "coefficients.K_S"
               }
+            },
+            "correction": {
+              "type": "exponential-saturation",
+              "parameters": {
+                "theta": {
+                  "parameter": "corrections.theta"
+                },
+                "reference_concentration": {
+                  "parameter": "coefficients.K_S"
+                }
+              },
+              "concentration_unit": "g/L",
+              "input": {
+                "ref": "glucose"
+              }
             }
           }
         },
         {
           "identifier": "q_a",
           "expression": {
-            "relationship": "saturating-uptake",
+            "relationship": "monod",
             "inputs": {
               "maximum": {
                 "parameter": "coefficients.qYEF_A_max"
@@ -173,13 +190,28 @@
               "half_saturation": {
                 "parameter": "coefficients.K_YEF_A"
               }
+            },
+            "correction": {
+              "type": "exponential-saturation",
+              "parameters": {
+                "theta": {
+                  "parameter": "corrections.theta"
+                },
+                "reference_concentration": {
+                  "parameter": "coefficients.K_YEF_A"
+                }
+              },
+              "concentration_unit": "g/L",
+              "input": {
+                "ref": "fraction_a"
+              }
             }
           }
         },
         {
           "identifier": "q_b",
           "expression": {
-            "relationship": "saturating-uptake",
+            "relationship": "monod",
             "inputs": {
               "maximum": {
                 "parameter": "coefficients.qYEF_B_max"
@@ -189,6 +221,21 @@
               },
               "half_saturation": {
                 "parameter": "coefficients.K_YEF_B"
+              }
+            },
+            "correction": {
+              "type": "exponential-saturation",
+              "parameters": {
+                "theta": {
+                  "parameter": "corrections.theta"
+                },
+                "reference_concentration": {
+                  "parameter": "coefficients.K_YEF_B"
+                }
+              },
+              "concentration_unit": "g/L",
+              "input": {
+                "ref": "fraction_b"
               }
             }
           }
@@ -236,7 +283,7 @@
             "relationship": "additive-inhibition",
             "inputs": {
               "rate": {
-                "relationship": "saturating-uptake",
+                "relationship": "monod",
                 "inputs": {
                   "maximum": {
                     "parameter": "coefficients.qAc_max"
@@ -246,6 +293,21 @@
                   },
                   "half_saturation": {
                     "parameter": "coefficients.K_A"
+                  }
+                },
+                "correction": {
+                  "type": "exponential-saturation",
+                  "parameters": {
+                    "theta": {
+                      "parameter": "corrections.theta"
+                    },
+                    "reference_concentration": {
+                      "parameter": "coefficients.K_A"
+                    }
+                  },
+                  "concentration_unit": "g/L",
+                  "input": {
+                    "ref": "acetate"
                   }
                 }
               },
