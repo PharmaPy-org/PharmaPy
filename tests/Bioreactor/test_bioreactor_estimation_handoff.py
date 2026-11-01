@@ -142,6 +142,25 @@ def independent_prediction(theta, times_s, dilution=.1):
     return solution.y[::-1].T
 
 
+def coefficient_configuration() -> dict:
+    """Place the correction in an existing coefficient-list input slot.
+
+    Returns
+    -------
+    dict
+        Fresh native case with a dimensionless correction [-] in list entry 0.
+    """
+    model = configuration(True)
+    model['parameters']['coefficients']['response'] = [0.]  # [-], neutral correction
+    model['parameters']['corrections'] = {}
+    next(rule for rule in model['model']['kinetics']['rule_graph']
+         if rule['identifier'] == 'theta')['expression'] = {'parameter': 'coefficients.response.0'}
+    next(rule for rule in model['model']['kinetics']['rule_graph']
+         if rule['identifier'] == 'mu')['expression']['correction']['parameters'][
+             'theta'] = {'parameter': 'coefficients.response.0'}
+    return model
+
+
 # Public-path regressions, independent balances, and failure qualification.
 def test_callback_preserves_requested_rows_order_units_and_input_isolation():
     model = configuration(hybrid=True)
@@ -225,13 +244,7 @@ def test_coefficient_list_and_flattened_legacy_names_use_existing_input_conventi
     model = configuration(True)
     times_s = SAMPLE_H * HOUR_S  # [s]
     expected = simulate_measurements([TRUTH_THETA], times_s, **callback_inputs(model))  # [mmol/L, g/L]
-    model['parameters']['coefficients']['response'] = [0.]  # [-], same correction in an existing list slot
-    model['parameters']['corrections'] = {}
-    next(rule for rule in model['model']['kinetics']['rule_graph']
-         if rule['identifier'] == 'theta')['expression'] = {'parameter': 'coefficients.response.0'}
-    next(rule for rule in model['model']['kinetics']['rule_graph']
-         if rule['identifier'] == 'mu')['expression']['correction']['parameters'][
-             'theta'] = {'parameter': 'coefficients.response.0'}
+    model = coefficient_configuration()
     observed = simulate_measurements([TRUTH_THETA], times_s,
         **callback_inputs(model, ('coefficients.response.0',)))  # [mmol/L, g/L]
     np.testing.assert_array_equal(observed, expected)
@@ -239,6 +252,27 @@ def test_coefficient_list_and_flattened_legacy_names_use_existing_input_conventi
     kwargs = callback_inputs(case, ('coefficients.response.0',))
     kwargs['definition'] = definition
     np.testing.assert_array_equal(simulate_measurements([TRUTH_THETA], times_s, **kwargs), expected)
+
+
+def test_equivalent_list_paths_cannot_bind_one_scalar_twice():
+    """Reject distinct text names that would silently overwrite one parameter."""
+    model = coefficient_configuration()
+    original = deepcopy(model)
+    with pytest.raises(ValueError, match='distinct scalar'):
+        simulate_measurements([0., TRUTH_THETA], SAMPLE_H * HOUR_S,
+            **callback_inputs(model, ('coefficients.response.0', 'coefficients.response.00')))
+    assert model == original
+
+
+def test_single_equivalent_list_path_preserves_existing_binding():
+    """Keep an individually valid leading-zero list index compatible."""
+    model = coefficient_configuration()
+    times_s = SAMPLE_H * HOUR_S  # [s]
+    expected = simulate_measurements([TRUTH_THETA], times_s,
+        **callback_inputs(model, ('coefficients.response.0',)))  # [mmol/L, g/L]
+    actual = simulate_measurements([TRUTH_THETA], times_s,
+        **callback_inputs(model, ('coefficients.response.00',)))  # [mmol/L, g/L]
+    np.testing.assert_array_equal(actual, expected)
 
 
 def test_pathway_callback_keeps_feed_event_sides_and_physical_units():
