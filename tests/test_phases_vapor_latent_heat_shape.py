@@ -304,9 +304,14 @@ def _real_drying_balance(vapor_phase, num_nodes, temp_cond, dry_rate):
         vapor_phase.getHeatVaporization(temp_cond, basis="mass")
     )  # [J/kg]
     np.testing.assert_array_equal(latent_heat[:, 0], np.zeros(num_nodes))
+    # The volatile fractions belong to species 1 and 2 (heavy, medium); the
+    # carrier, species 0, holds none. Earlier this expectation appended the
+    # carrier column last, which paired them with light and heavy (#527).
+    liquid_fractions = np.zeros((num_nodes, NUM_SPECIES))  # [-]
+    liquid_fractions[:, dryer.idx_volatiles] = x_liq
     liquid_cp = dryer.Liquid_1.getCp(
         temp_cond,
-        mass_frac=np.column_stack((x_liq, np.zeros(num_nodes))),
+        mass_frac=liquid_fractions,
         basis="mass",
     )  # [J/kg/K]
     heat_capacity = (

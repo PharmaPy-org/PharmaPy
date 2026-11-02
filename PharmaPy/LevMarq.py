@@ -20,49 +20,123 @@ def levenberg_marquardt(x, func, deriv, fletcher_modif=False, max_fun_eval=100,
                         eps_1=1e-8, eps_2=1e-8, tol_fun=1e-12,
                         full_output=False, mu=None, d_diag=None,
                         args=(), verbose=False):
-    """
-    Optimize function using the Levenberg-Marquardt algorithm
+    """Minimize a sum of squared residuals with Levenberg-Marquardt.
+
+    Each trial solves the damped Gauss-Newton system
+    ``(A + mu * D.T @ D) @ step = -b`` with ``A = J @ J.T`` and
+    ``b = J @ r`` at the accepted point, where ``r = func(x, *args)`` and
+    ``J = deriv(x, *args)``. A trial ``x + step`` is accepted when it
+    lowers ``norm(r)**2``, i.e. when the gain ratio ``rho``, the actual
+    over the predicted decrease, is positive. After an accepted trial
+    ``mu`` is multiplied by ``max(1/3, 1 - (beta - 1) * (2*rho - 1)**3)``,
+    where ``beta`` is 2 unless the preceding trials were rejected (then
+    the current ``nu``), and ``nu`` is reset to 2: ``mu`` decreases, by at
+    most a factor of 3, when ``rho > 0.5``, and increases when
+    ``0 < rho < 0.5``. A rejected trial is discarded, ``mu`` is multiplied
+    by ``nu`` and ``nu`` is doubled.
 
     Parameters
     ----------
-    x : array-like
-        1D array containing the decision variables.
+    x : array_like
+        Initial decision variables, shape ``(n_x,)``, in parameter units.
     func : callable
-        function with signature func(x, *args), which returns a n_data-sized
-        vector of residuals (x_data - x_model).
+        ``func(x, *args)`` returning the residual vector ``r``, shape
+        ``(n_data,)``, in residual units (``[-]`` for whitened residuals).
+        Either sign convention (model minus data or data minus model)
+        works, provided ``deriv`` returns the Jacobian of ``func`` itself:
+        the step uses ``b = J @ r``.
     deriv : callable
-        function that calculates the derivative of func with respect to x.
-        It has the same signature as func, and returns a n_data x n_x matrix
-        containing the jacobian of func
+        ``deriv(x, *args)`` returning the Jacobian of ``func`` with respect
+        to ``x``, shape ``(n_x, n_data)`` (one row per decision variable),
+        in residual units divided by parameter units.
     fletcher_modif : bool, optional
-        DESCRIPTION. The default is False.
+        If True, use Jacobian-based scaling: after each accepted step, every
+        entry of ``D`` is replaced by its parameter's Jacobian row norm
+        ``norm(J, axis=1)`` when that is larger. Unless ``d_diag`` is
+        given, every entry starts at the largest row norm
+        ``max(norm(J, axis=1))`` of the initial point, so ``D`` carries
+        Jacobian units. The default is False, which keeps ``D`` at its
+        initial value: ``d_diag``, or the identity (unit scaling).
     max_fun_eval : int, optional
-        maximum number of function evaluations. The default is 100.
+        Maximum number of trial evaluations of ``func`` and ``deriv`` [-],
+        excluding the evaluation at the initial point. The default is 100.
     eps_1 : float, optional
-        stoping criteria for the gradient. The default is 1e-8.
+        Gradient threshold [residual units**2 / parameter units]: stop
+        after an accepted step when ``norm(b) < eps_1``. The default is
+        1e-8.
     eps_2 : float, optional
-        stopping criterion for step size. The default is 1e-8.
+        Relative step threshold [-]: stop before a trial when
+        ``norm(step) < eps_2 * norm(x)``. The default is 1e-8.
     tol_fun : float, optional
-        stoping criterion for the objective function . The default is 1e-12.
+        Residual threshold [residual units]: stop when the residual 2-norm
+        ``norm(r)`` at the accepted point is below ``tol_fun``. The default
+        is 1e-12.
     full_output : bool, optional
-        If true, the returned result includes optimum x, covariance of x
-        and a dictionary with details about the optimization.
-        The default is False.
-    lambd_zero : float, optional
-        multiplier for the first value of mu. The default is 1e-2.
+        If True, also return the covariance estimate and a dictionary with
+        details about the optimization. The default is False.
+    mu : float, optional
+        Initial damping factor. ``mu * D.T @ D`` must carry the units of
+        ``A``, [residual units**2 / parameter units**2]; with unit scaling
+        ``mu`` has those units. The default is None, which uses
+        ``1e-2 * max(diag(A))`` at the initial point.
+    d_diag : array_like, optional
+        Initial diagonal of the scaling matrix ``D``, shape ``(n_x,)``,
+        replacing the initial value that ``fletcher_modif`` selects; with
+        ``fletcher_modif=True`` its entries are still raised to the
+        Jacobian row norms after accepted steps. ``mu * d_diag**2`` must
+        carry the units of ``A``. The default is None.
     args : tuple, optional
-        additional arguments to pass to func and deriv callables.
+        Additional positional arguments passed to ``func`` and ``deriv``.
         The default is ().
     verbose : bool, optional
-        If True, a table with the current value of the objective, gradient
-        and step size is shown as the optimization proceeds.
-        The default is False.
+        If True, print a table with the evaluation count, ``norm(r)**2`` of
+        the trial point, the step norm, the gradient norm ``norm(b)`` and
+        ``mu`` as the optimization proceeds. The default is False.
 
     Returns
     -------
-    TYPE
-        DESCRIPTION.
+    x : numpy.ndarray
+        Accepted decision variables, shape ``(n_x,)``, in parameter units.
+        Returned alone when ``full_output`` is False.
+    covar_x : numpy.ndarray
+        ``inv(A)`` at the accepted point, shape ``(n_x, n_x)``, entry
+        ``(i, j)`` in [parameter i units * parameter j units / residual
+        units**2]: the parameter covariance when the residuals are whitened
+        [-]. Returned only when ``full_output`` is True.
+    output : dict
+        Returned only when ``full_output`` is True. ``'x'``, ``'fun'`` and
+        ``'jac'`` are the accepted point, its residuals ``r`` and Jacobian
+        ``J`` (shapes and units as above). ``'num_iter'`` [-] counts
+        accepted steps and ``'num_fun_eval'`` [-] trial evaluations.
+        ``'lm_params'`` holds the final ``'d_diag'`` (shape ``(n_x,)``) and
+        ``'mu'``. When ``max_fun_eval > 0``, ``'stop_criterion'`` (str)
+        states why the loop ended and ``'norm_step'`` is the norm of the
+        last solved step [parameter units], which may be a rejected trial
+        or the small step that stopped the loop.
 
+    Raises
+    ------
+    numpy.linalg.LinAlgError
+        If the damped system or ``A`` at the accepted point is singular.
+
+    Notes
+    -----
+    The stopping criteria are checked in this order: a small step before
+    each trial, then, after an accepted trial, the gradient (``eps_1``)
+    followed by the residual norm (``tol_fun``). The residual criterion is
+    evaluated on the accepted point, so ``output['fun']`` always belongs to
+    the returned ``x``. Because the denominator of ``rho`` is positive for a
+    nonzero step and a positive ``mu``, a trial is rejected only when it
+    does not lower
+    ``norm(r)``; a rejected trial therefore stops on ``tol_fun`` only when
+    the accepted point, which can then only be the initial one, already
+    satisfies it. Otherwise the loop ends with ``'Maximum iterations
+    exceeded'`` once ``max_fun_eval`` trials have been evaluated.
+
+    With decision variables of different units the norms above mix units.
+    The default thresholds and ``max_fun_eval`` are long-standing package
+    defaults without a recorded derivation; adapt them to the scales of the
+    residuals and parameters.
     """
 
     nu = 2
@@ -146,9 +220,11 @@ def levenberg_marquardt(x, func, deriv, fletcher_modif=False, max_fun_eval=100,
             print("{:<7} {:<10.3e} {:<10.3e} {:<10.3e} {:<10.3e}".format(
                 num_feval, sq_new, norm(lm_step), norm(b_vector), mu))
 
-        if norm(fun_new) < tol_fun:
-            break
+        # x, fun and jac are the accepted point: the residuals of a rejected
+        # trial must not end the loop at a point it did not move to.
+        if norm(fun) < tol_fun:
             reason = 'Value of the objective function lower than tolerance'
+            break
 
     else:
         reason = 'Maximum iterations exceeded'

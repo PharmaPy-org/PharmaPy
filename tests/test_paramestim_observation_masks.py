@@ -700,11 +700,22 @@ def test_mcr_bootstrap_masks_non_spectral_columns():
 
     samples = statistics.get_bootsamples(BOOTSTRAP_SAMPLES)
 
-    residual = estimator.resid_runs[0]  # [-] spectra, [mol/L] tracer
-    fitted = estimator.y_model[0]
+    fitted = estimator.y_model[0]  # [-] spectra, [mol/L] tracer
+    observations = np.hstack((spectra, np.full((time_s.size, 1), np.nan)))
+    observations[tracer_rows, 2] = tracer
+    # Model-minus-data residuals: the spectral residuals of resid_runs are
+    # data minus prediction, so the samples are built from their negatives
+    # (#500); the tracer residuals are model minus data.
+    residual = fitted - observations  # [-] spectra, [mol/L] tracer
     tracer_observed = np.isin(np.arange(time_s.size), tracer_rows)
     observed = np.column_stack((np.ones((time_s.size, 2), dtype=bool),
                                 tracer_observed))
+    np.testing.assert_allclose(residual[:, :2],
+                               -estimator.resid_runs[0][:, :2],
+                               rtol=ROUNDOFF_RTOL)
+    np.testing.assert_allclose(residual[tracer_rows, 2],
+                               estimator.resid_runs[0][tracer_rows, 2],
+                               rtol=ROUNDOFF_RTOL)
     assert np.all(np.abs(residual[observed]) > NONZERO_RESIDUAL_FLOOR)
     assert len(samples[0]) == BOOTSTRAP_SAMPLES
     for sample in samples[0]:
