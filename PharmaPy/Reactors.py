@@ -81,7 +81,8 @@ def _requested_rows(time_profile, requested_times) -> np.ndarray:
     points, and CVode reports each output point it reaches as that same
     float. Any tolerance would instead have to be relative to some time
     scale and could merge distinct samples of multiscale grids, for example
-    1e-12 s and 2e-12 s within a 3600 s run.
+    1e-12 s and 2e-12 s within a 3600 s run. Diagnostic times use Python
+    float representations so messages remain stable across NumPy versions.
     """
     reported = np.asarray(time_profile, dtype=float)  # [s]
     requested = np.asarray(requested_times, dtype=float).ravel()  # [s]
@@ -90,10 +91,10 @@ def _requested_rows(time_profile, requested_times) -> np.ndarray:
     for index, time in enumerate(requested):
         matches = np.flatnonzero(reported == time)
         if matches.size == 0:
-            span = (f"{reported.size} times from {reported[0]!r} s to "
-                    f"{reported[-1]!r} s" if reported.size else "no times")
+            span = (f"{reported.size} times from {float(reported[0])!r} s to "
+                    f"{float(reported[-1])!r} s" if reported.size else "no times")
             raise ValueError(
-                f"Requested time {time!r} s is absent from the reactor "
+                f"Requested time {float(time)!r} s is absent from the reactor "
                 f"solution, which reports {span}. CVode's default "
                 "(non-continuous) output can omit requested points inside "
                 "its last internal step before the end time; pass "
