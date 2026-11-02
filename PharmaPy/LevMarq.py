@@ -6,8 +6,8 @@ Created on Fri Nov  8 20:23:12 2019
 @author: dcasasor
 """
 
-from numpy import ones_like, inner, diag, asarray, maximum
-from numpy.linalg import solve, norm, inv
+from numpy import ones_like, inner, diag, asarray, maximum, full, nan
+from numpy.linalg import LinAlgError, solve, norm, inv
 
 
 lm_header = [
@@ -102,7 +102,10 @@ def levenberg_marquardt(x, func, deriv, fletcher_modif=False, max_fun_eval=100,
         ``inv(A)`` at the accepted point, shape ``(n_x, n_x)``, entry
         ``(i, j)`` in [parameter i units * parameter j units / residual
         units**2]: the parameter covariance when the residuals are whitened
-        [-]. Returned only when ``full_output`` is True.
+        [-]. Filled with NaN when ``A`` is exactly singular (``inv`` raises
+        ``LinAlgError``), for example when a decision variable does not
+        affect any residual; the solve itself is still returned. Returned
+        only when ``full_output`` is True.
     output : dict
         Returned only when ``full_output`` is True. ``'x'``, ``'fun'`` and
         ``'jac'`` are the accepted point, its residuals ``r`` and Jacobian
@@ -117,7 +120,8 @@ def levenberg_marquardt(x, func, deriv, fletcher_modif=False, max_fun_eval=100,
     Raises
     ------
     numpy.linalg.LinAlgError
-        If the damped system or ``A`` at the accepted point is singular.
+        If the damped system of a trial step is singular. A singular ``A``
+        at the accepted point no longer raises (#532); see ``covar_x``.
 
     Notes
     -----
@@ -137,6 +141,15 @@ def levenberg_marquardt(x, func, deriv, fletcher_modif=False, max_fun_eval=100,
     The default thresholds and ``max_fun_eval`` are long-standing package
     defaults without a recorded derivation; adapt them to the scales of the
     residuals and parameters.
+
+    ``covar_x`` is the plain inverse, without an identifiability test:
+    ``inv`` raises only for an exactly singular ``A``. A numerically
+    singular ``A`` gives finite entries without correct digits, possibly
+    negative variances, and a non-finite Jacobian or an ``A`` close to the
+    underflow limit gives non-finite entries without an error.
+    ``ParameterEstimation.optimize_fn`` does not use ``covar_x``; its
+    covariance comes from ``ParameterEstimation.get_covariance``, which
+    tests ``A`` and returns NaN with a warning when it is undefined.
     """
 
     nu = 2
@@ -229,7 +242,12 @@ def levenberg_marquardt(x, func, deriv, fletcher_modif=False, max_fun_eval=100,
     else:
         reason = 'Maximum iterations exceeded'
 
-    covar_x = inv(a_matrix)
+    try:
+        # [x_i units * x_j units / residual units**2]
+        covar_x = inv(a_matrix)
+    except LinAlgError:
+        # A singular A leaves the covariance undefined, not the solve.
+        covar_x = full(a_matrix.shape, nan)
 
     if verbose:
         print('{:<40}'.format('-'*60))
