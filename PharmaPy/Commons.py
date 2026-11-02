@@ -848,3 +848,38 @@ def reorder_pde_outputs(state_array, num_fv, size_states, name_states=None):
             key: value for key, value in zip(name_states, individual_states)}
 
     return states_per_fv, individual_states
+
+
+def _real_float_array(values, message: str) -> np.ndarray:
+    """Return a float copy of real numeric values, or reject them.
+
+    Parameters
+    ----------
+    values : array_like
+        Integer or floating-point values in the caller's units, for
+        example an estimation-parameter seed.
+    message : str
+        Message of the ``ValueError`` raised for rejected input.
+
+    Returns
+    -------
+    numpy.ndarray
+        New float64 array with the shape of ``values``; the caller's
+        array is neither modified nor shared.
+
+    Raises
+    ------
+    ValueError
+        With ``message``, if ``values`` is ragged (cannot form a regular
+        array) or is not integer or floating point, for example a
+        dictionary, strings, booleans or complex numbers. Such input is
+        rejected rather than coerced: numpy would convert numeric strings
+        and booleans to floats and discard imaginary parts.
+    """
+    try:
+        raw = np.asarray(values)
+    except ValueError as error:  # ragged nested sequences
+        raise ValueError(message) from error
+    if raw.dtype.kind not in 'iuf':  # signed, unsigned, floating point
+        raise ValueError(message)
+    return raw.astype(float)

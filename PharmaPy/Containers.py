@@ -20,6 +20,7 @@ from PharmaPy.Connections import get_inputs_new
 
 from PharmaPy.Commons import unpack_states
 from PharmaPy.Errors import PharmaPyTypeError
+from PharmaPy.Presence import StructuralPresenceMixin, feed_weights
 
 from PharmaPy.Results import DynamicResult
 
@@ -40,13 +41,25 @@ MAX_TEMP_ITERATIONS = 50  # [-], Newton iterations of that inversion
 ENTHALPY_SCALE_TEMP = 1.0
 
 
-class ContinuousHoldup:
+class ContinuousHoldup(StructuralPresenceMixin):
     """Adiabatic, perfectly mixed liquid tank with fixed mass inventory.
 
     Inlet and outlet mass flows are equal. Composition and temperature evolve
     without reaction or external heat transfer; retrieval commits the terminal
     liquid state and absolute time for continuation.
+
+    The mass fractions are solver states, so the solver's difference-quotient
+    Jacobian perturbs those of species that are neither charged nor fed. The
+    holdup's heat capacity and enthalpy are therefore weighted by a
+    structural presence record (``PharmaPy.Presence.StructuralPresenceMixin``,
+    issue #425): a species is present if it has a nonzero fraction in the
+    liquid charge, as it is at the start of the solve, or, from the time of
+    that evaluation on, in a feed that the holdup evaluates with a nonzero
+    mass flow. An absent species needs no property data other than ``mw``
+    and is published at exactly zero.
     """
+
+    _presence_phase_names = ('Liquid_1',)
 
     def __init__(self) -> None:
         """Initialize an adiabatic, constant-mass continuous liquid holdup.
@@ -99,6 +112,10 @@ class ContinuousHoldup:
 
         Notes
         -----
+        The structural presence record starts from the charge's nonzero
+        mass fractions (issue #425); ``solve_unit`` rebuilds it from the
+        liquid as it is at the start of each solve.
+
         A deep copy of ``Liquid_1`` is kept as ``__original_phase__``, the
         initial-holdup snapshot that ``SimulationExec.get_holdup`` reports
         as a raw material. It is taken before any solve, which updates
@@ -119,6 +136,8 @@ class ContinuousHoldup:
         classify_phases(self)
         self.nomenclature()
         self.mass = self.Liquid_1.mass  # [kg]
+        self._start_presence(len(self.Liquid_1.name_species),
+                             self.Liquid_1.mass_frac)
 
         self.__original_phase__ = deepcopy(self.Liquid_1)
 
@@ -159,14 +178,47 @@ class ContinuousHoldup:
 
         return inputs['Inlet']
 
-    def unit_model(self, time, states):
+    def unit_model(self, time: float, states: np.ndarray) -> np.ndarray:
+        """Evaluate the holdup's composition and temperature derivatives.
+
+        Parameters
+        ----------
+        time : float
+            Absolute time [s] at which the feed is evaluated.
+        states : numpy.ndarray
+            Mass fractions [-], shape (num_species,), followed by the
+            temperature [K].
+
+        Returns
+        -------
+        numpy.ndarray
+            Mass-fraction derivatives [1/s] followed by the temperature
+            derivative [K/s], shape (num_species + 1,).
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``, from
+            ``energy_balance``, if a present species lacks ``cp_liq``.
+
+        Notes
+        -----
+        Side effect: the evaluated feed adds every species it supplies with
+        a nonzero mass flow to the structural presence record at ``time``,
+        where it stays (latched) until the record is rebuilt or a failed
+        solve restores it. The balances use the presence at ``time``, so a
+        species first fed later needs no data at earlier times.
+        """
         di_states = unpack_states(states, self.dim_states, self.name_states)
 
         inputs = self.get_inputs(time)
+        # Species fed with a nonzero mass flow are present from now on.
+        self._record_feed(inputs['mass_flow'], inputs['mass_frac'],
+                          time=time)
 
         material = self.material_balance(di_states['mass_frac'], inputs)
         energy = self.energy_balance(di_states['mass_frac'], di_states['temp'],
-                                     inputs)
+                                     inputs, time=time)
 
         balances = np.hstack((material, energy))
 
@@ -179,15 +231,58 @@ class ContinuousHoldup:
 
         return dw_dt
 
-    def energy_balance(self, mass_frac, temp, inputs):
-        cp = self.Liquid_1.getCp(mass_frac=mass_frac, temp=temp, basis='mass')
+    def energy_balance(self, mass_frac: np.ndarray, temp: float,
+                       inputs: dict, time: Optional[float] = None
+                       ) -> float:
+        """Return the temperature derivative of the adiabatic holdup.
 
-        h_in = self.Inlet.getEnthalpy(temp=inputs['temp'],
-                                      mass_frac=inputs['mass_frac'])
-        h = self.Inlet.getEnthalpy(temp=temp, mass_frac=mass_frac)
+        Parameters
+        ----------
+        mass_frac : numpy.ndarray
+            Holdup mass fractions [-], shape (num_species,), solver states.
+        temp : float
+            Holdup temperature [K].
+        inputs : dict
+            Feed mass flow [kg/s], mass fractions [-] and temperature [K].
+        time : float, optional
+            Absolute evaluation time [s]: only species recorded at or
+            before it are present. None counts every recorded species.
+
+        Returns
+        -------
+        float
+            dT/dt = F / (m cp) (h_in - h) [K/s], with mass-basis enthalpies
+            [J/kg] on a common reference and the holdup heat capacity cp
+            [J/kg/K].
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            present species (structural presence) lacks ``cp_liq``; absent
+            species need none, and a feed without flow needs none.
+
+        Notes
+        -----
+        The holdup heat capacity and enthalpy are weighted by the presence
+        mask rather than by the state fractions, whose absent entries a
+        difference-quotient Jacobian perturbs; an absent species without
+        data then contributes exactly zero (issue #425).
+        """
+        weights = self._presence_weights(mass_frac, time=time)  # [-]
+        cp = self.Liquid_1.getCp(mass_frac=mass_frac, temp=temp,
+                                 basis='mass', weights=weights)  # [J/kg/K]
+
+        # A species in a feed without flow needs no data.
+        h_in = self.Inlet.getEnthalpy(
+            temp=inputs['temp'], mass_frac=inputs['mass_frac'],
+            weights=feed_weights(inputs['mass_flow'],
+                                 inputs['mass_frac']))  # [J/kg]
+        h = self.Inlet.getEnthalpy(temp=temp, mass_frac=mass_frac,
+                                   weights=weights)  # [J/kg]
 
         dtemp_dt = inputs['mass_flow'] / self.mass / cp * \
-            (h_in - h)
+            (h_in - h)  # [K/s]
 
         return dtemp_dt
 
@@ -216,33 +311,68 @@ class ContinuousHoldup:
             Mass fractions [-] followed by temperature [K], shape
             (num_times, num_species + 1).
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``, raised
+            before the integration: if a species in the liquid at the start,
+            or fed with a nonzero mass flow at the start, lacks ``cp_liq``.
+            Absent species need none (issue #425). A species first fed
+            later in the run without data is reported by CVode instead,
+            whose error does not name it (issue #435).
+
         Notes
         -----
         The terminal liquid state and elapsed time become the initial
         conditions for the next call. The caller's option mapping is retained.
+
+        The structural presence record is rebuilt from the liquid as it is
+        at the start of the call, which still holds every species fed in
+        earlier segments. The derivatives are evaluated once at the initial
+        state before CVode starts, so that missing data of species present
+        at the start are reported by name. A solve that raises, in that
+        evaluation, the integration or the publication of the results
+        (``retrieve_results``, for example because a species fed during the
+        run lacks the ``rho_liq`` that the published liquid needs), keeps no
+        results: the unit's attributes (``elapsed_time``, ``outputs``,
+        ``output``, ``result``, ``Outlet``), the presence record and the
+        complete state of ``Liquid_1`` are restored to their values before
+        the call.
         """
         w_init = self.Liquid_1.mass_frac  # [-]
         temp_init = self.Liquid_1.temp  # [K]
 
         states_init = np.hstack((w_init, temp_init))  # [-], [K]
 
-        problem = Explicit_Problem(self.unit_model, states_init,
-                                   t0=self.elapsed_time)
-        solver = CVode(problem)
+        # A failed solve keeps no results: the unit, its presence record and
+        # its liquid are restored if anything below raises.
+        before_solve = self._solve_snapshot()
+        try:
+            self._start_presence(len(self.Liquid_1.name_species), w_init)
+            # Report missing data of the species present at the start by
+            # name; inside CVode the error would be replaced by its own.
+            self.unit_model(self.elapsed_time, states_init)
 
-        if sundials_opts is not None:
-            for name, value in sundials_opts.items():
-                setattr(solver, name, value)
-                if name == 'time_limit':
-                    solver.report_continuously = True
+            problem = Explicit_Problem(self.unit_model, states_init,
+                                       t0=self.elapsed_time)
+            solver = CVode(problem)
 
-        if not verbose:
-            solver.verbosity = 50
+            if sundials_opts is not None:
+                for name, value in sundials_opts.items():
+                    setattr(solver, name, value)
+                    if name == 'time_limit':
+                        solver.report_continuously = True
 
-        final_time = runtime + self.elapsed_time  # [s]
-        time, states = solver.simulate(final_time)
+            if not verbose:
+                solver.verbosity = 50
 
-        self.retrieve_results(time, states)
+            final_time = runtime + self.elapsed_time  # [s]
+            time, states = solver.simulate(final_time)
+
+            self.retrieve_results(time, states)
+        except BaseException:
+            self._restore_solve_snapshot(before_solve)
+            raise
 
         return time, states
 
@@ -265,10 +395,22 @@ class ContinuousHoldup:
         flow. The final liquid state updates the fixed inventory [kg] and a
         separate ``LiquidStream`` outlet. ``elapsed_time`` becomes the
         absolute endpoint [s], so the next solve starts at the terminal state.
+
+        The published mass fractions (``outputs``, ``result``, the liquid
+        and the outlet) hold species that were absent at each row's time at
+        exactly zero instead of any solver round-off (issue #425), so that
+        the outlet, the liquid and connected units need no data for them;
+        the ``states`` returned by ``solve_unit`` keep the solver values.
         """
         time = np.asarray(time)  # [s]
         di = unpack_states(states, self.dim_states, self.name_states)
         # di: species mass fractions [-] and temperature [K]
+        # One row per time, also for a single species, whose profile
+        # unpacks to shape (num_times,).
+        fractions = np.asarray(di['mass_frac'], dtype=float)  # [-]
+        di['mass_frac'] = self._project_absent(
+            fractions.reshape(np.size(time), -1),
+            time=time).reshape(fractions.shape)  # [-]
         inputs = self.get_inputs(time)
         di['mass_flow'] = np.broadcast_to(inputs['mass_flow'], time.shape).copy()  # [kg/s]
         di['time'] = time
@@ -835,6 +977,12 @@ class Mixer:
             :class:`Slurry` nor :class:`Cake` collaborator.
         RuntimeError
             If the Newton iteration cannot find the energy-balance root.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a liquid
+            inlet with a nonzero mass [kg] or mass flow [kg/s] carries a
+            species without ``cp_liq``; inlets without mass or flow need
+            none for their enthalpy. Slurry and cake inlets need ``cp_liq``
+            and ``cp_solid`` of the species they hold.
 
         Notes
         -----
@@ -866,8 +1014,11 @@ class Mixer:
                     % type(inlet).__name__
                 )
             else:
-                h_in.append(inlet.getEnthalpy(temp_in[ind],
-                                              mass_frac=massfrac_in[ind]))
+                # A liquid inlet without mass adds nothing and needs no data.
+                h_in.append(inlet.getEnthalpy(
+                    temp_in[ind], mass_frac=massfrac_in[ind],
+                    weights=feed_weights(mass_total_in[ind],
+                                         massfrac_in[ind])))  # [J/kg]
 
         def temp_root(temp: float) -> Union[float, np.floating]:
             """Return the total enthalpy residual at an outlet temperature.
@@ -914,6 +1065,14 @@ class Mixer:
         tuple
             Total mass [kg], mass fractions [-] with shape (num_species,),
             and temperature [K], using ``temp_refer`` [K] on both sides.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a liquid
+            inlet with a nonzero mass [kg] carries a species without
+            ``cp_liq``; inlets without mass need none for their
+            enthalpy.
         """
         massfrac_in = u_inputs['mass_frac']
         mass_in = u_inputs['mass']
@@ -924,10 +1083,12 @@ class Mixer:
         massfrac = np.dot(mass_in, massfrac_in) / total_mass
 
         # ---------- Energy balance
+        # An inlet without mass adds nothing, so its species need no data.
         h_in = []
-        for temp, mass_frac in zip(temp_in, massfrac_in):
+        for temp, mass_frac, mass in zip(temp_in, massfrac_in, mass_in):
             h_in.append(self.Liquid_1.getEnthalpy(
-                temp, mass_frac=mass_frac, temp_ref=self.temp_refer))
+                temp, mass_frac=mass_frac, temp_ref=self.temp_refer,
+                weights=feed_weights(mass, mass_frac)))  # [J/kg]
 
         def temp_root(temp: float) -> float:
             """Evaluate the batch enthalpy residual.
@@ -969,6 +1130,15 @@ class Mixer:
         tuple
             Total mass-flow profile [kg/s], mixed mass fractions [-], and
             temperatures [K], preserving time and species axes.
+
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a liquid
+            inlet carries a species without ``cp_liq`` in a row with a
+            nonzero mass flow [kg/s] (or, for a time-independent
+            composition, in any row); rows without flow need none for their
+            enthalpy.
         """
         massfrac_in = u_inputs['mass_frac']
         mass_in = u_inputs['mass_flow']
@@ -981,10 +1151,12 @@ class Mixer:
         massfrac = sum(masscomp_in) / total_mass[..., np.newaxis]
 
         # ---------- Energy balance
+        # A row without flow adds nothing, so its species need no data.
         h_in = []
-        for temp, mass_frac in zip(temp_in, massfrac_in):
+        for temp, mass_frac, mass in zip(temp_in, massfrac_in, mass_in):
             h_in.append(self.Liquid_1.getEnthalpy(
-                temp, mass_frac=mass_frac, temp_ref=self.temp_refer))
+                temp, mass_frac=mass_frac, temp_ref=self.temp_refer,
+                weights=feed_weights(mass, mass_frac)))  # [J/kg]
 
         energy_in = sum([mass * enth for (mass, enth) in zip(mass_in, h_in)])
 
@@ -1773,14 +1945,24 @@ class DynamicCollector:
             reference temperature, the same reference as the inversion in
             ``_temperatures``.
 
+        Raises
+        ------
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a species
+            fed with a nonzero fraction and a nonzero flow lacks
+            ``cp_liq``; a feed without flow needs no data.
+
         Notes
         -----
         The ideal-mixing enthalpy is a sum of species terms, so the
         reference cancels in the temperature derived from H.
         """
         inlet_flow = u_inputs['mass_flow']  # [kg/s]
+        # A feed without flow adds nothing, so its species need no data.
         h_in = self.Inlet.getEnthalpy(
-            temp=u_inputs['temp'], mass_frac=u_inputs['mass_frac'])  # [J/kg]
+            temp=u_inputs['temp'], mass_frac=u_inputs['mass_frac'],
+            weights=feed_weights(inlet_flow,
+                                 u_inputs['mass_frac']))  # [J/kg]
 
         return inlet_flow * h_in  # [J/s]
 

@@ -107,8 +107,8 @@ once per evaluation, and every measurement reads its own rows.
   otherwise invented, also when the grids only partially overlap.
 * **Single sampled point.** A scalar ``x`` (or a one-element array) is a
   valid measurement, for example one temperature reading. A reactor
-  experiment must still request at least one time after the charge time;
-  see the reactor callback limits under SimulationExec below.
+  experiment sampled only at the charge time returns the charged state; see
+  the reactor callbacks under SimulationExec below.
 * **Replicates.** A repeated x value within a measurement denotes replicate
   observations at that x; the k-th replicate maps to the k-th model-grid row
   holding that x, so the callback receives the repeated value. Replicates
@@ -433,7 +433,22 @@ Using experiments through SimulationExec
 ``paramest_wrapper`` (time [s] is the independent variable). Every
 experiment receives its own wrapper keywords ``modify_phase``,
 ``modify_controls`` and ``run_args``, built from ``phase_modifiers``,
-``control_modifiers`` and a per-experiment copy of ``wrapper_kwargs``:
+``control_modifiers`` and a per-experiment copy of ``wrapper_kwargs``.
+In a flowsheet with several units, name the fitted unit with ``pick_unit``,
+for example ``pick_unit='R02'`` for ``{'R01': ['R02']}``: every graph node,
+including a unit that appears only as a successor, can be selected, and the
+selected unit supplies the callback, the signature that binds experiment
+``args``, the parameter seed and the parameter names. Omitting ``pick_unit``
+there raises ``RuntimeError``, and a name outside the graph raises
+``ValueError`` listing the valid names. Earlier releases counted only the
+units with an adjacency entry, so in a graph such as ``{'R01': ['R02']}``,
+whose successor-only unit ``R02`` has none, they silently fitted ``R01``
+without ``pick_unit`` and ignored ``pick_unit='R02'``; single-unit
+flowsheets ignored ``pick_unit`` altogether
+(`issue #241 <https://github.com/PharmaPy-org/PharmaPy/issues/241>`__).
+The selected unit is fitted alone,
+from its current phases and inlets; run ``SolveFlowsheet`` first when they
+come from upstream units. The experiment forms are:
 
 * **Named experiments** (a dictionary ``x_data`` or a mapping of
   ``Experiment`` objects): modifiers are dictionaries keyed by exactly the
@@ -455,20 +470,84 @@ experiment receives its own wrapper keywords ``modify_phase``,
   ``ValueError``.
 
 Only modifier keys and entry types are validated by ``SetParamEstimation``;
-applying control modifiers inside reactor callbacks is tracked in
-`issue #271 <https://github.com/PharmaPy-org/PharmaPy/issues/271>`__.
+the unit's ``paramest_wrapper`` applies the modifier fields when the objective
+is evaluated. The batch, CSTR and semibatch reactor callbacks and the batch,
+MSMPR and semibatch crystallizer callbacks evaluate every experiment with a
+fresh copy of the unit's configured ``controls``, updated by that experiment's
+control modifier:
+
+* keys of the modifier are names of configured controls, and each value is a
+  partial control record. ``fun`` and ``args`` replace the configured entries;
+  ``kwargs`` is merged key by key, so keywords it omits keep their configured
+  values. For a configured control
+  ``{'temp': {'fun': ramp, 'kwargs': {'start': 330.0, 'slope': 0.0}}}`` with
+  ``ramp(time, start, slope)`` returning ``start + slope * time`` [K], the
+  modifier ``{'temp': {'kwargs': {'slope': 0.05}}}`` evaluates
+  ``330.0 + 0.05 * time`` [K] (slope in [K/s]);
+* an experiment without a control modifier (none supplied, ``{}`` or ``None``)
+  uses the configured controls. No experiment or objective evaluation
+  inherits another one's modifier, whatever the experiment order;
+* an unknown control name or a record entry other than ``fun``, ``args`` and
+  ``kwargs`` raises ``ValueError``, and a non-dictionary entry or ``kwargs``
+  raises ``TypeError``, before the unit is reset or integrated. The merged
+  record is validated like a configured control;
+* neither the unit's configured controls nor the caller's modifier
+  dictionaries are modified, also when an evaluation raises. Modifiers cannot
+  add or remove controls, so the integrated states are those of the configured
+  unit.
+
+Earlier releases silently ignored reactor control modifiers and integrated
+every experiment with the configured controls
+(`issue #271 <https://github.com/PharmaPy-org/PharmaPy/issues/271>`__).
+Crystallizers applied a modifier permanently and shallowly: a ``kwargs`` entry
+replaced all configured keyword arguments, later experiments without a
+modifier inherited it, and the caller's control dictionaries were changed in
+place (`issue #492 <https://github.com/PharmaPy-org/PharmaPy/issues/492>`__).
+
+``PlugFlowReactor`` does not support parameter estimation: no output contract
+(which axial positions and states its callback returns, in which units, and
+how sensitivities are supplied) is defined for the distributed model.
+``SetParamEstimation`` raises ``NotImplementedError``
+(``PharmaPyNonImplementedError``) for it before any other setup, and so does a
+direct call of its ``paramest_wrapper``
+(`issue #401 <https://github.com/PharmaPy-org/PharmaPy/issues/401>`__).
+Estimate the kinetics with a ``BatchReactor`` model of the kinetic experiments
+instead. Earlier releases accepted the unit and failed at the first objective
+evaluation with ``TypeError``.
+
+The columns of a reactor callback are the molar concentrations [mol/L] of
+the participating species, in ``Kinetics.partic_species`` order (the order
+of the species in the property database), for the batch, CSTR and
+semibatch reactors alike, so field ``0`` observes the first participating
+species. The CSTR and semibatch reactors integrate every phase species but
+return only the participating ones. Earlier releases returned their leading
+phase species instead, so whenever a nonreacting species preceded a
+reacting one in the phase, measurements were compared with the wrong
+species
+(`issue #497 <https://github.com/PharmaPy-org/PharmaPy/issues/497>`__).
+
+With ``return_sens=True``, the sensitivities a reactor callback returns
+cover exactly these participating-species columns, in [mol/L per parameter
+unit], and not the reactor and jacket temperatures that a non-isothermal
+``BatchReactor`` also integrates. Earlier releases returned the
+sensitivities of every integrated state, so the estimator paired
+temperature sensitivities with species measurements: non-isothermal batch
+fits with CVodes sensitivities used wrong Jacobians, Levenberg-Marquardt
+steps and parameter covariances, and such fits should be rerun
+(`issue #498 <https://github.com/PharmaPy-org/PharmaPy/issues/498>`__).
 
 Reactor callbacks (``paramest_wrapper`` of the batch, CSTR and semibatch
 reactors) return exactly one row per requested sample time, in request
 order with replicates repeated, so an experiment need not sample the initial
 time: endpoint-only measurements and replicate samples at the charge time
-are supported. Each reactor experiment must still request at least one time
-after the charge time. A grid made only of charge-time samples, such as
-``[0.0]`` or ``[0.0, 0.0]``, has zero integration duration:
-``SetParamEstimation`` accepts it, but evaluating the objective currently
-fails inside CVode with ``IndexError``. Support for such zero-duration
-experiments is tracked in
-`issue #418 <https://github.com/PharmaPy-org/PharmaPy/issues/418>`__.
+are supported. So are experiments sampled only at the charge time, such as
+``[0.0]`` or ``[0.0, 0.0]``: they have zero integration duration, so the
+callback does not integrate and returns the charged state in every requested
+row, with exactly zero sensitivities, since the charged state does not depend
+on the kinetic parameters. Such an experiment observes the charge but carries
+no kinetic information, and the reactor's ``result`` is None after it is
+evaluated. Earlier releases failed inside CVode with ``IndexError``
+(`issue #418 <https://github.com/PharmaPy-org/PharmaPy/issues/418>`__).
 Crystallizer callbacks still return the solver rows, which
 include the charge time, until
 `issue #328 <https://github.com/PharmaPy-org/PharmaPy/issues/328>`__ is

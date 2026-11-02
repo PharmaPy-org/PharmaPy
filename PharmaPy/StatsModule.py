@@ -18,25 +18,474 @@ import time
 import warnings
 
 
+# Opacity [-] of each sampled prediction line in
+# StatisticsClass.bootstrap_confid; the value of the original
+# implementation, low enough that many overlapping draws build a visible
+# density band. Display choice only.
+_ENSEMBLE_LINE_ALPHA = 0.02  # [-]
+# Subplot columns per row in StatisticsClass.plot_boots; layout of the
+# original implementation. Display choice only.
+_BOOT_PLOT_COLUMNS = 2  # [-]
+
+
+def _validated_count(value, name: str) -> int:
+    """Return a positive integer count or raise an actionable error.
+
+    Parameters
+    ----------
+    value : int
+        Candidate count [-].
+    name : str
+        Argument name for the error message.
+
+    Returns
+    -------
+    int
+        ``value`` as a Python ``int`` [-].
+
+    Raises
+    ------
+    ValueError
+        If ``value`` is not an integer (booleans excluded) of at least 1.
+    """
+    if (isinstance(value, bool) or not isinstance(value, (int, np.integer))
+            or value < 1):
+        raise ValueError(f"{name} must be a positive integer; got {value!r}")
+
+    return int(value)
+
+
+def _covariance_factor(covar_params, num_params: int,
+                       check_symmetry: bool = True) -> np.ndarray:
+    """Validate a parameter covariance and return its Cholesky factor.
+
+    Parameters
+    ----------
+    covar_params : array-like
+        Parameter covariance, shape ``(num_params, num_params)``; entry
+        ``(i, j)`` in the product of the units of parameters ``i`` and
+        ``j``.
+    num_params : int
+        Number of optimized parameters [-].
+    check_symmetry : bool, optional
+        If True (user-supplied matrices), reject a matrix that is not
+        symmetric on the correlation scale. If False (the estimator's own
+        covariance, symmetric in exact arithmetic), only symmetrize it.
+        The default is True.
+
+    Returns
+    -------
+    numpy.ndarray
+        Lower-triangular ``L`` with ``L @ L.T`` equal to the symmetric part
+        of ``covar_params``, shape ``(num_params, num_params)``; row ``i``
+        in the units of parameter ``i``.
+
+    Raises
+    ------
+    ValueError
+        If the matrix has the wrong shape, non-finite entries, a
+        non-positive variance, is not symmetric (``check_symmetry``), or is
+        not positive definite.
+
+    Notes
+    -----
+    The symmetry check compares each pair on the correlation scale,
+    ``|C_ij - C_ji| / sqrt(C_ii C_jj) <= sqrt(eps)``, so it does not depend
+    on the parameter units. The ``sqrt(eps)`` tolerance is a design
+    assumption: far above the round-off of a symmetric matrix written out
+    by a user, far below any meaningful correlation. It is not applied to
+    the estimator's ``s2 * inv(J J^T)``, whose LU inversion leaves an
+    asymmetry growing with ``cond(J J^T)``. In both cases the symmetric part
+    ``(C + C^T) / 2`` is factorized.
+    """
+    covar = np.asarray(covar_params, dtype=float)  # [param_i*param_j units]
+    expected_shape = (num_params, num_params)
+    if covar.shape != expected_shape:
+        raise ValueError(
+            f"covar_params has shape {covar.shape}; expected "
+            f"{expected_shape}, one row and column per optimized parameter")
+    if not np.all(np.isfinite(covar)):
+        raise ValueError("covar_params must contain only finite values")
+
+    variances = np.diag(covar)  # [param_i**2 units]
+    if np.any(variances <= 0):
+        raise ValueError(
+            "covar_params must be positive definite to draw parameter "
+            f"samples; its diagonal (variances) is {variances.tolist()}")
+
+    if check_symmetry:
+        # [-], pairwise asymmetry on the correlation scale
+        std = np.sqrt(variances)  # [param units]
+        asymmetry = np.abs(covar - covar.T) / np.outer(std, std)
+        if asymmetry.max() > np.sqrt(np.finfo(float).eps):
+            raise ValueError(
+                "covar_params must be symmetric; largest asymmetry on the "
+                f"correlation scale is {asymmetry.max():.3g}")
+
+    try:
+        return np.linalg.cholesky((covar + covar.T) / 2)
+    except np.linalg.LinAlgError as exc:
+        raise ValueError(
+            "covar_params must be positive definite to draw parameter "
+            f"samples: {exc}") from exc
+
+
+def _isolated_estimator(estimator):
+    """Return a shallow copy of an estimator safe to evaluate and fit.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator; it is not modified.
+
+    Returns
+    -------
+    ParameterEstimation
+        Copy sharing the model callable, its arguments, the data layout
+        and the weighting with ``estimator``, but owning every container
+        that ``optimize_fn`` or the objective callback modify in place.
+
+    Notes
+    -----
+    ``optimize_fn`` and its callbacks rebind estimator attributes
+    (``y_data``, ``params_convg``, ``info_opt``, ``resid_runs``,
+    ``y_model``, ``covar_params`` and others), so rebinding them on the
+    copy leaves the original fit untouched. The exceptions, which are
+    modified in place, are the iteration histories ``params_iter`` and
+    ``objfun_iter`` (appended to while they are lists; ``objfun_iter``
+    stays a list after ``optimize_fn(store_iter=False)``) and the cache
+    ``_observed_roots``. The copy gets its own lists and cache. The solver
+    options need no isolation: ``optimize_fn`` passes the solver a private
+    copy and leaves the stored ``optim_options`` untouched (issue #476).
+    Model callables and their arguments are shared, not copied, so models
+    that close over external objects keep working.
+    """
+    isolated = copy.copy(estimator)
+    for name in ('params_iter', 'objfun_iter'):
+        history = getattr(isolated, name, None)
+        if isinstance(history, list):
+            setattr(isolated, name, list(history))
+
+    roots = getattr(isolated, '_observed_roots', None)
+    if isinstance(roots, dict):
+        isolated._observed_roots = dict(roots)
+
+    return isolated
+
+
+def _fit_bootstrap_sample(estimator, y_sample: list) -> np.ndarray:
+    """Fit one dataset without modifying the fitted estimator.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator whose model, weighting, solver method
+        (``opt_method``) and solver options (``optim_options``) are reused;
+        it is not modified.
+    y_sample : list of numpy.ndarray
+        One dataset per experiment, in ``x_data`` order, with the layout of
+        ``StatisticsClass.get_bootsamples``: shape ``(n_times,
+        n_measured)``, model-grid rows and measured-state columns in the
+        states' units.
+
+    Returns
+    -------
+    numpy.ndarray
+        Optimized parameters, shape ``(num_params,)``, in the model's
+        parameter units.
+
+    Raises
+    ------
+    Exception
+        Whatever ``optimize_fn`` raises for this dataset.
+
+    Notes
+    -----
+    The fit runs on ``_isolated_estimator(estimator)`` with a copy of the
+    fitted estimator's effective ``optim_options``. A stateful model
+    callable is shared and is left at its last evaluation; see
+    ``_restore_model_state``.
+    """
+    isolated = _isolated_estimator(estimator)
+    isolated.y_data = y_sample  # [measured-state units]
+
+    options = estimator.optim_options
+    params, _, _ = isolated.optimize_fn(
+        method=estimator.opt_method,
+        verbose=False, store_iter=False,
+        optim_options=None if options is None else dict(options))
+
+    return params  # [model-parameter units]
+
+
+def _restore_model_state(estimator) -> None:
+    """Re-evaluate the model at the estimator's accepted parameters.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator; it is not modified.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    Exception
+        Whatever the model raises at the accepted parameters.
+
+    Notes
+    -----
+    Refits and evaluations on isolated copies share the estimator's model
+    callable. A stateful callable, such as a ``SimulationExec`` unit
+    operation, is left at its last evaluation; this re-evaluates the model
+    at the accepted ``params_convg``, matching the final refresh that
+    ``optimize_fn`` performs after an LM fit. (After an IPOPT fit, whose
+    last model calls are finite-difference perturbations, the callable ends
+    at the accepted parameters rather than at that perturbed point.)
+
+    The objective is evaluated on ``_isolated_estimator(estimator)``, so
+    every attribute it rebinds or appends to (residuals, predictions,
+    sensitivities, histories) belongs to the copy and the estimator stays
+    unchanged. Nothing is evaluated when the estimator has no accepted
+    parameters (``params_convg``).
+    """
+    accepted = getattr(estimator, 'params_convg', None)  # [param units]
+    if accepted is None:
+        return
+
+    _isolated_estimator(estimator).get_objective(accepted, True)
+
+
+def _restore_model_state_after_error(estimator, failed_step: str) -> None:
+    """Restore the model after a failure without masking that failure.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator whose model callable is restored; it is not
+        modified.
+    failed_step : str
+        Description of the failed operation for the warning message.
+
+    Returns
+    -------
+    None
+
+    Warns
+    -----
+    RuntimeWarning
+        If the model fails at the accepted parameters. The report is
+        dropped when warnings are turned into errors.
+
+    Notes
+    -----
+    Call from an ``except`` block and re-raise afterwards: the caller's
+    exception always takes priority over a restoration failure.
+    """
+    try:
+        _restore_model_state(estimator)
+    except Exception as refresh_error:
+        try:
+            warnings.warn(
+                "Could not restore the model at the accepted parameters "
+                "after {} failed: {}".format(failed_step, refresh_error),
+                RuntimeWarning,
+                stacklevel=3,
+            )
+        except Exception:
+            # A warnings filter set to 'error' turns the report into an
+            # exception; the original error still takes priority.
+            pass
+
+
 class ParallelProblem:
+    """Refit a fitted estimator to one given dataset.
+
+    The dataset replaces the observations of an isolated copy of the
+    estimator, which is then refitted with the estimator's solver method
+    and options, as ``StatisticsClass.bootstrap_params`` does for each
+    bootstrap dataset. The estimator itself is never modified.
+    """
+
     def __init__(self, instance):
+        """Store the fitted estimator.
+
+        Parameters
+        ----------
+        instance : ParameterEstimation
+            Estimator on which ``optimize_fn`` has been run.
+        """
         self.instance = instance
 
     def run_fit(self, sample):
-        self.instance.y_fit = sample
+        """Fit the given dataset and return its parameter estimates.
 
-        # Optimize
-        params, _, _ = self.instance.optimize_fn(
-            method=self.instance.opt_method,
-            verbose=False, store_iter=False,
-            optim_options=self.instance.optim_options)
+        Parameters
+        ----------
+        sample : list of array-like
+            One dataset per experiment, in ``x_data`` order, in the layout
+            of ``StatisticsClass.get_bootsamples`` (one entry of a
+            bootstrap sample): shape ``(n_times, n_measured)`` on the
+            estimator's model grid, measured-state columns in the states'
+            units, NaN where unobserved. A 1-D array of length ``n_times``
+            is accepted for an experiment with one measured state.
 
-        return params
+        Returns
+        -------
+        numpy.ndarray
+            Optimized parameters for ``sample``, shape ``(num_params,)``, in
+            the model's parameter units.
+
+        Raises
+        ------
+        RuntimeError
+            If the estimator has not been fitted (no ``optimize_fn`` run).
+        ValueError
+            If ``sample`` does not hold one array per experiment with the
+            shape of that experiment's observations, holds NaN or infinite
+            values at observed positions, or the estimator stores nested
+            ``MultipleCurveResolution`` observations (#505).
+        Exception
+            Whatever ``optimize_fn`` raises for this dataset.
+
+        Warns
+        -----
+        RuntimeWarning
+            If the fit raises and the model then also fails at the accepted
+            parameters; the fit's exception is still raised.
+
+        Notes
+        -----
+        The fit runs on an isolated copy (see ``_fit_bootstrap_sample``), so
+        the estimator keeps its observations, accepted parameters,
+        residuals, predictions, solver information and histories. A stateful
+        model callable is returned to the accepted parameters afterwards
+        (``_restore_model_state``), also when the fit raises.
+        """
+        estimator = self.instance
+        if getattr(estimator, 'params_convg', None) is None:
+            raise RuntimeError(
+                "ParallelProblem.run_fit needs a fitted estimator; run "
+                "optimize_fn first")
+
+        y_sample = _validated_sample(estimator, sample)
+
+        try:
+            params = _fit_bootstrap_sample(
+                estimator, y_sample)  # [model-parameter units]
+        except Exception:
+            _restore_model_state_after_error(estimator, 'the sample fit')
+            raise
+
+        _restore_model_state(estimator)
+
+        return params  # [model-parameter units]
+
+
+def _validated_sample(estimator, sample) -> list:
+    """Check a refit dataset against the estimator's observation layout.
+
+    Parameters
+    ----------
+    estimator : ParameterEstimation
+        Fitted estimator defining the number of experiments and the shape
+        ``(n_times, n_measured)`` of each experiment's observations.
+    sample : list of array-like
+        One dataset per experiment, in ``x_data`` order [measured-state
+        units].
+
+    Returns
+    -------
+    list of numpy.ndarray
+        Float arrays, one per experiment, with the observations' shapes
+        [measured-state units]; 1-D single-state entries become columns.
+
+    Raises
+    ------
+    ValueError
+        If the estimator stores nested ``'spectra'``/``'non_spectra'``
+        observations (``MultipleCurveResolution``, not supported, #505); if
+        ``sample`` is not a list or tuple with one entry per experiment; if
+        an entry's shape differs from the experiment's observations; or if
+        an entry is NaN or infinite at an observed position.
+
+    Notes
+    -----
+    Observed positions are those of the estimator's observation masks
+    (``x_masks``; every entry when the mask is None). Unobserved entries,
+    which ``get_bootsamples`` sets to NaN, may hold any value: their
+    residuals are zeroed before the fit.
+    """
+    if any(isinstance(observed, dict) for observed in estimator.y_data):
+        raise ValueError(
+            "ParallelProblem.run_fit does not support nested 'spectra'/"
+            "'non_spectra' observations (MultipleCurveResolution); bootstrap "
+            "refits of that layout are tracked in #505")
+
+    num_datasets = estimator.num_datasets
+    if (not isinstance(sample, (list, tuple))
+            or len(sample) != num_datasets):
+        found = (f"a list of {len(sample)} entries"
+                 if isinstance(sample, (list, tuple))
+                 else type(sample).__name__)
+        raise ValueError(
+            f"sample must be a list with one array per experiment "
+            f"({num_datasets}, in x_data order, as one entry of "
+            f"get_bootsamples); got {found}")
+
+    y_sample = []
+    for ind, (values, observed, x_mask) in enumerate(zip(
+            sample, estimator.y_data, estimator.x_masks)):
+        name = estimator.experim_names[ind]
+        expected_shape = np.shape(observed)  # (n_times, n_measured)
+        values = np.asarray(values, dtype=float)  # [measured-state units]
+        if values.ndim == 1 and expected_shape[1:] == (1,):
+            values = values[:, np.newaxis]
+        if values.shape != expected_shape:
+            raise ValueError(
+                f"sample entry {ind} ({name!r}) has shape "
+                f"{np.shape(sample[ind])}; expected {expected_shape} "
+                "(model-grid rows, measured-state columns)")
+
+        observed_mask = (np.ones(expected_shape, dtype=bool) if x_mask is None
+                         else np.asarray(x_mask, dtype=bool))
+        invalid = observed_mask & ~np.isfinite(values)
+        if invalid.any():
+            positions = [tuple(pos) for pos in np.argwhere(invalid).tolist()]
+            raise ValueError(
+                f"sample entry {ind} ({name!r}) is NaN or infinite at "
+                f"observed (row, column) positions {positions}; only "
+                "unobserved entries may be non-finite")
+        y_sample.append(values)
+
+    return y_sample
 
 
 class StatisticsClass:
 
     def __init__(self, estimation_instance, alpha=0.95):
+        """Collect the fitted quantities used by the statistics methods.
+
+        Parameters
+        ----------
+        estimation_instance : ParameterEstimation
+            Fitted estimator (``optimize_fn`` already run): its
+            ``info_opt`` (``'jac'``, ``'fun'``), ``params_convg``,
+            ``param_seed``, ``map_fixed``, ``y_model``, ``resid_runs``,
+            ``name_params``, ``num_data_total``, ``num_params`` and
+            ``x_data`` are read.
+            It is referenced as ``inst`` and not modified.
+        alpha : float, optional
+            Confidence level in (0, 1) [-] of the intervals and regions,
+            e.g. 0.95 for 95 % Student-t intervals. The default is 0.95.
+
+        Notes
+        -----
+        The attribute ``sigma_t`` (always None, never assigned) was removed
+        together with the ``bootstrap_confid`` repair (#400).
+        """
 
         # Values from the instance
         inst = estimation_instance
@@ -81,7 +530,6 @@ class StatisticsClass:
 
         # --------------- Output vals
         self.confid_intervals = None
-        self.sigma_t = None
         self.boot_params = None
 
     def get_intervals(self, covar_params=None, verbose=True, set_self=True):
@@ -315,36 +763,140 @@ class StatisticsClass:
 
         return axes
 
-    def bootstrap_confid(self, num_samples, plot=True):
-        std_samples = np.random.randn(num_samples, self.num_par)
+    def bootstrap_confid(self, num_samples, plot=True, covar_params=None):
+        """Propagate parameter uncertainty into model predictions.
 
-        stdev_params = np.array(list(self.sigma_t.values()))
-        samples = std_samples * stdev_params**2 + self.params
+        Monte-Carlo propagation of the linearized parameter covariance:
+        parameter vectors are drawn from the multivariate normal
+        ``N(params_convg, covar_params)`` and the model is evaluated at
+        each of them.
 
-        # Concentration profiles with the optimum params
-        conc_nominal = self.inst.conc_profile.copy()
+        Parameters
+        ----------
+        num_samples : int
+            Number of parameter draws [-]; at least 1.
+        plot : bool, optional
+            If True, plot the nominal predictions and the sampled
+            predictions of each experiment. The default is True.
+        covar_params : numpy.ndarray, optional
+            Covariance of the optimized parameters, shape
+            ``(num_params, num_params)``, entry ``(i, j)`` in the product of
+            the units of parameters ``i`` and ``j``; symmetric positive
+            definite. The default is the estimator's ``covar_params``, the
+            linearized covariance that ``get_intervals`` uses.
 
-        conc_bootstrap = []
-        for sample in samples:
-            self.inst.assign_params(sample)
-            self.inst.solve_model(self.c_init, time_eval=self.xgrid,
-                                  print_summary=False)
+        Returns
+        -------
+        samples : numpy.ndarray
+            Drawn parameters, shape ``(num_samples, num_params)``, in
+            optimized-parameter (``name_params``) order and units.
+        predictions : list of lists of numpy.ndarray
+            One entry per sample, in ``samples`` order, holding one array
+            per experiment (``x_data`` order) of the model predictions at
+            the measured states, shape ``(n_times, n_measured)`` on that
+            experiment's model grid (``x_model``), in the measured states'
+            units. Unlike ``y_model``, entries are model values also where
+            a state is not observed.
+        fig : matplotlib.figure.Figure or None
+            Figure, or None when ``plot`` is False.
+        axis : numpy.ndarray of matplotlib.axes.Axes or None
+            One axis per experiment, shape ``(num_datasets,)``, or None when
+            ``plot`` is False.
 
-            conc_bootstrap.append(self.inst.conc_profile)
+        Raises
+        ------
+        ValueError
+            If ``num_samples`` is not a positive integer, or the covariance
+            is not a finite, positive-definite ``(num_params, num_params)``
+            matrix; a given ``covar_params`` must also be symmetric on the
+            correlation scale (see ``_covariance_factor``).
+        Exception
+            Whatever the model raises at a drawn parameter vector.
 
-        if plot:
-            fig, axis = plt.subplots()
-            axis.plot(self.xgrid, conc_nominal[:, self.inst.measured_ind])
+        Warns
+        -----
+        RuntimeWarning
+            If a model evaluation raises and the model then also fails at
+            the accepted parameters; the evaluation's exception is still
+            raised.
 
-            lines = axis.lines
-            colors = [line.get_color() for line in lines]
+        Notes
+        -----
+        Each draw is ``theta_s = params_convg + L z_s``, where ``L`` is the
+        lower Cholesky factor of ``covar_params`` (``L L^T = covar_params``)
+        and ``z_s`` holds ``num_params`` independent standard normal draws
+        from NumPy's global generator (``numpy.random.standard_normal``,
+        one ``(num_samples, num_params)`` call), so ``numpy.random.seed``
+        reproduces the samples, as for ``get_bootsamples``. ``L`` factorizes
+        the symmetric part of the covariance; a given ``covar_params`` is
+        rejected unless symmetric to ``sqrt(eps)`` on the correlation scale,
+        while the estimator's own covariance, symmetric in exact arithmetic,
+        is symmetrized without that check. Earlier releases scaled the
+        standard normals by the parameter variances instead of the standard
+        deviations and never ran (#400); they read the attribute
+        ``StatisticsClass.sigma_t``, which was never assigned (always None)
+        and has been removed.
 
-            for array in conc_bootstrap:
-                for ind in range(self.inst.num_measured):
-                    axis.plot(self.xgrid, array[:, ind], color=colors[ind],
-                              alpha=0.02)
+        The model is evaluated with ``get_objective`` on an isolated copy
+        of the estimator, so the estimator keeps its observations, accepted
+        parameters, residuals and predictions. A stateful model callable is
+        returned to the accepted parameters afterwards, also when an
+        evaluation raises. The covariance is a linearization around
+        ``params_convg``; the sampled predictions inherit that
+        approximation.
+        """
+        num_samples = _validated_count(num_samples, 'num_samples')
+        # Lower Cholesky factor [param units]. The estimator's own
+        # covariance is only symmetrized; a user matrix is also checked.
+        if covar_params is None:
+            chol_lower = _covariance_factor(self.inst.covar_params,
+                                            self.num_par,
+                                            check_symmetry=False)
+        else:
+            chol_lower = _covariance_factor(covar_params, self.num_par)
 
-        return samples, conc_bootstrap, fig, axis
+        # [-], independent standard normal draws
+        std_normal = np.random.standard_normal((num_samples, self.num_par))
+        samples = self.params + std_normal @ chol_lower.T  # [param units]
+
+        estimator = _isolated_estimator(self.inst)
+        try:
+            estimator.get_objective(self.params, True)
+            # [measured-state units], per experiment (n_times, n_measured)
+            nominal = [np.array(y_run, dtype=float)
+                       for y_run in estimator.y_runs]
+
+            predictions = []
+            for sample in samples:
+                estimator.get_objective(sample, True)
+                predictions.append([np.array(y_run, dtype=float)
+                                    for y_run in estimator.y_runs])
+        except Exception:
+            _restore_model_state_after_error(self.inst,
+                                             'a sampled model evaluation')
+            raise
+
+        _restore_model_state(self.inst)
+
+        if not plot:
+            return samples, predictions, None, None
+
+        fig, axes = plt.subplots(1, self.inst.num_datasets, squeeze=False)
+        axes = axes[0]
+        for ind, axis in enumerate(axes):
+            grid = self.inst.x_model[ind]  # [x units]
+            nominal_lines = axis.plot(grid, nominal[ind])
+            colors = [line.get_color() for line in nominal_lines]
+            for prediction in predictions:
+                for col, color in enumerate(colors):
+                    axis.plot(grid, prediction[ind][:, col], color=color,
+                              alpha=_ENSEMBLE_LINE_ALPHA)
+
+            axis.set_title(self.inst.experim_names[ind])
+            axis.spines['right'].set_visible(False)
+            axis.spines['top'].set_visible(False)
+
+        return samples, predictions, fig, axes
 
     def _observed_columns(self, ind):
         """Return the observation mask of one experiment's residual columns.
@@ -446,7 +998,11 @@ class StatisticsClass:
         Notes
         -----
         Each state's resampling pool holds only its observed residuals
-        (model minus data, in that state's unit) of one experiment.
+        (model minus data, in that state's unit) of one experiment. Columns
+        stored as data minus model, such as the spectral channels of
+        ``MultipleCurveResolution``, are negated first (the estimator's
+        ``_residual_signs``), so every generated entry is the fitted value
+        minus a drawn model-minus-data residual.
         Unobserved entries have zero residual by construction; drawing them
         would add phantom zero errors and shrink the bootstrap spread. Each
         state is resampled independently, so correlations between
@@ -482,8 +1038,10 @@ class StatisticsClass:
 
         y_boot = []
         for ind in range(self.inst.num_datasets):  # datasets
-            # (n_measured, n_times) [measured-state units]
-            residual = self.residuals[ind].T
+            # (n_measured, n_times) [measured-state units], model minus data
+            signs = self.inst._residual_signs(ind)  # [-] or None
+            residual = (self.residuals[ind] if signs is None
+                        else self.residuals[ind] * signs).T
             y_nominal = self.y_nominal[ind].T
             observed_by_state = self._observed_columns(ind).T
             # (n_measured, n_times) [measured-state units] or None per state
@@ -530,114 +1088,6 @@ class StatisticsClass:
 
         return y_boot
 
-    def _isolated_estimator(self):
-        """Return a shallow copy of the estimator safe to evaluate and fit.
-
-        Returns
-        -------
-        ParameterEstimation
-            Copy sharing the model callable, its arguments, the data layout
-            and the weighting with ``self.inst``, but owning every container
-            that ``optimize_fn`` or the objective callback modify in place.
-
-        Notes
-        -----
-        ``optimize_fn`` and its callbacks rebind estimator attributes
-        (``y_data``, ``params_convg``, ``info_opt``, ``resid_runs``,
-        ``y_model``, ``covar_params`` and others), so rebinding them on the
-        copy leaves the original fit untouched. The exceptions, which are
-        modified in place, are the iteration histories ``params_iter`` and
-        ``objfun_iter`` (appended to while they are lists; ``objfun_iter``
-        stays a list after ``optimize_fn(store_iter=False)``), the cache
-        ``_observed_roots``, and the solver options, which ``optimize_fn``
-        writes into and which callers pass as a separate copy. The copy gets
-        its own lists and cache. Model callables and their arguments are
-        shared, not copied, so models that close over external objects keep
-        working.
-        """
-        estimator = copy.copy(self.inst)
-        for name in ('params_iter', 'objfun_iter'):
-            history = getattr(estimator, name, None)
-            if isinstance(history, list):
-                setattr(estimator, name, list(history))
-
-        roots = getattr(estimator, '_observed_roots', None)
-        if isinstance(roots, dict):
-            estimator._observed_roots = dict(roots)
-
-        return estimator
-
-    def _fit_bootstrap_sample(self, y_sample: list) -> np.ndarray:
-        """Fit one bootstrap dataset without modifying the fitted estimator.
-
-        Parameters
-        ----------
-        y_sample : list of numpy.ndarray
-            One generated dataset per experiment, in ``x_data`` order, with
-            the layout of ``get_bootsamples``: shape ``(n_times,
-            n_measured)``, measured-state columns in the states' units.
-
-        Returns
-        -------
-        numpy.ndarray
-            Optimized parameters, shape ``(num_params,)``, in the model's
-            parameter units.
-
-        Raises
-        ------
-        Exception
-            Whatever ``optimize_fn`` raises for this dataset.
-
-        Notes
-        -----
-        The fit runs on ``_isolated_estimator()``, and the solver receives a
-        copy of the options because ``optimize_fn`` writes keys into it.
-        """
-        estimator = self._isolated_estimator()
-        estimator.y_data = y_sample  # [measured-state units]
-
-        options = self.inst.optim_options
-        params, _, _ = estimator.optimize_fn(
-            method=self.inst.opt_method,
-            verbose=False, store_iter=False,
-            optim_options=None if options is None else dict(options))
-
-        return params  # [model-parameter units]
-
-    def _restore_model_state(self) -> None:
-        """Re-evaluate the model at the accepted parameters.
-
-        Bootstrap refits share the estimator's model callable. A stateful
-        callable, such as a ``SimulationExec`` unit operation, is left at its
-        last bootstrap evaluation; this re-evaluates the model at the
-        accepted ``params_convg``, matching the final refresh that
-        ``optimize_fn`` performs after an LM fit. (After an IPOPT fit, whose
-        last model calls are finite-difference perturbations, the callable
-        ends at the accepted parameters rather than at that perturbed point.)
-
-        Returns
-        -------
-        None
-
-        Raises
-        ------
-        Exception
-            Whatever the model raises at the accepted parameters.
-
-        Notes
-        -----
-        The objective is evaluated on ``_isolated_estimator()``, so every
-        attribute it rebinds or appends to (residuals, predictions,
-        sensitivities, histories) belongs to the copy and the estimator
-        stays unchanged. Nothing is evaluated when the estimator has no
-        accepted parameters (``params_convg``).
-        """
-        accepted = getattr(self.inst, 'params_convg', None)  # [param units]
-        if accepted is None:
-            return
-
-        self._isolated_estimator().get_objective(accepted, True)
-
     def bootstrap_params(self, num_samples: int = 100) -> np.ndarray:
         """Estimate parameters for residual-bootstrap response samples.
 
@@ -664,6 +1114,8 @@ class StatisticsClass:
             at the accepted parameters; the sample's exception is still
             raised, also when warnings are turned into errors (the report is
             then dropped).
+            Also, from ``optimize_fn``, if an IPOPT sample refit terminates
+            unsuccessfully; see Notes.
 
         Raises
         ------
@@ -697,7 +1149,12 @@ class StatisticsClass:
         ``ParameterEstimation.optimize_fn`` also accepts ``'IPOPT'``, whose
         numerical failures surface from cyipopt rather than as a
         ``LinAlgError``. Under that method a failed sample aborts the whole
-        bootstrap run instead of recording a NaN row.
+        bootstrap run instead of recording a NaN row. An unsuccessful IPOPT
+        termination of a sample refit, for example at ``max_iter``, does not
+        raise: ``optimize_fn`` emits its ``RuntimeWarning`` naming the Ipopt
+        status, and the sample's last iterate is stored as its row. When
+        that warning is turned into an error, it propagates like any other
+        sample exception and aborts the run.
         """
         y_samples = self.get_bootsamples(
             num_samples)  # [response-dependent units]
@@ -714,8 +1171,8 @@ class StatisticsClass:
 
                 # Optimize
                 try:
-                    params = self._fit_bootstrap_sample(
-                        y_sample)  # [model-parameter units]
+                    params = _fit_bootstrap_sample(
+                        self.inst, y_sample)  # [model-parameter units]
                 except np.linalg.LinAlgError as exc:
                     warnings.warn(
                         "Bootstrap optimization failed for sample {}: "
@@ -730,7 +1187,7 @@ class StatisticsClass:
         except Exception as error:
             # Restore shared model state, but never mask the sample error.
             try:
-                self._restore_model_state()
+                _restore_model_state(self.inst)
             except Exception as refresh_error:
                 try:
                     warnings.warn(
@@ -747,7 +1204,7 @@ class StatisticsClass:
             raise error
         # Interrupts (BaseException) propagate without further model runs.
 
-        self._restore_model_state()
+        _restore_model_state(self.inst)
         toc = time.time()  # [s]
 
         self.boot_params = boot_params  # [model-parameter units]
@@ -818,22 +1275,75 @@ class StatisticsClass:
         return sigma_y, sens_ord
 
     def plot_boots(self, num_samples, ind, fig_size=None):
-        bootsamples = self.get_bootsamples(num_samples)
-        num_div = bootsamples[ind].shape[1] // self.inst.num_xs[ind]
-        y_data = np.split(bootsamples[ind], num_div, axis=1)
+        """Plot residual-bootstrap datasets of one experiment.
 
-        nplot = len(y_data)
-        ncol = 2
-        nrow = nplot // ncol + nplot % ncol
+        Parameters
+        ----------
+        num_samples : int
+            Number of bootstrap datasets drawn with ``get_bootsamples`` [-];
+            at least 1.
+        ind : int
+            Experiment index in ``x_data`` order.
+        fig_size : tuple of float, optional
+            Figure size (width, height) [in].
 
-        fig, axes = plt.subplots(nrow, ncol, figsize=fig_size)
+        Returns
+        -------
+        fig : matplotlib.figure.Figure
+            Figure with one subplot per measured column of experiment
+            ``ind``; unused grid cells are removed.
+        axes : numpy.ndarray of matplotlib.axes.Axes
+            The subplots, shape ``(n_measured,)``, in measured-column
+            order. Subplot ``col`` holds one line per dataset, in
+            ``samples`` order: the observed entries of column ``col``
+            against the experiment's model grid (``x_model[ind]``).
+        samples : list of numpy.ndarray
+            The plotted datasets: ``get_bootsamples(num_samples)[ind]``,
+            ``num_samples`` arrays of shape ``(n_times, n_measured)`` in the
+            measured states' units, NaN where unobserved.
 
-        axes = np.atleast_1d(axes)
+        Raises
+        ------
+        ValueError
+            If ``num_samples`` is not a positive integer or ``ind`` is not
+            an experiment index.
 
-        for ind, data in enumerate(y_data):
-            axes.flatten()[ind].plot(self.inst.x_data[0], data.T, '-o',
-                                     mfc='None')
+        Notes
+        -----
+        Datasets are drawn from NumPy's global generator, as in
+        ``get_bootsamples``; nothing on the estimator changes. Unobserved
+        entries (staggered grids, missing values, measurements absent from
+        the experiment) are omitted from the lines, so a column without
+        observations shows an empty subplot.
+        """
+        num_samples = _validated_count(num_samples, 'num_samples')
+        num_datasets = self.inst.num_datasets
+        if (isinstance(ind, bool) or not isinstance(ind, (int, np.integer))
+                or not 0 <= ind < num_datasets):
+            raise ValueError(
+                f"ind must be an experiment index from 0 to "
+                f"{num_datasets - 1}; got {ind!r}")
 
-        if nplot < len(axes.flatten()):
-            fig.delaxes(axes.flatten()[-1])
-        return fig, axes
+        samples = self.get_bootsamples(num_samples)[ind]
+        grid = self.inst.x_model[ind]  # [x units], model grid of the rows
+        observed = self._observed_columns(ind)  # (n_times, n_measured)
+
+        num_plots = samples[0].shape[1]
+        num_cols = min(_BOOT_PLOT_COLUMNS, num_plots)
+        num_rows = -(-num_plots // num_cols)  # ceiling division
+
+        fig, axes = plt.subplots(num_rows, num_cols, figsize=fig_size,
+                                 squeeze=False)
+        axes_flat = axes.flatten()
+        for col in range(num_plots):
+            rows = observed[:, col]
+            # (n_observed, num_samples) [measured-state unit]
+            data = np.column_stack([sample[rows, col] for sample in samples])
+            axes_flat[col].plot(grid[rows], data, '-o', mfc='None')
+            axes_flat[col].set_title(
+                f'{self.inst.experim_names[ind]}, column {col}')
+
+        for axis in axes_flat[num_plots:]:
+            fig.delaxes(axis)
+
+        return fig, axes_flat[:num_plots], samples

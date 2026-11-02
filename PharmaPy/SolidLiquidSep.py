@@ -16,9 +16,11 @@ from typing import Callable, Optional, Union
 import numpy as np
 from numpy.typing import ArrayLike
 from PharmaPy._assimulo import CVode, Explicit_Problem
-from PharmaPy.Commons import high_resolution_fvm, trapezoidal_rule, series_erfc
+from PharmaPy.Commons import (_real_float_array, high_resolution_fvm,
+                              series_erfc, trapezoidal_rule)
 from PharmaPy.Phases import classify_phases
 from PharmaPy.MixedPhases import Slurry, Cake
+from PharmaPy.Presence import SpeciesPresence
 
 from PharmaPy.Commons import (unpack_states, reorder_pde_outputs,
                               eval_state_events, handle_events,
@@ -568,6 +570,10 @@ class DeliquoringStep:
         ValueError
             If the span tolerance, upstream coordinates, or field shapes
             are invalid, or a concentration is negative or nonfinite.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            species present in the initial field (see Notes) has no
+            ``rho_liq``.
 
         Warns
         -----
@@ -601,6 +607,16 @@ class DeliquoringStep:
         over z/height [-], including the full first and last control volumes.
         A uniform pure component has zero reduction contrast; its reduced
         concentration is zero and reconstruction retains its pure density.
+
+        Species presence (issue #425): a species whose concentration is
+        exactly zero at every node of the remapped initial field is absent.
+        Deliquoring only drains the pore liquid, so it stays absent. Its
+        pure density is not evaluated, so it needs no ``rho_liq``, and
+        ``rho_j`` holds a 0.0 placeholder for it: its reduction contrast
+        and mean concentration are then zero, so its reduced concentration
+        is zero and its reconstructed concentration, the published fields
+        and the outlet liquid hold it at exactly zero, whatever its reduced
+        state. The pure density of every present species is required.
         """
         z_dim = self.z_centers * self.cake_height  # [m]
         sat_initial, conc_initial = _remap_cake_fields(
@@ -613,7 +629,10 @@ class DeliquoringStep:
                           UserWarning, stacklevel=2)
         sat_initial = np.clip(sat_initial, saturation_minimum, 1)  # [-]
         sat_reduced = (sat_initial - self.sat_inf) / (1 - self.sat_inf)  # [-]
-        self.rho_j = self.Liquid_1.getDensityPure()[0]  # [kg/m**3]
+        presence = SpeciesPresence(self.Liquid_1.num_species)
+        species_present = presence.record(conc_initial)  # [-], bool per species
+        self.rho_j = self.Liquid_1.getDensityPure(
+            weights=species_present.astype(float))[0]  # [kg/m**3], 0.0 if absent
         self.conc_mean_init = np.tile(
             self.delta_z @ conc_initial, (self.num_nodes, 1))  # [kg/m**3]
         contrast = self.rho_j - self.conc_mean_init  # [kg/m**3]
@@ -1319,12 +1338,42 @@ class Filter:
         -----
         A prior solve may have resolved a callable into numeric params;
         the underlying callable still makes that resistance non-estimable.
+        The rules are those of ``validate_param_seed``.
+        """
+        # Reject callables before converting the configured values.
+        self._check_estimation_resistances(None)
+        physical_params = np.array((self.alpha, self.r_medium), dtype=float)  # [m/kg, 1/m]
+        self._check_estimation_resistances(physical_params)
+        return np.log(physical_params) if self.log_params else physical_params
+
+    def _check_estimation_resistances(self, physical_params: Optional[np.ndarray]) -> None:
+        """Apply the Filter's estimability and seed-domain rules.
+
+        Parameters
+        ----------
+        physical_params : ndarray or None
+            Seed resistances in physical units, shape (2,): alpha [m/kg]
+            and medium resistance [1/m]. None checks only estimability.
+
+        Raises
+        ------
+        ValueError
+            If a configured resistance (alpha or r_medium) is callable,
+            or a seed resistance is nonfinite or nonpositive.
+
+        Notes
+        -----
+        Callable resistances depend on the pressure drop and cannot be
+        represented by a constant estimation parameter. Positive medium
+        resistance is required for the zero-filtrate ODE startup in either
+        parameterization; positive alpha is a physical requirement.
         """
         if any(callable(value) for value in (self.alpha, self.r_medium)):
             raise ValueError(
                 "Callable resistances are not estimable; configure numeric "
                 "alpha [m/kg] and medium resistance [1/m] before estimation.")
-        physical_params = np.array((self.alpha, self.r_medium), dtype=float)  # [m/kg, 1/m]
+        if physical_params is None:
+            return
         if (not np.all(np.isfinite(physical_params)) or physical_params[0] <= 0
                 or physical_params[1] <= 0):
             raise ValueError(
@@ -1333,7 +1382,51 @@ class Filter:
                 "resistance is required for the zero-filtrate startup in either "
                 "parameterization; "
                 f"received {physical_params}.")
-        return np.log(physical_params) if self.log_params else physical_params
+
+    def validate_param_seed(self, param_seed: ArrayLike) -> None:
+        """Validate an explicit estimation seed on the declared basis.
+
+        Parameters
+        ----------
+        param_seed : array-like
+            Real (integer or floating-point) seed with shape (2,), ordered
+            as alpha and medium resistance. With log_params=False, units
+            are [m/kg] and [1/m]. With log_params=True, entries are natural
+            logarithms of the SI numerical values [-]. The seed is neither
+            modified nor converted for the caller.
+
+        Returns
+        -------
+        None
+
+        Raises
+        ------
+        ValueError
+            If the seed is ragged or not real numbers (for example a
+            dictionary, strings, booleans or complex numbers, which are not
+            coerced), does not have shape (2,), a configured resistance is
+            callable, or the seed's physical resistances (the seed itself,
+            or its exponential when log_params is True) are nonfinite or
+            nonpositive. The last two are the rules of ``param_seed``,
+            applied to a supplied seed instead of the configured
+            resistances. No other exception type is raised for the seed.
+
+        Notes
+        -----
+        The configured alpha and r_medium are consulted only to reject
+        callable resistances; their values are not read as a seed and are
+        not changed. Logarithms that overflow or underflow on
+        exponentiation are rejected, as in ``solve_unit``.
+        """
+        message = ("Filter estimation seeds hold alpha and medium resistance "
+                   "as two real numbers, shape (2,); received "
+                   f"{param_seed!r}.")
+        seed = _real_float_array(param_seed, message)  # [m/kg, 1/m] or [-]
+        if seed.shape != (2,):
+            raise ValueError(message)
+        with np.errstate(over='ignore', under='ignore'):
+            physical_params = np.exp(seed) if self.log_params else seed  # [m/kg, 1/m]
+        self._check_estimation_resistances(physical_params)
 
     def reset(self) -> None:
         """Reset the batch clock while preserving physical parameters.
@@ -2036,7 +2129,9 @@ class DisplacementWashing:
         vel : float
             Superficial liquid velocity [m/s].
         diff : ndarray
-            Effective axial diffusivities [m**2/s], shape (num_species,).
+            Effective axial diffusivities [m**2/s], shape (num_evaluated,):
+            one entry per evaluated species, the present species from
+            ``solve_unit`` (issue #425).
         lambd : float
             Adsorption correction [-].
 
@@ -2044,7 +2139,9 @@ class DisplacementWashing:
         -------
         ndarray
             Normalized concentration [-], shape (num_nodes, num_times,
-            num_species), with one representing the initial liquid.
+            num_evaluated), in the order of ``diff``, with one representing
+            the initial liquid. ``solve_unit`` scatters it back to
+            num_species columns, with absent species exactly zero.
 
         Notes
         -----
@@ -2079,15 +2176,19 @@ class DisplacementWashing:
         l_total : float
             Cake height [m].
         diff : ndarray
-            Effective axial diffusivities [m**2/s], shape (num_species,).
+            Effective axial diffusivities [m**2/s], shape (num_evaluated,):
+            one entry per evaluated species, the present species from
+            ``solve_unit`` (issue #425).
         lambd : float
             Adsorption correction [-].
 
         Returns
         -------
         ndarray
-            Normalized concentration [-], shape (num_nodes, num_species),
-            with one representing the initial liquid.
+            Normalized concentration [-], shape (num_nodes, num_evaluated),
+            in the order of ``diff``, with one representing the initial
+            liquid. ``solve_unit`` scatters it back to num_species columns,
+            with absent species exactly zero.
 
         Notes
         -----
@@ -2144,6 +2245,10 @@ class DisplacementWashing:
         ValueError
             If time_vals is supplied with dynamic=False, which computes only
             the profile at the washing-completion time.
+        MissingPropertyError
+            A subclass of ``AttributeError`` and ``ValueError``. If a
+            present species (see Notes) has no ``diffusivity`` with respect
+            to the solvent, or the solvent has no ``rho_liq``.
 
         Notes
         -----
@@ -2169,15 +2274,41 @@ class DisplacementWashing:
         resistance. Use that same porosity for adsorption, Darcy flow, and
         effluent and retained inventories. The washing diameter sets area and
         height without repacking the attached cake.
+
+        Species presence (issue #425): a species is present if its initial
+        concentration is nonzero at some node of the remapped field, or if
+        it is the solvent, which the wash liquid supplies as the pure
+        solvent at its density ``rho_liq`` [kg/m**3]. An absent species has
+        no initial or inlet concentration, so its profile is exactly zero
+        whatever its dispersion: the analytical solution is evaluated for
+        the present species only, an absent species needs no
+        ``diffusivity`` and is returned at exactly zero, also in the
+        normalized profile, whose ratio (c - c_in) / (c_0 - c_in) is
+        undefined for it. Earlier releases required the diffusivity of
+        every species and returned a data-dependent normalized profile for
+        an absent one.
         """
         if not dynamic and time_vals is not None:
             raise ValueError("time_vals cannot be supplied with dynamic=False; "
                              "static washing returns the completion profile.")
+        # ---------- Initial field and species presence (issue #425)
+        num_species = self.Liquid_1.num_species  # [-]
+        cake_height = self.CakePhase.cake_vol / self.cross_area  # [m]
+        z_vals = np.linspace(0, cake_height, self.num_nodes)  # [m], axial node positions
+        _, c_zero = _remap_cake_fields(
+            self.CakePhase, z_vals, num_species)  # [-], [kg/m**3]
+        wash_species = np.zeros(num_species)  # [-], 1 for the wash solvent
+        wash_species[self.solvent_idx] = 1.0
+        presence = SpeciesPresence(num_species)
+        present = presence.record(c_zero, wash_species)  # [-], bool per species
+
         # ---------- Physical properties
         # Liquid
         visc_liq_per_node = self.Liquid_1.getViscosity()
         visc_liq = np.mean(visc_liq_per_node)
-        diff_pure = self.Liquid_1.getDiffusivityPure(wrt=self.solvent_idx)
+        diff_pure = self.Liquid_1.getDiffusivityPure(
+            wrt=self.solvent_idx,
+            weights=present.astype(float))  # [m**2/s], 0.0 if absent
         epsilon = self.CakePhase.porosity  # [-], same packing as cake volume and resistance
         lambd_ads = 1 / (1 - self.k_ads + self.k_ads/epsilon)
 
@@ -2186,17 +2317,13 @@ class DisplacementWashing:
         alpha = self.CakePhase.alpha
 
         # Cake
-        cake_height = self.CakePhase.cake_vol / self.cross_area  # m
         vel_liq = deltaP / visc_liq / (alpha * dens_sol * cake_height *
                                        (1 - epsilon) + self.resist_medium)
-        diff = self.get_diffusivity(vel_liq, diff_pure)  # [m**2/s]
+        diff = self.get_diffusivity(vel_liq, diff_pure[present])  # [m**2/s], present species
 
-        z_vals = np.linspace(0, cake_height, self.num_nodes)
-        _, c_zero = _remap_cake_fields(
-            self.CakePhase, z_vals, self.Liquid_1.num_species)  # [-], [kg/m**3]
-
-        c_inlet = np.zeros(self.Liquid_1.num_species)
-        c_inlet[self.solvent_idx] = self.Liquid_1.rho_liq[self.solvent_idx]
+        c_inlet = np.zeros(num_species)  # [kg/m**3]
+        c_inlet[self.solvent_idx] = self.Liquid_1.getDensityPure(
+            weights=wash_species)[0][self.solvent_idx]  # [kg/m**3], pure wash solvent
 
         # ---------- Solve
         time_total = wash_ratio * cake_height / vel_liq
@@ -2210,15 +2337,18 @@ class DisplacementWashing:
         self.num_t = len(time_vals)
 
         if dynamic:
-            conc_adim = self.material_balance(z_vals, time_vals, vel_liq, diff,
-                                              lambd_ads)
-
-            conc_star = conc_adim[:, -1]
+            conc_adim_present = self.material_balance(
+                z_vals, time_vals, vel_liq, diff, lambd_ads)  # [-]
         else:
-            conc_adim = self.material_bce(z_vals, wash_ratio, vel_liq,
-                                          cake_height, diff, lambd_ads)
+            conc_adim_present = self.material_bce(
+                z_vals, wash_ratio, vel_liq, cake_height, diff,
+                lambd_ads)  # [-]
 
-            conc_star = conc_adim
+        # Absent species keep their zero normalized profile.
+        conc_adim = np.zeros(conc_adim_present.shape[:-1]
+                             + (num_species,))  # [-]
+        conc_adim[..., present] = conc_adim_present
+        conc_star = conc_adim[:, -1] if dynamic else conc_adim  # [-]
 
         with np.errstate(under='ignore'):  # assembly may round vanishing tails to zero
             conc = conc_star * (c_zero - c_inlet) + c_inlet

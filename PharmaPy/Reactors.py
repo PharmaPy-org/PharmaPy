@@ -15,8 +15,9 @@ from PharmaPy.Connections import get_inputs_new
 
 from PharmaPy.Plotting import plot_function, plot_distrib
 from PharmaPy.Results import DynamicResult
-from PharmaPy.ProcessControl import analyze_controls
+from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 from PharmaPy.CheckModule import check_modeling_objects
+from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.jac_module import numerical_jac_central
 from PharmaPy.ThermoModule import MissingPropertyError
 
@@ -105,6 +106,69 @@ def _requested_rows(time_profile, requested_times) -> np.ndarray:
         rows[index] = matches[min(count, matches.size - 1)]
         replicates[matches[0]] = count + 1
     return rows
+
+
+def _charge_time_only(time_grid, start_time) -> bool:
+    """Tell whether every requested output time is the integration start.
+
+    Parameters
+    ----------
+    time_grid : array_like or None
+        Absolute output times [s] that ``solve_unit`` passes to CVode,
+        shape ``(num_times,)``, or None when it integrates a ``runtime``.
+    start_time : float
+        Absolute start time [s] of the integration, CVode's ``t0``: the
+        charge time of a reset reactor.
+
+    Returns
+    -------
+    bool
+        True if ``time_grid`` is given, not empty, and every entry equals
+        ``start_time``.
+
+    Notes
+    -----
+    Times are compared by exact equality, on the same absolute floats
+    (offsets plus elapsed time) that CVode receives, so the rule agrees
+    with the solver's own start time and with the exact matching of
+    ``_requested_rows``. Such a grid has zero integration duration, and
+    every requested row is the charged state. A time that differs from
+    the start by even one unit in the last place is a genuine output
+    point after the charge: CVode integrates to it or reports its own
+    error, and any tolerance would instead replace a requested state
+    after the charge by the charged state.
+    """
+    if time_grid is None:
+        return False
+    grid = np.asarray(time_grid, dtype=float)  # [s]
+    return bool(grid.size) and bool(np.all(grid == start_time))
+
+
+def _reject_params_control(params_control) -> None:
+    """Reject the unsupported ``params_control`` argument of ``solve_unit``.
+
+    Parameters
+    ----------
+    params_control : object
+        Value passed as ``params_control``. The argument never had an
+        effect on a tank-reactor solve; it is kept in its position only so
+        that positional arguments after it bind as in earlier releases.
+
+    Returns
+    -------
+    None
+
+    Raises
+    ------
+    ValueError
+        If ``params_control`` is not None.
+    """
+    if params_control is not None:
+        raise ValueError(
+            "params_control is not supported by solve_unit and never had an "
+            "effect; configure the reactor's controls (the controls "
+            "constructor argument) or pass per-experiment control modifiers "
+            "to paramest_wrapper(..., modify_controls=...)")
 
 
 def check_stoichiometry(stoich, mws):
@@ -421,21 +485,7 @@ class _BaseReactor:
         self.temp_control = None
         self.resid_time = None
         self.oper_mode = None
-        # analyze_controls fills defaults in records; copy to preserve caller data.
-        self.controls = analyze_controls({
-            name: dict(control) if isinstance(control, dict) else control
-            for name, control in (controls or {}).items()})
-        for name, control in self.controls.items():
-            if set(control) != {'fun', 'args', 'kwargs'}:
-                raise ValueError(
-                    f"Control {name!r} must be callable or have exactly "
-                    "fun, args, kwargs keys")
-            if not callable(control['fun']):
-                raise TypeError(f"Control {name!r} 'fun' must be callable")
-            if (not isinstance(control['args'], (tuple, list))
-                    or not isinstance(control['kwargs'], dict)):
-                raise TypeError(
-                    f"Control {name!r} requires sequence args and dictionary kwargs")
+        self.controls = normalize_controls(controls)
 
         if state_events is None:
             state_events = []
@@ -605,6 +655,85 @@ class _BaseReactor:
             self._simulating = False
             self._missing_data_error = None
             self._missing_data_traceback = None
+
+    def _charge_state_profile(self, states_init: np.ndarray,
+                              eval_sens: bool) -> tuple:
+        """Return the charged state as the profile of a zero-duration solve.
+
+        Parameters
+        ----------
+        states_init : numpy.ndarray
+            Initial states in ``name_states`` order, as CVode would receive
+            them, shape ``(num_states,)``: concentrations [mol/L], the
+            optional Semibatch volume [m**3] and active temperatures [K].
+        eval_sens : bool
+            Whether to also return parameter sensitivities.
+
+        Returns
+        -------
+        time : numpy.ndarray
+            The start time [s], shape ``(1,)``. Requested replicates of it
+            share this row, as they share CVode's initial output row.
+        states : numpy.ndarray
+            Copy of ``states_init``, shape ``(1, num_states)``.
+        sensitivities : list of numpy.ndarray, optional
+            Returned only for ``eval_sens=True``: one zero array of shape
+            ``(1, num_states)`` per kinetic parameter, in
+            ``Kinetics.concat_params()`` order (CVode's ``p0``), in state
+            units per parameter unit. The initial states do not depend on
+            the kinetic parameters, so their sensitivities are exactly zero,
+            as the integrated path also sets at its initial row.
+
+        Notes
+        -----
+        Nothing is integrated, so ``_discard_solve_artifacts`` replaces the
+        artifacts of any earlier solve: profiles become None and the heat
+        duty and outlet describe the charge. The liquid phase,
+        ``elapsed_time`` and ``profiles_runs`` keep the charged state that
+        the solve started from.
+        """
+        time = np.array([self.elapsed_time], dtype=float)  # [s]
+        # Copy of the charge, shape (1, num_states).
+        states = np.array(states_init, dtype=float,
+                          ndmin=2)  # [mol/L], [m**3], [K]
+        self._discard_solve_artifacts(states[0])
+        if not eval_sens:
+            return time, states
+
+        num_params = len(self.Kinetics.concat_params())  # [-]
+        sensitivities = [np.zeros_like(states)
+                         for _ in range(num_params)]  # [state units/param units]
+        return time, states, sensitivities
+
+    def _discard_solve_artifacts(self, charged_states: np.ndarray) -> None:
+        """Replace per-solve artifacts after a solve without integration.
+
+        Parameters
+        ----------
+        charged_states : numpy.ndarray
+            Charged states in ``name_states`` order, shape
+            ``(num_states,)``: concentrations [mol/L], the optional
+            Semibatch volume [m**3] and active temperatures [K]. Unused
+            here; subclasses that store a terminal state use it.
+
+        Notes
+        -----
+        Profile artifacts, which only an integration defines, become None:
+        ``result`` (as before any solve, when it is absent), ``sensit`` and
+        ``outputs`` (their values on a fresh unit). Artifacts that describe
+        the reactor at the end of the evaluation take the charge: the
+        cumulative ``heat_duty`` [J] since the reset is recomputed over the
+        retained ``profiles_runs`` (empty after the
+        ``paramest_wrapper`` reset, so [0, 0] J with ``duty_type`` [0, 0]),
+        and ``Outlet`` is ``Liquid_1``, the charged holdup that a Batch
+        solve also publishes. ``CSTR`` overrides the outlet and adds its
+        solver profiles.
+        """
+        self.result = None
+        self.sensit = None
+        self.outputs = None
+        self._finalize_tank_heat_duty()
+        self.Outlet = self.Liquid_1
 
     def _structural_presence(self) -> np.ndarray:
         """Mark species with a nonzero stoichiometric coefficient.
@@ -1416,6 +1545,34 @@ class _BaseReactor:
         di_out = flatten_states(self.profiles_runs)
         return di_out
 
+    def _participating_state_columns(self) -> np.ndarray:
+        """Locate the participating-species concentrations in the states.
+
+        Returns
+        -------
+        numpy.ndarray
+            Integer column indices into a state profile in ``name_states``
+            order, as returned by ``solve_unit``, shape
+            ``(Kinetics.num_species,)`` and in ``Kinetics.partic_species``
+            order. Every indexed column holds a molar concentration [mol/L].
+
+        Notes
+        -----
+        The map follows the state layout recorded by ``set_names``: the
+        offset of the ``mole_conc`` block comes from ``name_states`` and
+        ``dim_states``, and each participating species is found by name in
+        the block's ``index``. ``BatchReactor`` integrates only the
+        participating species, so its map is ``0, ..., num_species - 1``.
+        ``CSTR`` and ``SemibatchReactor`` integrate every phase species, so
+        their map holds the positions of the participating species among
+        the phase species (issue #497).
+        """
+        block = self.name_states.index('mole_conc')
+        offset = int(sum(self.dim_states[:block]))  # columns before the block
+        names = list(self.states_di['mole_conc']['index'])
+        return np.array([offset + names.index(name)
+                         for name in self.Kinetics.partic_species], dtype=int)
+
     def paramest_wrapper(self, params, t_vals, modify_phase=None,
                          modify_controls=None, reord_sens=True, run_args={}):
         """Reset and evaluate a reactor for parameter estimation.
@@ -1434,7 +1591,13 @@ class _BaseReactor:
             If no amount key is present, retain the charged volume [m**3].
             An explicit amount follows the phase's mass/volume/moles precedence.
         modify_controls : dict, optional
-            Replacement control parameters; units follow the controlled state.
+            Control modifier of this experiment: configured control names
+            mapped to partial control records. ``fun`` and ``args`` replace
+            the configured entries and ``kwargs`` is merged key by key, for
+            example ``{'temp': {'kwargs': {'slope': 0.05}}}`` with a slope in
+            [K/s] for a control ``fun(time, slope=0.0)`` returning [K].
+            Argument units are those of the control function. None or an
+            empty dictionary evaluates the configured controls.
         reord_sens : bool, optional
             If True, stack time-by-parameter sensitivities by state. Otherwise
             retain the parameter-by-time-by-state layout. Defaults to True.
@@ -1444,40 +1607,95 @@ class _BaseReactor:
         Returns
         -------
         c_prof : numpy.ndarray
-            Species molar concentrations [mol/L], shape
-            ``(num_times, kinetics.num_species)``: exactly one row per
+            Molar concentrations of the participating species [mol/L],
+            shape ``(num_times, Kinetics.num_species)``, with one column per
+            species in ``Kinetics.partic_species`` order for every tank
+            reactor, whether it integrates only those species (batch) or
+            all phase species (CSTR, semibatch; see
+            ``_participating_state_columns``). Exactly one row per
             requested time in ``t_vals`` order, with replicate times
-            repeated. The initial state is included only if requested.
+            repeated. The initial state is included only if requested; a
+            grid of charge-time samples only returns the charged state in
+            every row (see the Notes).
         sens : numpy.ndarray, optional
-            Returned with ``c_prof`` only when ``return_sens`` is True.
-            Sensitivities have units of each state per kinetic parameter unit,
-            with the same rows as ``c_prof``; their layout follows
-            ``reord_sens``.
+            Returned with ``c_prof`` only when ``return_sens`` is True:
+            derivatives of the ``c_prof`` entries with respect to every
+            kinetic parameter in ``Kinetics.concat_params()`` order, in
+            [mol/L per parameter unit]. They cover exactly the columns of
+            ``c_prof`` and its rows; sensitivities of other integrated
+            states, such as the reactor and jacket temperatures of a
+            non-isothermal reactor, are not returned (issue #498). With
+            ``reord_sens=True`` the shape is
+            ``(Kinetics.num_species * num_times, num_params)``, state-major:
+            the rows of the first ``c_prof`` column over the requested
+            times, then those of the next column. With ``reord_sens=False``
+            it is ``(num_params, num_times, Kinetics.num_species)``, with
+            ``num_params = len(Kinetics.concat_params())``.
 
         Raises
         ------
+        TypeError
+            If ``modify_controls``, one of its entries, or an entry's
+            ``kwargs`` is not a dictionary, or the merged control record has
+            a non-callable ``fun`` or non-sequence ``args``. Raised before
+            the reactor is reset or integrated.
         ValueError
-            If a requested time is absent from the solver output: CVode's
+            If ``modify_controls`` names a control that is not configured or
+            an entry has keys other than ``fun``, ``args`` and ``kwargs``;
+            raised before the reactor is reset or integrated.
+            Also if a requested time is absent from the solver output: CVode's
             default (non-continuous) output can omit requested points inside
             its last internal step before the end time (pass
             ``run_args={'sundials_opts': {'report_continuously': True}}``
             or a ``maxh`` below the sample spacing), the integration ended
             early (terminating state event or stop), or the grid decreases.
+        NotImplementedError
+            If ``return_sens`` is True for a reactor without direct
+            sensitivity evaluation (``CSTR``, ``SemibatchReactor``), from
+            ``solve_unit``; also for a grid of charge-time samples only.
 
         Notes
         -----
         Composition-only modifiers preserve the reset charged volume used by
         geometry and initial states, rather than conserving liquid mass.
-        The supplied modifier dictionary is not changed.
+        The supplied modifier dictionaries are not changed.
+        Each call evaluates a new copy of the configured ``controls`` with
+        ``modify_controls`` applied (see
+        ``ProcessControl.apply_control_modifier``) and
+        restores the configured ``controls`` object afterwards, also when
+        the evaluation raises. Successive calls, such as the experiments of
+        one objective evaluation, therefore never inherit another call's
+        modifier: a call without a modifier uses the configured controls.
+        The reported ``result`` describes the modified controls. Modifiers
+        cannot add or remove controls, so the integrated states are those
+        of the configured reactor.
         CVode reports the initial state and merges repeated initial times,
         so rows are selected by requested time (``_requested_rows``) before
         any sensitivity reordering; a grid that starts at the initial time
         without initial replicates is returned unchanged.
-        ``t_vals`` must contain at least one time after the charge time. A
-        grid made only of charge-time samples, such as ``[0.0]``, has zero
-        integration duration and currently fails inside CVode with
-        ``IndexError`` (issue #418).
+        A grid made only of charge-time samples, such as ``[0.0]`` or
+        ``[0.0, 0.0]``, has zero integration duration. The charge time is
+        the solver's start time, the reset elapsed time, and is matched
+        exactly (see ``_charge_time_only``). Such a grid is not integrated:
+        ``solve_unit`` returns the charged state after its usual checks,
+        so every requested row is the charge (replicates repeated), with
+        the columns and units of an integrated grid, and the
+        sensitivities, when returned, are exactly zero in the same layout
+        (issue #418). The reactor keeps its charged state at the reset
+        elapsed time, and the artifacts of earlier solves are replaced
+        (``_discard_solve_artifacts``): ``result``, ``sensit``, ``outputs``
+        and the CSTR and semibatch ``statesProf`` are None, ``heat_duty``
+        is [0, 0] J, the CSTR and semibatch ``states`` hold the charged
+        states, and ``Outlet`` is the charged ``Liquid_1`` (None for a
+        CSTR, whose outlet stream needs a flow history).
+        Units without sensitivity support (CSTR, semibatch)
+        raise the same ``NotImplementedError`` for such a grid as for any
+        other when ``return_sens`` is True.
         """
+        # Validate and build this call's controls before changing any state.
+        experiment_controls = apply_control_modifier(
+            self.controls, modify_controls, 'reactor')
+
         self.reset()
 
         if isinstance(modify_phase, dict):
@@ -1485,38 +1703,47 @@ class _BaseReactor:
                 modify_phase = {'vol': self.Liquid_1.vol, **modify_phase}  # vol [m**3]
             self.Liquid_1.updatePhase(**modify_phase)
 
-        if isinstance(modify_controls, dict):
-            self.params_control = modify_controls
-
         self.Kinetics.set_params(params)
         self.elapsed_time = 0
 
-        if self.return_sens:
-            t_prof, states, sens = self.solve_unit(time_grid=t_vals,
-                                                   verbose=False,
-                                                   eval_sens=True, **run_args)
-            rows = _requested_rows(t_prof, t_vals)
-            states = states[rows]
-            sens = [block[rows] for block in sens]
+        configured_controls = self.controls
+        self.controls = experiment_controls
+        try:
+            if self.return_sens:
+                t_prof, states, sens = self.solve_unit(time_grid=t_vals,
+                                                       verbose=False,
+                                                       eval_sens=True,
+                                                       _charge_state_rows=True,
+                                                       **run_args)
+                rows = _requested_rows(t_prof, t_vals)
+                species_columns = self._participating_state_columns()
+                c_prof = states[rows][:, species_columns]  # [mol/L]
+                # Per kinetic parameter, the sensitivities of the returned
+                # concentrations only, without the temperature states of a
+                # non-isothermal reactor [mol/L per parameter unit].
+                sens = [block[rows][:, species_columns] for block in sens]
 
-            if reord_sens:
-                sens = reorder_sens(sens)
+                if reord_sens:
+                    sens = reorder_sens(sens)
+                else:
+                    sens = np.stack(sens)
+
+                return c_prof, sens
+
             else:
-                sens = np.stack(sens)
+                t_prof, states = self.solve_unit(time_grid=t_vals,
+                                                 verbose=False,
+                                                 eval_sens=False,
+                                                 _charge_state_rows=True,
+                                                 **run_args)
+                states = states[_requested_rows(t_prof, t_vals)]
 
-            c_prof = states[:, :self.Kinetics.num_species]
+                species_columns = self._participating_state_columns()
+                c_prof = states[:, species_columns]  # [mol/L]
 
-            return c_prof, sens
-
-        else:
-            t_prof, states = self.solve_unit(time_grid=t_vals,
-                                             verbose=False,
-                                             eval_sens=False, **run_args)
-            states = states[_requested_rows(t_prof, t_vals)]
-
-            c_prof = states[:, :self.Kinetics.num_species]
-
-            return c_prof
+                return c_prof
+        finally:
+            self.controls = configured_controls
 
     def plot_profiles(self, pick_comp=None, **fig_kwargs):
         """
@@ -1807,7 +2034,8 @@ class BatchReactor(_BaseReactor):
     def solve_unit(self, runtime=None, time_grid=None, eval_sens=False,
                    params_control=None, verbose=True, sundials_opts=None,
                    control_step_fraction: float = 1 / 1024,
-                   control_minimum_step: float = 1 / 1024):
+                   control_minimum_step: float = 1 / 1024,
+                   _charge_state_rows: bool = False):
         """Integrate Batch balances and store cumulative tank results.
 
         Parameters
@@ -1819,8 +2047,11 @@ class BatchReactor(_BaseReactor):
             runtime; repeated grids continue from the retained final state.
         eval_sens : bool, optional
             Whether to solve parameter sensitivities.
-        params_control : dict or None, optional
-            Control parameters retained for downstream use.
+        params_control : None, optional
+            Unsupported; it never had an effect and is kept only so that
+            later positional arguments bind as in earlier releases. Any value
+            other than None raises ValueError. Configure ``controls`` or pass
+            ``modify_controls`` to ``paramest_wrapper`` instead.
         verbose : bool, optional
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
@@ -1834,6 +2065,15 @@ class BatchReactor(_BaseReactor):
             Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
             for cancellation control at ordinary process temperatures. Reduce
             it for faster controls; completed boundaries take precedence.
+        _charge_state_rows : bool, optional
+            Private handoff from ``paramest_wrapper``. If True and every
+            output time of ``time_grid`` equals the start time (see
+            ``_charge_time_only``), return the start time [s], shape
+            ``(1,)``, and the charged states, shape ``(1, num_states)``,
+            without integrating; earlier solve artifacts such as ``result``
+            are then replaced (see ``_charge_state_profile``). The default
+            False integrates, which
+            needs a time after the start.
 
         Returns
         -------
@@ -1849,7 +2089,8 @@ class BatchReactor(_BaseReactor):
         Raises
         ------
         ValueError
-            If an active bath or jacket balance has no Utility.
+            If ``params_control`` is not None (raised before any other
+            check), or an active bath or jacket balance has no Utility.
         ImportError
             If the optional Assimulo solver backend is unavailable.
         MissingPropertyError
@@ -1863,6 +2104,8 @@ class BatchReactor(_BaseReactor):
         Otherwise continuation retains liquid and jacket states and appends
         cumulative heat duty. Control differentiation uses the completed span.
         """
+        _reject_params_control(params_control)
+
         self._reset_species_presence()
 
         check_modeling_objects(self)
@@ -1881,8 +2124,6 @@ class BatchReactor(_BaseReactor):
             raise ValueError("Control differentiation steps must be finite and positive")
         self.control_step_fraction = control_step_fraction  # [-]
         self.control_minimum_step = control_minimum_step  # [s]
-
-        self.params_control = params_control
 
         if runtime is not None:
             final_time = runtime + self.elapsed_time
@@ -1948,6 +2189,10 @@ class BatchReactor(_BaseReactor):
 
         self.derivatives = call_fn(self.elapsed_time, states_init,
                                    *list(kw_problem.values()))
+
+        if _charge_state_rows and _charge_time_only(time_grid,
+                                                    self.elapsed_time):
+            return self._charge_state_profile(states_init, eval_sens)
 
         # Set solver
         solver = CVode(problem)
@@ -2342,7 +2587,8 @@ class CSTR(_BaseReactor):
                    params_control=None, verbose=True, sundials_opts=None,
                    any_event: bool = True,
                    control_step_fraction: float = 1 / 1024,
-                   control_minimum_step: float = 1 / 1024):
+                   control_minimum_step: float = 1 / 1024,
+                   _charge_state_rows: bool = False):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -2354,8 +2600,11 @@ class CSTR(_BaseReactor):
             The last offset overrides ``runtime`` when both are supplied.
         eval_sens : bool, optional
             Direct sensitivity evaluation; only False is supported.
-        params_control : dict or None, optional
-            Control parameters stored on the reactor for downstream use.
+        params_control : None, optional
+            Unsupported; it never had an effect and is kept only so that
+            later positional arguments bind as in earlier releases. Any value
+            other than None raises ValueError. Configure ``controls`` or pass
+            ``modify_controls`` to ``paramest_wrapper`` instead.
         verbose : bool, optional
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
@@ -2372,6 +2621,15 @@ class CSTR(_BaseReactor):
             Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
             for cancellation control at ordinary process temperatures. Reduce
             it for faster controls; completed boundaries take precedence.
+        _charge_state_rows : bool, optional
+            Private handoff from ``paramest_wrapper``. If True and every
+            output time of ``time_grid`` equals the start time (see
+            ``_charge_time_only``), return the start time [s], shape
+            ``(1,)``, and the charged states, shape ``(1, num_states)``,
+            without integrating; earlier solve artifacts such as ``result``
+            are then replaced (see ``_charge_state_profile``). The default
+            False integrates, which
+            needs a time after the start.
 
         Returns
         -------
@@ -2389,6 +2647,8 @@ class CSTR(_BaseReactor):
         ImportError
             If the optional Assimulo backend is unavailable.
         ValueError
+            If ``params_control`` is not None (raised before any other
+            check).
             If an active bath or jacket energy balance has no Utility.
         MissingPropertyError
             If the energy balance needs ``cp_liq`` for a present species
@@ -2403,6 +2663,8 @@ class CSTR(_BaseReactor):
         The RHS is evaluated before constructing the solver so input failures
         propagate directly.
         """
+        _reject_params_control(params_control)
+
         self._reset_species_presence()
 
         check_modeling_objects(self)
@@ -2419,7 +2681,6 @@ class CSTR(_BaseReactor):
         self.control_step_fraction = control_step_fraction  # [-]
         self.control_minimum_step = control_minimum_step  # [s]
 
-        self.params_control = params_control
         self.set_names()
         self._require_utility()
         for name in self.controls:
@@ -2475,6 +2736,10 @@ class CSTR(_BaseReactor):
             problem.handle_event = partial(
                 handle_events, state_event_list=self.state_event_list,
                 any_event=any_event)
+
+        if _charge_state_rows and _charge_time_only(time_grid,
+                                                    self.elapsed_time):
+            return self._charge_state_profile(states_init, eval_sens)
 
         # Set solver
         solver = CVode(problem)
@@ -2585,6 +2850,33 @@ class CSTR(_BaseReactor):
         outputs['vol_flow'] = dp['inlet_vol_flow']  # [m**3/s], retained inlet history
         self.outputs = outputs
 
+    def _discard_solve_artifacts(self, charged_states: np.ndarray) -> None:
+        """Replace per-solve artifacts after a solve without integration.
+
+        Parameters
+        ----------
+        charged_states : numpy.ndarray
+            Charged states in ``name_states`` order, shape
+            ``(num_states,)``: concentrations of all phase species
+            [mol/L], the Semibatch volume [m**3] and active temperatures
+            [K].
+
+        Notes
+        -----
+        Extends ``_BaseReactor._discard_solve_artifacts``. The solver
+        profile ``statesProf`` becomes None and the terminal state
+        ``states`` is a copy of ``charged_states``. A ``SemibatchReactor``
+        keeps ``Outlet`` as its charged holdup ``Liquid_1``, as its solve
+        does. A ``CSTR`` outlet is a stream built from the solved terminal
+        state and inlet flow; no flow passed during a zero-duration
+        evaluation, so ``Outlet`` is None.
+        """
+        super()._discard_solve_artifacts(charged_states)
+        self.statesProf = None
+        self.states = np.array(charged_states, dtype=float)  # [mol/L], [m**3], [K]
+        if self.__class__.__name__ != 'SemibatchReactor':
+            self.Outlet = None
+
 
 class SemibatchReactor(CSTR):
     """
@@ -2686,7 +2978,8 @@ class SemibatchReactor(CSTR):
                    params_control=None, verbose=True, sundials_opts=None,
                    any_event: bool = True,
                    control_step_fraction: float = 1 / 1024,
-                   control_minimum_step: float = 1 / 1024):
+                   control_minimum_step: float = 1 / 1024,
+                   _charge_state_rows: bool = False):
         """Integrate the tank balances and store the resulting profiles.
 
         Parameters
@@ -2698,8 +2991,11 @@ class SemibatchReactor(CSTR):
             The last offset overrides ``runtime`` when both are supplied.
         eval_sens : bool, optional
             Direct sensitivity evaluation; only False is supported.
-        params_control : dict or None, optional
-            Control parameters stored on the reactor for downstream use.
+        params_control : None, optional
+            Unsupported; it never had an effect and is kept only so that
+            later positional arguments bind as in earlier releases. Any value
+            other than None raises ValueError. Configure ``controls`` or pass
+            ``modify_controls`` to ``paramest_wrapper`` instead.
         verbose : bool, optional
             Whether to print solver statistics.
         sundials_opts : dict or None, optional
@@ -2716,6 +3012,15 @@ class SemibatchReactor(CSTR):
             Nominal differentiation floor [s], default 1/1024 s (about 1 ms)
             for cancellation control at ordinary process temperatures. Reduce
             it for faster controls; completed boundaries take precedence.
+        _charge_state_rows : bool, optional
+            Private handoff from ``paramest_wrapper``. If True and every
+            output time of ``time_grid`` equals the start time (see
+            ``_charge_time_only``), return the start time [s], shape
+            ``(1,)``, and the charged states, shape ``(1, num_states)``,
+            without integrating; earlier solve artifacts such as ``result``
+            are then replaced (see ``_charge_state_profile``). The default
+            False integrates, which
+            needs a time after the start.
 
         Returns
         -------
@@ -2733,6 +3038,8 @@ class SemibatchReactor(CSTR):
         ImportError
             If the optional Assimulo backend is unavailable.
         ValueError
+            If ``params_control`` is not None (raised before any other
+            check).
             If an active bath or jacket energy balance has no Utility.
         MissingPropertyError
             If the energy balance needs ``cp_liq`` for a present species
@@ -2747,6 +3054,8 @@ class SemibatchReactor(CSTR):
         The RHS is evaluated before constructing the solver so input failures
         propagate directly.
         """
+        _reject_params_control(params_control)
+
         self._reset_species_presence()
 
         check_modeling_objects(self)
@@ -2763,7 +3072,6 @@ class SemibatchReactor(CSTR):
         self.control_step_fraction = control_step_fraction  # [-]
         self.control_minimum_step = control_minimum_step  # [s]
 
-        self.params_control = params_control
         self.set_names()
         self._require_utility()
         for name in self.controls:
@@ -2811,6 +3119,10 @@ class SemibatchReactor(CSTR):
                 handle_events, state_event_list=self.state_event_list,
                 any_event=any_event)
 
+        if _charge_state_rows and _charge_time_only(time_grid,
+                                                    self.elapsed_time):
+            return self._charge_state_profile(states_init, eval_sens)
+
         # Set solver
         solver = CVode(problem)
 
@@ -2840,53 +3152,6 @@ class SemibatchReactor(CSTR):
         self.flatten_states()
 
         return time, states
-
-    # def retrieve_results(self, time, states):
-    #     conc_prof = states[:, :self.num_concentr]
-    #     vol_prof = states[:, self.num_concentr]
-
-    #     if self.isothermal:
-    #         temp_prof = np.ones_like(time) * self.Liquid_1.temp
-    #         tht_prof = None
-
-    #     elif self.temp_control is not None:
-    #         conc_prof = states.copy()
-    #         temp_prof = self.temp_control(**self.params_control['temp'])
-
-    #     else:
-    #         temp_prof = states[:, self.num_concentr + 1]
-
-    #         if 'temp_ht' in self.states_uo:
-    #             tht_prof = states[:, -1]
-    #         else:
-    #             tht_prof = None
-
-    #     # Heat profile
-    #     u_inputs = self.get_inputs(time)
-
-    #     self.heat_prof = self.energy_balances(time, conc_prof, vol_prof,
-    #                                           temp_prof,
-    #                                           tht_prof, u_inputs,
-    #                                           heat_prof=True)
-
-    #     self.temp_runs.append(temp_prof)
-    #     self.conc_runs.append(conc_prof)
-    #     self.vol_runs.append(vol_prof)
-
-    #     if tht_prof is not None:
-    #         self.tempHt_runs.append(tht_prof)
-
-    #     # Final state
-    #     self.elapsed_time = time[-1]
-    #     self.concentr = self.conc_runs[-1][-1]
-    #     self.temp = self.temp_runs[-1][-1]
-    #     self.vol = self.vol_runs[-1][-1]
-
-    #     self.Liquid_1.temp = self.temp
-    #     self.Liquid_1.vol = self.vol
-    #     self.Liquid_1.updatePhase(vol=self.vol, mole_conc=self.concentr)
-    #     self.Outlet = self.Liquid_1
-    #     self.outputs = states
 
 
 class PlugFlowReactor(_BaseReactor):
@@ -2932,10 +3197,19 @@ class PlugFlowReactor(_BaseReactor):
         implemented and raises NotImplementedError at construction (issue
         #168); other values raise ValueError.
     return_sens : bool (optional, default = True)
-        whether or not the paramest_wrapper method should return
-        the sensitivity system along with the concentratio profiles.
-        Use False if you want the parameter estimation platform to
-        estimate the sensitivity system using finite differences
+        Kept for a constructor signature consistent with the tank
+        reactors; it has no effect, because PFR parameter estimation is
+        not supported (see the Notes).
+
+    Notes
+    -----
+    Parameter estimation is not supported: no estimation output contract
+    (axial positions, states, units and sensitivities of the callback) is
+    defined for the distributed model. ``paramest_wrapper`` and
+    ``SimulationExec.SetParamEstimation`` raise
+    ``PharmaPyNonImplementedError`` (a ``NotImplementedError``) through
+    ``validate_param_estimation`` (issue #401). Estimate the kinetics with
+    a ``BatchReactor`` model of the kinetic experiments instead.
     """
     
     def __init__(self, diam_in, num_discr,
@@ -2969,7 +3243,8 @@ class PlugFlowReactor(_BaseReactor):
         ht_mode : str, optional
             Heat-transfer geometry selector, bath or jacket (tube area).
         return_sens : bool, optional
-            Parameter-estimation sensitivity return policy.
+            Stored for consistency with the tank reactors; no effect,
+            since PFR parameter estimation is not supported (issue #401).
         state_events : list of dict or None, optional
             Termination conditions in the named states' physical units.
 
@@ -3513,6 +3788,74 @@ class PlugFlowReactor(_BaseReactor):
         self.tau = tau
 
         return tau
+
+    def validate_param_estimation(self) -> None:
+        """Reject parameter estimation, which the PFR does not support.
+
+        ``SimulationExec.SetParamEstimation`` calls this hook of the
+        selected unit before any setup, and ``paramest_wrapper`` calls it
+        first, so estimation fails with the same actionable error at setup
+        and on a direct callback call.
+
+        Returns
+        -------
+        None
+            Never returns normally.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            Always. It is a ``NotImplementedError``. No estimation output
+            contract is defined for the distributed model: which axial
+            positions and states the callback would return, in which
+            units, and how sensitivities would be supplied (issue #401).
+        """
+        raise PharmaPyNonImplementedError(
+            "PlugFlowReactor does not support parameter estimation: no "
+            "estimation output contract is defined for the distributed "
+            "model (which axial positions and states the callback returns, "
+            "in which units, and how sensitivities are supplied; issue "
+            "#401). Estimate the kinetic parameters with a BatchReactor "
+            "model of the kinetic experiments instead, then assign the "
+            "fitted Kinetics to the PlugFlowReactor")
+
+    def paramest_wrapper(self, params, t_vals, modify_phase=None,
+                         modify_controls=None, reord_sens=True,
+                         run_args=None):
+        """Reject the parameter-estimation callback of the PFR.
+
+        The signature matches the tank-reactor callback
+        (``_BaseReactor.paramest_wrapper``) so that ``Experiment``
+        arguments bind identically, but no argument is used.
+
+        Parameters
+        ----------
+        params : dict or array-like
+            Kinetic parameters in the attached kinetics model's order and
+            units; not set on the kinetics.
+        t_vals : array-like
+            Evaluation times [s], shape ``(num_times,)``; not used.
+        modify_phase : dict, optional
+            Initial-phase modifier; not used.
+        modify_controls : dict, optional
+            Control modifier; not used.
+        reord_sens : bool, optional
+            Sensitivity layout flag; not used.
+        run_args : dict, optional
+            ``solve_unit`` keyword arguments; not used.
+
+        Returns
+        -------
+        None
+            Never returns normally.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            Always, from ``validate_param_estimation``, before the reactor,
+            its kinetics or any argument is changed (issue #401).
+        """
+        self.validate_param_estimation()
 
     def solve_unit(self, runtime=None, time_grid=None, verbose=True,
                    any_event=True, sundials_opts=None):
