@@ -4,8 +4,11 @@ Reuse the independently derived linear-model expectations from the core tests.
 Also check that IPOPT fits leave the caller's ``optim_options`` unchanged
 (#476), with the proportional fixture of
 ``test_paramestim_optimize_fn_contract``, and that they report Ipopt's
-termination outcome and warn when it is unsuccessful (#475), with the
-synthetic first-order decay of the #475 reproduction.
+termination outcome and warn when it is unsuccessful (#475), also through
+``estimate_parameters`` with the warning pointing at the caller, and record
+the termination options in ``info['tolerances']`` (#352), and store
+outputs and an identifiability report that describe the accepted point
+(#352), with the synthetic first-order decay of the #475 reproduction.
 These small fits require cyipopt, but not Assimulo. MCR IPOPT fits are
 covered by ``test_paramestim_mcr_cyipopt`` (#240).
 """
@@ -172,6 +175,10 @@ ONE_ITERATION = {'max_iter': 1}  # [-]
 IPOPT_SOLVE_SUCCEEDED = 0  # [-]
 IPOPT_MAXIMUM_ITERATIONS_EXCEEDED = -1  # [-]
 UNSUCCESSFUL_IPOPT = 'IPOPT terminated unsuccessfully'
+# Ipopt tol [-] that cyipopt 1.7's minimize_ipopt writes into the options
+# when the caller gives none (cyipopt/scipy_interface.py:
+# ``options[b'tol'] = tol or 1e-8``), the value Ipopt then stops on.
+CYIPOPT_DEFAULT_TOL = 1e-8  # [-]
 # Termination tolerances of the independent SciPy reference fit, a few
 # machine epsilons (2.2e-16), so the reference optimum is resolved far
 # below DECAY_FIT_RTOL.
@@ -269,3 +276,62 @@ def test_converged_ipopt_fit_reports_success_without_warning():
     assert 1 <= info['nit'] <= IPOPT_OPTIONS['max_iter']
     np.testing.assert_allclose(fitted, expected, rtol=DECAY_FIT_RTOL,
                                atol=0.0)
+
+
+# Model outputs of order 1 mol/L recomputed here in the same IEEE
+# operations as the callback; their sum with the data residual adds a few
+# ulps, far below 1e-12 relative.
+PREDICTION_RTOL = 1e-12  # [-]
+
+
+@pytest.mark.parametrize('options', [IPOPT_OPTIONS, ONE_ITERATION])
+def test_ipopt_stored_outputs_describe_the_accepted_point(options):
+    """Converged and iteration-limited IPOPT fits store accepted outputs.
+
+    ``assemble_solver_info`` evaluates at the accepted point without
+    storing, so ``optimize_fn`` refreshes the buffers there if IPOPT's last
+    stored evaluation was elsewhere. The stored predictions and the
+    identifiability report then describe ``params_convg``, also after a
+    later evaluation at other parameters.
+    """
+    estimator = decay_estimator()
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        fitted, _, _ = estimator.optimize_fn(
+            method='IPOPT', optim_options=dict(options),
+            bounds=DECAY_BOUNDS, verbose=False)
+
+    np.testing.assert_array_equal(estimator.params_residuals, fitted)
+    np.testing.assert_allclose(np.ravel(estimator.y_model[0]),
+                               decay(fitted, DECAY_TIME_S),
+                               rtol=PREDICTION_RTOL, atol=0.0)
+    report = estimator.get_identifiability()
+    estimator.get_objective(2 * fitted, out_array=True)
+    after = estimator.get_identifiability()
+    for name in ('output_error_norm', 'sensitivity_error_bounds',
+                 'resolution_floor', 'identifiable'):
+        np.testing.assert_array_equal(getattr(after, name),
+                                      getattr(report, name), err_msg=name)
+
+
+def test_ipopt_outcome_through_estimate_parameters_points_at_caller():
+    """The #475 warning and the recorded tolerances through the wrapper.
+
+    ``max_iter`` is given as a keyword of ``estimate_parameters``; the
+    warning must point at this file, not at ``ParamEstim.py``, and
+    ``info['tolerances']`` holds that limit and cyipopt's ``tol`` default
+    (#352).
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        _, _, info = decay_estimator().estimate_parameters(
+            method='IPOPT', bounds=DECAY_BOUNDS, verbose=False,
+            **ONE_ITERATION)
+
+    unsuccessful = [item for item in caught
+                    if UNSUCCESSFUL_IPOPT in str(item.message)]
+    assert len(unsuccessful) == 1
+    assert unsuccessful[0].filename == __file__
+    assert info['success'] is False
+    assert info['tolerances'] == {'tol': CYIPOPT_DEFAULT_TOL,
+                                  'max_iter': ONE_ITERATION['max_iter']}
