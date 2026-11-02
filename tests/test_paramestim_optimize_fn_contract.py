@@ -5,8 +5,11 @@ Scope, by issue:
 - The Levenberg-Marquardt ``tol_fun`` stop reached through ``optimize_fn`` and,
   directly, after a rejected trial with an ``arctan`` residual (#474).
 - The estimator state after a call that raises (#479): an unknown method, a
-  failed solve, a singular covariance (a second parameter that stops affecting
-  the model), a failed first fit, IPOPT without cyipopt (run in a child process
+  failed solve, an error after the solve (the undefined-covariance warning of a
+  second parameter that stops affecting the model, turned into an error by a
+  warnings filter; #532 keeps such fits otherwise, see
+  ``test_paramestim_rank_deficient_covariance``), a failed first fit, IPOPT
+  without cyipopt (run in a child process
   that blocks cyipopt imports, the helper of
   ``test_paramestim_calibration_fit_predict``, so it runs whether or not
   cyipopt is installed), the residuals that ``StatisticsClass.get_bootsamples``
@@ -30,6 +33,7 @@ environment.
 
 import inspect
 import textwrap
+import warnings
 
 import numpy as np
 import pytest
@@ -55,6 +59,8 @@ LM_TOL_FUN = inspect.signature(
 # convergence stop (max_fun_eval only bounds the budget).
 NO_GRADIENT_OR_STEP_STOP = {'eps_1': 0.0, 'eps_2': 0.0}  # [mol*s/L], [-]
 TOL_FUN_REASON = 'Value of the objective function lower than tolerance'
+# Start of the RuntimeWarning of get_covariance for an undefined covariance.
+UNDEFINED_COVARIANCE = 'The linearized parameter covariance is undefined'
 
 
 def proportional(params, time_s):
@@ -268,12 +274,13 @@ def test_failed_solve_keeps_previous_fit():
     assert_same_fit(before, estimator)
 
 
-def test_singular_covariance_keeps_previous_fit():
-    """A fit whose covariance cannot be formed leaves the previous fit.
+def test_error_after_solve_keeps_previous_fit():
+    """A fit that raises after its results were assembled leaves the old fit.
 
     In ``dead`` mode the second parameter has no effect on the model, so
-    the solve succeeds but ``J @ J.T`` is singular and ``get_covariance``
-    raises after the new results were assembled.
+    the solve succeeds but ``J @ J.T`` is singular. ``get_covariance`` then
+    warns that the covariance is undefined (#532); a warnings filter turns
+    that warning into an error after the new results were assembled.
     """
     guard = {'dead': False}
 
@@ -302,8 +309,12 @@ def test_singular_covariance_keeps_previous_fit():
     before = fit_state(estimator)
     guard['dead'] = True
 
-    with pytest.raises(np.linalg.LinAlgError, match='Singular matrix'):
-        estimator.optimize_fn(method='scipy', simulate=True, verbose=False)
+    with warnings.catch_warnings():
+        warnings.filterwarnings('error', message=UNDEFINED_COVARIANCE,
+                                category=RuntimeWarning)
+        with pytest.raises(RuntimeWarning, match='zero information'):
+            estimator.optimize_fn(method='scipy', simulate=True,
+                                  verbose=False)
 
     assert_same_fit(before, estimator)
 
@@ -365,8 +376,9 @@ def test_failed_first_fit_leaves_an_unfitted_estimator(stage):
     """A first fit that raises leaves no fit results behind.
 
     ``'solve'`` fails inside LM after the seed evaluation; ``'covariance'``
-    finishes a SciPy solve whose second parameter has no effect, so
-    ``get_covariance`` raises after the results were assembled.
+    finishes a SciPy solve whose second parameter has no effect, so the
+    undefined-covariance warning of ``get_covariance``, turned into an
+    error, raises after the results were assembled.
     """
     def unused_second(params, time_s):
         """Return ``k * t``; the second parameter [mol/L/s**2] is unused.
@@ -398,8 +410,11 @@ def test_failed_first_fit_leaves_an_unfitted_estimator(stage):
             estimator.optimize_fn(optim_options=dict(INVALID_BUDGET),
                                   verbose=False)
     else:
-        with pytest.raises(np.linalg.LinAlgError, match='Singular matrix'):
-            estimator.optimize_fn(method='scipy', verbose=False)
+        with warnings.catch_warnings():
+            warnings.filterwarnings('error', message=UNDEFINED_COVARIANCE,
+                                    category=RuntimeWarning)
+            with pytest.raises(RuntimeWarning, match='zero information'):
+                estimator.optimize_fn(method='scipy', verbose=False)
 
     for name in ('opt_method', 'optim_options', 'params_convg', 'info_opt',
                  'covar_params', 'correl_params', 'paramest_df',
