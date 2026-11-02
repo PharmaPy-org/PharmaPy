@@ -65,6 +65,12 @@ LM_DEFAULT_OPTIONS = {'fletcher_modif': False, 'max_fun_eval': 100,
 # at a rate distinct from the converged one, which identifies the
 # max_fun_eval a rerun used.
 TRUNCATED_MAX_FUN_EVAL = 2  # [-]
+# The #352 warning of optimize_fn for that truncated fit: both trials are
+# accepted steps.
+TRUNCATED_FIT_WARNING = (
+    r"Levenberg-Marquardt \(method='LM'\) stopped without converging "
+    r"\(Maximum iterations exceeded\) after 2 trial evaluations and 2 "
+    r"accepted steps, bounded by max_fun_eval=2;")
 # The rerun replays bit-identical inputs through the same deterministic LM
 # iterations, so the fitted rate is reproduced exactly; four ulps of
 # relative slack absorb any platform-dependent operation ordering.
@@ -1053,9 +1059,12 @@ def test_rerun_uses_recorded_defaults_not_installed_ones():
     experiments = make_experiments()
     estimator = ParameterEstimation(decay, [SEED_RATE], experiments,
                                     name_params=['k'])
-    estimator.optimize_fn(
-        optim_options={'max_fun_eval': TRUNCATED_MAX_FUN_EVAL},
-        verbose=False)
+    with pytest.warns(RuntimeWarning, match=TRUNCATED_FIT_WARNING) as fit:
+        estimator.optimize_fn(
+            optim_options={'max_fun_eval': TRUNCATED_MAX_FUN_EVAL},
+            verbose=False)
+    assert [item.filename for item in fit
+            if issubclass(item.category, RuntimeWarning)] == [__file__]
     truncated = capture(estimator, experiments)
     assert truncated.solver.outcome['stop_criterion'] == \
         'Maximum iterations exceeded'
@@ -1069,7 +1078,12 @@ def test_rerun_uses_recorded_defaults_not_installed_ones():
         TRUNCATED_MAX_FUN_EVAL
     older_defaults = CalibrationRecord.from_dict(data)
 
-    rerun = older_defaults.rerun(decay, rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
+    with pytest.warns(RuntimeWarning, match=TRUNCATED_FIT_WARNING) as replay:
+        rerun = older_defaults.rerun(decay, rtol=REPLAY_RTOL,
+                                     atol=REPLAY_ATOL)
+    # Through CalibrationRecord.rerun the warning points at this caller.
+    assert [item.filename for item in replay
+            if issubclass(item.category, RuntimeWarning)] == [__file__]
     np.testing.assert_allclose(rerun.params_convg, truncated_rate,
                                rtol=REPLAY_RTOL, atol=REPLAY_ATOL)
     # The options as written, under the installed defaults, converge
@@ -1121,8 +1135,26 @@ def test_non_finite_rerun_values_are_mismatches():
     inputs = record.estimation_inputs()
     inputs['param_seed'] = np.array([np.nan])  # LM stays at a NaN seed
     estimator = ParameterEstimation(decay, **inputs)
-    estimator.optimize_fn(verbose=False)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter('always')
+        estimator.optimize_fn(verbose=False)
     assert np.isnan(estimator.params_convg[0])
+    # Every trial from the NaN seed is rejected, so LM spends its default
+    # budget (#352), and the NaN Jacobian leaves the covariance undefined
+    # (#532): exactly these two warnings, both pointing at this test.
+    runtime = [item for item in caught
+               if issubclass(item.category, RuntimeWarning)]
+    default_budget = LM_DEFAULT_OPTIONS['max_fun_eval']  # [-]
+    assert [str(item.message).split(';')[0] for item in runtime] == [
+        "Levenberg-Marquardt (method='LM') stopped without converging "
+        f"(Maximum iterations exceeded) after {default_budget} trial "
+        f"evaluations and 0 accepted steps, bounded by "
+        f"max_fun_eval={default_budget}",
+        "The linearized parameter covariance is undefined and is returned "
+        "as NaN: the weighted residual Jacobian has non-finite entries for "
+        "parameters k. Check the model and its sensitivities at the "
+        "accepted parameters"]
+    assert [item.filename for item in runtime] == [__file__, __file__]
     with pytest.raises(RerunMismatchError, match="k: rerun nan"):
         record.check_rerun(estimator, rtol=1.0, atol=1.0)
 
