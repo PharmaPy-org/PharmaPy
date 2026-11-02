@@ -8,8 +8,9 @@ lengths and entry types; state names handed to the estimator; and
 caller-data isolation. Only the public handoff
 to ``simulation.ParamInst`` is checked; nothing is integrated, so these
 tests need no ODE solver and run in the core lane. Physical application of
-control modifiers inside reactor callbacks belongs to issue #271; the
-solver-backed trajectories are in ``test_simexec_experiment_alignment.py``.
+control modifiers inside reactor callbacks (#271) is tested in
+``test_reactor_paramest_control_modifiers.py``; the solver-backed
+trajectories are in ``test_simexec_experiment_alignment.py``.
 
 Fixture: a real ``SimulationExec`` around an isothermal batch reactor for a
 first-order A -> B reaction with zero activation energy. Observations are
@@ -62,7 +63,8 @@ OWN_SOLVER_OPTIONS = {'rtol': 1e-8, 'atol': 1e-10}  # [-], [mol/L]
 TOO_MANY_WRAPPER_ARGS = 5  # [-]
 # Control sentinels: argument tuples of a temperature ramp control
 # temp(t) = temp_init + ramp * t, distinct per experiment so misrouting is
-# visible. They are only compared here; issue #271 owns applying them.
+# visible. They are only compared here; their application (#271) is tested
+# in test_reactor_paramest_control_modifiers.py.
 CONTROL_INITIAL_TEMP_K = {'dilute': 300.0, 'concentrated': 310.0,
                           'late': 320.0}  # [K]
 CONTROL_RAMP_K_S = -0.01  # [K/s], slow cooling
