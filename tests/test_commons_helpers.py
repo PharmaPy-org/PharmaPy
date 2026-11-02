@@ -1,7 +1,16 @@
+"""Solver-free checks of shared ``PharmaPy.Commons`` helpers.
+
+State packing and unpacking, finite-volume fluxes against hand
+calculations, and the estimation row selection ``_requested_rows`` shared by
+the reactor and crystallizer ``paramest_wrapper`` on hand-built reported
+time profiles. Fast unit tests without the optional Assimulo stack.
+"""
+
 import numpy as np
 import pytest
 
 from PharmaPy.Commons import (
+    _requested_rows,
     flatten_states,
     high_resolution_fvm,
     unpack_discretized,
@@ -130,3 +139,34 @@ def test_upwind_fvm_returns_neighbor_differences_from_boundary():
     fluxes = upwind_fvm(state, boundary_cond=0.0)
 
     np.testing.assert_allclose(fluxes, [1.0, 1.0, 2.0])
+
+
+def test_requested_rows_maps_kth_replicate_to_kth_reported_row():
+    # Hand-built solver profile [s]: the initial time once (CVode merges
+    # initial replicates) and 2 s reported twice.
+    reported = np.array([0.0, 1.0, 2.0, 2.0, 3.0])
+    # Out-of-order requests [s] with three replicates of 2 s, one more than
+    # reported, and two of the initial time.
+    requested = np.array([2.0, 0.0, 2.0, 3.0, 2.0, 0.0])
+
+    rows = _requested_rows(reported, requested, 'crystallizer')
+
+    # 2 s: first and second replicates -> rows 2 and 3, the extra third ->
+    # the last such row 3; 0 s -> the single initial row 0; 3 s -> row 4.
+    np.testing.assert_array_equal(rows, [2, 0, 3, 4, 3, 0])
+    assert rows.dtype.kind == 'i'
+
+
+@pytest.mark.parametrize('label', ['reactor', 'crystallizer'])
+def test_requested_rows_names_the_unit_for_an_absent_time(label):
+    with pytest.raises(ValueError, match=(
+            rf"^Requested time 1\.5 s is absent from the {label} solution, "
+            r"which reports 3 times from 0\.0 s to 2\.0 s\.")):
+        _requested_rows([0.0, 1.0, 2.0], [1.0, 1.5], label)
+
+
+def test_requested_rows_reports_an_empty_profile():
+    with pytest.raises(ValueError, match=(
+            r"^Requested time 1\.0 s is absent from the crystallizer "
+            r"solution, which reports no times\.")):
+        _requested_rows([], [1.0], 'crystallizer')
