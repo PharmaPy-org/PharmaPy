@@ -42,8 +42,10 @@ def cryst_mechanism(sup_sat, moms, temp, temp_ref, params, reformulate, kv,
     else:
         # A five-entry growth law carries alpha and beta after these three.
         # Only the refactored OneDFVMMechanism applies that size factor; the
-        # moment closure and the legacy crystallizers refuse such a law
-        # (CrystKinetics.has_size_dependent_growth) rather than ignore it.
+        # moment closure refuses a size-dependent law
+        # (CrystKinetics.has_size_dependent_growth) and the legacy
+        # crystallizers refuse any law longer than three entries, rather
+        # than ignore them.
         phi_1, phi_2, exp = params[:3]
         
 
@@ -1816,9 +1818,13 @@ class CrystKinetics:
         -----
         Growth entries past the first three are alpha [-] and beta [1/um],
         applied by the refactored ``OneDFVMMechanism`` only. The moment
-        closure (``MomentsPopulationBalance``) and the legacy crystallizers
-        evaluate a size-independent growth rate, so both refuse kinetics for
-        which this returns True instead of dropping the two entries.
+        closure (``MomentsPopulationBalance``) evaluates a size-independent
+        growth rate, so it refuses kinetics for which this returns True
+        instead of dropping the two entries. The legacy crystallizers refuse
+        any growth law longer than three entries at their ``Kinetics``
+        setter, whatever the size factor, because ``deriv_cryst`` returns
+        three growth partials and their estimation paths follow
+        ``name_params``.
         """
         size_factor = np.asarray(self.params['growth'],
                                  dtype=float)[3:5]  # alpha [-], beta [1/um]

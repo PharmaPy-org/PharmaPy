@@ -2005,11 +2005,11 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         Parameters
         ----------
         kinetics : CrystKinetics
-            Kinetics to check through ``has_size_dependent_growth``, the
-            predicate the legacy crystallizers share. Growth entries past
-            the first three are the size factor ``(1 + beta*L)**alpha`` that
-            ``OneDFVMMechanism`` applies: alpha [-], then beta [1/um]. An
-            object without the predicate is accepted.
+            Kinetics to check through ``has_size_dependent_growth``. Growth
+            entries past the first three are the size factor
+            ``(1 + beta*L)**alpha`` that ``OneDFVMMechanism`` applies:
+            alpha [-], then beta [1/um]. An object without the predicate is
+            accepted.
 
         Raises
         ------
