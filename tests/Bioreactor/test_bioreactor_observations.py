@@ -248,18 +248,30 @@ def test_fixed_step_rejects_off_grid_sampling():
     assert prediction['values']['nutrient'].shape == (2,)
 
 
-@pytest.mark.parametrize('edit, message', [
-    (lambda d: d['fields']['nutrient'].update(species='oxygen'), 'unknown species'),
-    (lambda d: d['fields']['nutrient'].update(unit='furlong'), 'unsupported'),
-    (lambda d: d['fields']['nutrient'].update(event_side='during'), 'event_side'),
-    (lambda d: d['fields']['nutrient'].update(quantity='mass'), 'quantity'),
-    (lambda d: d['fields']['nutrient'].update(extra=1), 'requires exactly'),
-    (lambda d: d.update(time_unit='fortnight'), 'time_unit'),
-    (lambda d: d.update(schema_version=2), 'schema_version'),
+@pytest.mark.parametrize('field, changes, message', [
+    ('nutrient', {'species': 'oxygen'}, 'unknown species'),
+    ('nutrient', {'unit': 'furlong'}, 'unsupported'),
+    ('nutrient', {'event_side': 'during'}, 'event_side'),
+    ('nutrient', {'quantity': 'mass'}, 'quantity'),
+    ('nutrient', {'extra': 1}, 'requires exactly'),
+    (None, {'time_unit': 'fortnight'}, 'time_unit'),
+    (None, {'schema_version': 2}, 'schema_version'),
 ])
-def test_invalid_declarations_are_rejected(edit, message):
+def test_invalid_declarations_are_rejected(field, changes, message):
+    """Reject each malformed field or top-level declaration independently.
+
+    Parameters
+    ----------
+    field : str or None
+        Measurement field to edit, or None for the declaration itself.
+    changes : dict
+        One invalid metadata value, without changing the physical observations.
+    message : str
+        Expected diagnostic for that invalid declaration.
+    """
     declaration = _declaration()
-    edit(declaration)
+    target = declaration if field is None else declaration['fields'][field]
+    target.update(changes)
     with pytest.raises(ValueError, match=message):
         _predict('generic_batch', declaration, _data([0.5]))
 

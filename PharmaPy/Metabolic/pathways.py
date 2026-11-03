@@ -322,10 +322,29 @@ class PathwayOptimizationResult(FluxSolution):
         ``exchange_matrix @ fluxes`` [flux unit], before exchange scaling.
     constraint_limits : Mapping[str, float]
         Evaluated uptake capacity per constraint identifier [flux unit].
+    source_intervals : Mapping[str, tuple], optional
+        Requested primary-optimal ranges: ``exchange:<species>`` in the same
+        units as extracellular_rates and ``growth`` in the growth-rate basis.
+        None means not assessed; infinite endpoints indicate an unbounded range.
     """
 
     extracellular_rates: FloatArray = None
     constraint_limits: Mapping[str, float] = field(default_factory=dict)
+    source_intervals: Mapping = None
+
+    def diagnostics(self):
+        """Include opt-in observable ranges in the existing closure report.
+
+        Returns
+        -------
+        dict
+            Existing numerical evidence and, when requested, source intervals
+            in the extracellular/growth bases documented by this result.
+        """
+        report = super().diagnostics()
+        if self.source_intervals is not None:
+            report['source_intervals'] = dict(self.source_intervals)
+        return report
 
     @property
     def status(self):
@@ -349,7 +368,7 @@ class PathwayOptimizationResult(FluxSolution):
         """
         return self.solver_message
 # Evaluate the explicitly selected secondary minimum-norm objective.
-def _squared_norm(z):
+def _squared_norm(z: np.ndarray) -> float:
     """Evaluate the selected minimum-norm secondary objective.
 
     Parameters
@@ -365,7 +384,7 @@ def _squared_norm(z):
     return float(z @ z)
 
 
-def _squared_norm_gradient(z):
+def _squared_norm_gradient(z: np.ndarray) -> np.ndarray:
     """Differentiate the selected minimum-norm secondary objective.
 
     Parameters
@@ -467,7 +486,8 @@ class ConfiguredPathwayModel:
         return min(maximum, mass_transfer * saturation / biomass / self.exchange_scale)
 
     # Solve the declared primary pathway objective.
-    def solve_fluxes(self, concentrations, biomass=None, *, availability=None, uptake_limits=None):
+    def solve_fluxes(self, concentrations, biomass=None, *, availability=None, uptake_limits=None,
+                     source_ranges: bool = False):
         """Maximize the declared objective under configured uptake and pathway bounds.
 
         Parameters
@@ -481,6 +501,10 @@ class ConfiguredPathwayModel:
             exhausted pools (concentration <= 0) cannot supply flux.
         uptake_limits : Mapping[str, float], optional
             Provider capacities [flux unit] for every ``provider`` rule output.
+        source_ranges : bool, optional
+            Evaluate source ranges on the primary optimal face, before the
+            secondary selection. Default False adds no diagnostic solves.
+            Only affine availability is supported for this LP diagnostic.
 
         Returns
         -------
@@ -506,6 +530,10 @@ class ConfiguredPathwayModel:
         Fixed fluxes retain their solved values: a small pathway coordinate can
         carry a significant physical rate when its exchange coefficients are large.
         """
+        if not isinstance(source_ranges, bool):
+            raise ValueError('source_ranges must be a boolean')
+        if source_ranges and hasattr(availability, 'step_day'):
+            raise ValueError('source ranges require affine availability, not a nonlinear relaxation')
         if isinstance(concentrations, Mapping):
             if set(concentrations) != set(self.state_names):
                 raise ValueError("concentration identifiers must exactly match state_ids.")
@@ -564,9 +592,9 @@ class ConfiguredPathwayModel:
         # each secondary solve that fixes an optimal pathway allocation.
         solver_options = {"primal_feasibility_tolerance": 1e-9,
                           "dual_feasibility_tolerance": 1e-9}
-        nonzero_objective = abs(self.definition.objective_coefficients[
-            self.definition.objective_coefficients != 0.])  # [objective/flux]
-        # Scaling by the largest coefficient can erase smaller physical terms.
+        nonzero_objective = abs(self.definition.objective_coefficients[self.definition.objective_coefficients != 0.])  # [objective/flux]
+        # Preserve every nonzero objective coefficient above the solver's absolute
+        # cost tolerance; scaling by the largest can erase a smaller physical term.
         objective_scale = np.min(nonzero_objective) if nonzero_objective.size else 0.  # [objective/flux]
         objective_row = self.definition.objective_coefficients / (objective_scale or 1.)  # [-]
         result = linprog(
@@ -626,6 +654,9 @@ class ConfiguredPathwayModel:
         )
         lower.setflags(write=False)
         upper.setflags(write=False)
+        intervals = (self._source_ranges(a_ub, b_ub, bounds, equality, equality_rhs,
+                                        objective_row, normalized_optimum, solver_options)
+                     if source_ranges else None)
         return PathwayOptimizationResult(
             reaction_ids=self.pathway_ids, fluxes=fluxes,
             primary_objective=float(self.definition.objective_coefficients @ fluxes),
@@ -641,6 +672,7 @@ class ConfiguredPathwayModel:
             solver_message=str(result.message if secondary_value is None
                                else deterministic_result.message), closure_policy_id=policy,
             cache_hit=False, extracellular_rates=rates, constraint_limits=MappingProxyType(named_limits),
+            source_intervals=intervals,
             inventory_violation_inf=(None if availability is None else
                                      float(max(0., -np.min(availability.residual(fluxes))))),
         )
@@ -648,14 +680,14 @@ class ConfiguredPathwayModel:
     # Audit the unchanged primary-optimal face before selecting a secondary result.
     @staticmethod
     def _check_primary_face(fluxes, objective, optimum):
-        """Reject a secondary point that loses the normalized primary optimum.
+        """Reject a secondary point that loses the scaled primary optimum.
 
         Parameters
         ----------
         fluxes : ndarray
             Candidate [flux unit].
         objective : ndarray
-            Objective divided by its smallest nonzero coefficient [-].
+            Objective normalized by its smallest nonzero coefficient [-].
         optimum : float
             Primary value in the normalized basis [flux unit].
 
@@ -666,10 +698,64 @@ class ConfiguredPathwayModel:
             No unit-sized floor is used: tiny primary values remain meaningful.
         """
         value = float(objective @ fluxes)  # [flux unit]
-        scale = max(abs(optimum), float(abs(objective) @ abs(fluxes)),
-                    np.finfo(float).tiny)  # [flux unit]
+        scale = max(abs(optimum), float(abs(objective) @ abs(fluxes)), np.finfo(float).tiny)  # [flux unit]
         if not np.isfinite(value) or abs(value - optimum) > 1e-8 * scale:
             raise MetabolicNumericalError('Pathway secondary solve changed the primary optimum.')
+
+    def _source_ranges(self, matrix, capacity, bounds, equality, rhs, objective, optimum, options):
+        """Bound each observable source on the certified primary LP face.
+
+        Parameters
+        ----------
+        matrix, capacity : ndarray or None
+            Uptake rows [-] and capacities [flux unit].
+        bounds : sequence
+            Pathway bounds [flux unit].
+        equality, rhs : ndarray or None
+            Scaled primary row [-] and optimum [flux unit].
+        objective : ndarray
+            Normalized primary coefficients [-].
+        optimum : float
+            Normalized primary optimum [flux unit].
+        options : dict
+            Existing HiGHS numerical settings.
+
+        Returns
+        -------
+        Mapping
+            Source intervals in extracellular/growth units; not a biological
+            uncertainty distribution. Unbounded endpoints are infinite.
+
+        Raises
+        ------
+        MetabolicNumericalError
+            A diagnostic solve fails or does not retain the primary optimum.
+        """
+        rows = dict(zip(('exchange:' + name for name in self.state_names), self.source_matrix))
+        rows['growth'] = self.growth_coefficients
+        intervals = {}
+        for name, row in rows.items():
+            nonzero_row = abs(row[row != 0.])  # [source/flux]
+            row_scale = np.min(nonzero_row) if nonzero_row.size else 0.  # [source/flux]
+            endpoints = []
+            for sign in (1., -1.):
+                solved = linprog(sign * row / (row_scale or 1.), A_ub=matrix, b_ub=capacity,
+                                 A_eq=equality, b_eq=rhs, bounds=bounds, method='highs', options=options)
+                if solved.status == 3:
+                    endpoints.append(-sign * np.inf)
+                    continue
+                if not solved.success:
+                    raise MetabolicNumericalError(f'Source range failed for {name}: {solved.message}')
+                self._check_primary_face(solved.x, objective, optimum)
+                lower = np.array([pair[0] for pair in bounds])  # [flux unit]
+                upper = np.array([np.inf if pair[1] is None else pair[1] for pair in bounds])  # [flux unit]
+                if (not np.isfinite(solved.x).all() or np.min(solved.x) < -1e-8
+                        or np.any(lower-solved.x > 1e-8) or np.any(solved.x-upper > 1e-8)
+                        or (matrix is not None and np.any(matrix @ solved.x - capacity > 1e-8))):
+                    raise MetabolicNumericalError(f'Source range violates constraints for {name}.')
+                endpoints.append(float(row @ solved.x))  # [reported source unit]
+            intervals[name] = tuple(endpoints)
+        return MappingProxyType(intervals)
 
     # Select and qualify the requested secondary minimum-norm solution.
     def _minimum_norm(self, initial, optimum, matrix, capacity, lower, upper):

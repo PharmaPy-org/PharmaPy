@@ -65,6 +65,21 @@ class ThermalBiology(Mechanism):
     no organism-specific heat yield or Arrhenius constant is assumed.
     """
 
+    def get_overrides(self, name: Optional[str] = None) -> Optional[dict]:
+        """Declare that no phase property hooks are replaced.
+
+        Parameters
+        ----------
+        name : str, optional
+            Property name being queried.
+
+        Returns
+        -------
+        dict or None
+            Empty mapping for the full query; None for a named property.
+        """
+        return {} if name is None else None
+
     def thermal_temperature(self, phase: LiquidPhase) -> float:
         """Validate the live thermal state before evaluating biological rates.
 
