@@ -12,9 +12,9 @@ The source's direct-kinetics model is retained only as a regression reference in
 Tests compare reconciliation with that reference and independently implemented
 concentration balances. Neither route is refitted to improve agreement.
 
-## Configuration and native execution
+## Native execution and retained direct reference
 
-All species, equations, coefficients, initial amounts, feed compositions, and event schedules come from JSON. The notebook calls shared `build_bioreactor` and `assembly.solve()`; it contains no local mechanisms or event loop. `ConfiguredRates` evaluates the existing rule graph and returns native mass-inventory rates. `WorkingVolume` integrates declared continuous inlet flows and applies scheduled volume changes. Native `LiquidStream` objects supply feed mass. Additions and well-mixed withdrawals update inventories between ordinary native solves.
+The maintained workflow uses `RateReconciledCulture`; the direct-kinetics regression reference uses `ConfiguredRates`. Both use the same builder and native balances. The direct-reference configuration is described below. All species, equations, coefficients, initial amounts, feed compositions, and event schedules come from JSON. The notebook calls shared `build_bioreactor` and `assembly.solve()`; it contains no local mechanisms or event loop. `ConfiguredRates` evaluates the existing rule graph and returns native mass-inventory rates. `WorkingVolume` integrates declared continuous inlet flows and applies scheduled volume changes. Native `LiquidStream` objects supply feed mass. Additions and well-mixed withdrawals update inventories between ordinary native solves.
 
 Select `mechanism: "configured-kinetics"` using the same top-level input layout as the metabolic models. Fill `model.kinetics.rule_graph`, `species_mass_rates`, and `rate_unit`; inactive sections and `flux_time_unit` remain empty/null. The generic shared capabilities support batch and fed-batch, with named piecewise-constant inlets, additions, and sampling. A flow event replaces its named inlet; zero flow stops it. No organism-specific equations are embedded in the architecture.
 

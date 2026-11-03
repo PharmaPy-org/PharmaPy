@@ -10,6 +10,7 @@ from copy import deepcopy
 from math import isfinite
 
 from .BioreactorUnitConverter import BioreactorUnitConverter
+from .kinetic_units import normalize_units, unit_signature
 
 
 # Familiar names resolve to the existing equations and input contracts.
@@ -412,7 +413,8 @@ def _expand(expr: object, parameters: Mapping, constants: Mapping) -> object:
     ValueError
         A relationship name (canonical or alias) is unsupported, has missing
         or extra inputs, or a scalar
-        slot violates its sign requirement.
+        slot violates its sign requirement, or a declared unit contract is
+        dimensionally inconsistent.
     """
     if isinstance(expr, list):
         return [_expand(item, parameters, constants) for item in expr]
@@ -427,8 +429,8 @@ def _expand(expr: object, parameters: Mapping, constants: Mapping) -> object:
                                  expr['correction'], parameters, constants)
     if 'relationship' not in expr:
         return {key: _expand(value, parameters, constants) for key, value in expr.items()}
-    if set(expr) != {'relationship', 'inputs'}:
-        raise ValueError('relationship expressions require only relationship and inputs')
+    if not {'relationship', 'inputs'} <= set(expr) or set(expr) - {'relationship', 'inputs', 'units'}:
+        raise ValueError('relationship expressions require relationship, inputs and optional units')
     name = expr['relationship']
     if not isinstance(name, str) or name not in _FAMILIES and name not in _ALIASES:
         choices = ', '.join(sorted(set(_FAMILIES) | set(_ALIASES)))
@@ -454,6 +456,9 @@ def _expand(expr: object, parameters: Mapping, constants: Mapping) -> object:
                 raise ValueError(f'{name}.{slot} entries require {sorted(fields)}')
             key = 'yield' if name == 'yield-sum' else 'constant'
             _scalar(item[key], parameters, f'{name}.{key}', key == 'constant')
+    if 'units' in expr:
+        values, output_factor = normalize_units(name, values, expr['units'])  # [declared output/reference output]
+        return _op('multiply', output_factor, _family_expression(name, _expand(values, parameters, constants)))
     return _family_expression(name, _expand(values, parameters, constants))
 
 
@@ -521,6 +526,10 @@ def expand_relationships(model: Mapping, parameters: Mapping) -> dict:
         ordinary operator nodes, including optional correction multipliers.
         Rule order and identifiers are unchanged. Correction input unit labels
         declare a shared basis; they do not convert arbitrary graph expressions.
+        Optional named-relationship units convert inputs and outputs within the
+        declared equation. Direct species sources must match ``rate_unit``;
+        the existing native source converter handles solver units. Other graph
+        consumers retain the relationship's declared output units.
 
     Raises
     ------
@@ -535,6 +544,19 @@ def expand_relationships(model: Mapping, parameters: Mapping) -> dict:
     if (any(not isinstance(name, str) or not name for name in identifiers)
             or len(set(identifiers)) != len(identifiers)):
         raise ValueError('rule identifiers must be nonempty and unique')
+    mappings = result.get('species_mass_rates')
+    sources = set(mappings.values()) if isinstance(mappings, Mapping) else set()
     for rule in graph:
-        rule['expression'] = _expand(rule['expression'], parameters, result.get('constants', {}))
+        expression = rule['expression']
+        expanded = _expand(expression, parameters, result.get('constants', {}))
+        if rule['identifier'] in sources and isinstance(expression, dict) and 'units' in expression:
+            if 'rate_unit' not in result:
+                raise ValueError('typed species sources require a declared rate_unit')
+            declared, source_scale = unit_signature(expression['units']['output'])  # [reference/declared output]
+            expected, target_scale = unit_signature(result['rate_unit'])  # [reference/native source unit]
+            if declared != expected:
+                raise ValueError(f"source {rule['identifier']} has incompatible biological or physical basis for {result['rate_unit']}")
+            if source_scale != target_scale:
+                raise ValueError(f"source {rule['identifier']} output unit must match rate_unit {result['rate_unit']}; choose that relationship output unit explicitly")
+        rule['expression'] = expanded
     return result

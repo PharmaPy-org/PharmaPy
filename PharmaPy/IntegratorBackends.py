@@ -1,5 +1,8 @@
 import importlib.util
+from copy import deepcopy
+from typing import Optional
 import numpy as np
+from numpy.typing import ArrayLike
 from abc import ABC, abstractmethod
 from functools import partial
 from scipy.integrate import solve_ivp
@@ -7,6 +10,74 @@ from PharmaPy._assimulo import (CVode, Explicit_Problem, IDA,
                                 Implicit_Problem)
 from PharmaPy.Commons import TerminateSimulation
 from PharmaPy.DataClasses import *
+
+
+# Compatibility budget inherited from the native inventory boundary policy.
+LEGACY_INVENTORY_LIMIT = 1e-12  # [native state units]; not a scale-independent physical accuracy claim
+
+
+def check_inventory(unit, times: ArrayLike, states: np.ndarray,
+                    limits: Optional[dict] = None) -> None:
+    """Check reported inventories without changing solver output.
+
+    Parameters
+    ----------
+    unit : MultiPhaseVessel
+        Compiled native state metadata supplies names, units and component order.
+    times : array_like
+        Reporting times [s], one per state row.
+    states : ndarray
+        Packed trajectory, shape (times, packed states), in native state units.
+    limits : dict, optional
+        StateKey to scalar or component-array absolute negative-error budgets
+        [that state's units]. Unspecified states retain the legacy 1e-12 budget.
+        These acceptance requirements are independent of integration tolerances.
+
+    Raises
+    ------
+    ValueError
+        A limit has an unknown/unconstrained state, wrong shape, or nonfinite
+        or negative value, or the trajectory/time dimensions are inconsistent.
+    RuntimeError
+        A returned constrained inventory is nonfinite or below its error budget.
+
+    Notes
+    -----
+    This checks reported output, not every internal solver stage. It does not
+    establish conservation or authorize consumption from an empty inventory.
+    """
+    collection = unit.solver_state_collection
+    times = np.asarray(times, dtype=float)  # [s]
+    states = np.asarray(states, dtype=float)  # [native state units]
+    if (times.ndim != 1 or not np.all(np.isfinite(times)) or states.ndim != 2
+            or states.shape != (times.size, collection.dim)):
+        raise ValueError('inventory check requires aligned times and packed state rows')
+    if limits is not None and not isinstance(limits, dict):
+        raise ValueError('inventory limits must map StateKey to absolute budgets')
+    limits = {} if limits is None else limits
+    for key in limits:
+        if key not in collection.slices or not collection.states[key].limit_negative_inventory:
+            raise ValueError(f"inventory limit requires a constrained solver state: {key}")
+    for key, state_slice in collection.slices.items():
+        state = collection.states[key]
+        if not state.limit_negative_inventory:
+            continue
+        budget = np.asarray(limits.get(key, LEGACY_INVENTORY_LIMIT), dtype=float)  # [state.units]
+        if budget.ndim > 1 or (budget.ndim == 1 and budget.shape != (state.dim,)):
+            raise ValueError(f"inventory limit for {key} must be scalar or have {state.dim} components")
+        if not np.all(np.isfinite(budget)) or np.any(budget < 0.):
+            raise ValueError(f"inventory limit for {key} must be finite and nonnegative")
+        values = states[:, state_slice]  # [state.units]
+        invalid = ~np.isfinite(values) | (values < -budget)
+        if np.any(invalid):
+            row, column = np.argwhere(invalid)[0]
+            component = state.index[column] if state.index is not None else column
+            allowed = np.broadcast_to(budget, (state.dim,))[column]  # [state.units]
+            raise RuntimeError(
+                f"integration violated a nonnegative inventory constraint: "
+                f"{key}, component {component}, time {times[row]:.9g} s, "
+                f"value {values[row, column]:.9g} {state.units}, "
+                f"limit {allowed:.9g} {state.units}")
 
 
 def attach_assimulo_events(problem, unit, implicit=False):
@@ -266,7 +337,48 @@ class _AssimuloOptions:
             self._solver.maxh = self.max_step_request  # [s]
 
 
+def _assimulo_rates(time, states, sw=None, *, backend, unit):
+    """Evaluate an owned CVode derivative using the selected inventory contract.
+
+    Parameters
+    ----------
+    time : float
+        Simulation time [s].
+    states : ndarray
+        Packed states [native state units].
+    sw : object, optional
+        Native event switches, unused by this autonomous wrapper.
+    backend : AssimuloBackend
+        Owner of the optional adaptive inventory evaluator.
+    unit : MultiPhaseVessel
+        Native unit supplying its reusable derivative buffer.
+
+    Returns
+    -------
+    ndarray
+        Independent derivative array [state units/s].
+
+    Raises
+    ------
+    RuntimeError
+        The unit returns the wrong number of rates or consumes an empty pool.
+    """
+    if backend._inventory_rates is None:
+        rates = unit.unit_model(time=time, states=states)  # [state units/s]
+    else:
+        rates = backend._inventory_rates(time, states)  # [state units/s]
+    if len(rates) != len(states):
+        raise RuntimeError(f"Model returned {len(rates)} values for {len(states)} states.")
+    return np.array(rates, dtype=float, copy=True)
+
+
 class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
+    """Native CVode integration with optional inventory-aware rate evaluation.
+
+    Default behavior retains the vessel limiter. Opt-in inventory handling
+    uses the same feasible boundary rates as SciPy, without adding a biological
+    model or altering the caller's tolerances. Returned states are not clipped.
+    """
 
     # Neutral name -> Assimulo/Sundials linear solver
     LINEAR_SOLVERS = {
@@ -275,7 +387,8 @@ class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
         "sparse": "SPARSE",
     }
 
-    def __init__(self, options=None):
+    def __init__(self, options=None, *, inventory_boundaries: bool = False,
+                 inventory_limits=None) -> None:
         """CVode (Assimulo) backend for ODE units.
 
         Parameters
@@ -284,6 +397,19 @@ class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
             CVode solver attributes, such as ``maxh`` [s], ``rtol`` [-] or
             ``atol``. Merged over ``DEFAULT_OPTIONS`` and copied, so later
             changes to the caller's dict do not leak in.
+        inventory_boundaries : bool, optional
+            Opt into the shared adaptive inventory-rate contract instead of
+            the vessel's fixed limiter horizon. Default False preserves native
+            callers. Empty-pool consumption is rejected; accepted states are
+            checked without clipping. This does not add SciPy's root restarts.
+        inventory_limits : dict, optional
+            Absolute output acceptance budgets [native state units], keyed by
+            StateKey; see ``check_inventory``. Used with inventory_boundaries.
+
+        Raises
+        ------
+        ValueError
+            Explicit limits are supplied without inventory boundaries enabled.
         """
 
         super().__init__()
@@ -293,6 +419,11 @@ class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
         self.options = dict(options) if options else {}
         self._caller_options = dict(self.options)
         self.state_event_list = []
+        self.inventory_boundaries = inventory_boundaries
+        if inventory_limits is not None and not inventory_boundaries:
+            raise ValueError('inventory_limits require inventory_boundaries=True')
+        self.inventory_limits = deepcopy(inventory_limits)
+        self._inventory_rates = None
 
         self.eval_sens = False
         self.jac_v_prod = False
@@ -379,7 +510,36 @@ class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
             options=None,
             any_event=True,
     ):
+        """Compile as needed, integrate, and publish native results.
 
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Native unit owning the states and result processing.
+        runtime : float, optional
+            Duration [s]; takes precedence over time_grid.
+        time_grid : array_like, optional
+            Reporting times [s].
+        eval_sens, jac_v_prod : bool, optional
+            Existing native sensitivity and Jacobian-product requests.
+        verbose : bool, optional
+            Native solver verbosity.
+        options : dict, optional
+            Solver options: times [s], relative tolerance [-], absolute
+            tolerances [native state units].
+        any_event : bool, optional
+            Existing event compilation option.
+
+        Returns
+        -------
+        tuple
+            Times [s] and packed states [native state units].
+
+        Raises
+        ------
+        RuntimeError
+            A physical inventory constraint fails.
+        """
         if (
             not self._compiled
             or eval_sens != self.eval_sens
@@ -395,10 +555,8 @@ class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
                 any_event,
             )
 
-            unit.derivatives = self._problem.rhs(
-                unit.elapsed_time,
-                states_init,
-            )
+            if not self.inventory_boundaries:
+                unit.derivatives = self._problem.rhs(unit.elapsed_time, states_init)
 
         time, states = self.fast_solve(
             unit,
@@ -417,7 +575,39 @@ class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
             time_grid=None,
             verbose=True,
     ):
+        """Integrate a compiled native unit with scoped inventory feasibility.
 
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Compiled native unit.
+        runtime : float, optional
+            Duration [s], taking precedence over time_grid.
+        time_grid : array_like, optional
+            Report times [s], whose last value sets the endpoint.
+        verbose : bool, optional
+            Retained native verbosity argument.
+
+        Returns
+        -------
+        tuple
+            Times [s] and unmodified solver states [native state units].
+
+        Raises
+        ------
+        ValueError
+            No endpoint is supplied or initial constrained inventories are negative.
+        RuntimeError
+            Compilation is missing, empty-pool consumption is infeasible, or
+            returned inventories violate the existing 1e-12 state-unit budget.
+
+        Notes
+        -----
+        Optional boundary rates use requested tolerances. Unlike SciPy's
+        inventory path, this path has no depletion-root projection; small
+        negative solver errors remain visible in returned states. The bound
+        detects invalid output rather than repairing it.
+        """
         if not self._compiled:
             raise RuntimeError("Integrator has not been compiled.")
 
@@ -437,26 +627,36 @@ class AssimuloBackend(_AssimuloOptions, IntegratorBackend):
 
         self._solver.initialize()
 
-        return self._solver.simulate(
-            final_time,
-            ncp_list=time_grid,
-        )
+        boundaries = None
+        if self.inventory_boundaries:
+            boundaries = _inventory_setup(
+                unit, states_init, unit.elapsed_time, final_time,
+                {"atol": self._solver.atol, "rtol": self._solver.rtol})
+            self._inventory_rates = boundaries["rates"]
+        try:
+            if self.inventory_boundaries:
+                unit.derivatives = self._problem.rhs(unit.elapsed_time, states_init)
+            time, states = self._solver.simulate(final_time, ncp_list=time_grid)
+        finally:
+            self._inventory_rates = None
+        if boundaries is not None:
+            check_inventory(unit, time, states, self.inventory_limits)
+        return time, states
     def set_ode_problem(
             self,
             unit,
             states_init,
     ):
+        """Bind an owned derivative callback and existing native state events.
 
-        def model(time, states, sw=None):
-            rhs = unit.unit_model(time=time, states=states)
-
-            if len(rhs) != len(states):
-                raise RuntimeError(
-                    f"Model returned {len(rhs)} values for {len(states)} "
-                    "states."
-                )
-
-            return rhs
+        Parameters
+        ----------
+        unit : MultiPhaseVessel
+            Compiled unit providing balances and event handlers.
+        states_init : ndarray
+            Initial packed states [native state units].
+        """
+        model = partial(_assimulo_rates, backend=self, unit=unit)
 
         events = unit.compiled_events
 
@@ -1355,6 +1555,75 @@ def _compile_ode_backend(backend, unit, eval_sens, jac_v_prod, name):
     return states
 
 
+def _inventory_setup(unit, states_init, start_time, final_time, kwargs):
+    """Prepare the shared adaptive inventory contract without changing kinetics.
+
+    Parameters
+    ----------
+    unit : MultiPhaseVessel
+        Compiled native vessel with declared constrained states.
+    states_init : ndarray
+        Initial packed states [native state units].
+    start_time, final_time : float
+        Integration interval [s], with strictly positive duration.
+    kwargs : dict
+        Effective atol [state units] and rtol [-].
+
+    Returns
+    -------
+    dict
+        Constrained indices, boundary tolerances [state units], rate tolerances
+        [state units/s], exhausted-index set and owned-rate evaluator.
+
+    Raises
+    ------
+    ValueError
+        Initial constrained inventories are negative or the duration is invalid.
+
+    Notes
+    -----
+    Retains the existing SciPy tolerance construction: min(atol, rtol*|y0|)
+    for nonzero initial states, atol otherwise. Stationary rates are bounded
+    by that tolerance divided by the interval. Physical infeasibility is
+    rejected by the existing shared rate evaluator.
+    """
+    if final_time <= start_time:
+        raise ValueError("inventory-aware integration requires positive duration")
+    collection = unit.solver_state_collection
+    constrained = np.asarray(
+        [index for key, state_slice in collection.slices.items()
+         if collection.states[key].limit_negative_inventory
+         for index in range(state_slice.start, state_slice.stop)],
+        dtype=int,
+    )
+    if constrained.size and np.any(states_init[constrained] < 0.0):
+        raise ValueError("initial constrained inventories must be nonnegative")
+
+    absolute_tolerance = np.broadcast_to(
+        kwargs["atol"], states_init.shape)  # [state units]
+    reference_state = np.abs(
+        collection.pack(unit._initial_solver_state))  # [state units]
+    boundary_tolerance = np.where(
+        reference_state > 0.0,
+        np.minimum(absolute_tolerance, kwargs["rtol"] * reference_state),
+        absolute_tolerance,
+    )  # [state units]
+    rate_tolerance = boundary_tolerance / (final_time - start_time)  # [state units/s]
+    active = {position for position in constrained
+              if states_init[position] == 0.0}
+
+    rates = partial(
+        _inventory_rates, constrained=constrained,
+        boundary_tolerance=boundary_tolerance, unit=unit,
+        rate_tolerance=rate_tolerance,
+    )
+
+    return {"constrained": constrained,
+            "boundary_tolerance": boundary_tolerance,
+            "rate_tolerance": rate_tolerance,
+            "active": active, "rates": rates}
+
+
 def _inventory_rates(
         time, states, *, constrained, boundary_tolerance, unit, rate_tolerance):
     """Evaluate rates with exhausted pools held at their boundary.
@@ -1765,7 +2034,7 @@ class ScipyBackend(IntegratorBackend):
     def __init__(self, options=None, method="BDF", segment_events=True,
                  event_atol=1e-10, event_rtol=1e-6,
                  max_restarts=200, max_short_segments=3, min_segment=None,
-                 stall_calls=200000, inventory_boundaries=False):
+                 stall_calls=200000, inventory_boundaries=False, inventory_limits=None):
 
         """Store options and budgets; nothing is compiled until a unit is given.
 
@@ -1789,11 +2058,17 @@ class ScipyBackend(IntegratorBackend):
         inventory_boundaries : bool, optional
             Enable depletion boundaries for ``limit_negative_inventory`` states.
             Default False.
+        inventory_limits : dict, optional
+            StateKey to absolute output acceptance budgets [native state units].
+            With inventory boundaries enabled, explicit limits preserve raw
+            reported values; omission retains legacy output clipping. See
+            ``check_inventory``. Depletion-root treatment is unchanged.
 
         Raises
         ------
         ValueError
-            ``method`` is not a supported solve_ivp method.
+            ``method`` is unsupported, or explicit inventory limits are supplied
+            without inventory boundaries enabled.
         """
         super().__init__()
 
@@ -1818,6 +2093,9 @@ class ScipyBackend(IntegratorBackend):
         self.min_segment = min_segment
         self.stall_calls = int(stall_calls)
         self.inventory_boundaries = bool(inventory_boundaries)
+        if inventory_limits is not None and not inventory_boundaries:
+            raise ValueError('inventory_limits require inventory_boundaries=True')
+        self.inventory_limits = deepcopy(inventory_limits)
         # Boundary-aware rate evaluator for the current solve, or None.
         self._inventory_rates = None
 
@@ -2258,39 +2536,9 @@ class ScipyBackend(IntegratorBackend):
         boundary count as stationary, so roundoff imbalance between supply
         and uptake cannot repeatedly release an empty pool.
         """
-        collection = unit.solver_state_collection
-        constrained = np.asarray(
-            [index for key, state_slice in collection.slices.items()
-             if collection.states[key].limit_negative_inventory
-             for index in range(state_slice.start, state_slice.stop)],
-            dtype=int,
-        )
-        if constrained.size and np.any(states_init[constrained] < 0.0):
-            raise ValueError("initial constrained inventories must be nonnegative")
-
-        absolute_tolerance = np.broadcast_to(
-            kwargs["atol"], states_init.shape)  # [state units]
-        reference_state = np.abs(
-            collection.pack(unit._initial_solver_state))  # [state units]
-        boundary_tolerance = np.where(
-            reference_state > 0.0,
-            np.minimum(absolute_tolerance, kwargs["rtol"] * reference_state),
-            absolute_tolerance,
-        )  # [state units]
-        rate_tolerance = boundary_tolerance / (final_time - start_time)  # [state units/s]
-        active = {position for position in constrained
-                  if states_init[position] == 0.0}
-
-        self._inventory_rates = partial(
-            _inventory_rates, constrained=constrained,
-            boundary_tolerance=boundary_tolerance, unit=unit,
-            rate_tolerance=rate_tolerance,
-        )
-
-        return {"constrained": constrained,
-                "boundary_tolerance": boundary_tolerance,
-                "rate_tolerance": rate_tolerance,
-                "active": active}
+        boundaries = _inventory_setup(unit, states_init, start_time, final_time, kwargs)
+        self._inventory_rates = boundaries["rates"]
+        return boundaries
 
     def depletion_events(self, boundaries, time, states):
         """Build terminal depletion events for the pools not yet exhausted.
@@ -2713,13 +2961,10 @@ class ScipyBackend(IntegratorBackend):
 
         if boundaries is not None and boundaries["constrained"].size:
             constrained = boundaries["constrained"]
-            # Retained output policy of the depletion-boundary method: values
-            # below this absolute cutoff are reported as a violation.
-            if np.any(states[:, constrained] < -1e-12):
-                raise RuntimeError(
-                    "integration violated a nonnegative inventory constraint"
-                )
-            states[:, constrained] = np.maximum(states[:, constrained], 0.0)
+            check_inventory(unit, times, states, self.inventory_limits)
+            if self.inventory_limits is None:
+                # Preserve legacy callers; explicit acceptance keeps raw output.
+                states[:, constrained] = np.maximum(states[:, constrained], 0.0)
 
         return times, states
 
