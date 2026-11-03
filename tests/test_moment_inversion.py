@@ -21,6 +21,10 @@ pytestmark = pytest.mark.unit
 # keeps a margin of 100 for other platforms' LAPACK.
 RECOVERY_RTOL = 1e-10  # [-]
 
+# Assimulo CVode's default relative tolerance, which PharmaPy's integrator
+# backends keep: the size of the error an integrated moment can carry.
+CVODE_DEFAULT_RTOL = 1e-6  # [-]
+
 SEEDS = ((120.0,), (4e9,))  # [um], [#/m3]
 FINES_AND_SEEDS = ((150.0, 8.0), (2e9, 3e11))  # [um], [#/m3], not in size order
 THREE_SIZES = ((60.0, 310.0, 5.0), (4e9, 3e7, 1e12))  # [um], [#/m3], not in size order
@@ -145,6 +149,20 @@ def test_nuclei_still_at_zero_size_beside_seeds_keep_their_node():
     np.testing.assert_allclose(rule.weights, counts, rtol=RECOVERY_RTOL)
 
 
+def test_nuclei_beside_seeds_keep_their_node_under_integration_error():
+    # A first moment low by the integrator's tolerance puts the nuclei node
+    # at about -0.02 um; dropping it would merge nuclei and seeds into one.
+    sizes, counts = (0.0, 100.0), (5e7, 1e10)  # [um], [#/m3]
+    moments = population_moments(sizes, counts, 4)
+    moments[1] *= 1 - CVODE_DEFAULT_RTOL
+
+    rule = invert_moments(moments, 2)
+
+    assert rule.nodes[0] == 0.0
+    np.testing.assert_allclose(rule.nodes[1], sizes[1], rtol=CVODE_DEFAULT_RTOL)
+    np.testing.assert_allclose(rule.weights, counts, rtol=CVODE_DEFAULT_RTOL)
+
+
 @pytest.mark.parametrize('moments', [np.zeros(6), np.array([-1e3, 0.0, 0.0, 0.0, 0.0, 0.0])],
                          ids=['empty', 'negative_count'])
 def test_no_crystals_give_no_nodes(moments):
@@ -165,24 +183,28 @@ def test_moments_no_population_can_have_stop_at_the_last_realizable_node():
     np.testing.assert_allclose(rule.weights, [count], rtol=RECOVERY_RTOL)
 
 
-def test_moments_that_need_a_negative_size_fall_back_to_fewer_nodes():
-    # Realizable only with a crystal at -5 um, so the two-node rule is refused.
+def test_a_node_that_needs_a_negative_size_moves_to_zero_with_its_count():
+    # Realizable only with a crystal at -5 um, read as one at zero size.
     sizes, counts = (-5.0, 20.0), (1e9, 3e9)  # [um], [#/m3]
     moments = population_moments(sizes, counts, 4)
-    mean_size = (counts[0] * sizes[0] + counts[1] * sizes[1]) / sum(counts)  # [um]
 
     rule = invert_moments(moments, 2)
 
-    np.testing.assert_allclose(rule.nodes, [mean_size], rtol=RECOVERY_RTOL)
-    np.testing.assert_allclose(rule.weights, [sum(counts)], rtol=RECOVERY_RTOL)
+    assert rule.nodes[0] == 0.0
+    np.testing.assert_allclose(rule.nodes[1], sizes[1], rtol=RECOVERY_RTOL)
+    np.testing.assert_allclose(rule.weights, counts, rtol=RECOVERY_RTOL)
 
 
-def test_a_negative_first_moment_gives_no_nodes():
-    moments = np.array([1e9, -1e8, 1e12, 1e14])
+def test_nuclei_with_a_first_moment_just_below_zero_give_one_node_at_zero():
+    # Every crystal is still at zero size, and integration error has left
+    # m_1 below zero by less than CVode's default absolute tolerance, 1e-6.
+    nuclei = 5e8  # [#/m3]
+    moments = np.array([nuclei, -1e-7, 0.0, 0.0])  # [um**k/m3]
 
     rule = invert_moments(moments, 2)
 
-    assert rule.nodes.shape == (0,)
+    np.testing.assert_array_equal(rule.nodes, [0.0])
+    np.testing.assert_allclose(rule.weights, [nuclei], rtol=RECOVERY_RTOL)
 
 
 @pytest.mark.parametrize('moments, num_nodes, rtol, message', [

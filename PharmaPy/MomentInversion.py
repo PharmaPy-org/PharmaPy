@@ -24,10 +24,12 @@ class QuadratureRule(NamedTuple):
     Attributes
     ----------
     nodes : numpy.ndarray
-        Sizes L_i in ascending order [x], shape ``(n,)``, all non-negative.
+        Sizes L_i in non-decreasing order [x], shape ``(n,)``, all
+        non-negative.
     weights : numpy.ndarray
         Positive weights w_i on the basis of the zeroth moment, shape
-        ``(n,)``. ``sum(w_i * L_i**k)`` reproduces moment k for k < 2n.
+        ``(n,)``. ``sum(w_i * L_i**k)`` reproduces moment k for k < 2n,
+        except for a node moved to zero (see ``invert_moments``).
     """
 
     nodes: np.ndarray
@@ -53,10 +55,9 @@ def invert_moments(moments, num_nodes: int,
     Returns
     -------
     QuadratureRule
-        The largest rule of n <= N nodes, all at non-negative sizes [x],
-        with positive weights [basis] (for crystals: um and #/m3 slurry).
-        ``n = 0`` (empty arrays) when m_0 <= 0, or when even one node would
-        sit at a negative size (m_1 < 0).
+        The rule of the n <= N nodes the moments hold, at non-negative
+        sizes [x], with positive weights [basis] (for crystals: um and
+        #/m3 slurry). ``n = 0`` (empty arrays) when m_0 <= 0.
 
     Raises
     ------
@@ -82,12 +83,17 @@ def invert_moments(moments, num_nodes: int,
     L**2k - P_k(L)**2 exactly and P_k vanishes at its nodes. So the
     recursion stops at k nodes once sigma_kk <= rtol * |m_2k|, both when
     the population holds only k sizes and when the moments are not
-    realizable (sigma_kk < 0). A negative node holding at most rtol of each
-    moment m_1..m_{2n-1} is rounding (the recursion's cancellation leaves
-    such nodes where the population sits at zero size) and is set to zero,
-    which moves those moments by no more than rtol. A rule with any other
-    negative node gives way to the next smaller one, whose smallest node is
-    no lower (Cauchy interlacing).
+    realizable (sigma_kk < 0).
+
+    A node below zero is moved to zero with its weight kept, which changes
+    moment k by w_i * |L_i|**k. Crystals at zero size, such as nuclei born
+    at rad = 0, sit on the edge of the support, and rounding or integration
+    error puts their node slightly below zero. Dropping to a smaller rule
+    instead collapsed QMOM solves for good: the smaller closure moved the
+    higher moments so that no larger rule was non-negative again, and with
+    nucleation at zero size m_5 ended up to 86 % off under CVode at its
+    default tolerances (probe, 3 Nov 2026). A negative m_1 thus gives one
+    node at zero holding m_0.
     """
     moments = _validated_moments(moments, num_nodes, rtol)[:2 * num_nodes]  # [x**k basis]
 
@@ -95,14 +101,9 @@ def invert_moments(moments, num_nodes: int,
         return QuadratureRule(np.empty(0), np.empty(0))
 
     diagonal, off_diagonal_sq = _recurrence_coefficients(moments, rtol)  # [x], [x**2]
+    nodes, weights = _gauss_rule(moments[0], diagonal, off_diagonal_sq)  # [x], [basis]
 
-    for num_kept in range(len(diagonal), 0, -1):
-        nodes, weights = _gauss_rule(moments[0], diagonal[:num_kept],
-                                     off_diagonal_sq[:num_kept - 1])
-        if _negative_nodes_are_rounding(nodes, weights, moments, rtol):
-            return QuadratureRule(np.maximum(nodes, 0.0), weights)
-
-    return QuadratureRule(np.empty(0), np.empty(0))
+    return QuadratureRule(np.maximum(nodes, 0.0), weights)
 
 
 def _validated_moments(moments, num_nodes, rtol):
@@ -194,36 +195,6 @@ def _recurrence_coefficients(moments, rtol):
         sigma_older, sigma_old = sigma_old, sigma
 
     return diagonal, off_diagonal_sq[1:]
-
-
-def _negative_nodes_are_rounding(nodes, weights, moments, rtol):
-    """Whether every negative node holds at most rtol of each moment.
-
-    Parameters
-    ----------
-    nodes : numpy.ndarray
-        Rule nodes [x], shape ``(n,)``.
-    weights : numpy.ndarray
-        Rule weights [basis], shape ``(n,)``.
-    moments : numpy.ndarray
-        Moments m_0..m_{2N-1} [x**k basis], ``2N >= 2n``.
-    rtol : float
-        Degeneracy tolerance [-]; see ``invert_moments``.
-
-    Returns
-    -------
-    bool
-        True when no node is negative, or when each negative node's
-        ``w_i * |L_i|**k`` is at most ``rtol * |m_k|`` for k = 1..2n-1.
-        A zero moment beside a negative node counts as not rounding.
-    """
-    negative = nodes < 0
-    if not np.any(negative):
-        return True
-
-    orders = np.arange(1, 2 * len(nodes))
-    contributions = weights[negative, None] * np.abs(nodes[negative, None]) ** orders  # [x**k basis]
-    return bool(np.all(contributions <= rtol * np.abs(moments[orders])))
 
 
 def _gauss_rule(zeroth_moment, diagonal, off_diagonal_sq):
