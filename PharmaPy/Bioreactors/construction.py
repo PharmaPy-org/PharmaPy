@@ -11,6 +11,7 @@ import json
 from copy import deepcopy
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from operator import itemgetter
 from pathlib import Path
 from typing import Optional, Union
 
@@ -18,7 +19,7 @@ import numpy as np
 from numpy.typing import ArrayLike
 
 from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef
-from PharmaPy.IntegratorBackends import FixedStepBackend, ScipyBackend
+from PharmaPy.IntegratorBackends import AssimuloBackend, FixedStepBackend, ScipyBackend
 from PharmaPy.Metabolic import MetabolicNetworkDefinition
 from PharmaPy.Phases_Refactored import LiquidPhase
 from PharmaPy.Reactors_Refactored import BatchReactor, SemiBatchReactor, ContinuousReactor
@@ -26,6 +27,8 @@ from PharmaPy.Streams_Refactored import LiquidStream
 
 from .mechanisms import ConfiguredRates, PathwayMetabolism, RateReconciledCulture, WorkingVolume, DeclaredStreamDensity
 from .input_format import normalize_forward_inputs
+from .numerical import inventory_limits
+from .construction_checks import density_contract, reaction_contract
 from .BioreactorUnitConverter import BioreactorUnitConverter
 from .thermal import thermal_options, attach_utility, positive_temperature, mixed_temperature
 
@@ -350,18 +353,23 @@ def _integrator(numerics):
     Parameters
     ----------
     numerics : Mapping
-        ``backend`` (``'fixed-step'`` or ``'scipy'``). SciPy requires
+        ``backend`` (``'fixed-step'``, ``'scipy'`` or ``'assimulo'``).
+        Adaptive solvers require
         ``relative_tolerance`` [-] and ``absolute_tolerance`` [state units]
-        and accepts ``maximum_step`` and the paired
+        and accept ``maximum_step``. SciPy additionally accepts ``method``
+        (BDF by default; an existing solve_ivp method) and the paired
         ``jacobian_relative_step`` [-] and ``jacobian_state_scale``
         [state units].
+        Optional ``inventory_acceptance`` declares named absolute error budgets
+        with units, validated against compiled state metadata before solving.
 
     Returns
     -------
     IntegratorBackend
-        ``FixedStepBackend``, or upstream ``ScipyBackend`` with
-        ``inventory_boundaries=True`` so depleted pools are held at a
-        boundary instead of being throttled by the vessel limiter.
+        Existing native backend. Adaptive backends opt into the shared
+        inventory-rate feasibility contract instead of the fixed vessel
+        limiter horizon. SciPy also locates depletion boundaries; CVode checks
+        returned inventories without projecting them to zero.
 
     Raises
     ------
@@ -372,25 +380,36 @@ def _integrator(numerics):
     if backend == "fixed-step":
         _require_keys(numerics, {"backend", "step"}, "fixed-step numerics")
         return FixedStepBackend()
-    if backend == "scipy":
+    if backend in {"scipy", "assimulo"}:
+        optional = {"maximum_step", "inventory_acceptance"}
+        if backend == "scipy":
+            optional.update({"method", "jacobian_relative_step", "jacobian_state_scale"})
         _require_keys(
             numerics,
             {"backend", "step", "relative_tolerance", "absolute_tolerance"},
-            "scipy numerics",
-            {"maximum_step", "jacobian_relative_step", "jacobian_state_scale"},
+            f"{backend} numerics",
+            optional,
         )
         options = {
             "rtol": float(numerics["relative_tolerance"]),
             "atol": float(numerics["absolute_tolerance"]),
         }
         if "maximum_step" in numerics:
-            options["max_step"] = _quantity_seconds(
+            options["max_step" if backend == "scipy" else "maxh"] = _quantity_seconds(
                 numerics["maximum_step"], "maximum_step"
             )
         for name in ("jacobian_relative_step", "jacobian_state_scale"):
             if name in numerics:
                 options[name] = numerics[name]
-        return ScipyBackend(options, inventory_boundaries=True)
+        if backend == "assimulo":
+            # Native CVode's continuous reporting retains every requested row;
+            # otherwise Assimulo 3.4.3 can omit a point near the final step.
+            options['report_continuously'] = True
+            return AssimuloBackend(options, inventory_boundaries=True)
+        method = numerics.get("method", "BDF")
+        if method not in {"BDF", "Radau", "LSODA", "RK45", "RK23", "DOP853"}:
+            raise ValueError("scipy method must be BDF, Radau, LSODA, RK45, RK23 or DOP853")
+        return ScipyBackend(options, method=method, inventory_boundaries=True)
     raise ValueError(f"unsupported native bioreactor backend {backend!r}")
 
 
@@ -763,6 +782,13 @@ class NativeBioreactorAssembly:
         Reject additions with unknown composition.
     thermo_path : str
         Native thermodynamic file, used to build inlet streams.
+    inventory_acceptance : dict, optional
+        Named absolute negative-error budgets with explicit units. Omission
+        retains legacy output handling; explicit limits preserve raw output.
+    construction : dict
+        Initial assumptions, defaults, physical-basis declarations and numerical
+        settings. Returned by input_audit as a defensive copy; this records
+        construction, not subsequent mutations of native objects.
     """
 
     unit: object
@@ -776,6 +802,8 @@ class NativeBioreactorAssembly:
     require_complete_inputs: bool = False
     thermo_path: str = ''
     _inlets: dict = field(default_factory=dict, repr=False)
+    inventory_acceptance: Optional[dict] = None
+    construction: dict = field(default_factory=dict)
 
     def reset(self):
         """Restore initial inventories and clear the assembly's scheduled inlets."""
@@ -833,7 +861,8 @@ class NativeBioreactorAssembly:
             stream = LiquidStream(self.thermo_path, mass_flow=density*flow,
                                   mass_frac=conc/density,
                                   temp=positive_temperature(event.get("temperature_k", self.phase.temp)))
-            if isinstance(self.unit, ContinuousReactor) and self.phase.get_mechanism(WorkingVolume) is not None:
+            if (self.phase.get_mechanism(DeclaredStreamDensity) is not None
+                    or isinstance(self.unit, ContinuousReactor) and self.phase.get_mechanism(WorkingVolume) is not None):
                 stream.mechanisms = [DeclaredStreamDensity(density)]
             if (self.phase.get_mechanism(WorkingVolume) is None
                     and not np.isclose(stream.vol_flow, flow, rtol=1e-10, atol=1e-15)):
@@ -847,24 +876,90 @@ class NativeBioreactorAssembly:
             volume.inlet_connections = tuple(self.unit.inlet_connections)
             volume.volume_rate = sum(flow for _, flow in self._inlets.values())
 
+    def _schedule(self) -> list:
+        """Normalize event instants once for consistent auditing and execution.
+
+        Returns
+        -------
+        list
+            Pairs of time [s] and event, including both run endpoints. Times
+            within eight floating-point ulps are coalesced in recipe order;
+            this preserves the established conversion-roundoff convention.
+        """
+        scheduled = sorted(
+            ((_event_time_seconds(event, self.event_time_unit), index, event)
+             for index, event in enumerate(self.events)), key=itemgetter(0))
+        canonical = None
+        for index, (time, order, event) in enumerate(scheduled):
+            tolerance = 8. * np.finfo(float).eps * max(1., abs(time))  # [s]; existing conversion-roundoff allowance
+            for endpoint in (self.time_grid[0], self.time_grid[-1]):
+                if abs(time - endpoint) <= tolerance:
+                    time = float(endpoint)
+            if canonical is None or time - canonical > tolerance:
+                canonical = time
+            scheduled[index] = (canonical, order, event)
+        return [(time, event) for time, _, event in sorted(scheduled)
+                if self.time_grid[0] <= time <= self.time_grid[-1]]
+
     def input_audit(self):
-        """Report missing feed composition without changing legacy additions.
+        """Report construction assumptions and missing feed composition.
 
         Returns
         -------
         dict
             ``feed_composition`` (``'COMPLETE'`` or ``'INCOMPLETE'``) and the list
             of in-window additions with unknown composition (``time_s`` [s]).
+            ``construction`` records initial model choices and qualification
+            scopes; it is independent of subsequent solver state mutations.
         """
-        incomplete = [dict(time_s=_event_time_seconds(event, self.event_time_unit),
+        incomplete = [dict(time_s=time,
                            composition=_feed_composition(event))
-                      for event in self.events
+                      for time, event in self._schedule()
                       if event["event_type"] in {"feed", "stock_to_target", "flow"}
                       and not (event['event_type'] == 'flow' and event['volume_l_h'] == 0.)
-                      and self.time_grid[0] <= _event_time_seconds(event, self.event_time_unit) < self.time_grid[-1]
                       and _feed_composition(event) in {"unknown", "unspecified"}]
         return {"feed_composition": "INCOMPLETE" if incomplete else "COMPLETE",
-                "incomplete_additions": incomplete}
+                "incomplete_additions": incomplete, 'construction': deepcopy(self.construction)}
+
+    def balance_report(self, histories, **evidence) -> dict:
+        """Apply the existing inventory ledger audit to this assembly.
+
+        Parameters
+        ----------
+        histories : sequence
+            Accepted native histories, masses [kg] and times [s].
+        **evidence : dict
+            Independently supplied ledger [kg/s], jumps [kg], integration-error
+            bounds [kg], budgets [kg], and optional invariant coefficients and
+            budgets in the units documented by ``diagnostics.inventory_report``.
+
+        Returns
+        -------
+        dict
+            Existing passed/failed/unresolved/not-assessable accounting report.
+            Missing sources or composition are never inferred from endpoints.
+        """
+        from .diagnostics import inventory_report
+        return inventory_report(self, histories, **evidence)
+
+    def _apply_event(self, event: Mapping) -> None:
+        """Apply one operation in declared order using existing material tools.
+
+        Parameters
+        ----------
+        event : Mapping
+            Normalized material or flow event with its declared units.
+
+        Raises
+        ------
+        ValueError
+            The existing event implementation rejects an infeasible operation.
+        """
+        if event['event_type'] == 'flow':
+            self._set_inlet(event)
+        else:
+            _apply_material_event(self.phase, event, self.carrier_density_kg_l,
+                                  self.carrier_species, nonisothermal=self.unit.has_energy_balance)
 
     def diagnostics(self, histories, *, depletion_tolerance_mmol=1e-9):
         """Inspect saved inventories; no additional reactor solves or rate changes.
@@ -980,6 +1075,9 @@ class NativeBioreactorAssembly:
         Event times within ``8 eps max(1, |t|)`` of each other or of the grid
         ends are merged so that unit conversion roundoff cannot reorder or drop
         events; recipe order is kept within one instant.
+        Terminal operations are applied once after the last interval; a native
+        one-point result retains their post-event state without integrating
+        beyond the requested endpoint. Call reset before replaying the recipe.
         """
         audit = self.input_audit()
         if self.require_complete_inputs and audit["incomplete_additions"]:
@@ -990,27 +1088,13 @@ class NativeBioreactorAssembly:
                                  isinstance(self.unit.integrator, FixedStepBackend))  # [s]
         if not self.unit.integrator._compiled:
             self.unit.compile_integrator(verbose=False)
+        if self.inventory_acceptance is not None:
+            self.unit.integrator.inventory_limits = inventory_limits(self.unit, self.inventory_acceptance)
         if not self.events:
             self.unit.solve_unit(time_grid=time_grid, verbose=verbose)
             return (self.unit.result,)
-        scheduled = sorted(
-            ((_event_time_seconds(event, self.event_time_unit), index, event)
-             for index, event in enumerate(self.events)), key=itemgetter(0))
-        # Unit conversion may separate the same instant by a few floating-point
-        # ulps. Preserve recipe order within that numerical instant.
-        canonical = None
-        for index, (time, order, event) in enumerate(scheduled):
-            tolerance = 8. * np.finfo(float).eps * max(1., abs(time))  # [s]; 8 ulps covers unit-conversion roundoff
-            for endpoint in (time_grid[0], time_grid[-1]):
-                if abs(time - endpoint) <= tolerance:
-                    time = float(endpoint)
-            if canonical is None or time - canonical > tolerance:
-                canonical = time
-            scheduled[index] = (canonical, order, event)
-        scheduled = [(time, event) for time, _, event in sorted(scheduled)]
+        scheduled = self._schedule()
         final_time = float(time_grid[-1])
-        scheduled = [(time, event) for time, event in scheduled
-                     if time_grid[0] <= time <= final_time]
         if not scheduled:
             self.unit.solve_unit(time_grid=time_grid, verbose=verbose)
             return (self.unit.result,)
@@ -1020,18 +1104,19 @@ class NativeBioreactorAssembly:
         for start, end in zip(boundaries[:-1], boundaries[1:]):
             for time, event in scheduled:
                 if time == start:
-                    if event['event_type'] == 'flow':
-                        self._set_inlet(event)
-                    else:
-                        _apply_material_event(
-                            self.phase, event, self.carrier_density_kg_l,
-                            self.carrier_species, nonisothermal=self.unit.has_energy_balance,
-                        )
+                    self._apply_event(event)
             tolerance = 8. * np.finfo(float).eps * max(1., abs(start), abs(end))  # [s]; 8 ulps covers unit-conversion roundoff
             grid = np.r_[start, time_grid[
                 (time_grid > start + tolerance) &
                 (time_grid < end - tolerance)], end]
             self.unit.solve_unit(time_grid=grid, verbose=verbose)
+            histories.append(self.unit.result)
+        terminal = [event for time, event in scheduled if time == final_time]
+        if terminal:
+            for event in terminal:
+                self._apply_event(event)
+            states = self.unit.solver_state_collection.pack(self.unit.complete_state({}, final_time))  # [native state units]
+            self.unit.retrieve_results(np.array([final_time]), states[None, :])
             histories.append(self.unit.result)
         return tuple(histories)
 
@@ -1081,7 +1166,7 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
         case["operation"],
         {"carrier_density_kg_l", "carrier_species", "initial_mass_kg",
          "initial_volume", "mode", "runtime"},
-        "operation", optional={"temperature_k", "volume_policy", "thermal"},
+        "operation", optional={"temperature_k", "volume_policy", "thermal", "density", "conservation"},
     )
     _require_keys(case["recipe"], {"name"}, "recipe", {"require_complete_inputs", "time_unit"})
     complete = case["recipe"].get("require_complete_inputs", False)
@@ -1106,10 +1191,6 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     initial_volume_l = _quantity_liters(  # [L]
         operation["initial_volume"], "initial_volume"
     )
-    if not np.isclose(mass_kg, initial_volume_l * density, rtol=0.0, atol=1e-12):
-        raise ValueError(
-            "initial_mass_kg must agree with initial_volume and carrier density"
-        )
     state = definition["state"]
     carrier_species = str(operation["carrier_species"])
     mechanism_name = definition["mechanism"]
@@ -1156,6 +1237,8 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     else:
         raise ValueError(f"unsupported biological mechanism {mechanism_name!r}")
 
+    density_mechanism, density_report = density_contract(operation, phase)
+    conservation_report = reaction_contract(operation.get('conservation'), phase)
     conditions = dict(case["biology"]["conditions"])
     if mechanism_name == "pathway-lp":
         mechanism = _pathway_mechanism(definition, phase, operation, conditions)
@@ -1168,6 +1251,8 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     if policy not in {"native", "working-volume"}:
         raise ValueError("volume_policy must be native or working-volume")
     mechanisms = [mechanism]
+    if density_mechanism is not None:
+        mechanisms.append(density_mechanism)
     if policy == "working-volume":
         mechanisms.append(WorkingVolume(phase, initial_volume_l / 1000., allow_outlets=mode == "continuous"))
     phase.mechanisms = mechanisms
@@ -1203,4 +1288,22 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     return NativeBioreactorAssembly(
         unit, phase, mechanism, _time_grid(operation, case["numerics"]),
         events, time_unit, density, carrier_species, complete, str(thermo_path),
+        inventory_acceptance=case['numerics'].get('inventory_acceptance'),
+        construction={
+            'reactor': type(unit).__name__, 'mechanism': mechanism_name,
+            'phase_species': list(phase.name_species), 'species_mass_unit': 'kg',
+            'auxiliary_material_states': list(getattr(mechanism, 'extensive_states', ())),
+            'density': density_report, 'volume_policy': policy,
+            'initial_mass_kg': mass_kg, 'initial_volume_l': initial_volume_l,
+            'native_initial_volume_l': float(phase.vol)*1000.,  # [L]; exact L/m3 conversion
+            'temperature_k': temperature_k,
+            'thermal_mode': (operation.get('thermal') or {}).get('mode', 'isothermal'),
+            'defaulted': [name for name in ('temperature_k', 'thermal', 'volume_policy', 'density')
+                          if operation.get(name) is None],
+            'conservation': conservation_report,
+            'mechanism_conservation': mechanism.audit_conservation(),
+            'numerical': deepcopy(case['numerics']),
+            'events': 'declared order at equal times; terminal post-state retained',
+            'scope': 'represented phase pools; biological auxiliary inventories require separate closure',
+        },
     )

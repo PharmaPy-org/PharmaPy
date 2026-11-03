@@ -140,7 +140,7 @@ the checkout; this is a verification procedure, not a separate runtime API.
 
 ## Remaining acceptance work
 
-F10/F11 is the selected baseline. The source workbook identifies the nominal
+The E. coli yeast-extract fed-batch process (source runs F10/F11) is the selected baseline. The source workbook identifies the nominal
 profile and logged additions as the same glucose feed; the current one-counted
 solution-volume inputs are retained as the published-model reproduction. The
 logged feed is gravimetric, and the delivered glucose dose (about 83-102 g) cannot
@@ -158,9 +158,9 @@ nonlimiting oxygen from the controller target alone.
 JSON forward-record adapter adopts #351 identity, ordering, units, source and
 parameter provenance requirements without replacing the existing arrays. It
 preserves input snapshots, solver settings, source observations and optional
-native state/algebraic fields for replay. The shared #346 object API remains
-pending upstream; correlated weights and sparse-Jacobian work (#237/#236) are
-not implemented here. This forward adapter does not close all of #351.
+native state/algebraic fields for replay. The prerequisite supplies the native `PharmaPy.Records.CalibrationRecord`
+API. This slice preserves forward provenance; the synthetic calibration-record
+example belongs to the later WP3.2 demonstration slice. This forward adapter does not close all of #351.
 
 Synthetic chemostat dilution, Monod equilibrium and washout are qualified through
 `ContinuousReactor`. This does not establish experimental continuous-culture
@@ -174,6 +174,7 @@ comparison figures are not distributed.
 
 | Shared change | Why WP3.1 needs it | Verification |
 | --- | --- | --- |
+| Retained estimation safeguards | Preserve derivative-resolution checks, reject failed bootstrap fits, and qualify covariance/interval interpretation through the inherited native estimator. | `tests/test_estimation_uncertainty_safeguards.py` and native statistics tests. |
 | Requested outlet rates and exact finite-step transport limit | Reserve withdrawal before metabolic feasibility; avoid smoothing down an exactly feasible outlet. Default assembly/limiting remains unchanged. | Chemostat depletion, volume and failure checks. |
 | Owned depletion-rate arrays | Native buffers are reused; the boundary rate evaluator returns copies so retained derivatives are not overwritten (upstream's right-hand side already copies). | Aliasing regression, analytical CSTR balances and upstream backend tests. |
 | Inlet rates passed only to requesting mechanisms | Feasibility includes incoming material rather than treating a supplied empty pool as unavailable. | Reconciliation supply and operating-transition cases. |
@@ -223,6 +224,98 @@ is required, not cosmetic. Upstream `ScipyBackend` tests pass unchanged, and
 tolerances differ between the classes (upstream 1e-6/1e-6, scipy's own
 1e-3/1e-6); the builder always declares both, and the one direct test that did
 not now states scipy's values explicitly.
+
+## Numerical solver selection and fast reactions
+
+The existing process JSON can select `numerical.backend: "assimulo"` for
+native CVode when the optional Assimulo environment is installed. For
+`"scipy"`, the optional `numerical.method` selects `BDF`, `Radau`, `LSODA`,
+`RK45`, `RK23` or `DOP853`; omission retains BDF. Existing numerical layouts
+remain valid. Both adaptive backends require explicit `relative_tolerance`
+and `absolute_tolerance`, and accept `maximum_step` with its time unit.
+These are numerical choices, not kinetic parameters or physical assumptions.
+There is no automatic method switch or tolerance adjustment after a failure.
+
+The bioreactor builder opts CVode into the same inventory-rate feasibility
+evaluator used by SciPy. A fast but feasible reaction is therefore not rejected
+merely because its instantaneous rate would exhaust the inventory over the
+vessel's unrelated default one-second limiter horizon. Consumption of a truly
+empty pool remains an error. This opt-in policy leaves other direct CVode
+callers' limiter behavior unchanged. Both callbacks return owned derivative
+arrays so a later vessel evaluation cannot overwrite an earlier derivative.
+
+CVode does not acquire SciPy's depletion-root projection: it retains its
+native adaptive integration and checks returned inventories against the
+existing absolute negative-inventory budget. It returns smaller negative
+numerical errors unchanged; it does not silently clip them. A failure requires
+inspection of the model and numerical convergence, not removal of the guard.
+The inherited fixed `1e-12` cutoff in native state units remains a limitation,
+not a scale-independent guarantee of positivity.
+
+`tests/Bioreactor/test_bioreactor_adaptive_inventory.py` verifies all exposed
+methods against an analytical first-order conversion, sequential-reaction
+transients and conservation, rejection of an infeasible empty-pool sink,
+derivative ownership, and CVode reaction-heat and cold-feed restart balances.
+These are numerical verification cases; they do not establish experimental
+parameter accuracy or biological validity.
+
+### Explicit inventory acceptance
+
+Optionally add an absolute error requirement to the existing `numerical` mapping:
+
+```json
+"inventory_acceptance": {
+  "mass_j": {"unit": "ng", "value": 1.0}
+}
+```
+
+This example is exactly the inherited `1e-12 kg` budget expressed as one
+nanogram; it is a compatibility example, not a recommended accuracy for every
+process. Choose requirements from the physical quantities that need to be
+resolved, then independently qualify the solver settings by convergence.
+An integration `absolute_tolerance` is not a guaranteed global error bound.
+
+State names, native units and component order come from native solver metadata.
+`value` applies uniformly to that state's components. Alternatively, `values`
+is a mapping naming **every** indexed component, including the carrier; its
+JSON key order does not matter. Scalar mechanism inventories can be targeted
+by their unique native state names. Ambiguous, unknown or unconstrained states,
+unsupported unit conversions, incomplete component mappings, nonfinite values
+and negative budgets are rejected. Zero explicitly requires nonnegative output.
+The declaration can be omitted or null, but an empty mapping is an error.
+
+`Bioreactors.numerical.inventory_limits` converts declared units and binds the
+requirements after native compilation. One native `check_inventory` helper
+checks both adaptive backends, reporting the state/component, time, value, unit
+and limit on failure. Unspecified states retain the compatibility budget.
+With explicit acceptance, reported negative values within budget remain visible:
+no final output clipping is performed. Omission preserves legacy behavior,
+including SciPy's existing final clipping. SciPy's depletion-root algorithm is
+unchanged in both cases. The check covers reported states, not all internal
+solver stages, and does not establish strict positivity or conservation.
+
+Acceptance limits never change physical empty-pool feasibility, kinetic
+parameters, solver tolerances or the initial-inventory rules. A permissive
+output budget cannot authorize consumption from an empty pool.
+
+### Independent convergence trials
+
+`Bioreactors.verification.run_convergence` runs a fresh native assembly for each
+explicit numerical setting and retains every success or failure. Supply a
+common `report_times` grid in seconds and an explicit `reference_index`; there
+is no automatic retry, best-run selection or replacement of a failed reference.
+Overrides cannot alter the process or its inventory acceptance requirements.
+The existing combined and separate input layouts are supported.
+
+The returned records include raw liquid component masses, volumes, temperatures,
+minimum masses, total-mass changes and differences from the selected reference
+in their respective units. When both event sides are present in native
+histories, the post-event value is selected without interpolation; native
+terminal-event semantics are preserved. If the process genuinely conserves total liquid mass, supply
+the independently known `conserved_mass_kg` to obtain a conservation residual.
+Otherwise leave it unset: a fed or withdrawn inventory is not assumed constant.
+No extra input file or production integration path is introduced. Agreement
+between trials is numerical evidence, not experimental validation.
 
 ## Interchangeability evidence
 

@@ -2033,13 +2033,18 @@ def test_operation_coincident_mixed_units_keep_declared_order(reverse):
     assert network_observed(a,h[-1])[-1,0]==pytest.approx(1.70 if reverse else 1.65,abs=1e-10)
 
 
-def test_operation_final_endpoint_in_another_unit_is_not_applied():
-    case,config,thermo=operation_load('endpoints')
-    case['operation']['runtime']={'value':.003,'unit':'day'}
-    config['recipes']['benchmark'][-1]['time']={'value':.003*24.,'unit':'h'}
-    a,h,_=operation_run(case,config,thermo)
-    assert len(h)==1
-    assert network_observed(a,h[0])[-1,6]==pytest.approx(1.02,abs=1e-12)
+def test_operation_final_endpoint_in_another_unit_is_applied_once():
+    """Apply the mixed-unit endpoint sample once and preserve both event sides."""
+    case, config, thermo = operation_load('endpoints')
+    case['operation']['runtime'] = {'value': .003, 'unit': 'day'}  # [day]; shorten the fixture to the tested endpoint
+    config['recipes']['benchmark'][-1]['time'] = {'value': .003*24., 'unit': 'h'}  # [h]; exact 24 h/day conversion
+    assembly, histories, _ = operation_run(case, config, thermo)
+    before, after = histories
+    assert network_observed(assembly, before)[-1, 6] == pytest.approx(1.02, abs=1e-12)  # [L]; initial 1 L plus 0.02 L feed
+    assert network_observed(assembly, after)[0, 6] == pytest.approx(1.01, abs=1e-12)  # [L]; remove the declared 0.01 L sample
+    np.testing.assert_array_equal(after.time, [before.time[-1]])
+    np.testing.assert_allclose(after.mass_j_liquid0[0], before.mass_j_liquid0[-1]*(1.01/1.02),
+                               rtol=1e-12, atol=1e-15)  # [kg]; independently specified well-mixed removal fraction
 
 
 @pytest.mark.parametrize('bad',['negative_concentration','unknown_species','empty_identifier'])
