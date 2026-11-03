@@ -15,6 +15,7 @@ from typing import Mapping, NamedTuple, Optional, Sequence, Union
 import numpy as np
 import numpy.typing as npt
 from scipy import stats
+from scipy.optimize import Bounds
 import matplotlib.pyplot as plt
 from matplotlib.patches import Ellipse, Rectangle
 import pandas as pd
@@ -33,6 +34,10 @@ _ENSEMBLE_LINE_ALPHA = 0.02  # [-]
 # Subplot columns per row in StatisticsClass.plot_boots; layout of the
 # original implementation. Display choice only.
 _BOOT_PLOT_COLUMNS = 2  # [-]
+
+
+class _BootstrapFitFailure(RuntimeError):
+    """Identify a refit rejected by the solver termination contract."""
 
 
 def _validated_count(value, name: str) -> int:
@@ -383,7 +388,8 @@ def _linearized_covariance(jac, residuals, dof, param_names,
         ``(n_entries,)`` [weighted residual unit]; zero where unobserved.
     dof : int
         Degrees of freedom ``num_data_total - num_params`` [-], with
-        ``num_data_total`` the number of observed entries; positive.
+        ``num_data_total`` the number of observed entries. Must be positive
+        for residual scaling; absolute-noise covariance can use zero.
     param_names : sequence of str
         Parameter names in the row order of ``J``, used in the diagnostic.
     include_mse : bool
@@ -400,12 +406,18 @@ def _linearized_covariance(jac, residuals, dof, param_names,
         covariance is undefined.
     mse : float
         Residual mean square ``s2 = r @ r / dof`` [weighted residual
-        unit**2].
+        unit**2]; NaN when degrees of freedom are not positive.
     diagnostic : str or None
-        None when the covariance is defined, otherwise the message of
-        ``_information_inverse`` stating why it is not.
+        None when the covariance is defined; otherwise a degrees-of-freedom
+        diagnostic or the reason returned by ``_information_inverse``.
     """
-    mse = 1 / dof * np.dot(residuals.T, residuals)  # [r**2]
+    mse = (np.dot(residuals.T, residuals) / dof
+           if dof > 0 else np.nan)  # [weighted residual unit**2]
+    if include_mse and dof <= 0:
+        undefined = np.full((len(param_names), len(param_names)), np.nan)  # [p_i*p_j]
+        return (undefined, undefined.copy(), mse,
+                'Residual-scaled covariance requires positive degrees of freedom; '
+                'known absolute noise permits include_mse=False.')
 
     # inv(J @ J.T) [p_i*p_j/r**2], computed as before #532 when defined;
     # NaN when the covariance is undefined.
@@ -611,7 +623,8 @@ def _fit_bootstrap_sample(estimator, y_sample: list) -> np.ndarray:
     Raises
     ------
     Exception
-        Whatever ``optimize_fn`` raises for this dataset.
+        Whatever ``optimize_fn`` raises for this dataset. An unsuccessful
+        termination or nonfinite parameter vector raises ``_BootstrapFitFailure``.
 
     Notes
     -----
@@ -624,11 +637,21 @@ def _fit_bootstrap_sample(estimator, y_sample: list) -> np.ndarray:
     isolated.y_data = y_sample  # [measured-state units]
 
     options = estimator.optim_options
-    params, _, _ = isolated.optimize_fn(
+    params, _, info = isolated.optimize_fn(
         method=estimator.opt_method,
         verbose=False, store_iter=False,
         optim_options=None if options is None else dict(options))
 
+    success = info.get('success')
+    if success is None and 'stop_criterion' in info:
+        success = info['stop_criterion'] in (
+            'Small gradient', 'Small step',
+            'Value of the objective function lower than tolerance')
+    if success is not None and not success:
+        raise _BootstrapFitFailure(str(info.get('message',
+            info.get('stop_criterion', 'unsuccessful solver termination'))))
+    if not np.isfinite(params).all():
+        raise _BootstrapFitFailure('nonfinite fitted parameters')
     return params  # [model-parameter units]
 
 
@@ -755,7 +778,8 @@ class ParallelProblem:
         Raises
         ------
         RuntimeError
-            If the estimator has not been fitted (no ``optimize_fn`` run).
+            If the estimator has not been fitted (no ``optimize_fn`` run),
+            or the refit reports unsuccessful termination or nonfinite parameters.
         ValueError
             If ``sample`` does not hold one array per experiment with the
             shape of that experiment's observations, holds NaN or infinite
@@ -957,6 +981,7 @@ class StatisticsClass:
         # --------------- Output vals
         self.confid_intervals = None
         self.boot_params = None
+        self.bootstrap_failures = []
 
     def get_intervals(self, covar_params=None, verbose=True, set_self=True):
         """Compute two-sided Student-t intervals of the fitted parameters.
@@ -990,17 +1015,33 @@ class StatisticsClass:
             returns it; its warning states the cause). A given
             ``covar_params`` is used as is.
 
+        Warns
+        -----
+        RuntimeWarning
+            The fit was unsuccessful, local variance is zero, or the symmetric
+            intervals touch or cross parameter bounds. Limits are not clipped.
+
         Notes
         -----
         ``confid_intervals['perc_deviation']`` is the half-width relative to
         the parameter value [%].
         """
+        info = self.inst.info_opt
+        if ('success' in info and not info['success']) or info.get('stop_criterion') == 'Maximum iterations exceeded':
+            warnings.warn('Confidence intervals follow an unsuccessful fit; '
+                          'inferential interpretation is unsupported.',
+                          RuntimeWarning, stacklevel=2)
+
         if covar_params is None:
             covar_params = self.inst.covar_params
             _require_defined_covariance(covar_params,
                                         'StatisticsClass.get_intervals')
 
-        sigma_params = np.sqrt(np.diag(covar_params))
+        if np.any(np.diag(covar_params) == 0.):
+            warnings.warn('Zero local variance does not establish parameter certainty; '
+                          'check residual noise scaling and identifiability.',
+                          RuntimeWarning, stacklevel=2)
+        sigma_params = np.sqrt(np.diag(covar_params))  # [parameter units]
 
         t_stat = stats.t.ppf((1 + self.alpha)/2, self.dof)
 
@@ -1009,6 +1050,19 @@ class StatisticsClass:
         intervals = np.column_stack((self.params - delta_par,
                                      self.params + delta_par))
 
+        options = self.inst.optim_options or {}
+        bounds = options.get('bounds')
+        active = np.any(info.get('active_mask', 0))
+        if bounds is not None:
+            if isinstance(bounds, Bounds):
+                lower, upper = bounds.lb, bounds.ub  # [parameter units]
+            else:
+                lower, upper = bounds  # [parameter units]
+            active = active or np.any(intervals[:, 0] <= lower) or np.any(intervals[:, 1] >= upper)
+        if active:
+            warnings.warn('Symmetric confidence intervals touch or cross a parameter bound; '
+                          'boundary coverage is not qualified. Use constrained inference.',
+                          RuntimeWarning, stacklevel=2)
         confidence_int = dict(zip(self.param_names, intervals))
 
         perc_deviation = np.abs(delta_par / self.params * 100)
@@ -1583,15 +1637,16 @@ class StatisticsClass:
             one row per bootstrap dataset in sampling order, columns in the
             order of the optimized parameters (``name_params``), in the
             physical units configured for each model parameter. A row is NaN
-            when the optimizer encounters a singular linear system during the
-            solve. A refit whose covariance is undefined, for example
+            when the optimizer encounters a singular linear system, reports an
+            unsuccessful termination, or returns nonfinite parameters. A refit whose covariance is undefined, for example
             because its parameters are not identifiable, keeps its
             estimates as the row (see Notes).
 
         Warns
         -----
         RuntimeWarning
-            If ``optimize_fn`` raises ``numpy.linalg.LinAlgError``; the warning
+            If the sample refit fails its termination/finite-value checks or
+            ``optimize_fn`` raises ``numpy.linalg.LinAlgError``; the warning
             includes the sample index and original diagnostic.
             Also if a sample's exception propagates and the model then fails
             at the accepted parameters; the sample's exception is still
@@ -1618,8 +1673,8 @@ class StatisticsClass:
         ``_fit_bootstrap_sample``), so the estimator keeps its observations,
         accepted parameters, residuals, predictions, solver information and
         covariance, also when a sample fails or an exception propagates. The
-        only state this method changes is ``boot_params`` and
-        ``num_samples`` on this ``StatisticsClass``, after all samples are
+        only state this method changes is ``boot_params``,
+        ``bootstrap_failures`` and ``num_samples`` on this ``StatisticsClass``, after all samples are
         fitted. A stateful model callback, such as a ``SimulationExec`` unit
         operation, is shared with the copies; ``_restore_model_state`` returns
         it to the accepted parameters after the samples, also when a sample's
@@ -1636,20 +1691,12 @@ class StatisticsClass:
         including one raised inside a user model. Other programming and model
         errors propagate unchanged.
 
-        This recovery is therefore scoped to ``opt_method='LM'``.
-        ``ParameterEstimation.optimize_fn`` also accepts ``'IPOPT'``, whose
-        numerical failures surface from cyipopt rather than as a
-        ``LinAlgError``. Under that method a failed sample aborts the whole
-        bootstrap run instead of recording a NaN row. A sample refit that
-        stops without converging does not raise, whatever the method: an
-        unsuccessful IPOPT termination (e.g. at ``max_iter``), LM at
-        ``max_fun_eval`` (``'Maximum iterations exceeded'``) or an
-        unsuccessful ``scipy.optimize.least_squares`` status (e.g. 0 at
-        ``max_nfev``). ``optimize_fn`` emits its ``RuntimeWarning`` naming
-        the stop reason, and the sample's last accepted iterate is stored as
-        its row. When that warning is turned into an error, it propagates
-        like any other sample exception (it is not a ``LinAlgError``) and
-        aborts the run.
+        Unsuccessful termination is retained as a NaN row rather than a fitted
+        sample, for every supported solver. ``bootstrap_failures`` records the
+        zero-based sample index and diagnostic for each rejected row. Successful
+        fits with undefined covariance retain their parameter estimates. Other
+        model/programming exceptions propagate. Optimizer warnings also remain
+        visible; a warnings-as-errors policy may abort before a row is recorded.
         """
         y_samples = self.get_bootsamples(
             num_samples)  # [response-dependent units]
@@ -1658,6 +1705,7 @@ class StatisticsClass:
         boot_params = np.zeros(
             (num_samples, self.inst.num_params))  # [model-parameter units]
 
+        failures = []
         tic = time.time()  # [s]
         try:
             for ind in range(num_samples):
@@ -1668,7 +1716,8 @@ class StatisticsClass:
                 try:
                     params = _fit_bootstrap_sample(
                         self.inst, y_sample)  # [model-parameter units]
-                except np.linalg.LinAlgError as exc:
+                except (np.linalg.LinAlgError, _BootstrapFitFailure) as exc:
+                    failures.append({'sample_index': ind, 'reason': str(exc)})
                     warnings.warn(
                         "Bootstrap optimization failed for sample {}: "
                         "{}".format(ind, exc),
@@ -1702,6 +1751,7 @@ class StatisticsClass:
         _restore_model_state(self.inst)
         toc = time.time()  # [s]
 
+        self.bootstrap_failures = failures
         self.boot_params = boot_params  # [model-parameter units]
         self.num_samples = num_samples
 

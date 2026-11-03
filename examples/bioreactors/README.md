@@ -16,3 +16,24 @@ existing clients. The combined layout changes packaging, not model equations.
 
 These are analytical/synthetic capability demonstrations, not independent
 experimental validation. WP3.2 and WP3.3 are outside this implementation.
+
+## Construction and numerical checks
+
+The existing process JSON can select native SciPy methods or optional Assimulo
+CVode. Explicit `numerical.inventory_acceptance` values set unit-bearing output
+budgets separately from solver tolerances; a permissive output budget never
+authorizes consumption from an empty pool.
+
+Optional `operation.density` distinguishes a constant mixture density from
+native composition-dependent mixture properties. `operation.conservation`
+checks a declared stoichiometric matrix against named invariant coefficients.
+The [construction contracts](../../PharmaPy/Bioreactors/construction_checks.py)
+document their units, required fields and failure conditions.
+
+`assembly.input_audit()` records construction assumptions. Terminal recipe
+operations are retained as a one-point post-event history; reset before replay.
+`assembly.balance_report()` requires independently supplied source ledgers and
+error budgets. [Convergence trials](../../PharmaPy/Bioreactors/verification.py)
+retain every success and failure on an explicitly supplied common reporting
+grid. These checks qualify numerical behavior and declared physical balances;
+experimental predictive accuracy still requires independent measurements.

@@ -16,8 +16,15 @@ INPUTS = tuple(EXAMPLES / folder / 'mechanism.json' for folder in (
 ))
 
 
-@pytest.mark.parametrize('path', INPUTS, ids=lambda path: str(path.relative_to(EXAMPLES)))
+@pytest.mark.parametrize('path', INPUTS, ids=[str(path.relative_to(EXAMPLES)) for path in INPUTS])
 def test_combined_and_split_inputs_build_identical_native_objects(path):
+    """Preserve native construction and input ownership in both input layouts.
+
+    Parameters
+    ----------
+    path : Path
+        Existing combined process input, including its declared physical units.
+    """
     document = json.loads(path.read_text())
     original = deepcopy(document)
     case, definition = split_forward_inputs(document)

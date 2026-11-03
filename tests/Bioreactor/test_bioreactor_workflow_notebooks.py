@@ -56,7 +56,7 @@ def _check_notebook(tmp_path, notebook):
     finally:
         plt.close('all')
 # Public-path regressions, independent balances, and failure qualification.
-@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=lambda p: p.parent.name)
+@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=[path.parent.name for path in NOTEBOOKS])
 def test_workflow_notebook_executes_from_repository_root(tmp_path, notebook):
     """Execute native example workflow cells in an isolated process.
 
@@ -75,8 +75,15 @@ def test_workflow_notebook_executes_from_repository_root(tmp_path, notebook):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=lambda p: p.parent.name)
+@pytest.mark.parametrize("notebook", NOTEBOOKS, ids=[path.parent.name for path in NOTEBOOKS])
 def test_workflow_notebook_uses_library_directly(notebook):
+    """Keep the presentation workflow a direct client of the production API.
+
+    Parameters
+    ----------
+    notebook : Path
+        Example notebook whose code cells are inspected without execution.
+    """
     document = json.loads(notebook.read_text())
     cells = [c for c in document['cells'] if c['cell_type'] == 'code']
     assert len(cells) == 6
