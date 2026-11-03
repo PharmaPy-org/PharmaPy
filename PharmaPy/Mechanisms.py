@@ -8,7 +8,8 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   TransferResult,StateEvent
 )
 from PharmaPy.Phases_Refactored import BasePhase
-from PharmaPy.Errors import PharmaPyNonImplementedError
+from PharmaPy.Errors import PharmaPyNonImplementedError, PharmaPyValueError
+from PharmaPy.MomentInversion import invert_moments
 from time import perf_counter
 
 eps = np.finfo(float).eps
@@ -16,6 +17,26 @@ eps = np.finfo(float).eps
 # Reaction rates are in kmol/(m**3 s), i.e. mol/(L s), and reaction enthalpies
 # in J/mol, so a rate times an enthalpy needs this exact factor to give W/m**3.
 MOL_PER_KMOL = 1e3  # [mol/kmol]
+
+
+def growth_size_factor(sizes, growth_params):
+    """Size factor of the growth rate, G(L) = G0 * (1 + beta*L)**alpha.
+
+    Parameters
+    ----------
+    sizes : float or numpy.ndarray
+        Crystal sizes L [um].
+    growth_params : array-like
+        Growth parameters of ``CrystKinetics``; entries 3 and 4 are alpha
+        [-] and beta [1/um].
+
+    Returns
+    -------
+    float or numpy.ndarray
+        ``(1 + beta*L)**alpha`` [-], shaped like ``sizes``.
+    """
+    alpha, beta = np.asarray(growth_params, dtype=float)[3:5]  # [-], [1/um]
+    return (1 + beta * np.asarray(sizes, dtype=float)) ** alpha
 
 class Mechanism:
     """
@@ -1610,10 +1631,20 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self.set_third_moment(target_m3)
     @PopulationBalanceMechanism.mechanism_kinetics.setter
     def mechanism_kinetics(self,value):
+        """Attach crystallization kinetics and tabulate the growth size factor.
+
+        Parameters
+        ----------
+        value : CrystKinetics or None
+            Kinetics to attach; None leaves the current ones. A growth law
+            past three entries has the size factor of
+            ``growth_size_factor``, evaluated once on ``x_grid``.
+        """
         if value is not None:
             self._mechanism_kinetics = value
             if len(value.params['growth'])>3:
-                self._growth_size_factor = (1 + value.params['growth'][4] * self.x_grid) ** value.params['growth'][3]
+                self._growth_size_factor = growth_size_factor(
+                    self.x_grid, value.params['growth'])  # [-]
     def set_third_moment(self, target_m3):
         """Rescale the distribution to a given third moment, keeping its shape.
 
@@ -2060,9 +2091,9 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
             raise PharmaPyNonImplementedError(
                 'MomentsPopulationBalance cannot carry size-dependent growth '
                 '(alpha, beta = %s): the moment equations close only for a '
-                'size-independent growth rate. Use OneDFVMMechanism for '
-                'size-dependent growth, or give growth only its first three '
-                'parameters.' % size_factor.tolist())
+                'size-independent growth rate. Use QMOMPopulationBalance or '
+                'OneDFVMMechanism for size-dependent growth, or give growth '
+                'only its first three parameters.' % size_factor.tolist())
 
     def _warn_if_onset_follows_steps(self, kinetics):
         """Warn when the crystal count can follow the integrator's steps.
@@ -2305,6 +2336,25 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
 
         return float(self.kv * moments[3] * self.VOLUME_UNIT_FACTOR)
 
+    def _growth_integrals(self, moments, orders):
+        """Integrals of L**k * G(L)/G0 * n(L) over size, for the growth terms.
+
+        Parameters
+        ----------
+        moments : numpy.ndarray
+            Moments mu_0..mu_{n-1} [um**k/m3 slurry], shape ``(num_mom,)``.
+        orders : numpy.ndarray of int
+            Orders k wanted, each below ``num_mom``.
+
+        Returns
+        -------
+        numpy.ndarray
+            The integrals [um**k/m3 slurry], shaped like ``orders``. Growth
+            is size independent here, G(L) = G0, so they are the moments
+            mu_k themselves.
+        """
+        return moments[orders]
+
     def solve_population_balance(
         self,
         liquid,
@@ -2313,7 +2363,36 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         time,
         connection,
     ):
+        """Moment rates and the solute transfer of crystallization.
 
+        Parameters
+        ----------
+        liquid : BasePhase
+            Liquid the crystals are suspended in.
+        solid : BasePhase
+            Solid phase owning the moments.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+        time : float
+            Time [s].
+        connection : PhaseConnection
+            Connection the transfer runs along.
+
+        Returns
+        -------
+        TransferResult
+            d(mu_k)/dt [um**k/(m3 slurry s)] of the kinetics alone, the
+            liquid species rates [kg/s], the crystal mass rate [kg/s] and
+            the slurry volume rate [m**3/s] of the transfer.
+
+        Notes
+        -----
+        dmu_0/dt = B and, for k >= 1,
+        dmu_k/dt = k (G0 I_(k-1) + D mu_(k-1)) + B rad**k, with
+        I_k = integral of L**k G(L)/G0 n(L) dL from ``_growth_integrals``
+        and the dissolution rate D size independent. The crystal mass rate
+        is rho kv (3 (G0 I_2 + D mu_2) + B rad**3) per m**3 of slurry.
+        """
         statekey = StateKey(self.moments_state_name, self.owning_phase_ref)
         mu = np.asarray(completed_state[statekey], dtype=float)
 
@@ -2335,8 +2414,13 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
 
         ind_mom = np.arange(1, len(mu))
 
+        # Orders 0..n-2 for the moment rates and 2 for the mass transfer.
+        orders = np.arange(max(len(mu_true) - 1, 3))
+        growth_integrals = self._growth_integrals(mu_true, orders)  # [um**k/m3]
+
         dmu_zero_dt = np.atleast_1d(nucl)
-        dmu_1on_dt = (ind_mom * (growth + dissol) * mu[:-1]
+        dmu_1on_dt = (ind_mom * (growth * growth_integrals[:len(mu) - 1]
+                                 + dissol * mu_true[:-1])
                       + nucl * self.rad ** ind_mom)
 
         dmu_dt = np.concatenate((dmu_zero_dt, dmu_1on_dt))
@@ -2346,7 +2430,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         # and the unscaled nucleation rate, not the conditioned state.
         mass_transfer = float(np.atleast_1d(
             self.density * self.kv
-            * (3 * (growth + dissol) * mu_true[2]
+            * (3 * (growth * growth_integrals[2] + dissol * mu_true[2])
                + nucl_intensive * self.rad ** 3)
         )[0]) * (1e-6) ** 3 * vol_slurry
 
@@ -2375,3 +2459,147 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         return TransferResult(state_rates=state_rates, aux=aux,
                               net_mass_rate=mass_transfer,
                               net_vol_rate=vol_rate)
+
+
+class QMOMPopulationBalance(MomentsPopulationBalance):
+    """Quadrature method of moments (QMOM), for size-dependent growth.
+
+    Carries the same state as ``MomentsPopulationBalance``, the moments
+    mu_0..mu_{2N-1} per m**3 of slurry [um**k/m3], with the same feed,
+    outlet, dilution and legacy handling. Where the moment form needs a
+    size-independent growth rate, QMOM evaluates the growth integrals with
+    an N-node Gauss quadrature recovered from the moments at every
+    right-hand side (McGraw, 1997, Aerosol Sci. Technol. 27:255-265):
+
+        integral of L**k G(L) n(L) dL = G0 sum_i w_i L_i**k (1 + beta L_i)**alpha
+
+    with the size factor of ``OneDFVMMechanism`` (``growth_size_factor``).
+    The rule integrates polynomials of degree below 2N exactly, so linear
+    growth (alpha = 1) is exact; other alpha are approximated, the more
+    closely the more nodes. Growth without a size factor uses the moments
+    themselves and reduces exactly to ``MomentsPopulationBalance``.
+
+    The moment form's assumptions remain: dissolution is size independent
+    with no disappearance of crystals at L = 0, and nuclei are born at size
+    ``rad``.
+    """
+
+    def __init__(
+        self,
+        owning_phase,
+        target_components,
+        solvent_name,
+        moments_init,
+        kinetics=None,
+        density=None,
+        kv=1,
+        rad=0.0,
+        scale=None,
+        moments_state_name='mu_n',
+        abs_tol=None,
+    ):
+        """Population balance carried as 2N moments, closed by quadrature.
+
+        Parameters
+        ----------
+        owning_phase : BasePhase
+            Solid phase whose crystals the moments describe.
+        target_components : str or list of str
+            Species that crystallize.
+        solvent_name : str
+            Name of the solvent species.
+        moments_init : array-like
+            Initial moments mu_0..mu_{2N-1} [um**k/m3 slurry], shape
+            ``(2N,)`` with N >= 2 quadrature nodes.
+        kinetics : CrystKinetics, optional
+            Crystallization kinetics, usually set later through the vessel's
+            ``CrystKinetics`` property. Growth may be size dependent.
+        density : float, optional
+            Crystal density [kg/m3]. None uses the owning phase's density.
+        kv : float, optional
+            Volume shape factor [-]. Defaults to 1.
+        rad : float, optional
+            Nucleus size [um]. Defaults to 0.
+        scale : float, optional
+            Deprecated and ignored; see ``_reject_scale``.
+        moments_state_name : str, optional
+            Name of the moments state. Defaults to ``'mu_n'``.
+        abs_tol : float or array-like, optional
+            Absolute integration tolerance per moment [um**k/m3 slurry]. None,
+            the default, keeps the integrator's own tolerance.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If ``moments_init`` does not hold an even number of moments, at
+            least four: N nodes take 2N moments, and the crystal mass needs
+            mu_3.
+
+        Warns
+        -----
+        RuntimeWarning
+            As ``MomentsPopulationBalance``, if ``kinetics`` can make the
+            crystal count follow the integrator's step pattern (#529).
+        """
+        num_mom = np.size(moments_init)
+
+        if num_mom < 4 or num_mom % 2:
+            raise PharmaPyValueError(
+                'QMOMPopulationBalance needs an even number of moments, at '
+                'least four (N >= 2 nodes take mu_0..mu_{2N-1}), got %d.'
+                % num_mom)
+
+        super().__init__(
+            owning_phase=owning_phase,
+            target_components=target_components,
+            solvent_name=solvent_name,
+            moments_init=moments_init,
+            kinetics=kinetics,
+            density=density,
+            kv=kv,
+            rad=rad,
+            scale=scale,
+            moments_state_name=moments_state_name,
+            abs_tol=abs_tol,
+        )
+
+    @staticmethod
+    def _reject_size_dependent_growth(kinetics):
+        """Accept any growth law: the quadrature carries the size factor.
+
+        Parameters
+        ----------
+        kinetics : CrystKinetics
+            Kinetics being attached.
+        """
+
+    def _growth_integrals(self, moments, orders):
+        """Integrals of L**k * G(L)/G0 * n(L) over size, by quadrature.
+
+        Parameters
+        ----------
+        moments : numpy.ndarray
+            Moments mu_0..mu_{2N-1} [um**k/m3 slurry], shape ``(2N,)``.
+        orders : numpy.ndarray of int
+            Orders k wanted.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``sum_i w_i L_i**k (1 + beta L_i)**alpha`` [um**k/m3 slurry],
+            shaped like ``orders``, over the N-node rule of
+            ``invert_moments``. Without a size factor, the moments mu_k.
+        """
+        kinetics = self.mechanism_kinetics
+        is_size_dependent = getattr(kinetics, 'has_size_dependent_growth',
+                                    None)
+
+        if is_size_dependent is None or not is_size_dependent():
+            return super()._growth_integrals(moments, orders)
+
+        rule = invert_moments(moments, self.num_mom // 2)  # [um], [#/m3]
+        size_factor = growth_size_factor(rule.nodes,
+                                         kinetics.params['growth'])  # [-]
+
+        return np.sum(rule.weights[:, None] * size_factor[:, None]
+                      * rule.nodes[:, None] ** orders, axis=0)
