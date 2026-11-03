@@ -12,6 +12,7 @@ from PharmaPy.ProcessControl_Refactored import Controller
 from PharmaPy.Results import DynamicResult
 from PharmaPy.IntegratorBackends import default_integrator
 from PharmaPy.Connections import interpolate_inputs
+from PharmaPy.Errors import PharmaPyValueError
 
 
 
@@ -62,7 +63,11 @@ class MultiPhaseVessel():
         controller : Controller, optional
             Operating controller; a fresh ``Controller()`` by default.
         h_conv : float, optional
-            Heat-transfer coefficient to the utility [W/m**2/K].
+            Vessel-side heat-transfer coefficient [W/m**2/K], combined in
+            series with the utility's own coefficient when a ``Utility`` is
+            assigned. Defaults to 0, which only suits a vessel that never
+            receives a utility; assigning one then raises
+            ``PharmaPyValueError``. The legacy tanks default to 1000.
         state_events : list, optional
             State events the integrator should locate.
         adiabatic : bool, optional
@@ -686,7 +691,29 @@ class MultiPhaseVessel():
 
     @Utility.setter
     def Utility(self, utility):
-        self.u_ht = 1 / (1 / self.h_conv + 1 / utility.h_conv)
+        """Attach the heat-transfer utility and register the duty output.
+
+        Parameters
+        ----------
+        utility : CoolingWater or compatible
+            Utility carrying its own film coefficient ``h_conv`` [W/m**2/K]
+            and inlet conditions.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the vessel's ``h_conv`` is not positive. The overall
+            coefficient is the series combination
+            ``1 / (1/h_conv + 1/utility.h_conv)``, which has no value for the
+            constructor default ``h_conv=0``.
+        """
+        if not self.h_conv > 0:
+            raise PharmaPyValueError(
+                '%s was built with h_conv=%r; a positive vessel-side '
+                'heat-transfer coefficient [W/m**2/K] is required before a '
+                'Utility can be assigned.' % (type(self).__name__, self.h_conv))
+
+        self.u_ht = 1 / (1 / self.h_conv + 1 / utility.h_conv)  # [W/m**2/K]
         self._Utility = utility
         self.output_state_collection.add(
             StateVariable(
@@ -2726,8 +2753,11 @@ class MultiPhaseVessel():
         -----
         A population carried per m3 of slurry is diluted by every inflow,
         including a feed with no crystals, which never reaches the solid
-        phase's inlet hook. The rate of volume change is taken as the
-        volumetric inflow minus outflow; see
+        phase's inlet hook, and by the volume the cross-phase transfers
+        create or consume: crystallizing solute leaves the liquid at its
+        liquid density and arrives at the crystal density. The rate of volume
+        change is the volumetric inflow minus outflow plus that transfer
+        volume rate, accumulated by ``add_crossphase_terms``; see
         ``PopulationBalanceMechanism.get_dilution_contributions`` for what
         that leaves out.
         """
@@ -2737,7 +2767,7 @@ class MultiPhaseVessel():
         vol_out = sum(transfer.vol_flow or 0.0
                       for connection in resolved_outlets
                       for transfer in connection)
-        net_vol_flow = vol_in - vol_out
+        net_vol_flow = vol_in - vol_out + buffer.transfer_vol_rate  # [m**3/s]
 
         if not net_vol_flow:
             return
@@ -2898,8 +2928,19 @@ class MultiPhaseVessel():
             time:float,
             completed_state:dict[StateKey]
         ):
+        """Add every active phase connection's transfer to the balance.
 
-        # temp = completed_state["temp"]
+        Parameters
+        ----------
+        buffer : MaterialContributionBuffer
+            Material rates being assembled; the transfers go into its
+            cross-phase bucket, and the volume they create or consume into
+            ``transfer_vol_rate`` [m**3/s] for ``add_dilution_terms``.
+        time : float
+            Simulation time [s].
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+        """
 
         for connection in self.phase_connections:
 
@@ -2947,6 +2988,8 @@ class MultiPhaseVessel():
                     material_writes.append((material_slice, rate))
 
             crossphase_result.aux["material_writes"] = material_writes
+
+            buffer.transfer_vol_rate += crossphase_result.net_vol_rate  # [m**3/s]
 
             buffer.aux[buffer.CROSSPHASE].append(crossphase_result.aux)
     

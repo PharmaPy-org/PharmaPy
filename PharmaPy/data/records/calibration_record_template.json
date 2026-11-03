@@ -1,0 +1,144 @@
+{
+  "schema": "pharmapy.calibration-record",
+  "schema_version": 1,
+  "case": "TEMPLATE-case",
+  "description": "TEMPLATE: illustrative calibration record. Replace every entry starting with TEMPLATE and every number with the data of your case; the numbers are the synthetic decay example of the PharmaPy user guide, and the null temperature at 4 s shows a missing observation.",
+  "model": {
+    "name": "TEMPLATE: model callback, e.g. decay",
+    "revision": "TEMPLATE: revision of the model code, e.g. a git commit",
+    "pharmapy_version": null,
+    "description": "TEMPLATE: model equations and assumptions; first-order A -> B with adiabatic temperature rise"
+  },
+  "sources": [
+    {
+      "name": "TEMPLATE-source",
+      "origin": "synthetic",
+      "sharing": "TEMPLATE: illustrative template, not data; state the license or sharing conditions of your data",
+      "description": "TEMPLATE: what the data are and how they were obtained; the numbers are the synthetic decay example of the PharmaPy user guide",
+      "citation": "TEMPLATE: bibliographic citation of the data, if any",
+      "uri": "TEMPLATE: location of the original data file",
+      "revision": "TEMPLATE: version of the source data",
+      "sha256": null,
+      "role": "calibration"
+    }
+  ],
+  "transformations": [
+    {
+      "description": "TEMPLATE: each step applied to the source data, in order, with the units of its constants; here the values are used as stored",
+      "fields": [
+        "c_A",
+        "T"
+      ],
+      "source": "TEMPLATE-source",
+      "parameters": {
+        "factor": {
+          "value": 1.0,
+          "units": "-"
+        }
+      }
+    }
+  ],
+  "output_names": [
+    "c_A",
+    "T"
+  ],
+  "parameters": [
+    {
+      "name": "k",
+      "units": "1/s",
+      "seed": 0.3,
+      "lower": 0.0,
+      "upper": null,
+      "optimized": true,
+      "fitted": null,
+      "description": "TEMPLATE: parameter meaning; first-order rate constant of A -> B"
+    }
+  ],
+  "experiments": [
+    {
+      "name": "TEMPLATE-run",
+      "args": [
+        2.0
+      ],
+      "kwargs": {
+        "rise_k_l_mol": 20.0,
+        "temp0_k": 300.0
+      },
+      "measurements": [
+        {
+          "name": "c_A",
+          "field": 0,
+          "units": "mol/L",
+          "basis": "molar concentration",
+          "x_units": "s",
+          "x": [
+            0.0,
+            1.0,
+            2.0,
+            4.0
+          ],
+          "values": [
+            2.01,
+            1.2,
+            0.75,
+            0.265
+          ],
+          "uncertainty": [
+            0.02,
+            0.02,
+            0.02,
+            0.02
+          ]
+        },
+        {
+          "name": "T",
+          "field": 1,
+          "units": "K",
+          "basis": "temperature",
+          "x_units": "s",
+          "x": [
+            2.0,
+            4.0
+          ],
+          "values": [
+            325.6,
+            null
+          ],
+          "uncertainty": [
+            0.5,
+            0.5
+          ]
+        }
+      ]
+    }
+  ],
+  "weight_matrix": null,
+  "solver": null,
+  "covariance": null,
+  "fields": [
+    {
+      "identity": {
+        "name": "c_A",
+        "kind": "state",
+        "units": "mol/L",
+        "basis": "molar concentration",
+        "description": "TEMPLATE: stored model state; here c_A = c_A0 * exp(-k t) of the decay model at the seed k"
+      },
+      "experiment": "TEMPLATE-run",
+      "x_units": "s",
+      "x": [
+        0.0,
+        1.0,
+        2.0,
+        4.0
+      ],
+      "columns": null,
+      "values": [
+        2.0,
+        1.4816364413634358,
+        1.0976232721880528,
+        0.6023884238244043
+      ]
+    }
+  ]
+}

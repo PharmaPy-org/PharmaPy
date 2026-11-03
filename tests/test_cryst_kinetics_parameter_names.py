@@ -1,5 +1,6 @@
 """Parameter-name table regressions for CrystKinetics."""
 
+import numpy as np
 import pytest
 
 from PharmaPy.Kinetics import CrystKinetics
@@ -93,3 +94,32 @@ def test_both_formulations_name_the_same_parameter_count(growth):
     reformulated = _kinetics(growth, reformulate=True)
 
     assert reformulated.num_params == physical.num_params
+
+
+@pytest.mark.parametrize("reformulate", [False, True])
+@pytest.mark.parametrize(
+    "growth, expected_count",
+    [(GROWTH, STANDARD_NAME_COUNT),
+     (GROWTH_SIZE_DEPENDENT, SIZE_DEPENDENT_NAME_COUNT)],
+    ids=["standard", "size_dependent"],
+)
+@pytest.mark.parametrize(
+    "container", [list, tuple, np.array], ids=["list", "tuple", "ndarray"]
+)
+def test_growth_parameters_accept_any_array_like(
+        container, growth, expected_count, reformulate):
+    """A NumPy array is accepted wherever a list or tuple of parameters is.
+
+    The class docstring accepts array-like parameters. Counting the growth
+    entries by testing the caller's container for truth raised
+    ``ValueError`` for an array of more than one element, so kinetics built
+    with ``growth=np.array([...])`` could not be constructed at all.
+    """
+    kinetics = CrystKinetics(
+        coeff_solub=SOLUB, growth=container(growth), reformulate_kin=reformulate
+    )
+
+    assert kinetics.num_params == expected_count
+    assert len(kinetics.params["growth"]) == len(growth)
+    # k and E are transformed by the reformulation; the orders are not.
+    np.testing.assert_array_equal(kinetics.params["growth"][2:], growth[2:])

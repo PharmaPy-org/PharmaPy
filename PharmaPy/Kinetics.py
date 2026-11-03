@@ -7,7 +7,7 @@ import numpy as np
 import json
 import re
 import warnings
-from typing import Union
+from typing import Tuple, Union
 
 from PharmaPy.Commons import get_permutation_indexes
 from PharmaPy.Errors import PharmaPyTypeError, PharmaPyValueError
@@ -16,6 +16,16 @@ from PharmaPy.Errors import PharmaPyTypeError, PharmaPyValueError
 
 gas_ct = 8.314  # J/mol/K
 eps = np.finfo(float).eps  # machine-epsilon floor for singularities
+# Projected concentrations below -DEPLETION_ROUNDOFF_ULPS * eps count as real
+# depletion for the return_both limiter in get_rxn_rates; anything closer to
+# zero is round-off from the dot product of the extents with the
+# stoichiometry. Ten units of double round-off at unit magnitude (about
+# 2e-15 mol/L) is far below any concentration a solver resolves, so a species
+# sitting at exactly zero with a zero net rate does not throttle every
+# reaction. A numerical design choice, not a fitted value. Kept as a count
+# and multiplied where it is used: the docs build mocks NumPy, so the module
+# must not do NumPy arithmetic at import time.
+DEPLETION_ROUNDOFF_ULPS = 10  # [-]
 
 STOICH_COEFFICIENT_PATTERN = r'\d+(\.\d+)?(/\d+)?'
 STOICH_COEFFICIENT_PREFIX = r'^' + STOICH_COEFFICIENT_PATTERN + r'\s?'
@@ -30,7 +40,13 @@ def cryst_mechanism(sup_sat, moms, temp, temp_ref, params, reformulate, kv,
         phi_1, phi_2, exp, s_2 = params
         sec = True
     else:
-        phi_1, phi_2, exp = params[:3] #for size dependent growth, len(params) is 5 but the last 2 are used in the fvm_method code
+        # A five-entry growth law carries alpha and beta after these three.
+        # Only the refactored OneDFVMMechanism applies that size factor; the
+        # moment closure refuses a size-dependent law
+        # (CrystKinetics.has_size_dependent_growth) and the legacy
+        # crystallizers refuse any law longer than three entries, rather
+        # than ignore them.
+        phi_1, phi_2, exp = params[:3]
         
 
     # absup = np.maximum(eps, sup_sat)
@@ -1043,9 +1059,9 @@ class RxnKinetics:
             return jac_params
 
     def get_rxn_rates(self, conc, temp=298.15, overall_rates: bool = True,
-                      jac: bool = False, delta_hrxn=None, max_iter: int = 3,
-                      return_both: bool = False,
-                      limiter_dt: float = 1.0) -> np.ndarray:
+                      jac: bool = False, delta_hrxn=None,
+                      return_both: bool = False, limiter_dt: float = 1.0
+                      ) -> Union[np.ndarray, Tuple[np.ndarray, np.ndarray]]:
         """Evaluate reaction rates or their concentration Jacobian.
 
         Parameters
@@ -1066,8 +1082,6 @@ class RxnKinetics:
             reversible rate or Jacobian evaluations. Values use the raw
             ``stoich_matrix`` row basis. None uses ``self.delta_hrxn``;
             explicit values, including zero, take precedence.
-        max_iter : int, optional
-            Unused; kept for call-site compatibility. The default is 3.
         return_both : bool, optional
             If True, return ``(rxn_rates, total_rates)`` with every
             reaction extent scaled by one factor so no species is driven
@@ -1120,8 +1134,8 @@ class RxnKinetics:
             # reactions that consume each offender. Scaling all extents by a
             # single number is trivially stoichiometry preserving, leaves the
             # selectivity between reactions exactly as the kinetics set it,
-            # and terminates without iterating -- so there is no max_iter to
-            # exhaust and no way to return a rate set that still goes
+            # and terminates without iterating -- so there is no iteration cap
+            # to exhaust and no way to return a rate set that still goes
             # negative. It is the more conservative choice, because a reaction
             # that does not touch the limiting species is throttled too.
             #
@@ -1135,7 +1149,8 @@ class RxnKinetics:
             if return_both and np.asarray(conc).ndim == 1:
 
                 total_rates = np.dot(rrates, self.normalized_stoich.T)
-                short = conc + total_rates * limiter_dt < -eps * 10
+                short = (conc + total_rates * limiter_dt
+                         < -DEPLETION_ROUNDOFF_ULPS * eps)  # [mol/L]
 
                 if short.any():
 
@@ -1320,8 +1335,13 @@ class CrystKinetics:
         self.coeff_solub = np.asarray(coeff_solub)
         self.solub_type = solubility_type
 
+        # Count the parsed growth entries rather than testing the caller's
+        # container for truth: a NumPy array has no single truth value, and
+        # the docstring accepts array-like parameters.
+        num_growth_params = len(self.params['growth'])  # [-]
+
         if reformulate_kin:
-            if len(param_dict.get('growth') or ()) <= 3:
+            if num_growth_params <= 3:
                 self.name_params = (r'\log(k_{bp})', r'\log(E_{bp}/R)', 'b',
                                     r'\log(k_{bs})', r'\log(E_{bs}/R)', 's_1', 's_2',
                                     r'\log(k_{g})', r'\log(E_{g}/R)', 'g',
@@ -1332,7 +1352,7 @@ class CrystKinetics:
                                 r'\log(k_{g})', r'\log(E_{g}/R)', 'g','alpha','beta',
                                 r'\log(k_{d})', r'\log(E_{d}/R)', 'd')
         else:
-            if len(param_dict.get('growth') or ()) <= 3:
+            if num_growth_params <= 3:
                 self.name_params = ('k_{bp}', 'E_{bp}', 'b',
                                     'k_{bs}', 'E_{bs}', 's_1', 's_2',
                                     'k_{g}', 'E_{g}', 'g',
@@ -1352,16 +1372,56 @@ class CrystKinetics:
             self.alpha_fn = alpha_fn
 
     def set_params(self, params_in):
+        """Replace the kinetic parameters from a mapping or a flat vector.
+
+        Parameters
+        ----------
+        params_in : dict or array-like
+            Either a mapping from mechanism name (``nucl_prim``, ``nucl_sec``,
+            ``growth``, ``dissolution``) to its physical parameters, in the
+            units of the class docstring, or the flat vector
+            ``concat_params`` returns: the four parameter sets concatenated
+            in that order, each with the length it currently has, so a
+            five-entry growth law stays five entries wide.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a flat vector is not one-dimensional or its length differs
+            from the current parameter count. The layout is taken from the
+            stored parameters, so a vector for a three-entry growth law
+            cannot be applied to kinetics carrying size-dependent growth,
+            and vice versa.
+
+        Notes
+        -----
+        A mapping passes through ``transform_params``, which fills omitted
+        mechanisms with their inactive defaults and applies the logarithmic
+        reformulation when configured. A flat vector is stored as given and
+        must already be in the stored formulation.
+        """
         if isinstance(params_in, dict):
             params_complete = self.transform_params(params_in,
                                                     self.reformulate_kin)
         else:
-            param_lens = np.array([3, 4, 3, 3])
+            # Split by the lengths the stored sets have, not a fixed
+            # [3, 4, 3, 3]: a fixed layout silently moved the alpha and beta
+            # of a five-entry growth law into the dissolution set.
+            param_lens = np.array([len(self.params[name])
+                                   for name in self.names_mechanisms])  # [-]
+            params_in = np.asarray(params_in, dtype=float)
+
+            if params_in.ndim != 1 or params_in.size != param_lens.sum():
+                raise PharmaPyValueError(
+                    'The parameter vector must be one-dimensional with '
+                    f'{param_lens.sum()} entries, split as '
+                    f'{dict(zip(self.names_mechanisms, param_lens.tolist()))}; '
+                    f'got shape {params_in.shape}.')
+
             split_idx = param_lens.cumsum()[:-1]
 
-            params_in = np.split(params_in, split_idx)
-
-            params_complete = dict(zip(self.names_mechanisms, params_in))
+            params_complete = dict(zip(self.names_mechanisms,
+                                       np.split(params_in, split_idx)))
 
         self.params = params_complete
 
@@ -1742,7 +1802,52 @@ class CrystKinetics:
         ddiss_dpar = dmech_dparam(self.dissol, d_par, not growing)
 
         return dbp_dpar, dbs_dpar, dgr_dpar, ddiss_dpar, conc_sat
+
+    def has_size_dependent_growth(self):
+        """Whether the growth law carries a size factor that is not one.
+
+        Returns
+        -------
+        bool
+            True when the growth parameters hold alpha and beta and both are
+            nonzero, so the size factor ``(1 + beta*L)**alpha`` differs from
+            one. With either of them zero the factor is exactly one and the
+            growth rate is size independent, as it is for a three-entry law.
+
+        Notes
+        -----
+        Growth entries past the first three are alpha [-] and beta [1/um],
+        applied by the refactored ``OneDFVMMechanism`` only. The moment
+        closure (``MomentsPopulationBalance``) evaluates a size-independent
+        growth rate, so it refuses kinetics for which this returns True
+        instead of dropping the two entries. The legacy crystallizers refuse
+        any growth law longer than three entries at their ``Kinetics``
+        setter, whatever the size factor, because ``deriv_cryst`` returns
+        three growth partials and their estimation paths follow
+        ``name_params``.
+        """
+        size_factor = np.asarray(self.params['growth'],
+                                 dtype=float)[3:5]  # alpha [-], beta [1/um]
+
+        return bool(size_factor.size and np.all(size_factor != 0))
+
     def supports(self, mechanism):
+        """Whether any of the named mechanisms has a nonzero parameter.
+
+        Parameters
+        ----------
+        mechanism : str or list of str
+            Names among ``names_mechanisms``: 'nucl_prim', 'nucl_sec',
+            'growth', 'dissolution'. An unknown name counts as unsupported.
+
+        Returns
+        -------
+        bool
+            True if at least one listed mechanism has at least one nonzero
+            parameter. A mechanism that was not given, or whose parameters
+            are all zero, contributes a zero rate and is reported as
+            unsupported, so the crystallizers can skip its state.
+        """
         if not isinstance(mechanism,list):
             mechanism = [mechanism]
         checks = []
