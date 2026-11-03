@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import Optional
 import numpy as np
 
 from PharmaPy.DataClasses import StateKey, StateVariable, TransferResult
@@ -36,14 +37,16 @@ from .rate_providers import RateProviderResult, build_rate_provider
 
 # Preserve declared stream density and physical working-volume behavior.
 class DeclaredStreamDensity(Mechanism):
-    """Use an explicit solution density through native stream property hooks.
+    """Use explicit solution density through native stream or phase hooks.
 
     Inlet density is fixed. For a working-volume outlet, density is the current
     vessel species mass divided by its liquid volume. No stream solver state is
     introduced, and biological inventories remain separate from phase species.
+    On a reactor phase without ``source_phase``, this is a fixed mixture-density
+    assumption; it supplies no material source of its own.
     """
 
-    def __init__(self, density: float, source_phase=None):
+    def __init__(self, density: float, source_phase=None, *, owning_phase: Optional[LiquidPhase] = None):
         """Declare a fixed inlet or state-dependent outlet density.
 
         Parameters
@@ -52,6 +55,9 @@ class DeclaredStreamDensity(Mechanism):
             Initial solution density [kg/m3].
         source_phase : PhaseRef, optional
             Vessel phase whose working-volume state sets outlet density.
+        owning_phase : LiquidPhase, optional
+            Reactor mixture using the fixed density. Its concentration getters
+            use the same inventory/volume basis as its volume property.
 
         Raises
         ------
@@ -63,6 +69,7 @@ class DeclaredStreamDensity(Mechanism):
             raise ValueError('stream density must be finite and positive')
         self.density = float(density)  # [kg/m3]
         self.source_phase = source_phase
+        self.owning_phase = owning_phase
 
     def get_overrides(self):
         """Return the native density hook.
@@ -71,8 +78,12 @@ class DeclaredStreamDensity(Mechanism):
         -------
         dict
             Density property override; volume/flow setters remain native.
+            Reactor mixtures also keep mass/molar concentrations consistent.
         """
-        return {'density': self.get_density}
+        overrides = {'density': self.get_density}
+        if self.owning_phase is not None:
+            overrides.update(mass_conc=self.get_mass_conc, mole_conc=self.get_mole_conc)
+        return overrides
 
     def get_density(self) -> float:
         """Return the current stream density.
@@ -83,6 +94,49 @@ class DeclaredStreamDensity(Mechanism):
             Solution density [kg/m3].
         """
         return self.density
+
+    def get_solver_state_rates(self, process, phase, **kwargs) -> TransferResult:
+        """Leave balances unchanged when attached to a reactor liquid phase.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Native owner of this property-only mechanism.
+        phase : LiquidPhase
+            Native liquid phase whose density is overridden.
+        **kwargs : dict
+            Native solver context; no kinetic quantities are consumed.
+
+        Returns
+        -------
+        TransferResult
+            No material derivatives and zero net mass rate [kg/s]. The owner
+            reference preserves the native zero-heat mechanism handoff.
+            Density changes a property, never creates mass or energy.
+        """
+        return TransferResult({}, {'process': process}, 0.)
+
+    def get_mass_conc(self) -> np.ndarray:
+        """Return reactor concentrations on the declared mixture-volume basis.
+
+        Returns
+        -------
+        ndarray
+            Species concentrations [kg/m3], in the owning phase's species order.
+            Shape follows the native species inventory array.
+        """
+        return self.owning_phase.mass_frac * self.density
+
+    def get_mole_conc(self) -> np.ndarray:
+        """Return native molar concentrations using the same physical volume.
+
+        Returns
+        -------
+        ndarray
+            Species concentrations [mol/L], same shape/order as mass_conc.
+            Dividing kg/m3 by molecular weight [g/mol] yields mol/L exactly.
+        """
+        return self.get_mass_conc() / self.owning_phase.mw
 
     def update_state(self, completed_state, **kwargs):
         """Refresh an outlet from accepted/trial vessel state before resolution.

@@ -238,3 +238,91 @@ for source inputs and a notebook. Its configured and pathway models encode the
 same Monod law and are checked against analytical dilution, yield balance,
 positive equilibrium and washout. Reconciliation receives the same transport
 contract; this is not experimental validation of a continuous biological model.
+
+## Construction assumptions and physical-basis checks
+
+`assembly.input_audit()` includes a `construction` record: native reactor and
+mechanism, thermodynamic species order, initial mass/volume/temperature, density choices, defaults, auxiliary material states, numerical settings,
+and conservation-check scope. It is a snapshot of construction; mutating
+native objects afterward does not rewrite that record. The existing feed audit
+still identifies unknown compositions before a strict-input solve.
+
+### Carrier, feed and mixture densities
+
+`carrier_density_kg_l` describes the carrier. A feed's `density_kg_l` describes
+that feed. Neither should be silently interpreted as a measured reactor mixture
+density. The optional `operation.density` makes the initial mixture contract
+explicit, without another input file:
+
+```json
+"density": {"mode": "constant-mixture", "value": 1.05, "unit": "kg/L"}
+```
+
+This is an illustrative density, not a recommended biological value. It sets
+the mixture's operational density and concentration properties throughout the run.
+Volume and kinetic concentrations use the same mass inventory. Volume follows total
+phase mass divided by this density; feed and reactor volumes therefore need not
+be additive when their densities differ. Alternatively:
+
+```json
+"density": {"mode": "native-phase"}
+```
+
+uses native mixture properties at the declared composition and temperature.
+The current native pure-liquid density implementation is temperature independent;
+mixture density can change with composition. This option does not supply a new
+temperature-density correlation. Both options require `volume_policy: "native"`.
+They reject independently prescribed working-volume dynamics as a conflicting
+volume definition. Initial mass must agree with declared volume times the selected
+initial density within the existing 1e-12 kg roundoff allowance.
+
+Omitting `density` preserves the legacy initial carrier-density consistency check
+and existing native/working-volume behavior. The audit labels that assumption
+`legacy-carrier`; it does not claim the carrier density is the measured mixture
+density. Thermodynamic species quantities and total liquid mass remain
+authoritative; the builder never rescales them to force agreement.
+
+### Scheduled operations at the endpoint
+
+Events at time zero apply before integration. Interior events retain the preceding
+segment's pre-event endpoint and the next segment's post-event initial point.
+Events at the final time now apply exactly once, followed by a one-point native
+result holding their post-event state. No integration occurs beyond the requested
+runtime. A final flow change updates the inlet configuration but transports no
+material after that endpoint. At equal times, recipe order is physical order:
+sampling before a feed generally differs from sampling after it.
+
+Auditing and solving use the same event-time normalization, including the existing
+eight-epsilon roundoff allowance. Call `assembly.reset()` before replaying the
+recipe. Observations selecting the post-event side can use the final one-point
+result. Consumers iterating histories must allow a one-point final segment.
+The JSON Assimulo path enables the existing native continuous-reporting option
+to retain requested times near the last solver step; it does not interpolate
+missing rows afterward or silently retry with different tolerances.
+
+### Declared conservation versus trajectory accounting
+
+Optional `operation.conservation` accepts exactly `basis`, `reactions`, and
+`invariants`. `basis` is `kg/extent` or `mol/extent`. Each named reaction maps
+species to signed coefficients; omitted reaction species mean zero. Molar
+coefficients are converted using the native molecular weights. Each invariant
+requires a `unit`, complete species `coefficients` in that unit/kg, and an
+`absolute_tolerance` in that unit/extent. A complete declaration checks the
+invariant-weighted reaction matrix against that explicit tolerance. Unknown
+species, invalid numbers and violated complete invariants fail construction.
+Missing species coefficients yield `not_assessable`, rather than invented
+elemental compositions or a claimed conservation pass.
+
+This structural check concerns the **declared matrix only**. It does not prove
+that a custom kinetic graph implements that matrix, or account automatically for
+separately tracked biomass, cells, products or omitted species. The native
+mechanism's existing conservation audit is reported separately.
+
+`assembly.balance_report(histories, **evidence)` delegates to the existing
+`diagnostics.inventory_report`. Supply independently justified inlet, outlet,
+transfer and biological ledgers [kg/s], event jumps [kg], residual budgets and
+quadrature-error bounds. Never derive an expected source ledger from observed
+state differences. Missing evidence remains `not_assessable`; unresolved
+quadrature remains distinct from passed or failed accounting. Structural and
+trajectory checks establish numerical/physical contracts, not experimental
+validation of an organism or process.

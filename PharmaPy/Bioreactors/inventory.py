@@ -332,14 +332,11 @@ class InventoryAvailability(LinearInventoryAvailability):
         necessary, possibly loose, uptake bound. Rows with negative remaining
         inventory need the full nonlinear constraint and are not relaxed.
         """
+        exposure, _ = self._exposure(lower)  # [population day x flux scale]
         if self.growth_index is None:
-            exposure, _ = self._exposure(np.zeros(len(lower)))
             return (-exposure * self.matrix / self.scale[:, None],
                     (self.amounts + self.other) / self.scale)
-        growth = lower[self.growth_index] * self.growth_conversion
-        exposure = (self.viable * self.step_day * self.cell_flux_scale / 2.
-                    * (1. + np.exp((growth - self.death) * self.step_day)))
-        remaining = self.amounts + self.other
+        remaining = self.amounts + self.other  # [mmol]
         # For nonnegative remaining inventory, minimum exposure gives a necessary
         # (possibly loose) uptake bound. Negative remaining amounts still need
         # the full nonlinear production constraint; never reject them here.

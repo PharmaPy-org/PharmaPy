@@ -1,0 +1,121 @@
+{
+  "schema_version": 3,
+  "$comment": "Synthetic equal-mass first-order conversion, not organism kinetics. One litre contains 1 g biomass and 999 g carrier. Decay is 4/s over 2 s; formal 1000 g/mol pools make mmol/L numerically equal to kg/m3. The analytical solution is biomass(t) = 0.001 exp(-4 t) kg.",
+  "mechanism": "configured-kinetics",
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "batch",
+    "runtime": {
+      "unit": "s",
+      "value": 2.0
+    },
+    "temperature_k": null,
+    "volume_policy": "working-volume",
+    "conditions": {},
+    "recipe": {
+      "name": "batch",
+      "require_complete_inputs": true
+    }
+  },
+  "state": {
+    "species": {
+      "unit": "g",
+      "amounts": {
+        "biomass": 1.0,
+        "substrate": 0.0,
+        "product": 0.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "parameters": {
+    "rates": {
+      "mu_max": 0.2,
+      "decay": 4.0
+    },
+    "affinities": {
+      "Ks": 1.0
+    },
+    "yields": {
+      "biomass": 0.5
+    },
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {
+      "theta": 0.0
+    }
+  },
+  "model": {
+    "pathways": {},
+    "reconciliation": {},
+    "kinetics": {
+      "rule_graph": [
+        {
+          "identifier": "loss",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.decay"
+              },
+              {
+                "concentration": "biomass"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "negative",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              -1.0,
+              {
+                "ref": "loss"
+              }
+            ]
+          }
+        }
+      ],
+      "species_mass_rates": {
+        "biomass": "negative",
+        "substrate": "loss"
+      },
+      "rate_unit": "kg/(m3 s)",
+      "constants": {}
+    }
+  },
+  "network": null,
+  "rate_provider": null,
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "batch": []
+  },
+  "numerical": {
+    "backend": "scipy",
+    "step": {
+      "unit": "s",
+      "value": 0.1
+    },
+    "relative_tolerance": 1e-08,
+    "absolute_tolerance": 1e-13,
+    "maximum_step": {
+      "unit": "s",
+      "value": 0.1
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  }
+}

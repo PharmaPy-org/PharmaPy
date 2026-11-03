@@ -23,7 +23,7 @@ case and full-horizon dynamic optimization are distinct comparisons.
 - [thermo.json](../inputs/thermo.json): native phase-property inputs.
 - [workflow.ipynb](../workflow.ipynb): native object construction, execution, and reports.
 
-The notebook loads the three forward inputs and exports local trajectories.
+The notebook loads `mechanism.json` and `thermo.json` and exports local trajectories.
 Published panels, historical trajectories and generated comparison figures are
 excluded from this branch. Consult the original paper via its DOI.
 

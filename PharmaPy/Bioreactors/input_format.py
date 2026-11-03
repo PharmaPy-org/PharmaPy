@@ -133,6 +133,33 @@ def _provider_input(value):
     return result
 
 
+def _numerical_keys(value, name):
+    """Validate the legacy layout plus optional method and inventory acceptance.
+
+    Parameters
+    ----------
+    value : object
+        Numerical mapping; method is a dimensionless choice and inventory
+        acceptance contains explicitly unit-bearing absolute error budgets.
+    name : str
+        Section name for the error message.
+
+    Raises
+    ------
+    ValueError
+        The mapping is missing legacy fields or includes unknown fields.
+    """
+    fields = NUMERICAL_FIELDS
+    if isinstance(value, dict):
+        for optional in ('method', 'inventory_acceptance'):
+            if optional in value:
+                fields = (*fields, optional)
+    _keys(value, fields, name)
+    acceptance = value.get('inventory_acceptance')
+    if acceptance is not None and (not isinstance(acceptance, dict) or not acceptance):
+        raise ValueError('inventory_acceptance must be a nonempty state mapping')
+
+
 def _keys(value, fields, name):
     """Require a mapping to contain exactly the declared fields.
 
@@ -307,7 +334,7 @@ def split_forward_inputs(document: dict) -> tuple[dict, dict]:
     if not isinstance(conditions, dict) or not isinstance(recipe, dict):
         raise ValueError('operation conditions and recipe must be mappings')
     numerical = definition.pop('numerical')
-    _keys(numerical, NUMERICAL_FIELDS, 'numerical')
+    _numerical_keys(numerical, 'numerical')
     case = dict(schema_version=2, biology={'conditions': conditions},
                 numerics=numerical, operation=operation, recipe=recipe)
     definition['schema_version'] = 2
@@ -354,12 +381,12 @@ def normalize_forward_inputs(case: dict, definition: Optional[dict] = None) -> t
         version = case.pop("schema_version")
         if version not in (1, 2):
             raise ValueError("unsupported case schema_version")
+        _numerical_keys(case["numerics"], "numerics")
         if version == 2:
             _keys(case["biology"], ("conditions",), "biology")
             case["biology"]["mechanism"] = definition["mechanism"]
             case["numerics"] = {key: None if _blank(value) else value
                                 for key, value in case["numerics"].items()}
-        _keys(case["numerics"], NUMERICAL_FIELDS, "numerics")
         case["numerics"] = {key: value for key, value in case["numerics"].items()
                             if value is not None}
     if definition.get("schema_version") == 2:
