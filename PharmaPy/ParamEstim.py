@@ -612,6 +612,12 @@ class Measurement:
         shape ``(n,)``, in the units and basis of ``values``. It must be
         finite and positive at every observed sample; entries at missing
         samples are ignored. The default None declares no uncertainty.
+        Cannot be combined with ``std``, including when either is None.
+    std : float or array_like, optional
+        Keyword alias for ``uncertainty``; normalized to ``uncertainty``.
+        Accepts a scalar or shape ``(n,)`` in the units and basis of
+        ``values``. The read-only ``std`` property returns the same immutable
+        array as ``uncertainty``, or None if undeclared.
     units : str, optional
         Label of the observation units, e.g. ``'mol/L'``. No conversion is
         performed; the label documents ``values`` and is checked for
@@ -636,9 +642,10 @@ class Measurement:
         values are omitted, or samples are not numeric.
     ValueError
         If duplicate alias keywords (``values`` and ``y``, ``units`` and
-        ``unit_y``, or ``x_units`` and ``unit_x``) are given together, ``x``
-        is empty, non-finite or decreasing, ``values`` does not
-        match ``x`` in shape, contains infinities or has no observation, or
+        ``unit_y``, ``x_units`` and ``unit_x``, or ``uncertainty`` and
+        ``std``) are given together, ``x`` is empty, non-finite or decreasing,
+        ``values`` does not match ``x`` in shape, contains infinities or has
+        no observation, or
         ``uncertainty`` is not finite and positive at an observed sample.
 
     Notes
@@ -652,14 +659,18 @@ class Measurement:
     """
 
     def __init__(self, field=None, x=_MISSING, values=_MISSING, *,
-                 y=_MISSING, uncertainty=None, units=_MISSING,
-                 unit_y=_MISSING, basis=None, x_units=_MISSING,
-                 unit_x=_MISSING) -> None:
+                 y=_MISSING,
+                 uncertainty: Optional[Union[float, Sequence[float],
+                                             np.ndarray]] = _MISSING,
+                 std: Optional[Union[float, Sequence[float],
+                                     np.ndarray]] = _MISSING,
+                 units=_MISSING, unit_y=_MISSING, basis=None,
+                 x_units=_MISSING, unit_x=_MISSING) -> None:
         """Validate and store a private copy of one measurement.
 
         Parameters
         ----------
-        field, x, values, y, uncertainty, units, unit_y, basis, x_units, unit_x
+        field, x, values, y, uncertainty, std, units, unit_y, basis, x_units, unit_x
             See the class docstring.
 
         Raises
@@ -682,6 +693,15 @@ class Measurement:
                 "'y'")
         if values is _MISSING:
             values = y
+
+        if uncertainty is not _MISSING and std is not _MISSING:
+            raise ValueError(
+                "Measurement received both 'uncertainty' and alias 'std'; "
+                "pass only one")
+        if std is not _MISSING:
+            uncertainty = std  # [units], alias retains the observation basis
+        elif uncertainty is _MISSING:
+            uncertainty = None  # [units], no standard deviation declared
 
         if units is not _MISSING and unit_y is not _MISSING:
             raise ValueError(
@@ -737,33 +757,34 @@ class Measurement:
                 "Measurement values are all NaN; a measurement needs at "
                 "least one observation (NaN marks a missing observation)")
 
-        std = None  # [units]
+        normalized_std = None  # [units]
         if uncertainty is not None:
             if np.ndim(uncertainty) == 0:
                 scalar = _float_vector(uncertainty,
                                        'Measurement uncertainty')  # [units]
-                std = np.full(x.shape, scalar[0])  # [units]
+                normalized_std = np.full(x.shape, scalar[0])  # [units]
             else:
-                std = _float_vector(uncertainty,
-                                    'Measurement uncertainty')  # [units]
-            if std.shape != x.shape:
+                normalized_std = _float_vector(
+                    uncertainty, 'Measurement uncertainty')  # [units]
+            if normalized_std.shape != x.shape:
                 raise ValueError(
                     "Measurement uncertainty must be a scalar or have one "
-                    f"entry per x sample; got shape {std.shape} and x shape "
-                    f"{x.shape}")
+                    f"entry per x sample; got shape {normalized_std.shape} "
+                    f"and x shape {x.shape}")
             invalid = np.flatnonzero(
-                observed & ~(np.isfinite(std) & (std > 0)))
+                observed & ~(np.isfinite(normalized_std)
+                             & (normalized_std > 0)))
             if invalid.size:
                 index = invalid[0]
                 raise ValueError(
                     "Measurement uncertainty must be a finite, positive "
                     "standard deviation at every observed sample; "
-                    f"uncertainty[{index}] = {float(std[index])!r}")
-            std = _frozen(std)  # [units]
+                    f"uncertainty[{index}] = {float(normalized_std[index])!r}")
+            normalized_std = _frozen(normalized_std)  # [units]
 
         self._x = _frozen(x)  # [x_units]
         self._values = _frozen(values)  # [units]
-        self._uncertainty = std  # [units]
+        self._uncertainty = normalized_std  # [units]
         self._units = _optional_label(units, 'units')
         self._basis = _optional_label(basis, 'basis')
         self._x_units = _optional_label(x_units, 'x_units')
@@ -847,6 +868,19 @@ class Measurement:
         -------
         numpy.ndarray or None
             Read-only, shape ``(n,)``, in ``units``; None if undeclared.
+        """
+        return self._uncertainty
+
+    @property
+    def std(self) -> Optional[np.ndarray]:
+        """Read-only alias for ``uncertainty``.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Same immutable standard-deviation array as ``uncertainty``,
+            shape ``(n,)``, in the units and basis of ``values``; None if
+            undeclared. Scalar inputs are broadcast to all samples.
         """
         return self._uncertainty
 

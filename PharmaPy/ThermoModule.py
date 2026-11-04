@@ -2259,7 +2259,10 @@ class ThermoPhysicalManager:
             array when ``raw_val`` is already a ``float`` ``ndarray``;
             multi-species array subset selection (``as_dict=False`` with a
             sequence of ``species``) always allocates a new array via NumPy
-            advanced indexing.
+            advanced indexing. On refactored phases and streams, derived
+            properties such as ``mole_frac``, ``mole_conc``, and
+            ``mass_conc`` are computed arrays: ``copy=False`` avoids an
+            extra copy but does not make them views of stored phase state.
         as_dict : bool, optional
             If True, return species-indexed fields as a dictionary mapping each
             selected species name to its value or spatial profile.
