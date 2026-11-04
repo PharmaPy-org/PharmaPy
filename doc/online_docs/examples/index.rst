@@ -11,3 +11,4 @@ Examples
    calibration_records
    PFR_Batch_solved
    PharmaPy_guide
+   lomustine_superstructure
