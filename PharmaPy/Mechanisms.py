@@ -545,6 +545,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
                 name_bool = [name == tc for name in self.owning_phase.name_species] #TODO check that it selects correctly
                 self.target_ind.append(np.where(name_bool)[0][0])
         self.solvent_ind = self.owning_phase.name_species.index(self.solvent_name)
+        self._bind_kinetics_target(kinetics)
 
         
         self.kv = kv
@@ -566,6 +567,19 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
         self._timers = {}
 
+    def _bind_kinetics_target(self, kinetics):
+        """Default ``kinetics.target_idx`` to the mechanism's first target index.
+
+        Parameters
+        ----------
+        kinetics : CrystKinetics or None
+            Kinetics instance being attached to the mechanism.
+        """
+        if (kinetics is not None
+                and getattr(kinetics, "target_idx", None) is None
+                and getattr(self, "target_ind", None)):
+            kinetics.target_idx = self.target_ind[0]
+
     @property
     def mechanism_kinetics(self):
         if self._mechanism_kinetics is not None:
@@ -575,6 +589,7 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
     @mechanism_kinetics.setter
     def mechanism_kinetics(self,value):
         if value is not None:
+            self._bind_kinetics_target(value)
             self._mechanism_kinetics = value
             
 
@@ -715,8 +730,12 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             return liquid.mass_j / mass_solvent
 
         if basis == 'mass_per_volume_solvent':
-            return (liquid.mass_j / mass_solvent
-                    * liquid.getDensityPure()[0][self.solvent_ind])
+            solvent_weights = np.zeros(liquid.num_species, dtype=bool)
+            solvent_weights[self.solvent_ind] = True
+            rho_solvent = liquid.getDensityPure(
+                'liquid', liquid.temp,
+                weights=solvent_weights)[0][self.solvent_ind]  # [kg/m**3]
+            return liquid.mass_j / mass_solvent * rho_solvent
 
         raise ValueError(
             f"Unknown solubility basis {basis!r}. Valid bases are "
@@ -807,14 +826,18 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         density equal to the solute's liquid density the two terms cancel,
         which is why an equal-density fixture never showed the missing term.
         """
-        rho_liquid_pure, _ = liquid.getDensityPure(
-            'liquid', liquid.temp)  # [kg/m**3] per species
-
+        rates = np.asarray(species_rates, dtype=float)  # [kg/s] per species
+        active = rates != 0.0
         vol_rate_solid = crystal_mass_rate / self.density  # [m**3/s]
-        vol_rate_liquid = float(np.sum(
-            np.asarray(species_rates, dtype=float) / rho_liquid_pure))  # [m**3/s]
+        if not np.any(active):
+            return float(vol_rate_solid)
 
-        return vol_rate_solid + vol_rate_liquid
+        rho_liquid_pure, _ = liquid.getDensityPure(
+            'liquid', liquid.temp, weights=active)  # [kg/m**3] per species
+        vol_rate_liquid = float(np.sum(
+            rates[active] / rho_liquid_pure[active]))  # [m**3/s]
+
+        return float(vol_rate_solid + vol_rate_liquid)
 
     # ------------------------------------------------------------------
     # API for child classes
@@ -1398,6 +1421,9 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self.x_grid_sq = self.x_grid**2
         self.x_grid_cu = self.x_grid**3
         self.dx = self._cell_widths(self.x_grid)
+        self._growth_size_params = None
+        self._growth_size_factor = None
+        self._update_growth_size_factor()
         # Nucleus size for the nucleation MASS term. This must equal the size
         # at which the boundary condition injects nuclei, which for this
         # discretisation is the first grid node: the flux at the left face is
@@ -1608,12 +1634,52 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         )
 
         self.set_third_moment(target_m3)
+    def _update_growth_size_factor(self, gparams=None):
+        """Return and cache the size-dependent growth multiplier on ``x_grid``.
+
+        Parameters
+        ----------
+        gparams : sequence of float, optional
+            Growth parameter vector ``(k_g, E_g, g[, alpha, beta])``. Defaults
+            to the attached kinetics' ``params['growth']``.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Size factor ``(1 + beta * x_grid) ** alpha`` [-], shape
+            ``x_grid.shape``, when ``gparams`` has more than three entries;
+            ``None`` otherwise.
+        """
+        if gparams is None:
+            if self._mechanism_kinetics is None:
+                self._growth_size_params = None
+                self._growth_size_factor = None
+                return None
+            gparams = self._mechanism_kinetics.params['growth']
+
+        if len(gparams) > 3:
+            alpha = float(gparams[3])  # [-]
+            beta = float(gparams[4])  # [1/um]
+            key = (alpha, beta)
+            if (getattr(self, '_growth_size_params', None) != key
+                    or getattr(self, '_growth_size_factor', None) is None):
+                self._growth_size_params = key
+                self._growth_size_factor = (
+                    (1.0 + beta * self.x_grid) ** alpha
+                )  # [-]
+        else:
+            self._growth_size_params = None
+            self._growth_size_factor = None
+
+        return self._growth_size_factor
+
     @PopulationBalanceMechanism.mechanism_kinetics.setter
     def mechanism_kinetics(self,value):
         if value is not None:
+            self._bind_kinetics_target(value)
             self._mechanism_kinetics = value
-            if len(value.params['growth'])>3:
-                self._growth_size_factor = (1 + value.params['growth'][4] * self.x_grid) ** value.params['growth'][3]
+            if hasattr(self, 'x_grid'):
+                self._update_growth_size_factor(value.params['growth'])
     def set_third_moment(self, target_m3):
         """Rescale the distribution to a given third moment, keeping its shape.
 
@@ -1792,7 +1858,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         else:
 
             t0 = perf_counter()
-            growth_dep = (growth* self._growth_size_factor)
+            growth_dep = growth * self._update_growth_size_factor(gparams)
             self._timers['pop_balance_compute_growth_dep'] = self._timers.get('pop_balance_compute_growth_dep',0)+perf_counter()-t0
             t0 = perf_counter()
             growth_pad = np.append(growth_dep,growth_dep[-1],)
@@ -1996,6 +2062,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         """
         if value is not None:
             self._reject_size_dependent_growth(value)
+            self._bind_kinetics_target(value)
             self._mechanism_kinetics = value
 
     @staticmethod
@@ -2230,6 +2297,8 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         time,
         connection,
     ):
+
+        self._reject_size_dependent_growth(self.mechanism_kinetics)
 
         statekey = StateKey(self.moments_state_name, self.owning_phase_ref)
         mu = np.asarray(completed_state[statekey], dtype=float)
