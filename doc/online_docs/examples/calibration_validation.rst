@@ -30,9 +30,12 @@ that measures ``c_A`` [mol/L] at four times and ``T`` [K] once, and a
 standard deviation of its errors (``uncertainty``), so the residuals are
 divided by them and are dimensionless. The fit uses PharmaPy's
 Levenberg-Marquardt solver (``method='LM'``). Calibration records can
-capture LM and IPOPT fits; SciPy least-squares fits (``method='scipy'`` or
-``'least_squares'``) cannot be recorded yet (issue
-`#534 <https://github.com/PharmaPy-org/PharmaPy/issues/534>`__).
+capture LM, IPOPT, SciPy least-squares (``method='scipy'`` or
+``'least_squares'``), and custom-optimizer fits (issue
+`#534 <https://github.com/PharmaPy-org/PharmaPy/issues/534>`__). Custom records
+require a callable accepting canonical per-parameter bounds for replay;
+callables are supplied again after loading JSON. See :doc:`calibration_records`
+for the bounds declaration required when custom bounds have shape ``(2, 2)``.
 
 .. testcode::
 
@@ -110,6 +113,14 @@ given options merged over the optimizer's defaults (see
 :doc:`../advanced_usage`). A fit that stops without converging, for example
 at the evaluation limit ``max_fun_eval``, warns with a ``RuntimeWarning``
 and its identifiability summary starts with ``FIT DID NOT CONVERGE``.
+
+For a custom optimizer callable, convergence is retained only when the solver
+reports it. A boolean ``success=False`` emits the same warning; a parameter-only
+return does not establish convergence. ``info['tolerances']`` preserves a private
+copy of explicitly returned tolerance metadata, or an empty dictionary when the
+solver does not report it. PharmaPy does not infer stopping defaults from custom
+option names. The supplied options remain available in ``optim_options`` and
+calibration records for replay.
 
 .. testcode::
 

@@ -40,6 +40,56 @@ class _BootstrapFitFailure(RuntimeError):
     """Identify a refit rejected by the solver termination contract."""
 
 
+def _interval_bounds(bounds, names: Sequence[str], method: str) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Interpret fitted bounds using the existing native parameter contracts.
+
+    Parameters
+    ----------
+    bounds : object
+        Stored bounds in parameter units. Built-in optimizers use their native
+        layouts; a custom optimizer may define a different layout.
+    names : sequence of str
+        Optimized parameter names, in interval column order.
+    method : str
+        Native optimization method identifier.
+
+    Returns
+    -------
+    tuple of numpy.ndarray or None
+        Lower and upper bounds [parameter units], each shape (n_parameters,).
+        None means custom bounds could not be interpreted; a warning is issued
+        and the already computed confidence intervals remain available.
+
+    Raises
+    ------
+    TypeError, ValueError
+        Standard optimizer bounds are invalid, or interpreted parameter bounds
+        contain invalid numeric limits.
+
+    Warns
+    -----
+    RuntimeWarning
+        Custom bounds have an ambiguous or unsupported layout. No constraint
+        interpretation is inferred from fitted values or container types.
+    """
+    # These native modules depend on statistics; import after initialization.
+    from PharmaPy.ParamEstim import _parameter_bounds
+    from PharmaPy.Records import _stored_bounds_to_pairs
+
+    if not isinstance(bounds, Bounds) and method in ('scipy', 'least_squares', 'custom'):
+        try:
+            bounds = _stored_bounds_to_pairs(bounds, len(names), method)
+        except (TypeError, ValueError, IndexError, KeyError) as error:
+            if method != 'custom':
+                raise
+            warnings.warn('Custom optimizer bounds cannot be interpreted unambiguously; '
+                          'interval-bound coverage is not assessed. Use scipy.optimize.Bounds '
+                          f'when supported by the optimizer. Details: {error}',
+                          RuntimeWarning, stacklevel=3)
+            return None
+    return _parameter_bounds(bounds, names)
+
+
 def _validated_count(value, name: str) -> int:
     """Return a positive integer count or raise an actionable error.
 
@@ -629,18 +679,23 @@ def _fit_bootstrap_sample(estimator, y_sample: list) -> np.ndarray:
     Notes
     -----
     The fit runs on ``_isolated_estimator(estimator)`` with a copy of the
-    fitted estimator's effective ``optim_options``. A stateful model
-    callable is shared and is left at its last evaluation; see
-    ``_restore_model_state``.
+    fitted estimator's effective ``optim_options``. For a custom fit,
+    its retained ``_custom_optimizer`` is supplied in that private options
+    copy, so both supported custom-callable entry forms can be replayed.
+    A stateful model callable is shared and is left at its last evaluation;
+    see ``_restore_model_state``.
     """
     isolated = _isolated_estimator(estimator)
     isolated.y_data = y_sample  # [measured-state units]
 
-    options = estimator.optim_options
+    options = ({} if estimator.optim_options is None
+               else dict(estimator.optim_options))
+    if estimator.opt_method == 'custom':
+        options['optimizer'] = estimator._custom_optimizer
     params, _, info = isolated.optimize_fn(
         method=estimator.opt_method,
         verbose=False, store_iter=False,
-        optim_options=None if options is None else dict(options))
+        optim_options=options)
 
     success = info.get('success')
     if success is None and 'stop_criterion' in info:
@@ -1019,7 +1074,9 @@ class StatisticsClass:
         -----
         RuntimeWarning
             The fit was unsuccessful, local variance is zero, or the symmetric
-            intervals touch or cross parameter bounds. Limits are not clipped.
+            intervals touch or cross parameter bounds. Ambiguous custom bounds
+            are reported as unassessed. Intervals are never clipped or discarded
+            because a custom optimizer's bound layout cannot be inferred.
 
         Notes
         -----
@@ -1054,11 +1111,10 @@ class StatisticsClass:
         bounds = options.get('bounds')
         active = np.any(info.get('active_mask', 0))
         if bounds is not None:
-            if isinstance(bounds, Bounds):
-                lower, upper = bounds.lb, bounds.ub  # [parameter units]
-            else:
-                lower, upper = bounds  # [parameter units]
-            active = active or np.any(intervals[:, 0] <= lower) or np.any(intervals[:, 1] >= upper)
+            limits = _interval_bounds(bounds, self.param_names, self.inst.opt_method)  # [parameter units]
+            if limits is not None:
+                lower, upper = limits  # [parameter units]
+                active = active or np.any(intervals[:, 0] <= lower) or np.any(intervals[:, 1] >= upper)
         if active:
             warnings.warn('Symmetric confidence intervals touch or cross a parameter bound; '
                           'boundary coverage is not qualified. Use constrained inference.',
