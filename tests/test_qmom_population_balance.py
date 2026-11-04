@@ -20,9 +20,12 @@ import numpy as np
 import pytest
 from scipy.integrate import quad
 
-from PharmaPy.CrystallizationKernels import (BrownianKernel, ConstantKernel,
-                                             DifferentialSedimentationKernel, KernelConditions,
-                                             ProductKernel, ShearKernel, SumKernel)
+from PharmaPy.CrystallizationKernels import (BinaryFragmentation, BrownianKernel, ConstantKernel,
+                                             ConstantSelection, DifferentialSedimentationKernel,
+                                             ErosionFragmentation, KernelConditions,
+                                             ParabolicFragmentation, PowerLawSelection,
+                                             ProductKernel, ShearKernel, SumKernel,
+                                             UniformFragmentation)
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
 from PharmaPy.Errors import (PharmaPySpecificationError, PharmaPyTypeError,
                              PharmaPyValueError)
@@ -161,7 +164,8 @@ def _kinetics(alpha, solubility=SOLUBILITY, growth_rate=GROWTH_RATE,
 def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
            crystal_density=LIQUID_SOLUTE_DENSITY, integrator=None,
            solubility=SOLUBILITY, shape_factor=SHAPE_FACTOR, agglomeration=None,
-           growth_rate=GROWTH_RATE, nucleation_rate=NUCLEATION_RATE, rad=0.0):
+           growth_rate=GROWTH_RATE, nucleation_rate=NUCLEATION_RATE, rad=0.0,
+           breakage=None, fragments=None):
     """Build the closed batch crystallizer.
 
     Parameters
@@ -186,6 +190,9 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
         G0 [um/s] and B [#/(m**3 s)]; see ``_kinetics``.
     rad : float, optional
         Nucleus size [um]. Defaults to zero.
+    breakage, fragments : optional
+        Breakage selection function and fragment distribution for
+        ``QMOMPopulationBalance``; None for none.
 
     Returns
     -------
@@ -196,7 +203,10 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
     liquid = LiquidPhase(DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC,
                          temp=TEMP)
     solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
-    kernel_kwargs = {} if agglomeration is None else {"agglomeration": agglomeration}
+    kernel_kwargs = {name: law for name, law in (("agglomeration", agglomeration),
+                                                 ("breakage", breakage),
+                                                 ("fragments", fragments))
+                     if law is not None}
     mechanism = mechanism_cls(
         owning_phase=solid, target_components=TARGET, solvent_name="solvent",
         moments_init=moments, density=crystal_density, kv=shape_factor, rad=rad,
@@ -761,11 +771,275 @@ def test_an_agglomeration_kernel_must_be_callable():
                               agglomeration=1e-14)
 
 
-def test_agglomeration_left_out_of_the_vessel_is_refused():
-    vessel, _, _ = _agglomeration_only(_population_moments(*THREE_SIZES),
-                                       ConstantKernel(1e-14))
+@pytest.mark.parametrize("kernels", [
+    {"agglomeration": ConstantKernel(1e-14)},
+    {"breakage": ConstantSelection(1e-3), "fragments": BinaryFragmentation()},
+], ids=["agglomeration", "breakage"])
+def test_kernels_left_out_of_the_vessel_are_refused(kernels):
+    vessel, _, _ = _build(_population_moments(*THREE_SIZES), None, growth_rate=0.0,
+                          nucleation_rate=0.0, **kernels)
 
     vessel.intraphase_processes = []
 
     with pytest.raises(PharmaPySpecificationError, match="intraphase_processes"):
         _state_and_rates(vessel)
+
+
+def _breakage_only(moments, selection, fragments, **kwargs):
+    """Batch crystallizer in which the crystals only break.
+
+    Parameters
+    ----------
+    moments : numpy.ndarray
+        Initial moments [um**k/m**3], shape ``(NUM_MOM,)``.
+    selection : callable
+        Breakage selection function.
+    fragments : object
+        Fragment distribution.
+    **kwargs
+        Passed to ``_build``.
+
+    Returns
+    -------
+    tuple
+        As ``_build``, with zero growth and nucleation.
+    """
+    return _build(moments, None, breakage=selection, fragments=fragments, growth_rate=0.0,
+                  nucleation_rate=0.0, **kwargs)
+
+
+ORDERS = np.arange(NUM_MOM)  # [-]
+BREAKAGE_RATE = 1e-3  # S_0 [1/s], arbitrary
+# Fragment shares b_k / L**k of the self-similar distributions, as Table 3 of
+# Marchisio, Vigil and Fox (2003) gives them, for the same orders.
+SELF_SIMILAR_FRAGMENTS = {
+    "symmetric": (BinaryFragmentation(0.5), 2 ** ((3 - ORDERS) / 3)),
+    "mass_ratio_1_4": (BinaryFragmentation(0.2), (4 ** (ORDERS / 3) + 1) / 5 ** (ORDERS / 3)),
+    "parabolic": (ParabolicFragmentation(1.0),
+                  3 / (3 + ORDERS) + 0.5 * (72 / (9 + ORDERS) - 72 / (6 + ORDERS)
+                                            + 18 / (3 + ORDERS))),
+    "uniform": (UniformFragmentation(), 6 / (ORDERS + 3)),
+}
+
+
+@pytest.mark.parametrize("name", SELF_SIMILAR_FRAGMENTS)
+def test_constant_breakage_scales_each_moment_by_its_fragment_share(name):
+    # Every parent breaks at S_0 into fragments whose k-th moment is c_k L**k,
+    # so dmu_k/dt = S_0 (c_k - 1) mu_k for every k.
+    fragments, share = SELF_SIMILAR_FRAGMENTS[name]
+    moments = _population_moments(*THREE_SIZES)
+    vessel, _, _ = _breakage_only(moments, ConstantSelection(BREAKAGE_RATE), fragments)
+
+    _, state, rates = _state_and_rates(vessel)
+
+    expected = BREAKAGE_RATE * (share - 1) * state
+    _assert_rates_match(rates, expected, BREAKAGE_RATE * (share + 1) * state)
+
+
+def test_volume_proportional_breakage_is_exact_for_the_low_moments():
+    # a = S_0 (L / L_ref)**3 with symmetric fragments: dmu_k/dt =
+    # S_0 (2**(1 - k/3) - 1) mu_(k+3) / L_ref**3, closed for k <= 2.
+    reference_size = 50.0  # [um]
+    moments = _population_moments(*THREE_SIZES)
+    vessel, _, _ = _breakage_only(
+        moments, PowerLawSelection(BREAKAGE_RATE, 3.0, reference_size), BinaryFragmentation())
+
+    _, state, rates = _state_and_rates(vessel)
+
+    low = np.arange(3)
+    expected = BREAKAGE_RATE * (2 ** (1 - low / 3) - 1) * state[low + 3] / reference_size ** 3
+    np.testing.assert_allclose(rates[low], expected, rtol=ALGEBRAIC_RTOL)
+    assert rates[3] == pytest.approx(0.0, abs=ALGEBRAIC_RTOL * abs(rates[0]) * state[3] / state[0])
+
+
+def test_erosion_chips_one_fragment_per_parent_larger_than_it():
+    # Parents of 3 um are smaller than the 5 um fragment and stay whole;
+    # each 90 um parent loses one 5 um fragment at the constant frequency.
+    fragment_size = 5.0  # [um]
+    (small, large), (n_small, n_large) = (3.0, 90.0), (3e10, 2e9)  # [um], [#/m**3]
+    moments = _population_moments((small, large), (n_small, n_large))
+    vessel, _, _ = _breakage_only(moments, ConstantSelection(BREAKAGE_RATE),
+                                  ErosionFragmentation(fragment_size))
+
+    _, _, rates = _state_and_rates(vessel)
+
+    events = BREAKAGE_RATE * n_large  # [#/(m**3 s)]
+    gained = events * (fragment_size ** ORDERS
+                       + np.cbrt(large ** 3 - fragment_size ** 3) ** ORDERS)
+    lost = events * large ** ORDERS
+    _assert_rates_match(rates, gained - lost, gained + lost)
+
+
+@pytest.mark.integration
+def test_constant_symmetric_breakage_follows_the_exact_moments_over_a_solve():
+    # dmu_k/dt = S_0 (2**(1 - k/3) - 1) mu_k for every k; S_0 doubles mu_0.
+    rate_constant = np.log(2) / RUNTIME  # [1/s]
+    moments = _population_moments(*THREE_SIZES)
+    vessel, _, _ = _breakage_only(
+        moments, ConstantSelection(rate_constant), BinaryFragmentation(),
+        integrator=ScipyBackend(method="LSODA",
+                                options={"rtol": SOLVER_TOL, "atol": SOLVER_TOL}))
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    trajectory = np.asarray(vessel.result.mu_n_solid0)  # [um**k/m**3]
+    expected = moments * np.exp(rate_constant * (2 ** (1 - ORDERS / 3) - 1) * RUNTIME)
+    np.testing.assert_allclose(trajectory[-1], expected, rtol=EXACT_CLOSURE_RTOL)
+    np.testing.assert_allclose(trajectory[:, 3], moments[3], rtol=MU3_CONSERVATION_RTOL)
+
+
+@pytest.mark.integration
+def test_volume_proportional_breakage_makes_crystals_at_a_constant_rate_over_a_solve():
+    # a = S_0 L**3 / L_ref**3 and two fragments per event: dmu_0/dt =
+    # S_0 mu_3 / L_ref**3 at constant mu_3, so mu_0 grows linearly (Ziff and
+    # McGrady, 1985). S_0 adds half the initial count.
+    reference_size = 50.0  # [um]
+    moments = _population_moments(*THREE_SIZES)
+    rate_constant = 0.5 * moments[0] * reference_size ** 3 / (moments[3] * RUNTIME)  # [1/s]
+    vessel, _, _ = _breakage_only(
+        moments, PowerLawSelection(rate_constant, 3.0, reference_size), BinaryFragmentation(),
+        integrator=ScipyBackend(method="LSODA",
+                                options={"rtol": SOLVER_TOL, "atol": SOLVER_TOL}))
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    trajectory = np.asarray(vessel.result.mu_n_solid0)  # [um**k/m**3]
+    assert trajectory[-1, 0] == pytest.approx(1.5 * moments[0], rel=EXACT_CLOSURE_RTOL)
+    np.testing.assert_allclose(trajectory[:, 3], moments[3], rtol=MU3_CONSERVATION_RTOL)
+
+
+@pytest.mark.integration
+def test_agglomeration_and_breakage_reach_their_balance_over_a_solve():
+    # dmu_0/dt = -beta_0 mu_0**2 / 2 + S_0 mu_0 is logistic: mu_0 rises to
+    # K = 2 S_0 / beta_0 as K / (1 + (K / mu_0(0) - 1) exp(-S_0 t)).
+    moments = _population_moments(*THREE_SIZES)
+    rate_constant = 5 / RUNTIME  # [1/s]: five e-folds, close to the balance
+    balance = 3 * moments[0]  # [#/m**3]
+    vessel, _, _ = _build(
+        moments, None, growth_rate=0.0, nucleation_rate=0.0,
+        agglomeration=ConstantKernel(2 * rate_constant / balance),
+        breakage=ConstantSelection(rate_constant), fragments=BinaryFragmentation(),
+        integrator=ScipyBackend(method="LSODA",
+                                options={"rtol": SOLVER_TOL, "atol": SOLVER_TOL}))
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    trajectory = np.asarray(vessel.result.mu_n_solid0)  # [um**k/m**3]
+    expected_mu0 = balance / (1 + (balance / moments[0] - 1) * np.exp(-rate_constant * RUNTIME))
+    assert trajectory[-1, 0] == pytest.approx(expected_mu0, rel=EXACT_CLOSURE_RTOL)
+    np.testing.assert_allclose(trajectory[:, 3], moments[3], rtol=MU3_CONSERVATION_RTOL)
+
+
+class VolumeLosingFragments:
+    """Two fragments of half the parent's size, which hold only a quarter of its volume."""
+
+    def moments(self, parent_sizes, orders):
+        """Moments of the two fragments.
+
+        Parameters
+        ----------
+        parent_sizes : numpy.ndarray
+            Parent sizes [um], shape ``(n,)``.
+        orders : numpy.ndarray
+            Moment orders, shape ``(m,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            2 (L/2)**k [um**k], shape ``(n, m)``.
+        """
+        return 2 * (np.asarray(parent_sizes)[:, None] / 2) ** np.asarray(orders)[None, :]
+
+
+@pytest.mark.parametrize("selection, fragments, message", [
+    (lambda size, conditions: -np.ones(np.shape(size)), BinaryFragmentation(),
+     "selection function must return finite, non-negative"),
+    (lambda size, conditions: np.ones(2), BinaryFragmentation(),
+     "selection function must return one frequency per size"),
+    (ConstantSelection(BREAKAGE_RATE), VolumeLosingFragments(), "hold their parent's volume"),
+], ids=["negative_frequency", "unbroadcast_frequency", "volume_losing_fragments"])
+def test_breakage_laws_that_break_the_balance_are_refused(selection, fragments, message):
+    vessel, _, _ = _breakage_only(_population_moments(*THREE_SIZES), selection, fragments)
+
+    with pytest.raises(PharmaPyValueError, match=message):
+        _state_and_rates(vessel)
+
+
+class ShatteringSelection:
+    """A user selection function that is infinite at zero size, a = S_0 / L."""
+
+    needs_finite_nuclei = True
+
+    def __call__(self, size, conditions):
+        """Breakage frequency.
+
+        Parameters
+        ----------
+        size : numpy.ndarray
+            Crystal sizes [um].
+        conditions : KernelConditions
+            Unused.
+
+        Returns
+        -------
+        numpy.ndarray
+            1e-3 / L [1/s], with L in um.
+        """
+        return 1e-3 / np.asarray(size, dtype=float)
+
+
+class SizeRecordingSelection:
+    """Constant breakage frequency that keeps the smallest size it was asked about."""
+
+    def __init__(self):
+        self.smallest = np.inf  # [um]
+
+    def __call__(self, size, conditions):
+        """Breakage frequency.
+
+        Parameters
+        ----------
+        size : numpy.ndarray
+            Crystal sizes [um], recorded.
+        conditions : KernelConditions
+            Unused.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``BREAKAGE_RATE`` [1/s] for every size.
+        """
+        self.smallest = min(self.smallest, float(np.min(size)))
+        return np.full(np.shape(size), BREAKAGE_RATE)
+
+
+def test_breakage_sees_no_crystal_smaller_than_a_nucleus():
+    # As for agglomeration: the node of nuclei still at zero size sits at
+    # about 5e-13 um, and the selection function sees the nucleus size.
+    selection = SizeRecordingSelection()
+    moments = _population_moments((0.0, 100.0), (5e7, 1e10))
+    vessel, _, _ = _breakage_only(moments, selection, BinaryFragmentation(), rad=NUCLEUS_SIZE)
+
+    _state_and_rates(vessel)
+
+    assert selection.smallest == NUCLEUS_SIZE
+
+
+@pytest.mark.parametrize("kernels, error, message", [
+    ({"breakage": ConstantSelection(BREAKAGE_RATE)}, PharmaPyValueError, "both a selection"),
+    ({"fragments": BinaryFragmentation()}, PharmaPyValueError, "both a selection"),
+    ({"breakage": BREAKAGE_RATE, "fragments": BinaryFragmentation()}, PharmaPyTypeError,
+     "selection function a"),
+    ({"breakage": ConstantSelection(BREAKAGE_RATE), "fragments": 0.5}, PharmaPyTypeError,
+     "moments"),
+    ({"breakage": ShatteringSelection(), "fragments": BinaryFragmentation()}, PharmaPyValueError,
+     "rad > 0"),
+], ids=["selection_alone", "fragments_alone", "uncallable_selection", "fragments_without_moments",
+        "infinite_at_zero_size"])
+def test_incomplete_or_invalid_breakage_is_refused(kernels, error, message):
+    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+
+    with pytest.raises(error, match=message):
+        QMOMPopulationBalance(owning_phase=solid, target_components=TARGET,
+                              solvent_name="solvent", moments_init=np.zeros(NUM_MOM),
+                              **kernels)

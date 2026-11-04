@@ -1,17 +1,24 @@
-"""Agglomeration kernels for the QMOM population balance.
+"""Agglomeration and breakage kernels for the QMOM population balance.
 
-A kernel is a callable ``kernel(size_i, size_j, conditions)`` returning the
-agglomeration rate coefficient beta [m**3/s] of a crystal of size L_i with
+An agglomeration kernel is a callable ``kernel(size_i, size_j, conditions)``
+returning the rate coefficient beta [m**3/s] of a crystal of size L_i with
 one of size L_j [um], per crystal pair per m**3 of slurry, broadcast over
-the two size arrays. ``conditions`` is a ``KernelConditions``. A user kernel
-is any callable with this signature, returning finite, non-negative rates;
-one that is infinite at zero size sets ``needs_finite_nuclei = True``, and
-the population balance then asks for nuclei born at a finite size.
+the two size arrays. A breakage selection function is a callable
+``selection(size, conditions)`` returning the frequency a(L) [1/s] at which
+a crystal of size L breaks. ``conditions`` is a ``KernelConditions``. A
+fragment distribution has ``moments(parent_sizes, orders)``, the moments
+b_k(L) [um**k] of the fragments of one parent of each size. User versions
+are any objects of these shapes; a kernel or selection function that is
+infinite at zero size sets ``needs_finite_nuclei = True``, and the
+population balance then asks for nuclei born at a finite size.
 
-The built-in kernels follow Table 1 of Marchisio, Vigil and Fox (2003, J.
-Colloid Interface Sci. 258:322-334), with physical prefactors: constant,
-Brownian, sum, hydrodynamic (``ShearKernel``) and differential force
-(``DifferentialSedimentationKernel``), plus ``ProductKernel``.
+The built-in kernels follow Tables 1 to 3 of Marchisio, Vigil and Fox
+(2003, J. Colloid Interface Sci. 258:322-334), with physical prefactors.
+Agglomeration: constant, Brownian, sum, hydrodynamic (``ShearKernel``) and
+differential force (``DifferentialSedimentationKernel``), plus
+``ProductKernel``. Selection: constant, power law and exponential.
+Fragments: symmetric and 1:4 (``BinaryFragmentation``), erosion, parabolic
+and uniform.
 """
 
 from typing import NamedTuple
@@ -433,3 +440,320 @@ class DifferentialSedimentationKernel:
                          / (72 * self.viscosity))  # [1/(m s)]
         return (self.efficiency * settling_rate * (size_i + size_j) ** 2
                 * np.abs(size_i ** 2 - size_j ** 2))
+
+
+# ---------------------------------------------------------------------------
+# Breakage: selection functions a(L) [1/s] (Marchisio et al., 2003, Table 2)
+# ---------------------------------------------------------------------------
+
+class ConstantSelection:
+    """Every crystal breaks at the same frequency, a = S_0.
+
+    Parameters
+    ----------
+    rate_constant : float
+        S_0 [1/s], at least zero.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If ``rate_constant`` is negative or not finite.
+    """
+
+    def __init__(self, rate_constant):
+        self.rate_constant = _validated_rate_constant(rate_constant, 'rate_constant')  # [1/s]
+
+    def __call__(self, size, conditions):
+        """Breakage frequency.
+
+        Parameters
+        ----------
+        size : numpy.ndarray
+            Crystal sizes [um].
+        conditions : KernelConditions
+            Unused.
+
+        Returns
+        -------
+        numpy.ndarray
+            S_0 [1/s], shaped like ``size``.
+        """
+        return np.full(np.shape(size), self.rate_constant)
+
+
+class PowerLawSelection:
+    """Larger crystals break more often, a = S_0 (L / L_ref)**alpha.
+
+    Parameters
+    ----------
+    rate_constant : float
+        S_0 [1/s], the frequency at the reference size, at least zero.
+    exponent : float
+        alpha [-], at least zero. A negative exponent makes small crystals
+        break faster, the regime in which breakage can shatter mass into
+        crystals of vanishing size (Marchisio et al., 2003), which the
+        moments cannot carry; the frequency would also be infinite at zero
+        size.
+    reference_size : float, optional
+        L_ref [um], above zero. Defaults to 1 um, so S_0 is the frequency of
+        a one-micron crystal.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If ``rate_constant`` or ``exponent`` is negative or not finite, or
+        ``reference_size`` is not finite and positive.
+    """
+
+    def __init__(self, rate_constant, exponent, reference_size=1.0):
+        self.rate_constant = _validated_rate_constant(rate_constant, 'rate_constant')  # [1/s]
+        self.exponent = _validated_rate_constant(exponent, 'exponent')  # [-]
+        self.reference_size = _validated_positive(reference_size, 'reference_size')  # [um]
+
+    def __call__(self, size, conditions):
+        """Breakage frequency.
+
+        Parameters
+        ----------
+        size : numpy.ndarray
+            Crystal sizes [um].
+        conditions : KernelConditions
+            Unused.
+
+        Returns
+        -------
+        numpy.ndarray
+            S_0 (L / L_ref)**alpha [1/s], shaped like ``size``.
+        """
+        return self.rate_constant * (np.asarray(size, dtype=float)
+                                     / self.reference_size) ** self.exponent
+
+
+class ExponentialSelection:
+    """Breakage frequency growing with crystal volume, a = S_0 exp(delta L**3).
+
+    Parameters
+    ----------
+    rate_constant : float
+        S_0 [1/s], the frequency as L goes to zero, at least zero.
+    volume_coefficient : float
+        delta [1/um**3], at least zero, so that, as for the power law, small
+        crystals do not break faster than large ones.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If either parameter is negative or not finite.
+    """
+
+    def __init__(self, rate_constant, volume_coefficient):
+        self.rate_constant = _validated_rate_constant(rate_constant, 'rate_constant')  # [1/s]
+        self.volume_coefficient = _validated_rate_constant(
+            volume_coefficient, 'volume_coefficient')  # [1/um**3]
+
+    def __call__(self, size, conditions):
+        """Breakage frequency.
+
+        Parameters
+        ----------
+        size : numpy.ndarray
+            Crystal sizes [um].
+        conditions : KernelConditions
+            Unused.
+
+        Returns
+        -------
+        numpy.ndarray
+            S_0 exp(delta L**3) [1/s], shaped like ``size``.
+        """
+        return self.rate_constant * np.exp(
+            self.volume_coefficient * np.asarray(size, dtype=float) ** 3)
+
+
+# ---------------------------------------------------------------------------
+# Breakage: fragment distributions (Marchisio et al., 2003, Table 3)
+# ---------------------------------------------------------------------------
+
+def _size_powers(parent_sizes, orders):
+    """Parent sizes raised to each order.
+
+    Parameters
+    ----------
+    parent_sizes : numpy.ndarray
+        Parent sizes L [um], shape ``(n,)``.
+    orders : numpy.ndarray
+        Moment orders k, shape ``(m,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        L**k [um**k], shape ``(n, m)``.
+    """
+    return np.asarray(parent_sizes, dtype=float)[:, None] ** np.asarray(orders)[None, :]
+
+
+class BinaryFragmentation:
+    """Two fragments holding the fractions f and 1 - f of the parent's volume.
+
+    b_k(L) = (f**(k/3) + (1 - f)**(k/3)) L**k. The paper's symmetric
+    fragmentation is f = 1/2, the default, and its mass ratio 1:4 is f = 1/5.
+
+    Parameters
+    ----------
+    volume_fraction : float, optional
+        f [-], strictly between 0 and 1. Defaults to 0.5.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If ``volume_fraction`` is not strictly between 0 and 1.
+    """
+
+    def __init__(self, volume_fraction=0.5):
+        volume_fraction = float(volume_fraction)
+        if not 0 < volume_fraction < 1:
+            raise PharmaPyValueError(
+                'volume_fraction must lie strictly between 0 and 1, so that both '
+                'fragments exist, got %r.' % volume_fraction)
+        self.volume_fraction = volume_fraction  # [-]
+
+    def moments(self, parent_sizes, orders):
+        """Moments of the two fragments of each parent.
+
+        Parameters
+        ----------
+        parent_sizes : numpy.ndarray
+            Parent sizes L [um], shape ``(n,)``.
+        orders : numpy.ndarray
+            Moment orders k, shape ``(m,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            b_k(L) [um**k], shape ``(n, m)``.
+        """
+        thirds = np.asarray(orders) / 3
+        share = self.volume_fraction ** thirds + (1 - self.volume_fraction) ** thirds  # [-]
+        return share[None, :] * _size_powers(parent_sizes, orders)
+
+
+class ErosionFragmentation:
+    """A small fragment of fixed size chipped off the parent.
+
+    b_k(L) = L_0**k + (L**3 - L_0**3)**(k/3): one fragment of size L_0 and
+    the eroded parent, which keeps the rest of the volume. A parent no
+    larger than L_0 has nothing to lose and does not erode: b_k(L) = L**k.
+
+    Parameters
+    ----------
+    fragment_size : float
+        L_0 [um], above zero; the paper's primary particle.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If ``fragment_size`` is not finite and positive.
+    """
+
+    def __init__(self, fragment_size):
+        self.fragment_size = _validated_positive(fragment_size, 'fragment_size')  # [um]
+
+    def moments(self, parent_sizes, orders):
+        """Moments of the fragment and the eroded parent.
+
+        Parameters
+        ----------
+        parent_sizes : numpy.ndarray
+            Parent sizes L [um], shape ``(n,)``.
+        orders : numpy.ndarray
+            Moment orders k, shape ``(m,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            b_k(L) [um**k], shape ``(n, m)``.
+        """
+        parent_sizes = np.asarray(parent_sizes, dtype=float)
+        thirds = np.asarray(orders) / 3
+        erodes = parent_sizes > self.fragment_size
+        remaining_cube = np.where(erodes, parent_sizes ** 3 - self.fragment_size ** 3, 0.0)  # [um**3]
+        eroded = (self.fragment_size ** np.asarray(orders))[None, :] + remaining_cube[:, None] ** thirds
+        return np.where(erodes[:, None], eroded, _size_powers(parent_sizes, orders))
+
+
+class ParabolicFragmentation:
+    """Two fragments on average, spread by a parabola-like law in size.
+
+    b(L|lambda) = 3C L**2/lambda**3 + (1 - C/2)(72 L**8/lambda**9
+    - 72 L**5/lambda**6 + 18 L**2/lambda**3) on 0 < L < lambda, so
+    b_k = (3C/(k+3) + (1 - C/2)(72/(k+9) - 72/(k+6) + 18/(k+3))) lambda**k.
+    C = 2 is the uniform distribution.
+
+    Parameters
+    ----------
+    shape_parameter : float
+        C [-], from 0 to 3. Written as b = (x**2/lambda)(3C + 18 (1 - C/2)
+        (2x**3 - 1)**2) with x = L/lambda, the bracket is linear in
+        (2x**3 - 1)**2, which runs from 0 to 1; it stays non-negative at both
+        ends, 3C and 18 - 6C, only for 0 <= C <= 3.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If ``shape_parameter`` lies outside [0, 3].
+    """
+
+    def __init__(self, shape_parameter):
+        shape_parameter = float(shape_parameter)
+        if not 0 <= shape_parameter <= 3:
+            raise PharmaPyValueError(
+                'shape_parameter must lie in [0, 3], where the fragment '
+                'distribution is non-negative, got %r.' % shape_parameter)
+        self.shape_parameter = shape_parameter  # [-]
+
+    def moments(self, parent_sizes, orders):
+        """Moments of the fragments of each parent.
+
+        Parameters
+        ----------
+        parent_sizes : numpy.ndarray
+            Parent sizes L [um], shape ``(n,)``.
+        orders : numpy.ndarray
+            Moment orders k, shape ``(m,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            b_k(L) [um**k], shape ``(n, m)``.
+        """
+        orders = np.asarray(orders, dtype=float)
+        c = self.shape_parameter
+        share = (3 * c / (orders + 3) + (1 - c / 2) * (72 / (orders + 9) - 72 / (orders + 6)
+                                                        + 18 / (orders + 3)))  # [-]
+        return share[None, :] * _size_powers(parent_sizes, orders)
+
+
+class UniformFragmentation:
+    """Fragments spread evenly in volume below the parent's size.
+
+    b(L|lambda) = 6 L**2/lambda**3 on 0 < L < lambda, two fragments on
+    average, so b_k = 6/(k+3) lambda**k.
+    """
+
+    def moments(self, parent_sizes, orders):
+        """Moments of the fragments of each parent.
+
+        Parameters
+        ----------
+        parent_sizes : numpy.ndarray
+            Parent sizes L [um], shape ``(n,)``.
+        orders : numpy.ndarray
+            Moment orders k, shape ``(m,)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            b_k(L) [um**k], shape ``(n, m)``.
+        """
+        share = 6 / (np.asarray(orders, dtype=float) + 3)  # [-]
+        return share[None, :] * _size_powers(parent_sizes, orders)

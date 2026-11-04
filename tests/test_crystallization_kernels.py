@@ -1,20 +1,26 @@
-"""Built-in agglomeration kernels of ``PharmaPy.CrystallizationKernels``.
+"""Built-in agglomeration and breakage kernels of ``PharmaPy.CrystallizationKernels``.
 
 Expected rates are built from the crystal sizes converted to metres first,
 the shear and Brownian kernels from Smoluchowski's radius forms and the
 settling kernel from Stokes velocities, so none repeats the kernels' own
 expressions; the degrees of homogeneity are those of Table 1 of Marchisio,
-Vigil and Fox (2003). Sizes are in um and rates in m**3/s. The size arrays
-have different lengths, so a broadcast that drops or swaps an axis changes
-the shape.
+Vigil and Fox (2003). Fragment moments come from the fragments' sizes, or
+from integrating the densities b(L|lambda) of that paper's Table 3. Sizes
+are in um, agglomeration rates in m**3/s and breakage frequencies in 1/s.
+The size arrays have different lengths, so a broadcast that drops or swaps
+an axis changes the shape.
 """
 
 import numpy as np
 import pytest
+from scipy.integrate import quad
 
-from PharmaPy.CrystallizationKernels import (BrownianKernel, ConstantKernel,
-                                             DifferentialSedimentationKernel, KernelConditions,
-                                             ProductKernel, ShearKernel, SumKernel)
+from PharmaPy.CrystallizationKernels import (BinaryFragmentation, BrownianKernel, ConstantKernel,
+                                             ConstantSelection, DifferentialSedimentationKernel,
+                                             ErosionFragmentation, ExponentialSelection,
+                                             KernelConditions, ParabolicFragmentation,
+                                             PowerLawSelection, ProductKernel, ShearKernel,
+                                             SumKernel, UniformFragmentation)
 from PharmaPy.Errors import PharmaPyValueError
 
 pytestmark = pytest.mark.unit
@@ -199,3 +205,182 @@ def test_kernels_scale_with_their_degree_of_homogeneity(name, degree):
 def test_invalid_kernel_parameters_are_refused(make_kernel, message):
     with pytest.raises(PharmaPyValueError, match=message):
         make_kernel()
+
+
+PARENT_SIZES = np.array([5.0, 60.0, 310.0])  # [um]
+ORDERS = np.arange(6)  # [-], the moments of a three-node QMOM
+# quad's own tolerance, 1e-12, with a margin of 100.
+INTEGRATION_RTOL = 1e-10  # [-]
+
+
+def test_constant_selection_is_the_same_for_every_crystal():
+    rate_constant = 2e-3  # [1/s]
+
+    rates = ConstantSelection(rate_constant)(PARENT_SIZES, CONDITIONS)
+
+    np.testing.assert_array_equal(rates, np.full(3, rate_constant))
+
+
+def test_power_law_selection_is_its_rate_constant_at_the_reference_size():
+    selection = PowerLawSelection(2e-3, 1.5, reference_size=60.0)  # [1/s], [-], [um]
+
+    rates = selection(PARENT_SIZES, CONDITIONS)
+
+    assert rates[1] == pytest.approx(2e-3, rel=ALGEBRAIC_RTOL)
+    # Each size relative to 60 um, raised to the exponent.
+    np.testing.assert_allclose(rates / rates[1], (PARENT_SIZES / 60.0) ** 1.5,
+                               rtol=ALGEBRAIC_RTOL)
+
+
+def test_exponential_selection_grows_log_linearly_with_crystal_volume():
+    rate_constant, volume_coefficient = 2e-3, 1e-7  # [1/s], [1/um**3]
+    selection = ExponentialSelection(rate_constant, volume_coefficient)
+
+    rates = selection(PARENT_SIZES, CONDITIONS)
+
+    assert selection(np.array([0.0]), CONDITIONS)[0] == rate_constant
+    # A relative error of 1e-12 in a rate is an absolute 1e-12 in its log,
+    # which a relative check of the 1.25e-5 exponent of the 5 um crystal
+    # would not allow.
+    np.testing.assert_allclose(np.log(rates / rate_constant),
+                               volume_coefficient * PARENT_SIZES ** 3, rtol=0.0,
+                               atol=ALGEBRAIC_RTOL)
+
+
+def _moments_of_fragments(fragment_sizes):
+    """Moments of each parent's fragments, from their sizes.
+
+    Parameters
+    ----------
+    fragment_sizes : list of tuple of float
+        For each parent, the sizes of its fragments [um].
+
+    Returns
+    -------
+    numpy.ndarray
+        b_k [um**k], shape ``(parents, len(ORDERS))``.
+    """
+    return np.array([[sum(size ** k for size in sizes) for k in ORDERS]
+                     for sizes in fragment_sizes])
+
+
+@pytest.mark.parametrize("volume_fraction", [0.5, 0.2], ids=["symmetric", "mass_ratio_1_4"])
+def test_binary_fragments_split_the_parent_volume(volume_fraction):
+    fragments = BinaryFragmentation(volume_fraction)
+
+    moments = fragments.moments(PARENT_SIZES, ORDERS)
+
+    # Fragments of volume f v and (1 - f) v have sizes f**(1/3) L and so on.
+    expected = _moments_of_fragments([
+        (np.cbrt(volume_fraction * size ** 3), np.cbrt((1 - volume_fraction) * size ** 3))
+        for size in PARENT_SIZES])
+    np.testing.assert_allclose(moments, expected, rtol=ALGEBRAIC_RTOL)
+
+
+def test_erosion_chips_one_fragment_off_parents_larger_than_it():
+    fragment_size = 10.0  # [um], larger than the 5 um parent
+
+    moments = ErosionFragmentation(fragment_size).moments(PARENT_SIZES, ORDERS)
+
+    expected = _moments_of_fragments([
+        (5.0,),  # no larger than the fragment: left whole
+        (fragment_size, np.cbrt(60.0 ** 3 - fragment_size ** 3)),
+        (fragment_size, np.cbrt(310.0 ** 3 - fragment_size ** 3)),
+    ])
+    np.testing.assert_allclose(moments, expected, rtol=ALGEBRAIC_RTOL)
+
+
+def _parabolic_density(size, parent_size, shape_parameter):
+    """Fragment density of the parabolic distribution (Marchisio et al., 2003, Table 3).
+
+    Parameters
+    ----------
+    size : float
+        Fragment size L [um].
+    parent_size : float
+        Parent size lambda [um].
+    shape_parameter : float
+        C [-].
+
+    Returns
+    -------
+    float
+        b(L|lambda) [1/um].
+    """
+    ratio = size / parent_size  # [-]
+    return (3 * shape_parameter * ratio ** 2
+            + (1 - shape_parameter / 2) * (72 * ratio ** 8 - 72 * ratio ** 5 + 18 * ratio ** 2)
+            ) / parent_size
+
+
+def _uniform_density(size, parent_size):
+    """Fragment density of the uniform distribution (Marchisio et al., 2003, Table 3).
+
+    Parameters
+    ----------
+    size : float
+        Fragment size L [um].
+    parent_size : float
+        Parent size lambda [um].
+
+    Returns
+    -------
+    float
+        b(L|lambda) = 6 L**2 / lambda**3 [1/um].
+    """
+    return 6 * size ** 2 / parent_size ** 3
+
+
+@pytest.mark.parametrize("fragments, density", [
+    (ParabolicFragmentation(0.5), lambda size, parent: _parabolic_density(size, parent, 0.5)),
+    (ParabolicFragmentation(2.8), lambda size, parent: _parabolic_density(size, parent, 2.8)),
+    (UniformFragmentation(), _uniform_density),
+], ids=["parabolic_low_c", "parabolic_high_c", "uniform"])
+def test_spread_fragments_match_the_moments_of_their_density(fragments, density):
+    moments = fragments.moments(PARENT_SIZES, ORDERS)
+
+    expected = np.array([[quad(lambda size: size ** k * density(size, parent), 0.0, parent,
+                               epsabs=0.0, epsrel=1e-12)[0] for k in ORDERS]
+                         for parent in PARENT_SIZES])
+    np.testing.assert_allclose(moments, expected, rtol=INTEGRATION_RTOL)
+
+
+def test_parabolic_fragments_with_c_of_two_are_uniform():
+    np.testing.assert_allclose(ParabolicFragmentation(2.0).moments(PARENT_SIZES, ORDERS),
+                               UniformFragmentation().moments(PARENT_SIZES, ORDERS),
+                               rtol=ALGEBRAIC_RTOL)
+
+
+@pytest.mark.parametrize("fragments, fragment_counts", [
+    (BinaryFragmentation(0.5), [2, 2, 2]),
+    (BinaryFragmentation(0.2), [2, 2, 2]),
+    (ErosionFragmentation(10.0), [1, 2, 2]),  # the 5 um parent is left whole
+    (ParabolicFragmentation(1.0), [2, 2, 2]),
+    (UniformFragmentation(), [2, 2, 2]),
+], ids=["symmetric", "mass_ratio_1_4", "erosion", "parabolic", "uniform"])
+def test_fragments_are_counted_and_hold_their_parents_volume(fragments, fragment_counts):
+    # The paper's two constraints: b_0 counts the fragments, b_3 is the
+    # parent's volume.
+    moments = fragments.moments(PARENT_SIZES, ORDERS)
+
+    np.testing.assert_allclose(moments[:, 0], fragment_counts, rtol=ALGEBRAIC_RTOL)
+    np.testing.assert_allclose(moments[:, 3], PARENT_SIZES ** 3, rtol=ALGEBRAIC_RTOL)
+
+
+@pytest.mark.parametrize("make_law, message", [
+    (lambda: ConstantSelection(-1e-3), "rate_constant must be a finite, non-negative"),
+    (lambda: PowerLawSelection(1e-3, -0.5), "exponent must be a finite, non-negative"),
+    (lambda: PowerLawSelection(1e-3, 1.0, reference_size=0.0),
+     "reference_size must be a finite, positive"),
+    (lambda: ExponentialSelection(1e-3, -1e-7), "volume_coefficient must be a finite, non-negative"),
+    (lambda: BinaryFragmentation(0.0), "strictly between 0 and 1"),
+    (lambda: BinaryFragmentation(1.0), "strictly between 0 and 1"),
+    (lambda: ErosionFragmentation(0.0), "fragment_size must be a finite, positive"),
+    (lambda: ParabolicFragmentation(-0.1), r"must lie in \[0, 3\]"),
+    (lambda: ParabolicFragmentation(3.5), r"must lie in \[0, 3\]"),
+], ids=["negative_rate", "shattering_exponent", "zero_reference_size",
+        "negative_volume_coefficient", "no_volume", "all_volume", "zero_fragment",
+        "parabolic_below", "parabolic_above"])
+def test_invalid_breakage_parameters_are_refused(make_law, message):
+    with pytest.raises(PharmaPyValueError, match=message):
+        make_law()
