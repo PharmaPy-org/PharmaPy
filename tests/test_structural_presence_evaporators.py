@@ -1792,7 +1792,7 @@ def test_failed_solve_is_undone(paths, cls, first_segments,
     first segment or the continuous evaporator initializes), so the retry
     failed too.
     """
-    sundials = pytest.importorskip("assimulo.solvers.sundials")
+    pytest.importorskip("assimulo")
     path = paths["constructible"]
     unit = _late_api_evaporator(cls, path, include_nitrogen)
     fresh = _late_api_evaporator(cls, path, include_nitrogen)
@@ -1801,7 +1801,7 @@ def test_failed_solve_is_undone(paths, cls, first_segments,
         fresh.solve_unit(SHORT_SEGMENT, verbose=False)
     phases = (unit.Liquid_1, unit.Vapor_1)
     before = [_phase_fingerprint(phase) for phase in phases]
-    with pytest.raises(sundials.IDAError):
+    with pytest.raises(MissingPropertyError, match=r"\['api'\].*'p_vap'"):
         unit.solve_unit(LONG_SEGMENT, verbose=False)
 
     assert unit.Liquid_1 is phases[0] and unit.Vapor_1 is phases[1]

@@ -1042,16 +1042,11 @@ class Drying(StructuralPresenceMixin):
             initial state: if a species present at the start (charged in the
             liquid or the gas, evaporating, or in the inlet gas at the
             start) lacks the data that ``unit_model`` needs for it, also
-            when its initial fraction is zero.
+            when its initial fraction is zero. Also raised for a species
+            first carried by the inlet gas later in the run, with CVode's
+            diagnostic as its cause.
         assimulo.solvers.sundials.CVodeError
-            If the integration fails, for example because a species first
-            carried by the inlet gas later in the run lacks its data: CVode
-            reports its own error, which does not name the species, or
-            stalls at the time the species enters until its step limit
-            (issue #435). With either error, and with any other that the
-            initialization, the integration or the publication of the
-            results raises, the unit keeps no results: its attributes and
-            presence records are restored to their values before the call.
+            Native integration failure without a recorded model error.
 
         Notes
         -----
@@ -1064,8 +1059,8 @@ class Drying(StructuralPresenceMixin):
         starts, so that a species present at the start (see the class
         docstring) without the data it needs raises the species-named
         ``MissingPropertyError``; a species first fed later by the inlet gas
-        without it is reported by CVode, whose error does not name it
-        (issue #435). A solve that raises, in its initialization, the
+        without it raises the original named error through the shared
+        solver guard. A solve that raises, in its initialization, the
         integration or the publication of its results, keeps no results:
         the unit's attributes (``elapsed_time``, ``result``, ``timeProf``,
         the presence records and the model diagnostics) are restored to

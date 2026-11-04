@@ -555,8 +555,8 @@ class _BaseCryst(StructuralPresenceMixin):
         The derivatives evaluated before CVode starts check only the species
         with a nonzero concentration at the initial state, so a present
         species at zero concentration (a dissolving target, a species fed
-        from the start) would first need its data inside CVode, whose error
-        does not name it (issue #435). Every crystallizer evaluates the
+        from the start) can first need its data inside CVode. The shared
+        solver guard preserves the named error. Every crystallizer evaluates the
         liquid heat capacity or enthalpy: in its energy balance when the
         temperature is integrated, in the heat-duty retrieval of
         ``BatchCryst`` and ``MSMPR``, and in the slurry that every retrieval
@@ -1801,7 +1801,8 @@ class _BaseCryst(StructuralPresenceMixin):
             liquid, the target, the named solvent, or fed with a nonzero
             flow) lacks the liquid data the balances need, whatever its
             concentration. Absent species need none. A species first fed
-            later without data is reported by CVode instead (issue #435).
+            later without data raises the original named error, chained
+            from CVode's diagnostic by the shared solver guard.
         """
 
         # A failed solve keeps no results: the unit, its presence record and

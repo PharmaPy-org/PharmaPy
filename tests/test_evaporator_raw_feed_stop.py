@@ -222,11 +222,12 @@ def test_failed_solve_after_volume_event_keeps_inlet_open(thermo_path):
     """Restore the inlet mode when IDA fails after the event shut the inlet.
 
     The feed-temperature law raises after CONTROL_FAILURE_TIME, past the
-    volume event, so IDA fails deterministically without retaining results.
+    volume event. The shared guard exposes that original controller error
+    without retaining results.
     Replacing it with a working law, the retried solve must feed until its
     own event, with totals matching the independently located event.
     """
-    sundials = pytest.importorskip('assimulo.solvers.sundials')
+    pytest.importorskip('assimulo')
 
     def failing_temperature(time):
         """Return TEMPERATURE [K] until the controller fails.
@@ -255,7 +256,7 @@ def test_failed_solve_after_volume_event_keeps_inlet_open(thermo_path):
     unit = simulation.EV
     run = {'EV': dict(RUN['EV'], sundials_opts=dict(SOLVER_OPTIONS))}
 
-    with pytest.raises(sundials.IDAError, match='residual function failed'):
+    with pytest.raises(RuntimeError, match='feed temperature controller failed'):
         simulation.SolveFlowsheet(kwargs_run=run, verbose=False)
 
     assert unit.allow_flow

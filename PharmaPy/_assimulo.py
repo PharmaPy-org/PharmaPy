@@ -14,6 +14,7 @@ private compatibility exports while new templates use :mod:`PharmaPy.solvers`.
 """
 
 from importlib import import_module
+from functools import lru_cache
 from typing import Any, NoReturn
 
 # Source: the supported backend pin documented in DEPENDENCIES.md and
@@ -125,6 +126,225 @@ def _construct_assimulo_object(
     return constructor(*args, **kwargs)
 
 
+class _CallbackFailure:
+    """Latch the first model error during one native solver operation.
+
+    The native solver may retry at earlier times after a Python exception.
+    Once a callback fails, all retries raise without re-entering the model.
+    Calls outside a solver operation keep their ordinary Python behavior.
+    """
+
+    def __init__(self, callback: Any, solver_exceptions: tuple) -> None:
+        """Store the callback and backend control-flow exception classes.
+
+        Parameters
+        ----------
+        callback : callable
+            RHS or residual; arguments, units and shapes are model-specific.
+        solver_exceptions : tuple of type
+            Backend errors and control flow, including normal termination
+            and explicitly recoverable solver exceptions, to pass through.
+        """
+        self.callback = callback
+        self.solver_exceptions = solver_exceptions
+        self.active = False
+        self.error = None
+        self.traceback = None
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Evaluate the model unless an earlier callback already failed.
+
+        Parameters
+        ----------
+        *args, **kwargs : Any
+            Original callback arguments, with their original units/shapes.
+
+        Returns
+        -------
+        Any
+            Original RHS or residual result, unchanged in units and shape.
+
+        Raises
+        ------
+        BaseException
+            First model error, with its saved traceback on every retry.
+            Backend control-flow exceptions pass through without latching.
+        """
+        if self.active and self.error is not None:
+            raise self.error.with_traceback(self.traceback)
+        try:
+            return self.callback(*args, **kwargs)
+        except self.solver_exceptions:
+            raise
+        except BaseException as error:
+            if self.active:
+                self.error = error
+                self.traceback = error.__traceback__
+            raise
+
+
+class _FailureHandlingSolver:
+    """Native solver mixin that exposes latched callback errors to Python."""
+
+    def __init__(self, problem: Any, *args: Any, **kwargs: Any) -> None:
+        """Give the native solver a private guarded callback.
+
+        Parameters
+        ----------
+        problem : assimulo.problem.Problem
+            Explicit or implicit problem, with model-specific units/shapes.
+        *args, **kwargs : Any
+            Arguments forwarded to the native solver constructor.
+
+        Notes
+        -----
+        Assimulo 3.4.3 caches the callback at construction. Restore the
+        problem's original callable immediately afterwards, so sharing a
+        problem between solvers does not share failure state or alter calls
+        made directly to the problem.
+        """
+        callback_name = self._callback_name
+        callback = getattr(problem, callback_name)
+        self._callback_failure = _CallbackFailure(callback, (
+            _load_assimulo_symbol("assimulo.exception", "AssimuloException"),
+            _load_assimulo_symbol("assimulo.solvers.sundials", "CVodeError"),
+            _load_assimulo_symbol("assimulo.solvers.sundials", "IDAError"),
+        ))
+        setattr(problem, callback_name, self._callback_failure)
+        try:
+            super().__init__(problem, *args, **kwargs)
+        finally:
+            setattr(problem, callback_name, callback)
+
+    def _run(self, operation: Any, *args: Any, **kwargs: Any) -> Any:
+        """Run a native operation with a fresh, exception-safe failure latch.
+
+        Parameters
+        ----------
+        operation : callable
+            Native ``simulate`` or IDA ``make_consistent`` method.
+        *args, **kwargs : Any
+            Native operation arguments, retaining backend units/shapes.
+
+        Returns
+        -------
+        Any
+            Native result, unchanged.
+
+        Raises
+        ------
+        BaseException
+            Original callback error, chained from the backend diagnostic.
+            Without a recorded model failure, native errors pass unchanged.
+
+        Notes
+        -----
+        Clear exception and traceback references even for interrupts, so
+        later solves neither retain a failed model nor inherit its error.
+        """
+        failure = self._callback_failure
+        failure.active = True
+        try:
+            try:
+                result = operation(*args, **kwargs)
+            except BaseException as backend_error:
+                if failure.error is not None:
+                    raise failure.error.with_traceback(failure.traceback) from backend_error
+                raise
+            if failure.error is not None:
+                if operation.__name__ == "make_consistent":
+                    # Assimulo 3.4.3 returns [IDA flag, y, yd] on a
+                    # consistency failure instead of raising IDAError.
+                    native_error = _load_assimulo_symbol(
+                        "assimulo.solvers.sundials", "IDAError")
+                    diagnostic = native_error(result[0], self.t)
+                else:
+                    # Defensive: event handling or a future backend must
+                    # not return success after a model callback failed.
+                    diagnostic = RuntimeError(
+                        "Assimulo returned after a model callback failed")
+                raise failure.error.with_traceback(failure.traceback) from diagnostic
+            return result
+        finally:
+            failure.active = False
+            failure.error = None
+            failure.traceback = None
+
+    def simulate(self, *args: Any, **kwargs: Any) -> Any:
+        """Integrate while preserving the first RHS or residual exception.
+
+        Parameters
+        ----------
+        *args, **kwargs : Any
+            Native ``simulate`` arguments: final time [s] and optional
+            reporting grid [s] (or the model's independent-coordinate units).
+
+        Returns
+        -------
+        tuple
+            Native times, states and, for IDA, derivatives, with the model's
+            original units and shapes. Normal event termination is preserved.
+
+        Raises
+        ------
+        BaseException
+            Original callback failure (including KeyboardInterrupt and
+            SystemExit), chained from the native error; otherwise the native
+            error unchanged.
+        """
+        return self._run(super().simulate, *args, **kwargs)
+
+
+class _ImplicitFailureHandlingSolver(_FailureHandlingSolver):
+    """Also guard residuals evaluated during IDA consistent initialization."""
+
+    def make_consistent(self, *args: Any, **kwargs: Any) -> Any:
+        """Compute consistent initial states with residual-error propagation.
+
+        Parameters
+        ----------
+        *args, **kwargs : Any
+            Native IDA consistency arguments, including the mode string.
+
+        Returns
+        -------
+        Any
+            Native IDA consistency result, unchanged.
+
+        Raises
+        ------
+        BaseException
+            Original residual failure chained from the backend error, or a
+            native error unchanged when no model callback failed.
+        """
+        return self._run(super().make_consistent, *args, **kwargs)
+
+
+@lru_cache(maxsize=None)
+def _solver_class(name: str) -> type:
+    """Build a guarded native solver subclass without eager optional imports.
+
+    Parameters
+    ----------
+    name : {'CVode', 'IDA'}
+        Backend solver class to load.
+
+    Returns
+    -------
+    type
+        Native solver subclass sharing the callback-failure contract.
+
+    Raises
+    ------
+    ImportError
+        If the optional backend constructor cannot be loaded.
+    """
+    native = _load_assimulo_symbol("assimulo.solvers", name)
+    mixin = _FailureHandlingSolver if name == "CVode" else _ImplicitFailureHandlingSolver
+    callback_name = "rhs" if name == "CVode" else "res"
+    return type(name, (mixin, native), {"_callback_name": callback_name})
+
+
 def CVode(*args: Any, **kwargs: Any) -> Any:
     """Construct an Assimulo CVode solver on first use.
 
@@ -138,14 +358,14 @@ def CVode(*args: Any, **kwargs: Any) -> Any:
     Returns
     -------
     Any
-        Assimulo CVode solver instance.
+        Native CVode subclass with per-solve callback-failure handling.
 
     Raises
     ------
     ImportError
         If the optional Assimulo backend is unavailable.
     """
-    return _construct_assimulo_object("assimulo.solvers", "CVode", *args, **kwargs)
+    return _solver_class("CVode")(*args, **kwargs)
 
 
 def IDA(*args: Any, **kwargs: Any) -> Any:
@@ -161,14 +381,15 @@ def IDA(*args: Any, **kwargs: Any) -> Any:
     Returns
     -------
     Any
-        Assimulo IDA solver instance.
+        Native IDA subclass guarding residuals during ``simulate`` and
+        ``make_consistent``.
 
     Raises
     ------
     ImportError
         If the optional Assimulo backend is unavailable.
     """
-    return _construct_assimulo_object("assimulo.solvers", "IDA", *args, **kwargs)
+    return _solver_class("IDA")(*args, **kwargs)
 
 
 def Explicit_Problem(*args: Any, **kwargs: Any) -> Any:
