@@ -1,11 +1,14 @@
-"""Legacy crystallizers refuse size-dependent growth laws.
+"""Legacy crystallizers refuse growth laws longer than three entries.
 
 ``CrystKinetics`` accepts a five-entry growth law ``[k_g, E_g, g, alpha,
 beta]`` whose size factor ``(1 + beta*L)**alpha`` only the refactored
 ``OneDFVMMechanism`` applies. The legacy ``BatchCryst``, ``MSMPR`` and
-``SemibatchCryst`` read ``k_g, E_g, g`` alone, so they must refuse such a law
-at the ``Kinetics`` setter instead of running size-independent growth without
-warning. The shared predicate ``has_size_dependent_growth`` is checked here
+``SemibatchCryst`` evaluate ``k_g, E_g, g`` alone and ``deriv_cryst`` returns
+three growth partials, so a longer law, even one whose size factor is one,
+would list alpha and beta as estimable in ``name_params`` and ``mask_params``
+while the analytic ``jac_params`` builds 13 columns under a 15-entry mask.
+They refuse such a law at the ``Kinetics`` setter. The predicate
+``has_size_dependent_growth`` that the moment closure uses is checked here
 too. Nothing is solved and no Assimulo is needed.
 """
 
@@ -23,11 +26,12 @@ SOLUB = [50.0]  # [kg/m**3]
 GROWTH = [1.0, 0.0, 1.0]  # k [um/s], E [J/mol], g [-]
 GROWTH_SIZE_DEPENDENT = [1.0, 0.0, 1.0, 0.5, 2.0]  # ..., alpha [-], beta [1/um]
 # Either entry at zero makes the size factor exactly one: (1 + 2 L)**0 and
-# (1 + 0 L)**0.5, so these laws are size independent despite their length.
+# (1 + 0 L)**0.5. The legacy units still refuse these laws, which carry two
+# parameters they never apply; only the predicate treats them as size
+# independent.
 GROWTH_ZERO_ALPHA = [1.0, 0.0, 1.0, 0.0, 2.0]
 GROWTH_ZERO_BETA = [1.0, 0.0, 1.0, 0.5, 0.0]
 STANDARD_NAME_COUNT = 3 + 4 + 3 + 3  # prim, sec, growth, dissolution [-]
-SIZE_DEPENDENT_NAME_COUNT = STANDARD_NAME_COUNT + 2  # plus alpha, beta [-]
 TANK_VOLUME = 1.0  # [m**3], required by the continuous units, unused here
 
 UNIT_FACTORIES = [
@@ -36,19 +40,22 @@ UNIT_FACTORIES = [
     lambda: SemibatchCryst('C', method='1D-FVM', vol_tank=TANK_VOLUME),
 ]
 UNIT_IDS = ['BatchCryst', 'MSMPR', 'SemibatchCryst']
+FIVE_ENTRY_LAWS = [GROWTH_SIZE_DEPENDENT, GROWTH_ZERO_ALPHA, GROWTH_ZERO_BETA]
+FIVE_ENTRY_IDS = ['size_dependent', 'zero_alpha', 'zero_beta']
 
 
 @pytest.mark.parametrize('make_unit', UNIT_FACTORIES, ids=UNIT_IDS)
+@pytest.mark.parametrize('growth', FIVE_ENTRY_LAWS, ids=FIVE_ENTRY_IDS)
 @pytest.mark.parametrize('reformulate', [False, True])
-def test_legacy_crystallizer_refuses_size_dependent_growth(make_unit,
-                                                            reformulate):
-    """A nonzero alpha and beta is refused and leaves the unit untouched."""
+def test_legacy_crystallizer_refuses_growth_beyond_three_entries(
+        make_unit, growth, reformulate):
+    """A five-entry law is refused, unit size factor or not, untouched."""
     unit = make_unit()
-    kinetics = CrystKinetics(SOLUB, growth=GROWTH_SIZE_DEPENDENT,
+    kinetics = CrystKinetics(SOLUB, growth=growth,
                              reformulate_kin=reformulate)
 
     with pytest.raises(PharmaPyNonImplementedError,
-                       match='size-dependent growth'):
+                       match='growth law of 3 entries'):
         unit.Kinetics = kinetics
 
     assert unit.Kinetics is None
@@ -56,23 +63,15 @@ def test_legacy_crystallizer_refuses_size_dependent_growth(make_unit,
 
 
 @pytest.mark.parametrize('make_unit', UNIT_FACTORIES, ids=UNIT_IDS)
-@pytest.mark.parametrize(
-    'growth, expected_count',
-    [(GROWTH, STANDARD_NAME_COUNT),
-     (GROWTH_ZERO_ALPHA, SIZE_DEPENDENT_NAME_COUNT),
-     (GROWTH_ZERO_BETA, SIZE_DEPENDENT_NAME_COUNT)],
-    ids=['three_entry', 'zero_alpha', 'zero_beta'])
-def test_legacy_crystallizer_accepts_size_independent_growth(make_unit,
-                                                              growth,
-                                                              expected_count):
-    """Three-entry laws and unit size factors attach as before."""
+def test_legacy_crystallizer_accepts_three_entry_growth(make_unit):
+    """A three-entry law attaches with one mask entry per parameter."""
     unit = make_unit()
-    kinetics = CrystKinetics(SOLUB, growth=growth)
+    kinetics = CrystKinetics(SOLUB, growth=GROWTH)
 
     unit.Kinetics = kinetics
 
     assert unit.Kinetics is kinetics
-    assert len(unit.mask_params) == expected_count
+    assert len(unit.mask_params) == STANDARD_NAME_COUNT
     assert tuple(unit.name_params) == tuple(kinetics.name_params)
 
 

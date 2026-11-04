@@ -1097,6 +1097,10 @@ def test_stage11_refactored_crystallizer_matches_legacy():
 # measured with CVode at the MAX_STEP cap). The bound is about four times
 # the largest of those.
 LEGACY_AMOUNT_TOL = 5e-4      # [-], |refactored - legacy| / initial A charge
+# Mid-conversion checkpoint (~64 % of A converted; max |refactored - legacy|
+# is 2.2e-4 of the initial A charge) so a uniform rate error cannot hide behind
+# near-complete final conversion.
+TIME_R01_MID = 600.0          # [s]
 # The sum of m_j / rho_j over the species is the ideal-mixing volume of the
 # final masses; the vessel volume must reproduce it to round-off.
 IDEAL_MIXING_RTOL = 1e-12     # [-]
@@ -1105,7 +1109,7 @@ MOL_PER_KMOL = 1000.0         # [mol/kmol]
 
 
 def _legacy_reactor_summary():
-    """Final amounts of A, B, C, D [mol] and the liquid volume profile [m3]."""
+    """Mid-run and final amounts of A, B, C, D [mol] and volume profile [m3]."""
     unit = OldBatchReactor(isothermal=True)
     unit.Utility = CoolingWater(mass_flow=0.01, temp_in=TEMP_INIT)
     unit.Phases = LiquidPhase(PATH, temp=TEMP_INIT, mole_conc=CONC_INIT.copy(),
@@ -1113,14 +1117,19 @@ def _legacy_reactor_summary():
     unit.Kinetics = rxn_kinetics()
     unit.solve_unit(runtime=TIME_R01, verbose=False)
 
-    conc = np.asarray(unit.result.mole_conc)[-1]  # [mol/L] of A, B, C, D
+    time = np.asarray(unit.result.time)           # [s]
+    conc = np.asarray(unit.result.mole_conc)      # [mol/L] of A, B, C, D
     vol = np.asarray(unit.result.vol)             # [m3]
+    moles_traj = conc * vol[:, None] * LITERS_PER_M3  # [mol]
+    moles_mid = np.array([
+        np.interp(TIME_R01_MID, time, moles_traj[:, idx]) for idx in range(4)
+    ])  # [mol]
 
-    return conc * vol[-1] * LITERS_PER_M3, vol
+    return moles_mid, moles_traj[-1], vol
 
 
 def _refactored_reactor_summary():
-    """Final amounts of A, B, C, D [mol], the volume profile [m3] and the
+    """Mid-run and final amounts of A, B, C, D [mol], volume profile [m3] and
     ideal-mixing volume of the final masses [m3]."""
     liquid = NewLiquidPhase(PATH, temp=TEMP_INIT, mole_conc=CONC_INIT.copy(),
                             vol=VOL_INIT, name_solv='solvent')
@@ -1129,19 +1138,27 @@ def _refactored_reactor_summary():
     unit.RxnKinetics = rxn_kinetics()
     unit.solve_unit(runtime=TIME_R01, verbose=False)
 
-    mass_j = np.asarray(unit.result.mass_j_liquid0)[-1]    # [kg] per species
+    time = np.asarray(unit.result.time)                    # [s]
+    mass_traj = np.asarray(unit.result.mass_j_liquid0)     # [kg] per species
     vol = np.asarray(unit.result.vessel_vol)               # [m3]
-    moles = mass_j / np.asarray(liquid.mw) * MOL_PER_KMOL  # [mol]
+    moles_traj = (
+        mass_traj[:, :4] / np.asarray(liquid.mw)[:4] * MOL_PER_KMOL
+    )  # [mol]
+    moles_mid = np.array([
+        np.interp(TIME_R01_MID, time, moles_traj[:, idx]) for idx in range(4)
+    ])  # [mol]
     rho_pure, _ = liquid.getDensityPure('liquid', TEMP_INIT)  # [kg/m3]
-    vol_ideal = float(np.sum(mass_j / rho_pure))           # [m3]
+    vol_ideal = float(np.sum(mass_traj[-1] / rho_pure))    # [m3]
 
-    return moles[:4], vol, vol_ideal
+    return moles_mid, moles_traj[-1], vol, vol_ideal
 
 
 def test_stage12_refactored_reactor_matches_legacy():
-    """Final amounts agree with the legacy tank; the volume follows the density."""
-    legacy, vol_legacy = _legacy_reactor_summary()
-    refactored, vol_refactored, vol_ideal = _refactored_reactor_summary()
+    """Transient and final amounts agree with legacy; volume follows density."""
+    legacy_mid, legacy, vol_legacy = _legacy_reactor_summary()
+    refactored_mid, refactored, vol_refactored, vol_ideal = (
+        _refactored_reactor_summary()
+    )
 
     # The legacy tank keeps its charge volume. The refactored one ends at the
     # ideal-mixing volume of its final masses, above the charge volume here.
@@ -1150,13 +1167,19 @@ def test_stage12_refactored_reactor_matches_legacy():
     assert vol_refactored[-1] > vol_refactored[0]
 
     charge = CONC_INIT[0] * VOL_INIT * LITERS_PER_M3  # [mol] of A charged
-    gap = np.abs(refactored - legacy) / charge
-    for value, name in zip(gap, 'ABCD'):
-        if value > LEGACY_AMOUNT_TOL:
-            raise AssertionError(
-                'final amount of %s differs from the legacy reactor by %.2e of '
-                'the A charge (bound %.1e): refactored %s mol, legacy %s mol'
-                % (name, value, LEGACY_AMOUNT_TOL, refactored, legacy))
+    for label, ref_vals, leg_vals in (
+        ('mid-run (t=%g s)' % TIME_R01_MID, refactored_mid, legacy_mid),
+        ('final', refactored, legacy),
+    ):
+        gap = np.abs(ref_vals - leg_vals) / charge
+        for value, name in zip(gap, 'ABCD'):
+            if value > LEGACY_AMOUNT_TOL:
+                raise AssertionError(
+                    '%s amount of %s differs from the legacy reactor by %.2e '
+                    'of the A charge (bound %.1e): refactored %s mol, '
+                    'legacy %s mol'
+                    % (label, name, value, LEGACY_AMOUNT_TOL,
+                       ref_vals, leg_vals))
 
 
 STAGES = (
