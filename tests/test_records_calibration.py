@@ -721,6 +721,13 @@ def test_records_are_immutable_and_isolated_from_callers():
 
 
 def test_from_estimation_captures_fit_and_closed_form_predictions():
+    """Capture accepted LM predictions and its explicit convergence outcome.
+
+    Notes
+    -----
+    The combined #541/#542 contract records LM success and its stop message
+    alongside the legacy iteration counts; these are required provenance.
+    """
     record, estimator, _ = fitted_record()
     rate = record.fitted_values[0]  # [1/s]
 
@@ -735,7 +742,9 @@ def test_from_estimation_captures_fit_and_closed_form_predictions():
     assert record.solver.options == {}  # injected LM keys are omitted
     outcome = record.solver.outcome
     assert set(outcome) == {'stop_criterion', 'num_iter', 'num_fun_eval',
-                            'objective'}
+                            'objective', 'success', 'message'}
+    assert outcome['success'] is True
+    assert outcome['message'] == outcome['stop_criterion']
     residuals = standardized_residuals(rate)  # [-], closed form
     assert outcome['objective'] == pytest.approx(
         np.sum(residuals ** 2) / 2, rel=ROUNDOFF_RTOL)
