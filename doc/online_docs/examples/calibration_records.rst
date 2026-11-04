@@ -238,6 +238,22 @@ The template is:
 .. literalinclude:: ../../../PharmaPy/data/records/calibration_record_template.json
    :language: json
 
+Custom-optimizer bounds
+-----------------------
+
+A custom callable defines the layout of the bounds it receives. When stored
+custom bounds have shape ``(2, 2)``, ``from_estimation`` requires an explicit
+``bounds=[(lower_0, upper_0), (lower_1, upper_1)]`` declaration in parameter
+order and units. Neither the Python container type nor containment of the
+seed and solution proves which constraints the callable applied. The declared
+bounds must describe the actual fit; capture cannot verify that declaration.
+
+Record replay always supplies per-parameter ``(lower, upper)`` pairs. If the
+original optimizer expects native SciPy lower/upper vectors, supply a compatible
+adapter as ``record.rerun(..., optimizer=adapter)`` that converts the canonical
+pairs to the solver's layout. A callable is not serialized: after JSON reload,
+supply it again through ``optimizer=...``.
+
 Reloading and rerunning a fit
 -----------------------------
 

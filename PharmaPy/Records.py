@@ -2979,8 +2979,6 @@ def _stored_bounds_to_pairs(
         raw_bounds,
         num_optimized: int,
         method: str = 'scipy',
-        fitted_values: Optional[Sequence[float]] = None,
-        seed_values: Optional[Sequence[float]] = None,
 ) -> list:
     """Convert stored optimizer bounds into ``(lower, upper)`` pairs.
 
@@ -2997,18 +2995,25 @@ def _stored_bounds_to_pairs(
     method : str, optional
         Optimization method identifier (``'scipy'``, ``'least_squares'``, or
         ``'custom'``).
-    fitted_values : sequence of float, optional
-        Accepted optimized parameter values in parameter units, used to
-        disambiguate 2x2 custom-optimizer bounds when needed.
-    seed_values : sequence of float, optional
-        Initial optimized parameter guesses in parameter units, used to
-        disambiguate 2x2 custom-optimizer bounds when needed.
 
     Returns
     -------
     list of tuple
         One ``(lower, upper)`` pair per optimized parameter in parameter
         units, with ``None`` for an unbounded side.
+
+    Raises
+    ------
+    ValueError
+        If custom bounds have shape ``(2, 2)``. A custom callable defines
+        its own layout, so the caller must explicitly declare canonical
+        bounds to ``CalibrationRecord.from_estimation`` in that case.
+
+    Notes
+    -----
+    Seed and fitted values cannot establish which constraints a custom
+    optimizer applied: both layouts may contain both points. Container
+    types likewise do not define a custom callable's bounds contract.
     """
     def _bound_or_none(val, infinite_sign: int) -> Optional[float]:
         """Map an unbounded sentinel (None or +/-inf) to None.
@@ -3033,6 +3038,18 @@ def _stored_bounds_to_pairs(
             return None
         return num
 
+    if (method == 'custom' and num_optimized == 2
+            and isinstance(raw_bounds, (list, tuple, np.ndarray))
+            and len(raw_bounds) == 2
+            and all(isinstance(row, (list, tuple, np.ndarray))
+                    and np.ndim(row) == 1 and len(row) == 2
+                    for row in raw_bounds)):
+        raise ValueError(
+            "Stored custom optimizer bounds have ambiguous shape (2, 2); "
+            "pass explicit per-parameter bounds=[(lower, upper), ...] to "
+            "CalibrationRecord.from_estimation. Custom replay requires "
+            "an optimizer accepting these canonical pairs.")
+
     if isinstance(raw_bounds, (list, tuple)) and len(raw_bounds) == num_optimized:
         all_pairs = all(
             isinstance(item, (list, tuple)) and len(item) == 2
@@ -3043,43 +3060,6 @@ def _stored_bounds_to_pairs(
             return [
                 (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
                 for lo, hi in raw_bounds]
-        if all_pairs and method == 'custom' and num_optimized == 2:
-            pairs_rows = [
-                (_bound_or_none(lo, -1), _bound_or_none(hi, 1))
-                for lo, hi in raw_bounds]
-            pairs_cols = [
-                (_bound_or_none(raw_bounds[0][idx], -1),
-                 _bound_or_none(raw_bounds[1][idx], 1))
-                for idx in range(2)]
-
-            def _intervals_valid(
-                pairs_cand: list[tuple[Optional[float], Optional[float]]],
-            ) -> bool:
-                """Check interval ordering and containment of seed/fitted vectors."""
-                for lo, hi in pairs_cand:
-                    if lo is not None and hi is not None and lo > hi:
-                        return False
-                for vec in (fitted_values, seed_values):
-                    if vec is not None and len(vec) == 2:
-                        for val, (lo, hi) in zip(vec, pairs_cand):
-                            fval = float(val)  # [parameter units]
-                            if lo is not None and fval < lo - 1e-12:
-                                return False
-                            if hi is not None and fval > hi + 1e-12:
-                                return False
-                return True
-
-            rows_ok = _intervals_valid(pairs_rows)
-            cols_ok = _intervals_valid(pairs_cols)
-            if rows_ok and not cols_ok:
-                return pairs_rows
-            if cols_ok and not rows_ok:
-                return pairs_cols
-            is_scipy_two_tuple = (
-                isinstance(raw_bounds, tuple)
-                and all(isinstance(item, (list, np.ndarray)) for item in raw_bounds)
-            )
-            return pairs_cols if is_scipy_two_tuple else pairs_rows
 
     if isinstance(raw_bounds, (list, tuple, np.ndarray)) and len(raw_bounds) == 2:
         lo_raw, hi_raw = raw_bounds[0], raw_bounds[1]
@@ -4515,7 +4495,13 @@ covariance_include_mse
             parameters), because ``optimize_fn`` does not store them and
             they cannot be verified against the fit. For LM fits they are
             optional and recorded as declared parameter ranges; LM ignores
-            bounds.
+            bounds. SciPy bounds are captured automatically. For custom
+            fits with stored bounds of shape ``(2, 2)``, explicit canonical
+            pairs are required because the callable defines the layout.
+            These are caller declarations, not verified solver constraints.
+            Custom replay always supplies canonical pairs; use a compatible
+            adapter via ``rerun(optimizer=...)`` when the original callable
+            expects a different layout.
         model_solver : Mapping, optional
             Settings of the model's own solver, for documentation.
         weight_matrix : pandas.DataFrame, optional
@@ -4708,8 +4694,6 @@ covariance_include_mse
                     stored_bounds,
                     num_optimized,
                     method=method,
-                    fitted_values=np.asarray(estimator.params_convg, dtype=np.float64),
-                    seed_values=seeds[flags],
                 )
             else:
                 bounds = [(None, None)] * num_optimized
