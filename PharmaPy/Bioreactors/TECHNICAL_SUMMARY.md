@@ -138,7 +138,11 @@ and test commands. Packaging is checked by building a wheel and running the
 package-data and public-builder tests against a non-editable installation outside
 the checkout; this is a verification procedure, not a separate runtime API.
 
-## Remaining acceptance work
+## Acceptance scope and remaining scientific work
+
+The [delivery acceptance table](../../doc/online_docs/bioreactors/ACCEPTANCE.md)
+maps every #361, #364 and #365 criterion to implementation, tests and remaining
+scientific or review conditions.
 
 The E. coli yeast-extract fed-batch process (source runs F10/F11) is the selected baseline. The source workbook identifies the nominal
 profile and logged additions as the same glucose feed; the current one-counted
@@ -158,17 +162,18 @@ nonlimiting oxygen from the controller target alone.
 JSON forward-record adapter adopts #351 identity, ordering, units, source and
 parameter provenance requirements without replacing the existing arrays. It
 preserves input snapshots, solver settings, source observations and optional
-native state/algebraic fields for replay. The prerequisite supplies the native `PharmaPy.Records.CalibrationRecord`
-API. This slice preserves forward provenance; the synthetic calibration-record
-example belongs to the later WP3.2 demonstration slice. This forward adapter does not close all of #351.
+native state/algebraic fields for replay. The integrated native `PharmaPy.Records.CalibrationRecord` API is used by the
+Doyle estimation demonstration for export, integrity checks and relocated replay.
+The forward adapter and that synthetic demonstration do not establish two-case
+empirical record adoption or close all of #351. Weighting and derivative
+capabilities remain those of the inherited native estimator.
 
 Synthetic chemostat dilution, Monod equilibrium and washout are qualified through
 `ContinuousReactor`. This does not establish experimental continuous-culture
 predictivity or implement selective cell retention/perfusion. WP3.2 supplies named kinetic selection, bounded positive corrections and a
-native estimation handoff. The following demonstration slice supplies its
-reproducible synthetic calibration workflow. Broad empirical calibration
-and experiment design remain WP3.3 scope. A successful forward
-run does not close those acceptance gaps. Original observations remain in
+native estimation handoff with a reproducible synthetic training/validation
+demonstration. Broad empirical estimation and experiment design remain WP3.3
+scope. A successful forward run does not establish those scientific outcomes. Original observations remain in
 `reference/`; generated evidence, notebook outputs and historical published
 comparison figures are not distributed.
 
@@ -176,7 +181,7 @@ comparison figures are not distributed.
 
 | Shared change | Why WP3.1 needs it | Verification |
 | --- | --- | --- |
-| Retained estimation safeguards | Preserve derivative-resolution checks, reject failed bootstrap fits, and qualify covariance/interval interpretation through the inherited native estimator. | `tests/test_estimation_uncertainty_safeguards.py` and native statistics tests. |
+| Retained estimation safeguards | Preserve the existing local derivative-resolution check, reject failed bootstrap fits, and qualify covariance/interval interpretation while adopting the newer native estimator and record APIs. This is shared compatibility, not a separate bioreactor estimator or WP3.3 delivery. | `tests/test_estimation_uncertainty_safeguards.py`, native statistics tests and the bioreactor steady-culture information test. |
 | Requested outlet rates and exact finite-step transport limit | Reserve withdrawal before metabolic feasibility; avoid smoothing down an exactly feasible outlet. Default assembly/limiting remains unchanged. | Chemostat depletion, volume and failure checks. |
 | Owned depletion-rate arrays | Native buffers are reused; the boundary rate evaluator returns copies so retained derivatives are not overwritten (upstream's right-hand side already copies). | Aliasing regression, analytical CSTR balances and upstream backend tests. |
 | Inlet rates passed only to requesting mechanisms | Feasibility includes incoming material rather than treating a supplied empty pool as unavailable. | Reconciliation supply and operating-transition cases. |

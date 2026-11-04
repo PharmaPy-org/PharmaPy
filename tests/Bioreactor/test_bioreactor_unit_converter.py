@@ -3,6 +3,7 @@
 import json
 from .input_helpers import read_input_json
 from pathlib import Path
+from PharmaPy.Bioreactors.culture import CultureSnapshot
 
 import numpy as np
 import pytest
@@ -13,7 +14,7 @@ from PharmaPy.Bioreactors import BioreactorUnitConverter as Units, build_bioreac
 EXAMPLES = Path(__file__).parents[2] / 'examples/bioreactors'
 
 
-# Real fixture construction and independent qualification helpers.
+# Public-path regression and failure checks.
 @pytest.mark.parametrize('value, source, target, expected, properties', [
     (2., 'h', 's', 7200., {}),
     (750., 'mL', 'm3', .00075, {}),
@@ -127,6 +128,17 @@ def test_rate_normalization_minutes_and_overflow():
     ('mol', 'kgDW', 'min', None, 1.),
 ])
 def test_equivalent_pathway_bases_preserve_native_simulation(amount, normalization, time, content, scale):
+    """Rescale LP coordinates while retaining explicit physical provider outputs.
+
+    Parameters
+    ----------
+    amount, normalization, time : str
+        Declared LP exchange amount, biomass normalization and time units.
+    content : float or None
+        Biomass conversion [gDW/(10^6 cell)] when cell normalization is used.
+    scale : float
+        Exchange conversion to mol/kgDW in the selected time unit.
+    """
     p = EXAMPLES / 'generic_batch/inputs'
     case, definition = [read_input_json(p/file) for file in ('case.json', 'mechanism.json')]
     case['operation']['runtime']['value'] = .2
@@ -138,7 +150,8 @@ def test_equivalent_pathway_bases_preserve_native_simulation(amount, normalizati
         'exchange': exchange, 'growth': dict(amount_unit='1', normalization='none', time_unit=time)}
     definition['flux_time_unit'] = '1/' + time
     definition['model']['pathways']['exchange_matrix'] = [[-10. / scale]]
-    definition['parameters']['rates']['uptake']['nutrient'] = 2. * Units.TIME[time] / 3600. / scale
+    definition['parameters']['rates']['uptake']['nutrient'] = 2. * Units.TIME[time] / 3600.  # [mol/(kgDW declared time)]
+    definition['rate_provider']['output_units']['nutrient_uptake_capacity'] = f'mol/(kgDW {time})'
     assembly = build_bioreactor(case, definition, p/'thermo.json')
     actual = assembly.solve(verbose=False)[0]
     assert Units.from_inputs(case, definition).exchange_scale == pytest.approx(scale)
@@ -175,21 +188,32 @@ def test_ambiguous_or_incompatible_pathway_bases_fail(exchange, growth):
 
 
 def test_pathway_transfer_cap_uses_declared_exchange_basis():
+    """Keep provider output units physical while rescaling native LP coefficients."""
     p = EXAMPLES / 'batch_ecoli_dfba/inputs'
     case, definition = [read_input_json(p/file) for file in ('case.json', 'mechanism.json')]
-    original = build_bioreactor(case, definition, p/'thermo.json').mechanism.model
+    original_mechanism = build_bioreactor(case, definition, p/'thermo.json').mechanism
+    original = original_mechanism.model
     model = definition['model']['pathways']
     model['flux_basis'] = {
         'exchange': dict(amount_unit='mmol', normalization='kgDW', time_unit='h'),
         'growth': dict(amount_unit='1', normalization='none', time_unit='h')}
     model['exchange_matrix'] = (np.asarray(model['exchange_matrix']) * 1000.).tolist()
     uptake = definition['parameters']['rates']['uptake']
-    for name in uptake:
-        uptake[name] *= 1000.
+    # Provider glucose remains mol/(kgDW h); only the native oxygen cap changes basis.
+    uptake['oxygen'] *= 1000.  # [mmol/(kgDW h)], exact mol-to-mmol conversion
     converted = build_bioreactor(case, definition, p/'thermo.json').mechanism.model
-    for biomass in (.001, 1.):
-        first = original.solve_fluxes([10.8, .4, .21], biomass)
-        second = converted.solve_fluxes([10.8, .4, .21], biomass)
+    concentrations = [10.8, .4, .21]  # [mmol/L], original qualification state
+    snapshot = CultureSnapshot(
+        concentrations_mmol_l=dict(zip(original.state_names, concentrations)),
+        volume_l=1.,  # [L], unit-volume specific-rate evaluation fixture
+        viable_cells_million=0., dead_cells_million=0.,  # [10^6 cell], biomass-basis culture
+        product_g=0.,  # [g], no product in this fixture
+        ivcd_million_cell_day_per_ml=0.)  # [10^6 cell day/mL], no cell-count integral
+    limits = original_mechanism.uptake_provider.evaluate(snapshot, {}).rates  # [mol/(kgDW h)]
+    converted_limits = {name: value / converted.exchange_scale for name, value in limits.items()}  # [mmol/(kgDW h)]
+    for biomass in (.001, 1.):  # [kgDW/m3], dilute and dense transfer regimes
+        first = original.solve_fluxes(concentrations, biomass, uptake_limits=limits)
+        second = converted.solve_fluxes(concentrations, biomass, uptake_limits=converted_limits)
         np.testing.assert_allclose(second.fluxes, first.fluxes, atol=1e-10)
         np.testing.assert_allclose(second.extracellular_rates * converted.exchange_scale,
                                    first.extracellular_rates, atol=1e-9)

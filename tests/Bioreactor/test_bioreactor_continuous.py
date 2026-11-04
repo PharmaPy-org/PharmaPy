@@ -62,8 +62,15 @@ def continuous_inputs(tmp_path, dilution=0.1, closure='pathway-lp', growth=True)
         path = INPUTS / 'thermo.json'
         if growth:
             model['parameters']['affinities']['nutrient'] = 1.  # [mol/m3] = [mmol/L]
-            model['model']['pathways']['uptake_constraints'][0].update(
-                type='monod', half_saturation_parameter='affinities.nutrient')
+            # This analytical fixture selects native Monod constraints explicitly;
+            # the shipped generic batch now uses the optional provider route.
+            model['rate_provider'] = None
+            model['model']['pathways'].pop('rule_graph')
+            model['model']['pathways']['uptake_constraints'][0] = {
+                'identifier': 'nutrient_uptake', 'type': 'monod', 'species': 'nutrient',
+                'maximum_parameter': 'rates.uptake.nutrient',
+                'half_saturation_parameter': 'affinities.nutrient',
+                'mass_transfer_parameter': None, 'saturation_parameter': None}
     return case, model, path
 
 

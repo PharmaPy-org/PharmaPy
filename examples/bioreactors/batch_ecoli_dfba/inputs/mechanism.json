@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "$comment": "Schema 3: physical setup in operation; solver settings in numerical.",
+  "$comment": "Schema 3. Empirical uptake capacities use model.pathways.rule_graph via the existing provider; parameters.corrections.theta=0 [-] is neutral. Concentrations are mmol/L (= mol/m3); max(S,0) preserves the native negative-trial extension. Monod greater-select thresholds equal depletion_tolerance and must be changed together. Monod corrections use the existing affinity as reference concentration; constant-capacity corrections use an explicit 1 mmol/L reference, a configurable normalization assumption, not a fitted value. Built-in transfer-cap and inventory constraints remain independent physical limits.",
   "mechanism": "pathway-lp",
   "operation": {
     "carrier_density_kg_l": 1.0,
@@ -59,7 +59,9 @@
         "oxygen": 0.21
       }
     },
-    "corrections": {}
+    "corrections": {
+      "theta": 0.0
+    }
   },
   "model": {
     "pathways": {
@@ -109,12 +111,9 @@
       "uptake_constraints": [
         {
           "identifier": "glucose_uptake",
-          "type": "monod",
+          "type": "provider",
           "species": "glucose",
-          "maximum_parameter": "rates.uptake.glucose",
-          "half_saturation_parameter": "affinities.glucose",
-          "mass_transfer_parameter": null,
-          "saturation_parameter": null
+          "output": "glucose_uptake_capacity"
         },
         {
           "identifier": "oxygen_uptake",
@@ -136,13 +135,83 @@
         }
       ],
       "depletion_tolerance": 1e-08,
-      "problem_name": "configured batch pathway allocation"
+      "problem_name": "configured batch pathway allocation",
+      "rule_graph": [
+        {
+          "identifier": "glucose_uptake_capacity",
+          "expression": {
+            "op": "greater-select",
+            "threshold": 1e-08,
+            "args": [
+              {
+                "op": "maximum",
+                "args": [
+                  {
+                    "concentration": "glucose"
+                  },
+                  0.0
+                ]
+              },
+              {
+                "relationship": "monod",
+                "inputs": {
+                  "maximum": {
+                    "parameter": "rates.uptake.glucose"
+                  },
+                  "substrate": {
+                    "op": "maximum",
+                    "args": [
+                      {
+                        "concentration": "glucose"
+                      },
+                      0.0
+                    ]
+                  },
+                  "half_saturation": {
+                    "parameter": "affinities.glucose"
+                  }
+                },
+                "correction": {
+                  "type": "exponential-saturation",
+                  "parameters": {
+                    "theta": {
+                      "parameter": "corrections.theta"
+                    },
+                    "reference_concentration": {
+                      "parameter": "affinities.glucose"
+                    }
+                  },
+                  "concentration_unit": "mmol/L",
+                  "input": {
+                    "op": "maximum",
+                    "args": [
+                      {
+                        "concentration": "glucose"
+                      },
+                      0.0
+                    ]
+                  }
+                }
+              },
+              0.0
+            ]
+          }
+        }
+      ]
     },
     "kinetics": {},
-    "reconciliation": {"reconciliation_policy": null}
+    "reconciliation": {
+      "reconciliation_policy": null
+    }
   },
   "network": null,
-  "rate_provider": null,
+  "rate_provider": {
+    "type": "rule-graph",
+    "identifier": "configured-uptake-capacities",
+    "output_units": {
+      "glucose_uptake_capacity": "mol/(kgDW h)"
+    }
+  },
   "transport": {
     "species": "oxygen",
     "kla_per_s": 0.0020833333333333333,

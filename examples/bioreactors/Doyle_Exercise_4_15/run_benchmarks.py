@@ -27,8 +27,9 @@ HERE = Path(__file__).resolve().parent
 SPECIES = ('biomass', 'substrate', 'product')
 
 
-def reference_rates(time_h, state, dilution_h, parameters, substrate_feed):
-    """Evaluate textbook concentration balances independently.
+def reference_rates(time_h, state, dilution_h, parameters, substrate_feed,
+                    theta=0., feature_scale_g_l=None):
+    """Evaluate textbook or explicitly corrected balances independently.
 
     Parameters
     ----------
@@ -42,6 +43,11 @@ def reference_rates(time_h, state, dilution_h, parameters, substrate_feed):
         Published rates [1/h], affinities [g/L], yields [g/g].
     substrate_feed : float
         Feed substrate concentration [g/L].
+    theta : float, optional
+        Synthetic log correction [-]. Zero preserves the textbook equations.
+    feature_scale_g_l : float, optional
+        Positive feature scale [g/L]. Defaults to the textbook Ks, as declared
+        in hybrid.json. This is a fixed design assumption, not a fitted affinity.
 
     Returns
     -------
@@ -56,6 +62,10 @@ def reference_rates(time_h, state, dilution_h, parameters, substrate_feed):
         denominator += substrate**2 / affinities['Ki']
         inhibition -= product / affinities['Pm']
     growth = parameters['rates']['mu_max'] * inhibition * substrate / denominator  # [1/h]
+    if theta != 0.:
+        feature_scale = (affinities['Ks'] if feature_scale_g_l is None
+                         else feature_scale_g_l)  # [g/L]
+        growth *= np.exp(theta * substrate / (substrate + feature_scale))  # [1/h]
     product_rate = (parameters['yields'].get('alpha', 0.) * growth
                     + parameters['rates'].get('beta', 0.)) * biomass  # [g/(L h)]
     return np.array([(growth - dilution_h) * biomass,

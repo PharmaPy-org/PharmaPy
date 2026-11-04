@@ -145,7 +145,11 @@ def test_reload_inputs_reruns_the_public_model_and_preserves_predictions(tmp_pat
     provenance.update(sources=[{'role': 'synthetic test', 'uri': 'generic_batch/inputs'}],
                       transformations=[], sharing_conditions='Synthetic PharmaPy qualification fixture')
     metadata = {'rates.uptake.nutrient': {'unit': 'mol/(kgDW h)', 'basis': 'dry biomass',
-                                         'bounds': None, 'bounds_status': 'not fitted'}}
+                                         'bounds': None, 'bounds_status': 'not fitted'},
+                'corrections.theta': {'unit': '-', 'basis': 'dimensionless log multiplier',
+                                     'bounds': None, 'bounds_status': 'neutral, not fitted'},
+                'corrections.reference_concentration': {'unit': 'mmol/L', 'basis': 'liquid concentration',
+                                     'bounds': None, 'bounds_status': 'configured normalization, not fitted'}}
     observed = read_observations(declaration, data)
     assembly = build_bioreactor(case, mechanism, folder / 'thermo.json')
     histories = assembly.solve(report_times=sampling_times(observed))

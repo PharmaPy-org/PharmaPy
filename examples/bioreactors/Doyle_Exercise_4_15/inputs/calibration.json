@@ -1,0 +1,47 @@
+{
+  "$comment": "Synthetic workflow qualification, not empirical calibration. Truth ln(1.2) is the previously declared small positive log correction. Mechanistic mu_max, Ks, Y, initial states and feeds are treated as exact. Noise settings and entire-experiment holdout come from synthetic_design.json. Only one alternative noise realization is fitted at a time. The explicit 1e-4 theta step is qualified by derivative refinement for this example, independent of the shared nonzero-step default. tol_fun=0 deliberately disables residual-norm termination for noisy data; gradient/step/budget criteria remain active. Replay budgets use the established handoff concentration budget and five forward-difference steps, not statistical confidence limits. LM does not enforce bounds; the existing provider rejects out-of-domain trials.",
+  "truth_theta": 0.1823215567939546,
+  "noise_label": "noise_1pct",
+  "realization": 0,
+  "parameter_names": [
+    "corrections.theta"
+  ],
+  "parameter_units": [
+    "-"
+  ],
+  "parameter_seed": [
+    0.0
+  ],
+  "dx_finitediff": 0.0001,
+  "zero_noise_scale_g_l": 1.0,
+  "optim_options": {
+    "max_fun_eval": 100,
+    "eps_1": 1e-08,
+    "eps_2": 1e-08,
+    "tol_fun": 0.0
+  },
+  "replay_parameter_atol": 0.0005,
+  "replay_prediction_atol_g_l": 1e-07,
+  "observation_declaration": {
+    "schema_version": 1,
+    "time_unit": "h",
+    "fields": {
+      "substrate": {
+        "species": "substrate",
+        "quantity": "concentration",
+        "unit": "g/L",
+        "event_side": "post",
+        "time_key": "time_h",
+        "value_key": "value_g_l"
+      },
+      "biomass": {
+        "species": "biomass",
+        "quantity": "concentration",
+        "unit": "g/L",
+        "event_side": "post",
+        "time_key": "time_h",
+        "value_key": "value_g_l"
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 {
   "schema_version": 3,
-  "$comment": "Schema 3: physical setup in operation; solver settings in numerical.",
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical. Optional exponential-saturation correction: parameters.corrections.theta=0 [-] preserves the baseline. Each corrected substrate-dependent rate uses its own substrate and half-saturation concentration as the explicit reference scale (same concentration units). This scale choice is a configuration assumption, not a fitted correction. Derived balances and yields remain linked to these rates.",
   "mechanism": "configured-kinetics",
   "operation": {
     "carrier_density_kg_l": 1.0,
@@ -51,7 +51,9 @@
     "maintenance": {},
     "responses": {},
     "coefficients": {},
-    "corrections": {}
+    "corrections": {
+      "theta": 0.0
+    }
   },
   "model": {
     "pathways": {},
@@ -61,31 +63,33 @@
         {
           "identifier": "mu",
           "expression": {
-            "op": "divide",
-            "args": [
-              {
-                "op": "multiply",
-                "args": [
-                  {
-                    "parameter": "rates.mu_max"
-                  },
-                  {
-                    "concentration": "substrate"
-                  }
-                ]
+            "relationship": "monod",
+            "inputs": {
+              "maximum": {
+                "parameter": "rates.mu_max"
               },
-              {
-                "op": "add",
-                "args": [
-                  {
-                    "parameter": "affinities.Ks"
-                  },
-                  {
-                    "concentration": "substrate"
-                  }
-                ]
+              "substrate": {
+                "concentration": "substrate"
+              },
+              "half_saturation": {
+                "parameter": "affinities.Ks"
               }
-            ]
+            },
+            "correction": {
+              "type": "exponential-saturation",
+              "parameters": {
+                "theta": {
+                  "parameter": "corrections.theta"
+                },
+                "reference_concentration": {
+                  "parameter": "affinities.Ks"
+                }
+              },
+              "concentration_unit": "mmol/L",
+              "input": {
+                "concentration": "substrate"
+              }
+            }
           }
         },
         {

@@ -6,12 +6,16 @@
       "growth": 0.4,
       "uptake": 4.0
     },
-    "affinities": {},
+    "affinities": {
+      "nutrient": 1.0
+    },
     "yields": {},
     "maintenance": {},
     "responses": {},
     "coefficients": {},
-    "corrections": {}
+    "corrections": {
+      "theta": 0.0
+    }
   },
   "model": {
     "pathways": {},
@@ -38,34 +42,36 @@
             "op": "multiply",
             "args": [
               {
-                "op": "multiply",
-                "args": [
-                  {
+                "relationship": "monod",
+                "inputs": {
+                  "maximum": {
                     "parameter": "rates.growth"
                   },
-                  {
-                    "ref": "biomass_g_l"
-                  }
-                ]
-              },
-              {
-                "op": "divide",
-                "args": [
-                  {
+                  "substrate": {
                     "concentration": "nutrient"
                   },
-                  {
-                    "op": "add",
-                    "args": [
-                      {
-                        "constant": "half_saturation"
-                      },
-                      {
-                        "concentration": "nutrient"
-                      }
-                    ]
+                  "half_saturation": {
+                    "parameter": "affinities.nutrient"
                   }
-                ]
+                },
+                "correction": {
+                  "type": "exponential-saturation",
+                  "parameters": {
+                    "theta": {
+                      "parameter": "corrections.theta"
+                    },
+                    "reference_concentration": {
+                      "parameter": "affinities.nutrient"
+                    }
+                  },
+                  "concentration_unit": "mmol/L",
+                  "input": {
+                    "concentration": "nutrient"
+                  }
+                }
+              },
+              {
+                "ref": "biomass_g_l"
               }
             ]
           }
@@ -73,46 +79,48 @@
         {
           "identifier": "nutrient_rate",
           "expression": {
-            "op": "multiply",
+            "op": "negate",
             "args": [
               {
-                "op": "negate",
+                "op": "multiply",
                 "args": [
                   {
-                    "op": "multiply",
-                    "args": [
-                      {
+                    "relationship": "monod",
+                    "inputs": {
+                      "maximum": {
                         "parameter": "rates.uptake"
                       },
-                      {
-                        "ref": "biomass_g_l"
+                      "substrate": {
+                        "concentration": "nutrient"
                       },
-                      {
-                        "constant": "kg_per_g"
-                      },
-                      {
-                        "constant": "nutrient_mw_g_mol"
+                      "half_saturation": {
+                        "parameter": "affinities.nutrient"
                       }
-                    ]
-                  }
-                ]
-              },
-              {
-                "op": "divide",
-                "args": [
-                  {
-                    "concentration": "nutrient"
-                  },
-                  {
-                    "op": "add",
-                    "args": [
-                      {
-                        "constant": "half_saturation"
+                    },
+                    "correction": {
+                      "type": "exponential-saturation",
+                      "parameters": {
+                        "theta": {
+                          "parameter": "corrections.theta"
+                        },
+                        "reference_concentration": {
+                          "parameter": "affinities.nutrient"
+                        }
                       },
-                      {
+                      "concentration_unit": "mmol/L",
+                      "input": {
                         "concentration": "nutrient"
                       }
-                    ]
+                    }
+                  },
+                  {
+                    "ref": "biomass_g_l"
+                  },
+                  {
+                    "constant": "kg_per_g"
+                  },
+                  {
+                    "constant": "nutrient_mw_g_mol"
                   }
                 ]
               }
@@ -128,8 +136,7 @@
       "constants": {
         "biomass_g_per_mmol": 1.0,
         "kg_per_g": 0.001,
-        "nutrient_mw_g_mol": 100.0,
-        "half_saturation": 1.0
+        "nutrient_mw_g_mol": 100.0
       }
     }
   },
@@ -200,5 +207,5 @@
     "jacobian_relative_step": null,
     "jacobian_state_scale": null
   },
-  "$comment": "Schema 3: physical setup in operation; solver settings in numerical."
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical. Named Monod growth [1/h] and uptake [mol/(kgDW h)] retain the original synthetic rates and yield. affinities.nutrient [mmol/L] is the former constants.half_saturation value, moved to a user-selectable parameter without changing its value. Concentration primitives use mmol/L; explicit mass factors are retained. Optional exponential-saturation correction: parameters.corrections.theta=0 [-] preserves the baseline. Each corrected substrate-dependent rate uses its own substrate and half-saturation concentration as the explicit reference scale (same concentration units). This scale choice is a configuration assumption, not a fitted correction. Derived balances and yields remain linked to these rates."
 }

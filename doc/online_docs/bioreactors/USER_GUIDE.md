@@ -492,6 +492,15 @@ Unknown fields/types/units, missing bindings and invalid scalar values are error
 `relationship_catalog()` includes correction descriptions and fill-in templates.
 
 
+The Doyle hybrid uses this form so the uncorrected rate stays separately available.
+Its downstream growth and substrate-consumption rules both consume the corrected
+`mu`, preserving their declared yield. Existing explicit correction graphs remain
+supported. The convenience does not attach itself automatically to other balances,
+change pathway optimization bounds, infer material destinations, or fit from data.
+The simulator executes the supplied model; a calibration workflow may supply the
+parameter value. `examples/bioreactors/Doyle_Exercise_4_15/calibrate.py` is an
+example-specific workflow, not part of the generic simulator.
+
 ## Shared estimation callback
 
 `simulate_measurements(parameters, time_s, case=..., parameter_names=...,

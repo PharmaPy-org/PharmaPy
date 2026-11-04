@@ -4,8 +4,7 @@ This configuration transfers the existing F10/F11 experimental reproduction into
 `rate-reconciled-culture`. The source coefficients, initial phase amounts, feeds,
 samples, base additions and solver settings are unchanged. The parent README
 records the original source processing corrections and biological limitations.
-No coefficients are fitted here. The direct-kinetic reference remains in `tests/Bioreactor/fixtures/ecoli_ye_direct`
-for regression verification, not as an additional user-facing example.
+No coefficients are fitted here. The original direct-kinetic example remains intact.
 
 Run `workflow.ipynb` with Run All. It uses the same six forward-only steps and
 native `build_bioreactor -> assembly.solve -> SemiBatchReactor.solve_unit` path.
@@ -140,3 +139,37 @@ integration reduces the F10 independent error below 8e-7 g/L; maximum-step
 refinement also remains within the original acceptance gate. Rerun the command above for current assessment and comparison files. These
 generated files are excluded from Git. See the validation ladder for the
 qualification scope; the historical test count is not a current branch sign-off.
+
+## Kinetics selection
+
+Both F10 and F11 now select `monod` for `q_s`, `q_a`, `q_b` and the nested uptake term in `q_ac`. The existing `additive-inhibition`, `capacity-limited-rate` and `yield-sum` compositions remain explicit. Concentrations/affinities use their declared mass bases and uptake maxima their source-specific normalization. Edit the relevant `inputs/mechanism.json` or `inputs/F11/mechanism.json`; Step 2 displays their parameter/rule selections. Retain each run's feed history, source coefficients and reconciliation constraints to reproduce the published case.
+
+The notebook exposes `kinetic_forms = relationship_catalog()` with supported names, aliases, required inputs, equations and units. For rule graphs, change `relationship` and supply every required input; for pathway optimization, keep the distinct uptake-constraint interface. No parameter, yield or physical-basis conversion is inferred.
+
+Named Monod/Haldane forms are equivalent to the former rational expressions on the physical nonnegative-substrate domain. They inherit the existing zero-uptake extension for negative trial substrate; negative inventories are not validated biological states. Signed product inhibition and custom hybrid equations remain explicit. The numerical and independent-reference checks retain their existing acceptance budgets.
+
+### Neutral kinetic correction
+
+The kinetic input files expose `parameters.corrections.theta = 0` (dimensionless).
+The correction multiplies the selected substrate-dependent rate by
+`exp(theta * substrate / (substrate + reference_concentration))`; zero preserves
+the original rate. Each declaration explicitly binds the concentration and its
+units. The ordinary kinetic examples reuse that rate's half-saturation
+concentration as the reference scale, a configurable assumption rather than a
+calibrated value. Doyle's `hybrid.json` retains its separate documented scale.
+A shared theta changes all declared corrections in that file; derived yields
+and balance expressions continue to use the corrected rates. Change individual
+bindings to use independent coefficients if required. Selecting another kinetic
+relationship also requires reviewing its input slots and correction bindings.
+
+Pathway examples now connect empirical uptake capacities through
+`model.pathways.rule_graph` and the existing `rule-graph` provider, with
+`parameters.corrections.theta = 0`. Edit the capacity expression's `relationship`
+and inputs to select a kinetic form; constant capacities use a parameter node.
+The correction scale is the Monod affinity, or an explicit configurable
+`parameters.corrections.reference_concentration = 1` [mmol/L] for constant
+capacities. These are normalization assumptions, not fitted values. Monod's
+`greater-select.threshold` preserves the native depletion cutoff; update it
+alongside `model.pathways.depletion_tolerance`. Negative trial concentrations
+use the existing zero extension. The oxygen `transfer-cap`, inventory limits,
+and metabolic balances remain independent constraints, even for nonzero theta.

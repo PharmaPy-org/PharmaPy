@@ -163,21 +163,33 @@ def test_standard_inputs_reject_unsupported_or_inactive_configuration(change):
 
 
 def test_species_pathway_and_parameter_names_remain_user_defined(tmp_path):
+    """Rename the complete provider handoff and preserve analytical growth.
+
+    Parameters
+    ----------
+    tmp_path : Path
+        Temporary thermodynamic declaration with the renamed species.
+    """
     case, definition, thermo = _load("generic_batch")
-    definition["parameters"]["rates"] = {"user_capacity": 2.0}
+    definition["parameters"]["rates"] = {"user_capacity": 2.0}  # [mol/(kgDW h)], unchanged capacity
     definition["model"]["pathways"]["state_ids"] = ["user_substrate"]
     definition["model"]["pathways"]["pathway_ids"] = ["user_pathway"]
     rule = definition["model"]["pathways"]["uptake_constraints"][0]
-    rule.update(identifier="user_uptake", species="user_substrate",
-                maximum_parameter="rates.user_capacity")
+    rule.update(identifier="user_uptake", species="user_substrate", output="user_capacity")
+    capacity = definition["model"]["pathways"]["rule_graph"][0]
+    capacity['identifier'] = 'user_capacity'
+    capacity['expression']['parameter'] = 'rates.user_capacity'
+    capacity['expression']['correction']['input']['args'][0]['concentration'] = 'user_substrate'
+    definition['rate_provider']['output_units'] = {'user_capacity': 'mol/(kgDW h)'}
     definition["model"]["pathways"]["pathway_bound_rules"][0].update(
         species="user_substrate", pathways=["user_pathway"])
-    definition["state"]["species"]["amounts"] = {"user_substrate": 0.01}
+    definition["state"]["species"]["amounts"] = {"user_substrate": 0.01}  # [mol], unchanged initial nutrient
     thermo["user_substrate"] = thermo.pop("nutrient")
     path = tmp_path / "thermo.json"
     path.write_text(json.dumps(thermo))
     assembly = build_bioreactor(case, definition, path)
     result = assembly.solve(verbose=False)[-1]
+    # [kgDW]: initial 1e-4 kgDW, capacity 2 mol/(kgDW h), 10 mol/kgDW and 6 h.
     expected = 0.0001 * np.exp(2.0 / 10.0 * 6.0)
     assert result.biomass_kg_liquid0[-1] == pytest.approx(expected, rel=1e-6)
 
