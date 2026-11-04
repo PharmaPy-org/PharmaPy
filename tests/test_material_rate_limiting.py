@@ -548,4 +548,3 @@ def test_native_paired_transfer_through_solve_unit():
     assert np.all(states >= 0.)
     buffer = unit._material_contributions
     assert buffer.aux[buffer.CROSSPHASE][0]["transfer_scale"] == 1.
-
