@@ -17,8 +17,8 @@ Measurement schema
 ------------------
 
 ``Measurement(field=None, x=None, values=None, *, y=None, uncertainty=None,
-units=None, unit_y=None, basis=None, x_units='s', unit_x=None)`` describes one
-observed model-output field in one experiment.
+std=None, units=None, unit_y=None, basis=None, x_units='s', unit_x=None)``
+describes one observed model-output field in one experiment.
 
 ``field``
    Identity of the observed model output: a zero-based ``int`` column of the
@@ -40,11 +40,17 @@ observed model-output field in one experiment.
    the model output column. ``NaN`` marks a missing observation; infinite
    values are rejected and at least one observation is required. Passing both
    ``values`` and ``y`` raises ``ValueError``.
-``uncertainty``
+``uncertainty`` (or ``std``)
    Standard deviation of the measurement error (not a variance and not a
    weight), a positive scalar or one entry per sample, in the units of
    ``values``. It must be finite and positive at every observed sample;
-   entries at missing samples are ignored.
+   entries at missing samples are ignored. ``std`` is normalized to
+   ``uncertainty``; both read-only properties return the same immutable
+   array of shape ``(n,)``, with scalar inputs broadcast to all samples,
+   or ``None`` when undeclared. Passing both keywords raises ``ValueError``,
+   including when either is explicitly ``None``. Each observed residual is
+   divided by its sample's standard deviation, so per-sample ``std`` values
+   give the same weighting as per-sample ``uncertainty`` values.
 ``units`` (or ``unit_y``) and ``basis``
    Labels such as ``'mol/L'`` and ``'molar concentration'``. They are not
    used for conversion. Declared labels must agree for every measurement of
@@ -308,7 +314,7 @@ Uncertainties are declared in each measurement's own unit.
    cold = Experiment(
        {'c_A': Measurement(0, [0.5, 1.5, 3.0],  # [s]
                            [0.785, np.nan, 0.220],  # [mol/L], NaN = missing
-                           uncertainty=[0.01, 0.01, 0.02], units='mol/L')},
+                           std=[0.01, 0.01, 0.02], units='mol/L')},
        args=(1.0,),  # initial c_A [mol/L]
        kwargs={'rise_k_l_mol': 10.0, 'temp0_k': 290.0})  # [K*L/mol], [K]
 

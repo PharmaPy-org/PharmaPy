@@ -101,18 +101,21 @@ back as ``NaN``. Infinite values are rejected.
    not allowed when the measurements declare uncertainties.
 ``solver``
    ``null`` before fitting, otherwise the optimizer settings: ``method``
-   (``'LM'`` or ``'IPOPT'``), ``options`` (the effective options of the
+   (``'LM'``, ``'IPOPT'``, ``'scipy'``, ``'least_squares'`` or ``'custom'``),
+   ``options`` (the effective options of the
    fit: the given ``optim_options`` without the entries ``optimize_fn`` sets
    itself), ``default_options`` (the optimizer defaults in force for the
    options not passed: for Levenberg-Marquardt the ``levenberg_marquardt``
    keyword defaults such as ``max_fun_eval``, ``eps_1``, ``eps_2`` and
-   ``tol_fun``; ``null`` when not recorded and for IPOPT, whose ``options``
+   ``tol_fun``; ``null`` when not recorded and for ``'IPOPT'``, ``'scipy'``,
+   ``'least_squares'`` and ``'custom'``, where for IPOPT ``options``
    hold the options passed plus the entries cyipopt writes into
    ``optimize_fn``'s private copy, ``tol``, ``mu_strategy`` and
    ``hessian_approximation``, while Ipopt's native defaults such as
    ``max_iter`` and ``acceptable_tol`` are not recorded), ``model_solver``
    (settings of the model's own integrator, for documentation),
-   ``outcome`` (e.g. ``stop_criterion``, ``num_iter``, ``num_fun_eval`` and
+   ``outcome`` (e.g. ``stop_criterion``, ``num_iter``, ``num_fun_eval``,
+   ``status``, ``success``, ``message``, ``nfev`` and
    ``objective``, ``1/2 * r @ r`` of the weighted residuals) and
    ``derivatives``: ``jacobian`` is ``'model_sensitivities'``, ``'jac_fun'``
    or ``'finite_difference'`` and ``dx_finitediff`` is ``'default'`` (the
