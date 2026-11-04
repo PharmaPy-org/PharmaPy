@@ -49,7 +49,7 @@ def _interval_bounds(bounds, names: Sequence[str], method: str) -> Optional[tupl
         Stored bounds in parameter units. Built-in optimizers use their native
         layouts; a custom optimizer may define a different layout.
     names : sequence of str
-        Optimized parameter names, in interval column order.
+        Optimized parameter names, in interval row order.
     method : str
         Native optimization method identifier.
 
