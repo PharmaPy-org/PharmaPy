@@ -101,18 +101,21 @@ back as ``NaN``. Infinite values are rejected.
    not allowed when the measurements declare uncertainties.
 ``solver``
    ``null`` before fitting, otherwise the optimizer settings: ``method``
-   (``'LM'`` or ``'IPOPT'``), ``options`` (the effective options of the
+   (``'LM'``, ``'IPOPT'``, ``'scipy'``, ``'least_squares'`` or ``'custom'``),
+   ``options`` (the effective options of the
    fit: the given ``optim_options`` without the entries ``optimize_fn`` sets
    itself), ``default_options`` (the optimizer defaults in force for the
    options not passed: for Levenberg-Marquardt the ``levenberg_marquardt``
    keyword defaults such as ``max_fun_eval``, ``eps_1``, ``eps_2`` and
-   ``tol_fun``; ``null`` when not recorded and for IPOPT, whose ``options``
+   ``tol_fun``; ``null`` when not recorded and for ``'IPOPT'``, ``'scipy'``,
+   ``'least_squares'`` and ``'custom'``, where for IPOPT ``options``
    hold the options passed plus the entries cyipopt writes into
    ``optimize_fn``'s private copy, ``tol``, ``mu_strategy`` and
    ``hessian_approximation``, while Ipopt's native defaults such as
    ``max_iter`` and ``acceptable_tol`` are not recorded), ``model_solver``
    (settings of the model's own integrator, for documentation),
-   ``outcome`` (e.g. ``stop_criterion``, ``num_iter``, ``num_fun_eval`` and
+   ``outcome`` (e.g. ``stop_criterion``, ``num_iter``, ``num_fun_eval``,
+   ``status``, ``success``, ``message``, ``nfev`` and
    ``objective``, ``1/2 * r @ r`` of the weighted residuals) and
    ``derivatives``: ``jacobian`` is ``'model_sensitivities'``, ``'jac_fun'``
    or ``'finite_difference'`` and ``dx_finitediff`` is ``'default'`` (the
@@ -234,6 +237,22 @@ The template is:
 
 .. literalinclude:: ../../../PharmaPy/data/records/calibration_record_template.json
    :language: json
+
+Custom-optimizer bounds
+-----------------------
+
+A custom callable defines the layout of the bounds it receives. When stored
+custom bounds have shape ``(2, 2)``, ``from_estimation`` requires an explicit
+``bounds=[(lower_0, upper_0), (lower_1, upper_1)]`` declaration in parameter
+order and units. Neither the Python container type nor containment of the
+seed and solution proves which constraints the callable applied. The declared
+bounds must describe the actual fit; capture cannot verify that declaration.
+
+Record replay always supplies per-parameter ``(lower, upper)`` pairs. If the
+original optimizer expects native SciPy lower/upper vectors, supply a compatible
+adapter as ``record.rerun(..., optimizer=adapter)`` that converts the canonical
+pairs to the solver's layout. A callable is not serialized: after JSON reload,
+supply it again through ``optimizer=...``.
 
 Reloading and rerunning a fit
 -----------------------------

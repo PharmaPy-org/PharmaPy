@@ -1383,7 +1383,8 @@ def test_lm_bounds_are_recorded_as_declared_ranges():
     (lambda: ParameterRecord('k', '1/s', 1.0, optimized=False, fitted=1.0),
      "is not optimized and keeps its seed"),
     (lambda: SolverSettings('BFGS'),
-     r"SolverSettings method must be one of \('LM', 'IPOPT'\)"),
+     r"SolverSettings method must be one of \('LM', 'IPOPT', 'scipy', "
+     r"'least_squares', 'custom'\)"),
 ])
 def test_component_validation_messages(build, message):
     with pytest.raises(ValueError, match=message):
