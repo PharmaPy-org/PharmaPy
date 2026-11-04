@@ -159,6 +159,7 @@ def test_documented_workflow_output_and_values(capsys):
 
 
 def test_page_states_stand_in_status_suite_and_demonstrator_steps():
+    """Keep demonstrated capabilities and outstanding adoption explicit."""
     text = _text()
     assert 'synthetic or stand-in fit' in text
     assert 'not evidence of an empirical calibration' in text
@@ -179,7 +180,9 @@ def test_page_states_stand_in_status_suite_and_demonstrator_steps():
                       'Pass a bound established by ``check_derivatives`` '
                       'as ``jacobian_rtol``',
                       "(``noise_model`` ``'identity'``)",
-                      'Calibration records can capture LM and IPOPT fits',
+                      'capture LM, IPOPT, SciPy least-squares',
+                      'and custom-optimizer fits',
+                      'canonical per-parameter bounds for replay',
                       '``derivative_bound``'):
         assert statement in text, statement
     for issue in ('#222', '#314', '#328', '#534', '#535'):
