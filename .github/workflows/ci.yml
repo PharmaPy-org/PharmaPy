@@ -20,7 +20,10 @@ jobs:
   core-tests:
     name: Core tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The full core suite includes solver-backed bioreactor qualification.
+    # Ten minutes cancelled otherwise-progressing runs on #472 and #549;
+    # match the existing solver-lane budget without reducing test coverage.
+    timeout-minutes: 30
 
     steps:
       - name: Check out repository
@@ -44,7 +47,7 @@ jobs:
         run: python -m pytest --collect-only
 
       - name: Run assimulo-free tests
-        run: python -m pytest tests/ -m "not assimulo"
+        run: python -m pytest tests/ -m "not assimulo" --durations=20
 
   pixi-lock:
     name: Locked pixi install (${{ matrix.os }})

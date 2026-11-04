@@ -1,0 +1,166 @@
+{
+  "schema_version": 3,
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical.",
+  "mechanism": "configured-kinetics",
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "continuous",
+    "runtime": {
+      "unit": "h",
+      "value": 100.0
+    },
+    "temperature_k": null,
+    "volume_policy": "working-volume",
+    "conditions": {},
+    "recipe": {
+      "name": "continuous",
+      "require_complete_inputs": true
+    }
+  },
+  "state": {
+    "species": {
+      "unit": "g",
+      "amounts": {
+        "biomass": 4.5,
+        "substrate": 1.0,
+        "product": 0.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "parameters": {
+    "rates": {
+      "mu_max": 0.2
+    },
+    "affinities": {
+      "Ks": 1.0
+    },
+    "yields": {
+      "biomass": 0.5
+    },
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {},
+    "reconciliation": {},
+    "kinetics": {
+      "rule_graph": [
+        {
+          "identifier": "mu",
+          "expression": {
+            "op": "divide",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.mu_max"
+                  },
+                  {
+                    "concentration": "substrate"
+                  }
+                ]
+              },
+              {
+                "op": "add",
+                "args": [
+                  {
+                    "parameter": "affinities.Ks"
+                  },
+                  {
+                    "concentration": "substrate"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "growth",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "ref": "mu"
+              },
+              {
+                "concentration": "biomass"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "consumption",
+          "expression": {
+            "op": "negate",
+            "args": [
+              {
+                "op": "divide",
+                "args": [
+                  {
+                    "ref": "growth"
+                  },
+                  {
+                    "parameter": "yields.biomass"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "species_mass_rates": {
+        "biomass": "growth",
+        "substrate": "consumption"
+      },
+      "rate_unit": "g/(L h)",
+      "constants": {}
+    }
+  },
+  "network": null,
+  "rate_provider": null,
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "continuous": [
+      {
+        "event_type": "flow",
+        "time": 0.0,
+        "volume_l_h": 0.1,
+        "concentrations_g_l": {
+          "substrate": 10.0
+        },
+        "density_kg_l": 1.0,
+        "composition": "supplied"
+      }
+    ]
+  },
+  "numerical": {
+    "backend": "scipy",
+    "step": {
+      "unit": "h",
+      "value": 0.25
+    },
+    "relative_tolerance": 1e-09,
+    "absolute_tolerance": 1e-12,
+    "maximum_step": {
+      "unit": "h",
+      "value": 0.25
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  }
+}

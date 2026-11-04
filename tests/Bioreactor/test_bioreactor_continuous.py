@@ -41,7 +41,7 @@ def continuous_inputs(tmp_path, dilution=0.1, closure='pathway-lp', growth=True)
     tuple
         Case, mechanism and thermo path, in their declared input units.
     """
-    case, model, thermo = [read_input_json((INPUTS / f'{name}.json'))
+    case, model, thermo = [read_input_json(INPUTS / f'{name}.json')
                            for name in ('case', 'mechanism', 'thermo')]
     case['operation'].update(mode='continuous', volume_policy='working-volume')
     case['operation']['runtime']['value'] = 80.  # [h]; eight residence times at D=0.1/h
@@ -109,7 +109,7 @@ def test_monod_continuous_equilibrium_and_mass_yield(tmp_path, closure):
     folder = ROOT/'examples/bioreactors/generic_chemostat/inputs'
     if closure == 'configured-kinetics':
         folder = folder/'kinetics'
-    case, model = [read_input_json((folder/f'{name}.json')) for name in ('case', 'mechanism')]
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case', 'mechanism')]
     assembly = build_bioreactor(case, model, folder/'thermo.json')
     time, nutrient, biomass = _trajectory(assembly.solve(), assembly.phase, closure=='configured-kinetics')
     # S*=Ks D/(mu_max-D)=1/3 mmol/L; X*=Y(Sin-S*)=0.9667 g/L.
@@ -232,6 +232,46 @@ def test_native_rhs_callback_does_not_alias_previous_derivative(tmp_path):
     assert second[2] != first[2]
 
 
+@pytest.mark.parametrize('basis', ['biomass', 'cells'])
+def test_reconciliation_outlet_advects_material_states_but_not_exposure(basis):
+    """Native outlet hooks withdraw each biological inventory exactly once.
+
+    Parameters
+    ----------
+    basis : str
+        Source fixture population basis; coefficients remain unchanged.
+    """
+    if basis == 'biomass':
+        folder = ROOT/'examples/bioreactors/ecoli_ye_fed_batch/reconciliation/inputs'
+        thermo = ROOT/'examples/bioreactors/ecoli_ye_fed_batch/inputs/thermo.json'
+    else:
+        folder = Path(__file__).parent/'fixtures/fed_batch_cho/inputs'
+        thermo = folder/'thermo.json'
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case','mechanism')]
+    case['operation'].update(mode='continuous',volume_policy='working-volume')
+    case['operation']['runtime'] = {'unit': 'h', 'value': 1.}
+    model['recipes'][case['recipe']['name']] = []
+    model['state']['product_g'] = 0.2  # [g]; nonzero withdrawal sentinel
+    a = build_bioreactor(case,model,thermo)
+    # Feed exactly matches phase species; it contains no mechanism-owned biomass/product.
+    concentrations = dict(zip(a.phase.name_species,a.phase.mole_conc*1000.))  # [mmol/L]
+    concentrations.pop(a.carrier_species)
+    flow = .1*a.phase.vol*1000.  # [L/h]; D=0.1/h
+    a._set_inlet({'event_type':'flow','time':0.,'volume_l_h':flow,
+                  'concentrations_mmol_l':concentrations,'density_kg_l':a.phase.mass/a.phase.vol/1000.})
+    a.unit.compile_structure()
+    states=a.unit.create_solver_init_states()
+    a.unit.unit_model(0.,states,limiter_dt=0.)
+    buffer=a.unit._material_contributions
+    packed=a.unit.solver_state_collection.unpack(states)
+    for key in a.mechanism.solver_state_keys:
+        section=a.unit.solver_state_collection.material_slices[key]
+        expected=-np.asarray(packed[key])*.1/3600. if key.name in a.mechanism.extensive_states else 0.
+        np.testing.assert_allclose(buffer.contributions[buffer.OUTLET,section],expected,rtol=1e-12,atol=1e-16)
+    # Matching liquid composition cancels only the species inlet/outlet terms.
+    section=a.unit._material_slice_by_phase[next(iter(a.unit._material_slice_by_phase))]
+    np.testing.assert_allclose(buffer.contributions[buffer.INLET,section]+
+                               buffer.contributions[buffer.OUTLET,section],0.,atol=1e-15)
 
 
 @pytest.mark.assimulo
@@ -387,7 +427,7 @@ def test_reconciliation_reserves_outlet_before_inventory_projection():
     remains available to metabolism. Cell growth is zero in this fixture.
     """
     folder = Path(__file__).parent/'fixtures/reconciliation/operating_transitions/inputs/single'
-    case, model = [read_input_json((folder/f'{name}.json')) for name in ('case', 'mechanism')]
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case', 'mechanism')]
     case['operation'].update(mode='continuous', runtime={'unit':'day','value':.001})
     model['state']['species']['amounts']['nutrient_a'] = .0001  # [mmol]
     model['recipes']['benchmark'] = [{'event_type':'flow','time':{'unit':'day','value':0.},
@@ -416,7 +456,7 @@ def test_reconciliation_continuous_inventory_and_product_solution():
     exp(-Dt), product is 0.1 t exp(-Dt) g and A is (10-1.5 t) exp(-Dt) mmol.
     """
     folder = Path(__file__).parent/'fixtures/reconciliation/operating_transitions/inputs/single'
-    case, model = [read_input_json((folder/f'{name}.json')) for name in ('case', 'mechanism')]
+    case, model = [read_input_json(folder/f'{name}.json') for name in ('case', 'mechanism')]
     case['operation'].update(mode='continuous', runtime={'unit':'h','value':2.})
     case['numerics'].update(backend='scipy', relative_tolerance=1e-9, absolute_tolerance=1e-12,
                            maximum_step={'unit':'s','value':300.})

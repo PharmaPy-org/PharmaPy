@@ -72,7 +72,7 @@ def test_pathway_tie_break_preserves_small_physical_flux(coordinate_scale):
 @pytest.mark.parametrize('backend', ['scipy', 'fixed-step'])
 @pytest.mark.parametrize('acetate', [0., 1e-5])
 def test_missing_uptake_rule_cannot_create_growth_from_empty_resource(backend, acetate):
-    thermo = Path(__file__).parents[2] / 'tests/fixtures/native_four_species.json'
+    thermo = EXAMPLES / 'batch_ecoli_dfba/inputs/thermo.json'
     solute = np.array([.001, acetate, 0.]) * np.array([180.156, 60.052, 31.998]) / 1000.
     phase = LiquidPhase(thermo, mass=1., mass_frac=np.r_[solute, 1.-solute.sum()], verbose=False)
     mechanism = PathwayMetabolism(_model(), 1e-4, flux_time_unit='1/s')
@@ -102,7 +102,7 @@ def test_standalone_pathway_closes_all_exhausted_pools():
 
 def test_scheduled_feed_restarts_growth_after_depletion():
     p = EXAMPLES / 'generic_fed_batch/inputs'
-    case, definition = [read_input_json((p / name)) for name in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p / name) for name in ('case.json', 'mechanism.json')]
     definition['state']['species']['amounts']['nutrient'] = 0.
     assembly = build_bioreactor(case, definition, p / 'thermo.json')
     before, after = assembly.solve(verbose=False)
@@ -141,11 +141,17 @@ def test_impossible_external_drain_is_reported_as_infeasible():
         ConfiguredPathwayModel(_model()).solve_fluxes([1., 1., 1.], 1., availability=availability)
 
 
+def test_transport_capacity_cannot_disagree_with_actual_supply():
+    p = EXAMPLES / 'batch_ecoli_dfba/inputs'
+    case, definition = [read_input_json(p / name) for name in ('case.json', 'mechanism.json')]
+    definition['transport']['kla_per_s'] = 0.
+    with pytest.raises(ValueError, match='actual transport'):
+        build_bioreactor(case, definition, p / 'thermo.json')
 
 
 def test_culture_adaptive_boundary_constrains_growth_and_product_together():
     p = Path(__file__).parent / 'fixtures/fed_batch_cho/inputs'
-    case, definition = [read_input_json((p / name)) for name in ('case.json', 'mechanism.json')]
+    case, definition = [read_input_json(p / name) for name in ('case.json', 'mechanism.json')]
     definition['state']['species']['amounts']['TRP'] = 0.
     assembly = build_bioreactor(case, definition, p / 'thermo.json')
     unit = assembly.unit
@@ -230,8 +236,8 @@ def test_pathway_minimum_norm_respects_inventory_and_zero_objective():
 
 def test_pathway_minimum_norm_configuration_reaches_native_builder():
     folder = EXAMPLES / 'generic_batch/inputs'
-    case = read_input_json((folder / 'case.json'))
-    definition = read_input_json((folder / 'mechanism.json'))
+    case = read_input_json(folder / 'case.json')
+    definition = read_input_json(folder / 'mechanism.json')
     baseline = build_bioreactor(case, definition, folder / 'thermo.json')
     assert baseline.mechanism.model.definition.secondary_optimization is None
     definition['model']['pathways']['secondary_optimization'] = {
@@ -266,8 +272,8 @@ def test_closed_uptake_screen_flags_free_growth_without_claiming_elemental_balan
 @pytest.mark.parametrize('capacity, expected', [(10., 5.), (3., 3.)])
 def test_unweighted_culture_matches_analytic_projection(capacity, expected):
     p = Path(__file__).parent / 'fixtures/khare_cho_fed_batch/inputs'
-    case = read_input_json((p / 'case.json'))
-    definition = read_input_json((p / 'mechanism.json'))
+    case = read_input_json(p / 'case.json')
+    definition = read_input_json(p / 'mechanism.json')
     mechanism = build_bioreactor(case, definition, p / 'thermo.json').mechanism
     assert mechanism.closure.internal_reaction_ids == ()
     network = MetabolicNetworkDefinition('projection', '1', ('A',),
@@ -288,8 +294,8 @@ def test_unweighted_culture_matches_analytic_projection(capacity, expected):
 @pytest.mark.parametrize('policy, bound', [('unknown', None), ('unweighted', 2.5)])
 def test_culture_rejects_ambiguous_reconciliation_policy(policy, bound):
     p = Path(__file__).parent / 'fixtures/khare_cho_fed_batch/inputs'
-    case = read_input_json((p / 'case.json'))
-    definition = read_input_json((p / 'mechanism.json'))
+    case = read_input_json(p / 'case.json')
+    definition = read_input_json(p / 'mechanism.json')
     definition['model']['reconciliation'].update(
         reconciliation_policy=policy, reconciliation_relative_bound=bound)
     with pytest.raises(ValueError, match='reconciliation|relative target bounds'):
@@ -299,8 +305,8 @@ def test_culture_rejects_ambiguous_reconciliation_policy(policy, bound):
 @pytest.mark.parametrize('magnitude', [0., .01, 1., 100., 10000.])
 def test_unweighted_small_feasible_targets_retain_exchange_accuracy(magnitude):
     p = Path(__file__).parent / 'fixtures/khare_cho_fed_batch/inputs'
-    mechanism = build_bioreactor(read_input_json((p / 'case.json')),
-        read_input_json((p / 'mechanism.json')), p / 'thermo.json').mechanism
+    mechanism = build_bioreactor(read_input_json(p / 'case.json'),
+        read_input_json(p / 'mechanism.json'), p / 'thermo.json').mechanism
     network = MetabolicNetworkDefinition('small-targets', '1', ('A', 'B', 'C'), [
         ReactionDefinition('uptake', {'A': 1.}, 0., 1.),
         ReactionDefinition('conversion', {'A': -1., 'B': 2.}, 0., 1.),
