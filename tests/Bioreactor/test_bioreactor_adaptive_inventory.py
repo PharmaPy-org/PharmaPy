@@ -16,6 +16,7 @@ from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Mechanisms import Mechanism
 from PharmaPy.MultiPhaseVessel import MultiPhaseVessel
 from PharmaPy.Phases_Refactored import LiquidPhase
+from tests.Bioreactor.test_bioreactor_thermal import thermal_case
 
 
 # Synthetic first-order networks have closed-form, independently derived states.
@@ -252,6 +253,44 @@ def test_unknown_method_is_rejected_before_solving():
     """A misspelling must not silently select a different numerical algorithm."""
     with pytest.raises(ValueError, match='scipy method must be'):
         build_bioreactor(configured_case('scipy','radau'), thermo_path=EXAMPLE/'thermo.json')
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+@pytest.mark.parametrize('with_feed', [False, True])
+def test_cvode_preserves_thermal_balance_and_feed_restart(thermal_case, with_feed):
+    """Verify reaction heat and a discontinuous cold feed with native CVode.
+
+    Parameters
+    ----------
+    thermal_case : tuple
+        Existing real constant-Cp fixture: 1 kg, 1000 J/(kg K), 300 K,
+        0.01 kg substrate, 0.01/s conversion, and 2000 J full-conversion heat.
+    with_feed : bool
+        Add 0.5 kg of nutrient-free liquid at 270 K after 50 s.
+    """
+    pytest.importorskip('assimulo')
+    document, path = thermal_case
+    document['numerical']['backend'] = 'assimulo'
+    if with_feed:
+        document['operation']['mode'] = 'fed-batch'
+        document['recipes']['continuous'] = [{
+            'time': 50., 'event_type': 'feed', 'volume_l': .5,
+            'concentrations_mmol_l': {}, 'composition': 'nutrient-free',
+            'temperature_k': 270.}]  # [s], [L], [mmol/L], [K]; fixture density 1 kg/L
+    assembly = build_bioreactor(document, thermo_path=path)
+    histories = assembly.solve()
+    assert len(histories) == (2 if with_feed else 1)
+    substrate = assembly.phase.name_species.index('substrate')
+    for segment, history in enumerate(histories):
+        remaining = np.exp(-.01*history.time)  # [-]; exact first-order retained fraction
+        expected_temperature = 300. + 2.*(1.-remaining)  # [K]; heat/Cp before any feed
+        if segment:
+            expected_temperature = 290. + (2./1.5)*(1.-remaining)  # [K]; (1*300+0.5*270)/1.5, with reaction heat over 1.5 kg
+        np.testing.assert_allclose(np.asarray(history.global_temp).reshape(-1),
+                                   expected_temperature, atol=1e-6, rtol=0.)  # [K]; existing independent thermal budget
+        np.testing.assert_allclose(history.mass_j_liquid0[:, substrate],
+                                   .01*remaining, atol=1e-9, rtol=1e-6)  # [kg]; feed contributes no substrate
 
 
 @pytest.mark.integration

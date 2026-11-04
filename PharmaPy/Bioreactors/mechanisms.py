@@ -12,8 +12,9 @@ from types import SimpleNamespace
 from typing import Optional
 import numpy as np
 
-from PharmaPy.DataClasses import StateKey, StateVariable, TransferResult
+from PharmaPy.DataClasses import IntraPhaseProcess, StateKey, StateVariable, TransferResult
 from PharmaPy.Mechanisms import Mechanism
+from PharmaPy.Phases_Refactored import LiquidPhase
 from PharmaPy.Metabolic.closures.base import (
     MetabolicEnvironment,
     MetabolicInfeasibleError,
@@ -33,6 +34,7 @@ from .culture import (CultureModelDefinition, CultureSnapshot,
 from .BioreactorUnitConverter import BioreactorUnitConverter
 from .inventory import InventoryAvailability, LinearInventoryAvailability
 from .rate_providers import RateProviderResult, build_rate_provider
+from .thermal import ThermalBiology
 
 
 # Preserve declared stream density and physical working-volume behavior.
@@ -368,13 +370,14 @@ class WorkingVolume(Mechanism):
         """
         return {self.solver_state_keys[0]: amount} if self.allow_outlets else {}
 
-    def get_solver_state_rates(self, **kwargs):
+    def get_solver_state_rates(self, **kwargs) -> TransferResult:
         """Return the working-volume derivative.
 
         Parameters
         ----------
         **kwargs
-            Native mechanism arguments; unused.
+            Native arguments; ``process`` is retained for the native energy
+            balance handoff. The volume mechanism contributes no heat.
 
         Returns
         -------
@@ -382,11 +385,11 @@ class WorkingVolume(Mechanism):
             ``d(working_volume)/dt`` [m3/s]; no species mass is transferred.
         """
         return TransferResult(state_rates={self.solver_state_keys[0]: self.volume_rate},
-                              aux={}, net_mass_rate=0.)
+                              aux={"process": kwargs.get("process")}, net_mass_rate=0.)
 
 
 # Evaluate explicit biological rates on native phase states.
-class ConfiguredRates(Mechanism):
+class ConfiguredRates(ThermalBiology):
     """Map user-defined volumetric kinetic rules to native species mass balances.
 
     Each phase species named in ``species_mass_rates`` receives the volumetric
@@ -474,7 +477,9 @@ class ConfiguredRates(Mechanism):
         Parameters
         ----------
         phase : LiquidPhase
-            Current phase; concentration [kg/m3], volume [m3], weights [g/mol].
+            Current phase; concentration [kg/m3], volume [m3], weights [g/mol]
+            and live temperature [K]. Non-isothermal calculations require
+            finite, positive specific heat [J/(kg K)].
 
         Returns
         -------
@@ -489,7 +494,8 @@ class ConfiguredRates(Mechanism):
         snapshot = SimpleNamespace(concentrations_mmol_l=dict(zip(
             phase.name_species, BioreactorUnitConverter.convert(
                 phase.mass_conc, 'kg/m3', 'mmol/L', molecular_weight_g_mol=phase.mw))),
-            volume_l=BioreactorUnitConverter.convert(phase.vol, 'm3', 'L'))
+            volume_l=BioreactorUnitConverter.convert(phase.vol, 'm3', 'L'),
+            temperature_k=self.thermal_temperature(phase))
         result = self.rate_provider.evaluate(snapshot, self.conditions)
         if dict(result.units) != self.expected_rate_units:
             raise ValueError('provider output units disagree with configured volumetric rates')
@@ -543,21 +549,6 @@ class ConfiguredRates(Mechanism):
         result = self._evaluate_rates(phase)
         return result.rates[self.reported_rates[state_var.name]['rule']]
 
-    def get_overrides(self, name=None):
-        """Declare that no phase property hooks are replaced.
-
-        Parameters
-        ----------
-        name : str, optional
-            Property name being queried.
-
-        Returns
-        -------
-        dict or None
-            Empty mapping for the full query; None for a named property.
-        """
-        return {} if name is None else None
-
     def audit_conservation(self):
         """Report that configured rules carry no elemental balance.
 
@@ -569,7 +560,8 @@ class ConfiguredRates(Mechanism):
         return {'status': 'NOT_CHECKED', 'reason': 'Configured kinetic rules do not declare elemental balances.'}
 
     # Construct accepted species and biological auxiliary source terms.
-    def get_solver_state_rates(self, phase, process, **kwargs):
+    def get_solver_state_rates(self, phase: LiquidPhase, process: IntraPhaseProcess,
+                               **kwargs) -> TransferResult:
         """Evaluate the provider and return native species mass rates.
 
         Parameters
@@ -585,7 +577,9 @@ class ConfiguredRates(Mechanism):
         Returns
         -------
         TransferResult
-            Species mass rates [kg/s] and the provider result in ``aux``.
+            Species mass rates [kg/s]. ``aux`` retains the native ``process``,
+            provider result and named ``source_rates_kg_s`` [kg/s] so the
+            energy hook uses the same accepted material evaluation.
 
         Raises
         ------
@@ -598,11 +592,13 @@ class ConfiguredRates(Mechanism):
         mass_rates = np.array([rates[self.outputs[n]] if n in self.outputs else 0.  # [kg/s]
                                for n in phase.name_species]) * self.rate_scale * phase.vol
         return TransferResult({StateKey('mass_j', process.phaseref): mass_rates},
-                              {'rate_provider': result}, float(mass_rates.sum()))
+                              {'rate_provider': result, 'process': process,
+                               'source_rates_kg_s': dict(zip(phase.name_species, mass_rates))},
+                              float(mass_rates.sum()))
 
 
 # Hand configured pathway rates to the native material and energy balances.
-class PathwayMetabolism(Mechanism):
+class PathwayMetabolism(ThermalBiology):
     """Couple an arbitrary input-declared pathway LP to a native liquid phase.
 
     At each rate evaluation the pathway LP is solved for the current
@@ -728,21 +724,6 @@ class PathwayMetabolism(Mechanism):
         self._timers = {}
 
     # Preserve native properties and reset/step lifecycle hooks.
-    def get_overrides(self, name=None):
-        """Declare that no phase property hooks are replaced.
-
-        Parameters
-        ----------
-        name : str, optional
-            Property name being queried.
-
-        Returns
-        -------
-        dict or None
-            Empty mapping for the full query; None for a named property.
-        """
-        return {} if name is None else None
-
     def prepare_step(self, step_s):
         """Declare the fixed propagation interval used for end-inventory constraints.
 
@@ -795,14 +776,15 @@ class PathwayMetabolism(Mechanism):
         return duplicate
 
     # Solve the real pathway problem before returning material and heat payloads.
-    def get_solver_state_rates(self, *, phase, completed_state, **kwargs):
+    def get_solver_state_rates(self, *, phase: LiquidPhase, completed_state: Mapping,
+                               **kwargs) -> TransferResult:
         """Optimize pathway use and return native species-mass and biomass rates.
 
         Parameters
         ----------
         phase : LiquidPhase
-            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol] and ``vol``
-            [m3].
+            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol], ``vol``
+            [m3] and live ``temp`` [K].
         completed_state : Mapping
             Native completed state; supplies ``biomass_kg`` [kgDW].
         **kwargs
@@ -816,6 +798,8 @@ class PathwayMetabolism(Mechanism):
             Species mass rates [kg/s], biomass rate [kgDW/s], and the pathway
             solution and rate-provider result in ``aux``. Zero biomass returns no
             metabolic source or LP solution; physical gas transfer remains active.
+            ``aux`` also retains the native ``process`` and accepted named
+            ``source_rates_kg_s`` [kg/s] for the energy hook.
 
         Raises
         ------
@@ -825,6 +809,7 @@ class PathwayMetabolism(Mechanism):
         MetabolicInfeasibleError
             The LP has no feasible flux.
         """
+        temperature_k = self.thermal_temperature(phase)  # [K]
         phase_ref = self.solver_state_keys[0].phaseref
         biomass = float(completed_state[StateKey("biomass_kg", phase_ref)])  # [kgDW]
         volume = float(phase.vol)  # [m3]
@@ -862,7 +847,9 @@ class PathwayMetabolism(Mechanism):
             return TransferResult(
                 state_rates={StateKey('mass_j', phase_ref): species_rate,
                              StateKey('biomass_kg', phase_ref): 0.},
-                aux={'population_status': 'absent', 'pathway_solution': None},
+                aux={'population_status': 'absent', 'pathway_solution': None,
+                     'process': kwargs.get('process'),
+                     'source_rates_kg_s': dict(zip(phase.name_species, species_rate))},
                 net_mass_rate=float(species_rate.sum()))
         inlet_mass = kwargs.get('inlet_rates', {}).get(StateKey('mass_j', phase_ref),
                                                       np.zeros(phase.num_species))
@@ -883,7 +870,8 @@ class PathwayMetabolism(Mechanism):
         limits = None
         if self.uptake_provider is not None:
             snapshot = SimpleNamespace(concentrations_mmol_l=concentrations_all,
-                                       volume_l=volume * 1000., biomass_kg=biomass)
+                                       volume_l=volume * 1000., biomass_kg=biomass,
+                                       temperature_k=temperature_k)
             uptake_result = self.uptake_provider.evaluate(snapshot, self.conditions)
             expected_unit = f'mol/(kgDW {self.flux_time_unit[2:]})'
             if dict(uptake_result.units) != dict.fromkeys(self.uptake_outputs, expected_unit):
@@ -922,13 +910,15 @@ class PathwayMetabolism(Mechanism):
                 StateKey("mass_j", phase_ref): species_mass_rate,
                 StateKey("biomass_kg", phase_ref): biomass_rate,
             },
-            aux={"pathway_solution": solution, "rate_provider": provider_result},
+            aux={"pathway_solution": solution, "rate_provider": provider_result,
+                 "process": kwargs.get("process"),
+                 "source_rates_kg_s": dict(zip(phase.name_species, species_mass_rate))},
             net_mass_rate=float(species_mass_rate.sum() + biomass_rate),
         )
 
 
 # Reconcile biological targets before constructing accepted source terms.
-class RateReconciledCulture(Mechanism):
+class RateReconciledCulture(ThermalBiology):
     """Reconcile an arbitrary kinetic rule graph with an input-declared network.
 
     Kinetic rules predict exchange fluxes; a steady-state network closure
@@ -1150,21 +1140,6 @@ class RateReconciledCulture(Mechanism):
         report['post_reconciliation_death'] = self.death_increment is not None
         return report
 
-    def get_overrides(self, name=None):
-        """Declare that no phase property hooks are replaced.
-
-        Parameters
-        ----------
-        name : str, optional
-            Property name being queried.
-
-        Returns
-        -------
-        dict or None
-            Empty mapping for the full query; None for a named property.
-        """
-        return {} if name is None else None
-
     def __deepcopy__(self, memo):
         """Copy runtime state while sharing immutable network declarations.
 
@@ -1375,14 +1350,15 @@ class RateReconciledCulture(Mechanism):
                                self.unit_converter.growth_scale))
 
     # Return accepted source rates and the existing native thermal handoff.
-    def get_solver_state_rates(self, *, phase, completed_state, **kwargs):
+    def get_solver_state_rates(self, *, phase: LiquidPhase, completed_state: Mapping,
+                               **kwargs) -> TransferResult:
         """Evaluate kinetics, reconcile fluxes, and return native culture balances.
 
         Parameters
         ----------
         phase : LiquidPhase
-            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol] and ``vol``
-            [m3].
+            Current phase; supplies ``mass_j`` [kg], ``mw`` [g/mol], ``vol``
+            [m3] and live ``temp`` [K].
         completed_state : Mapping
             Native completed state with the population, product and IVCD states.
         **kwargs
@@ -1396,6 +1372,8 @@ class RateReconciledCulture(Mechanism):
             Species mass rates [kg/s]; population rates [10^6 cell/s] or
             [kgDW/s]; product rate [g/s]; IVCD rate [10^6 cell day/(mL s)]; and the
             flux solution and provider result in ``aux``.
+            ``aux`` also retains the native ``process`` and accepted named
+            ``source_rates_kg_s`` [kg/s] for the energy hook.
 
         Raises
         ------
@@ -1423,7 +1401,8 @@ class RateReconciledCulture(Mechanism):
         if self.population_state == 'biomass_kg':
             snapshot_values = dict(viable_cells_million=0., dead_cells_million=0.,
                                    ivcd_million_cell_day_per_ml=0., **values)
-        snapshot = CultureSnapshot(concentrations, volume_l, **snapshot_values)
+        snapshot = CultureSnapshot(concentrations, volume_l, **snapshot_values,
+                                   temperature_k=self.thermal_temperature(phase))
         provider_result = self.rate_provider.evaluate(snapshot, self.conditions)
         self.unit_converter.validate_rate_units(provider_result.units)
         self.last_provider_result = provider_result
@@ -1550,6 +1529,8 @@ class RateReconciledCulture(Mechanism):
             state_rates[StateKey('biomass_kg', phase_ref)] = viable_rate
         return TransferResult(
             state_rates,
-            {"flux_solution": solution, "rate_provider": provider_result},
+            {"flux_solution": solution, "rate_provider": provider_result,
+             "process": kwargs.get("process"),
+             "source_rates_kg_s": dict(zip(phase.name_species, species_rate))},
             float(species_rate.sum()),
         )

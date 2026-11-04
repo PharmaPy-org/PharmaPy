@@ -14,22 +14,26 @@ This module defines no experiment or measurement object hierarchy; that belongs
 to the shared estimation work (#346).
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from typing import Optional, TYPE_CHECKING
 
 import numpy as np
 
 from .BioreactorUnitConverter import BioreactorUnitConverter
 
+if TYPE_CHECKING:
+    from .construction import NativeBioreactorAssembly
 
 # Declaration layout ----------------------------------------------------------
 _DECLARATION_FIELDS = {"schema_version", "time_unit", "fields"}
 _FIELD_KEYS = {"species", "quantity", "unit", "event_side", "time_key", "value_key"}
-_QUANTITIES = {"concentration"}
+_QUANTITIES = {"concentration", "temperature"}
 _EVENT_SIDES = {"pre", "post"}
 
 
 # Validation helpers ------------------------------------------------------------
-def _validate_declaration(declaration, species_names=None):
+def _validate_declaration(declaration: Mapping,
+                          species_names: Optional[Sequence[str]] = None) -> dict:
     """Validate a measurement declaration and return its fields in order.
 
     Parameters
@@ -37,12 +41,14 @@ def _validate_declaration(declaration, species_names=None):
     declaration : Mapping
         ``schema_version`` (1), ``time_unit`` (a ``TIME`` unit of the source
         sampling times) and ``fields``: an ordered mapping from field name to
-        ``species``, ``quantity`` (``'concentration'``), ``unit`` (an
+        ``species``, ``quantity`` (``'concentration'`` or ``'temperature'``), ``unit`` (an
         amount-per-volume unit such as ``'g/L'`` or ``'mmol/L'``),
         ``event_side`` (``'pre'`` or ``'post'``), and the source-file column
-        names ``time_key`` and ``value_key``. A ``$comment`` entry is ignored.
+        names ``time_key`` and ``value_key``. Temperature uses ``species: null``
+        and unit ``K`` or ``degC``. A ``$comment`` entry is ignored.
     species_names : Sequence[str], optional
-        Phase species; when given, every field must measure one of them.
+        Phase species; when given, every concentration field must measure one
+        of them. Temperature fields describe the liquid as a whole.
 
     Returns
     -------
@@ -75,13 +81,17 @@ def _validate_declaration(declaration, species_names=None):
         if not isinstance(field, Mapping) or set(field) != _FIELD_KEYS:
             raise ValueError(f"measurement field {name!r} requires exactly {sorted(_FIELD_KEYS)}")
         if field["quantity"] not in _QUANTITIES:
-            raise ValueError(f"measurement field {name!r} quantity must be concentration")
+            raise ValueError(f"measurement field {name!r} quantity must be concentration or temperature")
         if field["event_side"] not in _EVENT_SIDES:
             raise ValueError(f"measurement field {name!r} event_side must be pre or post")
-        if species_names is not None and field["species"] not in species_names:
-            raise ValueError(f"measurement field {name!r} measures unknown species {field['species']!r}")
-        # Probe the unit once; the molecular weight only enables amount bases.
-        BioreactorUnitConverter.convert(1., "kg/m3", field["unit"], molecular_weight_g_mol=1.)
+        if field["quantity"] == "temperature":
+            if field["species"] is not None or field["unit"] not in {"K", "degC"}:
+                raise ValueError("temperature fields require species null and unit K or degC")
+        else:
+            if species_names is not None and field["species"] not in species_names:
+                raise ValueError(f"measurement field {name!r} measures unknown species {field['species']!r}")
+            # Probe the unit once; the molecular weight only enables amount bases.
+            BioreactorUnitConverter.convert(1., "kg/m3", field["unit"], molecular_weight_g_mol=1.)
         result[name] = dict(field)
     return result
 
@@ -153,7 +163,8 @@ def sampling_times(observations):
                                      observations["time_s"].values()]))
 
 
-def predict_measurements(assembly, histories, declaration, observations):
+def predict_measurements(assembly: "NativeBioreactorAssembly", histories: Sequence,
+                         declaration: Mapping, observations: Mapping) -> dict:
     """Predict each declared measured field at its own sampling times.
 
     Parameters
@@ -191,6 +202,8 @@ def predict_measurements(assembly, histories, declaration, observations):
     with the phase molecular weight. At an event time the solution holds two
     states; ``event_side`` selects the last state before (``'pre'``) or the
     first state after (``'post'``) the event.
+    Temperature fields read native ``global_temp`` [K], with the exact
+    Celsius offset 273.15 K when ``unit`` is ``degC``.
     """
     names = list(assembly.phase.name_species)
     fields = _validate_declaration(declaration, names)
@@ -202,7 +215,6 @@ def predict_measurements(assembly, histories, declaration, observations):
                               for h in histories])  # [m3]
     predicted = {}
     for name, field in fields.items():
-        index = names.index(field["species"])
         rows = []
         for time in observations["time_s"][name]:
             tolerance = 8. * np.finfo(float).eps * max(1., abs(time))  # [s]; 8 ulps covers unit-conversion roundoff
@@ -211,10 +223,17 @@ def predict_measurements(assembly, histories, declaration, observations):
                 raise RuntimeError(f"sampling time {time} s for {name!r} is absent from the solution; "
                                    "solve with report_times=sampling_times(observations)")
             rows.append(matches[0] if field["event_side"] == "pre" else matches[-1])
-        concentration = masses[rows, index] / volumes[rows]  # [kg/m3]
-        predicted[name] = BioreactorUnitConverter.convert(
-            concentration, "kg/m3", field["unit"],
-            molecular_weight_g_mol=assembly.phase.mw[index])  # [field unit]
+        if field["quantity"] == "temperature":
+            temperatures = np.concatenate([np.asarray(h.global_temp, dtype=float).reshape(-1)
+                                           for h in histories])  # [K]
+            celsius_offset = 273.15 if field["unit"] == "degC" else 0.0  # [K]; exact Celsius definition
+            predicted[name] = temperatures[rows] - celsius_offset  # [field unit]
+        else:
+            index = names.index(field["species"])
+            concentration = masses[rows, index] / volumes[rows]  # [kg/m3]
+            predicted[name] = BioreactorUnitConverter.convert(
+                concentration, "kg/m3", field["unit"],
+                molecular_weight_g_mol=assembly.phase.mw[index])  # [field unit]
         predicted[name] = np.atleast_1d(predicted[name])
     return {"time_s": {name: np.array(observations["time_s"][name], dtype=float)
                        for name in fields},

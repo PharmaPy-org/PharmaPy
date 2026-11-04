@@ -10,6 +10,7 @@ import pytest
 
 from PharmaPy.Bioreactors import build_bioreactor
 from tests.Bioreactor.test_bioreactor_adaptive_inventory import configured_case, EXAMPLE
+from tests.Bioreactor.test_bioreactor_thermal import thermal_case
 from tests.Bioreactor.test_forward_audit import native_case
 
 
@@ -102,8 +103,38 @@ def test_terminal_feed_is_applied_once_and_replays_after_reset(backend):
     np.testing.assert_allclose(again[-1].mass_j_liquid0, after.mass_j_liquid0, rtol=1e-10, atol=1e-12)
 
 
+@pytest.mark.integration
+@pytest.mark.parametrize('density_mode', ['legacy', 'constant-mixture', 'native-phase'])
+def test_terminal_cold_feed_uses_native_enthalpy_mixing(thermal_case, density_mode):
+    document, path = thermal_case
+    if density_mode != 'legacy':
+        document['operation']['volume_policy'] = 'native'
+        document['operation']['density'] = {'mode': density_mode}
+        if density_mode == 'constant-mixture':
+            document['operation']['density'].update(value=1., unit='kg/L')  # [kg/L]; same synthetic liquid property
+    document['recipes']['continuous'] = [{'time': 100., 'event_type': 'feed', 'volume_l': .5,
+        'composition': 'nutrient-free', 'concentrations_mmol_l': {}, 'temperature_k': 270.}]  # [s], [L], [K]
+    assembly = build_bioreactor(document, thermo_path=path)
+    before, after = assembly.solve()
+    expected = (float(np.asarray(before.global_temp).reshape(-1)[-1]) + .5*270.)/1.5  # [K]; equal Cp, 1 kg + 0.5 kg
+    assert float(np.asarray(after.global_temp).reshape(-1)[0]) == pytest.approx(expected, abs=1e-7)
 
 
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_assimulo_preserves_every_requested_time_near_terminal_feed(thermal_case):
+    pytest.importorskip('assimulo')
+    document, path = thermal_case
+    document['operation']['volume_policy'] = 'native'
+    document['operation']['density'] = {'mode': 'constant-mixture', 'value': 1., 'unit': 'kg/L'}
+    document['numerical'].update(backend='assimulo', relative_tolerance=1e-6, absolute_tolerance=1e-10,
+                                  maximum_step={'unit': 's', 'value': 5.})  # [-], [native kg,K,m3], [s]; regression where CVode omits 97.5 s without native continuous reporting
+    document['recipes']['continuous'] = [{'time': 100., 'event_type': 'feed', 'volume_l': .5,
+        'composition': 'nutrient-free', 'concentrations_mmol_l': {}, 'temperature_k': 270.}]  # [s], [L], [K]
+    times = np.linspace(0., 100., 41)  # [s]; 2.5 s spacing includes the formerly missing 97.5 s row
+    before, after = build_bioreactor(document, thermo_path=path).solve(report_times=times)
+    np.testing.assert_array_equal(before.time, times)
+    np.testing.assert_array_equal(after.time, [100.])
 
 
 @pytest.mark.integration
