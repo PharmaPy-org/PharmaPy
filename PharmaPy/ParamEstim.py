@@ -3905,7 +3905,11 @@ class ParameterEstimation:
               recorded custom-optimizer fit through
               ``CalibrationRecord.optimizer_inputs()`` or
               ``CalibrationRecord.rerun()``, ``bounds`` is supplied as a list
-              of per-parameter ``(lower, upper)`` pairs.
+              of per-parameter ``(lower, upper)`` pairs. Recording custom
+              bounds of shape ``(2, 2)`` requires an explicit canonical
+              declaration to ``CalibrationRecord.from_estimation``; use a
+              compatible replay adapter if the original callable expects
+              another layout.
             * **Accepted return forms**: ``optimizer`` may return (1) a
               mapping containing ``'x'`` (1-D array of shape
               ``(num_params,)``) plus optional diagnostic entries

@@ -22,7 +22,7 @@ import sys
 
 import numpy as np
 import pytest
-from scipy.optimize import OptimizeResult, minimize
+from scipy.optimize import OptimizeResult, least_squares, minimize
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -741,8 +741,8 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
         replayed_three.params_convg, opt_three, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
     )
 
-    # 3. Custom-optimizer capture and replay across native SciPy 2-tuple,
-    #    pair-list, tuple-of-tuples, and list-of-lists bounds representations.
+    # 3. The callable accepts these layouts, but capture requires an
+    #    explicit canonical declaration for any custom 2x2 bounds.
     native_bounds = ([0.0, 0.05], [3.0, 2.0])  # ([mol/L, 1/s], [mol/L, 1/s])
     pair_list_bounds = [(0.0, 3.0), (0.05, 2.0)]  # [(mol/L, mol/L), (1/s, 1/s)]
     tuple_of_tuples_bounds = ((0.0, 3.0), (0.05, 2.0))  # ((mol/L, mol/L), (1/s, 1/s))
@@ -772,6 +772,7 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
             est_cust,
             experiments,
             case=f'custom_bounds_{label}',
+            bounds=pair_list_bounds,
             parameter_units={'c_A0': 'mol/L', 'k': '1/s'},
             model=ModelRevision('first_order_decay', revision='v1'),
             sources=[DataSource('synthetic_batch', 'synthetic', 'internal test')],
@@ -841,6 +842,7 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
         est_active,
         experiments,
         case='custom_active_tuple_of_tuples_bounds',
+        bounds=active_pair_bounds,
         parameter_units={'c_A0': 'mol/L', 'k': '1/s'},
         model=ModelRevision('first_order_decay', revision='v1'),
         sources=[DataSource('synthetic_batch', 'synthetic', 'internal test')],
@@ -857,3 +859,121 @@ def test_scipy_two_param_list_of_tuples_bounds_and_three_param_ndarray_bounds():
     np.testing.assert_allclose(
         replayed_active.params_convg, opt_active, rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL
     )
+
+
+# Deliberately overlapping numerical ranges: both 2x2 orientations contain
+# the seed and solution, despite representing different physical constraints.
+PROVENANCE_TIMES = np.array([0.0, 0.01, 0.02, 0.05, 0.1])  # [s]
+PROVENANCE_SEED = np.array([0.5, 15.0])  # [mol/L, 1/s]
+PROVENANCE_TRUE = np.array([0.7, 14.0])  # [mol/L, 1/s]
+PROVENANCE_LOWER = [0.0, 10.0]  # [mol/L, 1/s]
+PROVENANCE_UPPER = [1.0, 20.0]  # [mol/L, 1/s]
+PROVENANCE_PAIRS = [(0.0, 1.0), (10.0, 20.0)]  # [(mol/L, mol/L), (1/s, 1/s)]
+
+
+def native_scipy_bounds_optimizer(seed, objective_fun, gradient_fun, *, bounds):
+    """Fit weighted residuals with SciPy's native lower/upper bounds.
+
+    Parameters
+    ----------
+    seed : numpy.ndarray
+        Initial ``[c_A0, k]`` in [mol/L, 1/s].
+    objective_fun : callable
+        Weighted residual callback returning a dimensionless vector.
+    gradient_fun : callable
+        Weighted sensitivity callback in [L/mol, s], with parameter rows.
+    bounds : sequence or numpy.ndarray
+        Native lower/upper vectors, each in [mol/L, 1/s].
+
+    Returns
+    -------
+    scipy.optimize.OptimizeResult
+        Genuine least-squares solution, with parameters in [mol/L, 1/s].
+    """
+    return least_squares(
+        lambda parameters: objective_fun(parameters, out_array=True), seed,
+        jac=lambda parameters: gradient_fun(parameters, out_array=True).T,
+        bounds=bounds)
+
+
+def canonical_scipy_bounds_optimizer(seed, objective_fun, gradient_fun, *, bounds):
+    """Adapt canonical per-parameter record bounds to real SciPy fitting.
+
+    Parameters
+    ----------
+    seed : numpy.ndarray
+        Initial ``[c_A0, k]`` in [mol/L, 1/s].
+    objective_fun : callable
+        Weighted residual callback returning a dimensionless vector.
+    gradient_fun : callable
+        Weighted sensitivity callback in [L/mol, s], with parameter rows.
+    bounds : sequence of tuple
+        Canonical intervals in [(mol/L, mol/L), (1/s, 1/s)].
+
+    Returns
+    -------
+    scipy.optimize.OptimizeResult
+        Genuine least-squares solution, with parameters in [mol/L, 1/s].
+    """
+    native_bounds = np.asarray(bounds, dtype=float).T  # [mol/L, 1/s] per row
+    return native_scipy_bounds_optimizer(
+        seed, objective_fun, gradient_fun, bounds=native_bounds)
+
+
+@pytest.mark.parametrize('layout', ['native_list', 'native_tuple',
+                                   'native_array', 'canonical_pairs'])
+def test_custom_two_parameter_bounds_require_explicit_record_declaration(layout):
+    """Require declared constraints even when both layouts contain the fit.
+
+    Parameters
+    ----------
+    layout : {'native_list', 'native_tuple', 'native_array', 'canonical_pairs'}
+        Bounds container interpreted by the explicitly chosen real adapter;
+        each interval has the corresponding concentration or rate units.
+    """
+    # Deterministic deviations of 0.001 mol/L keep the residual variance
+    # nonzero; this fixture tests constraint provenance, not solver accuracy.
+    observed = (first_order_decay(PROVENANCE_TRUE, PROVENANCE_TIMES)[:, 0]
+                + np.array([0.001, -0.001, 0.001, -0.001, 0.001]))  # [mol/L]
+    experiments = {'batch': Experiment({'c_A': Measurement(
+        0, PROVENANCE_TIMES, observed, uncertainty=MEAS_STD,
+        units='mol/L', x_units='s', basis='molar concentration')})}
+    native_bounds = [PROVENANCE_LOWER, PROVENANCE_UPPER]  # [mol/L, 1/s] per row
+    if layout == 'canonical_pairs':
+        optimizer = canonical_scipy_bounds_optimizer
+        fit_bounds = PROVENANCE_PAIRS  # [(mol/L, mol/L), (1/s, 1/s)]
+    else:
+        optimizer = native_scipy_bounds_optimizer
+        fit_bounds = {'native_list': native_bounds,
+                      'native_tuple': tuple(native_bounds),
+                      'native_array': np.asarray(native_bounds)}[layout]
+    estimator = ParameterEstimation(
+        first_order_decay, PROVENANCE_SEED, experiments,
+        name_params=['c_A0', 'k'])
+    estimator.optimize_fn(method=optimizer, bounds=fit_bounds, verbose=False)
+    assert estimator.info_opt['success']
+    np.testing.assert_array_less(PROVENANCE_LOWER, estimator.params_convg)
+    np.testing.assert_array_less(estimator.params_convg, PROVENANCE_UPPER)
+    capture = dict(
+        case='ambiguous_custom_bounds',
+        parameter_units={'c_A0': 'mol/L', 'k': '1/s'},
+        model=ModelRevision('first_order_decay', revision='constraint-provenance'),
+        sources=[DataSource('synthetic', 'synthetic', 'declared decay case')])
+    with pytest.raises(ValueError, match='custom.*2.*2.*explicit.*bounds'):
+        CalibrationRecord.from_estimation(estimator, experiments, **capture)
+
+    record = CalibrationRecord.from_estimation(
+        estimator, experiments, bounds=PROVENANCE_PAIRS, **capture)
+    assert [(item.lower, item.upper) for item in record.parameters] == PROVENANCE_PAIRS
+    assert record.optimizer_inputs()['bounds'] == PROVENANCE_PAIRS
+    np.testing.assert_array_equal(record.fitted_values, estimator.params_convg)
+    loaded = CalibrationRecord.from_json(record.to_json())
+    assert loaded.optimizer_inputs()['bounds'] == PROVENANCE_PAIRS
+    replayed = loaded.rerun(
+        first_order_decay, optimizer=canonical_scipy_bounds_optimizer,
+        rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL)
+    np.testing.assert_allclose(
+        replayed.params_convg, estimator.params_convg,
+        rtol=ESTIMATE_RTOL, atol=ESTIMATE_ATOL)
+    np.testing.assert_array_less(PROVENANCE_LOWER, replayed.params_convg)
+    np.testing.assert_array_less(replayed.params_convg, PROVENANCE_UPPER)
