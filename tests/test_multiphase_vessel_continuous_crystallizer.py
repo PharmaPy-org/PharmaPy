@@ -1,0 +1,690 @@
+"""Withdrawal and flow contracts for the continuous and semibatch crystallizers.
+
+Tests evaluate ``unit_model`` at t = 0, so they need no integrator, except one
+that integrates a fed semibatch crystallizer with SciPy.
+
+Units: charge mass [kg], temp [K], x_grid [um], distrib [#/(um m**3)],
+feed [kg/s], vol_flow [m**3/s], residence time [s], d(mass_j)/dt [kg/s],
+d(distrib)/dt [#/(um m**3 s)].
+
+Every test runs undersaturated, where nucleation and growth are inactive, so
+the only mechanism acting on the crystal population is withdrawal through the
+product stream. Formation is covered in the batch module.
+"""
+
+import os
+
+import numpy as np
+import pytest
+
+from PharmaPy.Crystallizers_Refactored import (ContinuousCrystallizer,
+                                               SemiBatchCrystallizer)
+from PharmaPy.IntegratorBackends import ScipyBackend
+from PharmaPy.Kinetics import CrystKinetics
+from PharmaPy.Mechanisms import OneDFVMMechanism
+from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.Streams_Refactored import LiquidStream
+
+pytestmark = pytest.mark.unit
+
+DATA_PATH = os.path.join(
+    os.path.dirname(__file__), "Flowsheet", "data", "compound_database.json"
+)
+
+SPECIES = ("A", "B", "C", "D", "solvent")  # solvent LAST
+TARGET = "C"
+TARGET_INDEX = SPECIES.index(TARGET)
+
+NUM_GRID = 199  # [-] size classes
+GRID_START = 1.0  # [um]
+GRID_STOP = 199.0  # [um]
+
+CHARGE_MASS = 1.0  # [kg]
+CHARGE_MASS_FRAC = [0.0, 0.0, 0.2, 0.0, 0.8]  # [-]
+FEED_MASS_FLOW = 0.01  # [kg/s], feed composition matches the charge
+
+# Undersaturated, so the kinetics select the unparameterised dissolution
+# branch and only withdrawal acts on the population.
+WARM_TEMP = 313.0  # [K]
+
+APELBLAT_COEFFS = np.array([-28.13909202, 0.001, 5.900800253])  # [-, K, -]
+NUCL_PRIM = (6.26855218e18, 0.0, 8.30671806)
+NUCL_SEC = (0.0, 0.0, 0.0, 0.0)
+GROWTH = (1.45782420e6, 0.0, 4.52241037, 1.0, 3.93676056)
+
+VESSEL_DIAMETER = 0.01  # [m]
+
+SEED_PEAK = 1.0e10  # [#/(um m**3)]
+SEED_CENTRE = 50.0  # [um]
+SEED_WIDTH = 15.0  # [um]
+
+# Recorded from this fixture. The liquid-only figure is listed because it is
+# what a residence time built on the wrong volume would produce.
+REFERENCE_RESIDENCE_TIME = 106.34780878  # [s], on the slurry volume
+LIQUID_ONLY_RESIDENCE_TIME = 100.0  # [s], the wrong answer
+
+# Closed-form comparisons (a division, a trapezoid) sit a few orders above
+# double-precision roundoff.
+ALGEBRAIC_RTOL = 1e-12  # [-]
+REFERENCE_RTOL = 1e-6  # [-]
+# An idle vessel resolves an outlet of order 1e-20 m**3/s, so its rates are
+# roundoff rather than exact zeros.
+IDLE_RATE_ATOL = 1e-15  # [kg/s] and [#/(um m**3 s)]
+
+
+def _size_grid():
+    """Return the internal crystal size coordinate.
+
+    Returns
+    -------
+    numpy.ndarray
+        Uniform grid of ``NUM_GRID`` sizes [um], spacing 1 um.
+    """
+    return np.arange(GRID_START, GRID_STOP + 1.0)
+
+
+def _seed_distribution(scale=1.0):
+    """Return a Gaussian crystal population.
+
+    Parameters
+    ----------
+    scale : float, optional
+        Multiplier on the peak number density [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        Crystal number density [#/(um m**3)].
+    """
+    grid = _size_grid()
+    return scale * SEED_PEAK * np.exp(
+        -0.5 * ((grid - SEED_CENTRE) / SEED_WIDTH) ** 2
+    )
+
+
+def _build_crystallizer(distrib=None, with_feed=True, temp=WARM_TEMP):
+    """Build a continuous crystallizer ready for a solver-free evaluation.
+
+    Parameters
+    ----------
+    distrib : numpy.ndarray, optional
+        Initial crystal number density [#/(um m**3)]. Defaults to unseeded.
+    with_feed : bool, optional
+        When True, attach a liquid feed whose composition matches the charge.
+    temp : float, optional
+        Vessel temperature [K].
+
+    Returns
+    -------
+    ContinuousCrystallizer
+        Vessel with its array layout compiled.
+
+    Notes
+    -----
+    The mechanism must be attached to the solid before the vessel sees the
+    phases, and the kinetics must be set through the vessel property, which
+    is what wires the phase connections.
+    """
+    vessel = ContinuousCrystallizer(
+        integrator=None, h_conv=0, diam=VESSEL_DIAMETER, isothermal=True
+    )
+
+    liquid = LiquidPhase(
+        DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC, temp=temp
+    )
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=[0.0, 0.0, 1.0, 0.0, 0.0], temp=temp
+    )
+
+    mechanism = OneDFVMMechanism(
+        solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        x_grid=_size_grid(),
+        distrib_init=np.zeros(NUM_GRID) if distrib is None else distrib,
+    )
+    solid.mechanisms = mechanism
+
+    vessel.Phases = [liquid, solid]
+    vessel.CrystKinetics = CrystKinetics(
+        APELBLAT_COEFFS,
+        nucl_prim=NUCL_PRIM,
+        nucl_sec=NUCL_SEC,
+        growth=GROWTH,
+        solubility_type="apelblat",
+    )
+
+    if with_feed:
+        vessel.Inlet = LiquidStream(
+            DATA_PATH,
+            mass_flow=FEED_MASS_FLOW,
+            mass_frac=CHARGE_MASS_FRAC,
+            temp=temp,
+        )
+
+    # compile_structure builds the array layout the balances index into. It
+    # runs inside solve_unit, but these tests call unit_model directly.
+    vessel.compile_structure()
+    return vessel
+
+
+def _mechanism(vessel):
+    """Return the population balance attached to the solid phase.
+
+    Parameters
+    ----------
+    vessel : ContinuousCrystallizer
+        Compiled vessel.
+
+    Returns
+    -------
+    OneDFVMMechanism
+        The crystallization mechanism.
+    """
+    from PharmaPy.DataClasses import PhaseRef
+
+    solid = vessel.Phases.get_phase_from_ref(PhaseRef("solid", 0))
+    return solid.get_mechanism(OneDFVMMechanism)
+
+
+def _liquid(vessel):
+    """Return the vessel's liquid phase.
+
+    Parameters
+    ----------
+    vessel : ContinuousCrystallizer
+        Compiled vessel.
+
+    Returns
+    -------
+    LiquidPhase
+        The continuous phase.
+    """
+    from PharmaPy.DataClasses import PhaseRef
+
+    return vessel.Phases.get_phase_from_ref(PhaseRef("liquid", 0))
+
+
+def _derivatives(vessel):
+    """Evaluate the material balance once and split it by state.
+
+    Parameters
+    ----------
+    vessel : ContinuousCrystallizer
+        Compiled vessel.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Liquid species mass rates [kg/s] and crystal number density rates
+        [#/(um m**3 s)].
+
+    Notes
+    -----
+    ``unit_model`` returns the vessel's reusable buffer, so the slices are
+    copied before they are returned.
+    """
+    states = vessel.create_solver_init_states()
+    packed = np.asarray(vessel.unit_model(0.0, states, mat_bce=True)).copy()
+
+    collection = vessel.solver_state_collection
+    species_key = next(k for k in collection.states if k.name == "mass_j")
+    distrib_key = next(k for k in collection.states if k.name == "distrib")
+    return (
+        packed[collection.slices[species_key]],
+        packed[collection.slices[distrib_key]],
+    )
+
+
+def _outlet_vol_flow(vessel):
+    """Return the volumetric discharge the controller posted.
+
+    Parameters
+    ----------
+    vessel : ContinuousCrystallizer
+        Compiled vessel, already evaluated at least once.
+
+    Returns
+    -------
+    float
+        Outlet volumetric flow [m**3/s].
+    """
+    posted = [
+        value
+        for key, value in vessel.controller.operating_conditions.items()
+        if key.name == "vol_flow" and key.port == "outlet"
+    ]
+    assert len(posted) == 1
+    return float(posted[0])
+
+
+def test_suspended_crystals_wash_out_at_the_slurry_residence_time():
+    """Withdrawal removes the population at minus one over the residence time.
+
+    With the vessel undersaturated nothing nucleates or grows, so the only
+    term acting on the distribution is discharge through the product. The
+    residence time is built on the slurry volume, not the liquid volume; the
+    two differ here by more than six percent, so this pins the basis.
+    """
+    seed = _seed_distribution()
+    vessel = _build_crystallizer(distrib=seed)
+
+    species_rates, distribution_rates = _derivatives(vessel)
+    mechanism = _mechanism(vessel)
+
+    outlet_flow = _outlet_vol_flow(vessel)  # [m**3/s]
+    slurry_volume = mechanism._slurry_volume()  # [m**3]
+    residence_time = slurry_volume / outlet_flow  # [s]
+
+    np.testing.assert_allclose(
+        distribution_rates, -seed / residence_time, rtol=ALGEBRAIC_RTOL
+    )
+    np.testing.assert_allclose(
+        residence_time, REFERENCE_RESIDENCE_TIME, rtol=REFERENCE_RTOL
+    )
+
+    # Guard against a vacuous pass: crystals are present and really leaving.
+    assert np.max(seed) > 0
+    assert np.min(distribution_rates) < 0
+
+    # A residence time built on the liquid volume alone would be the round
+    # 100 s, which the assertion above would not tolerate.
+    liquid_only = _liquid(vessel).vol / outlet_flow  # [s]
+    np.testing.assert_allclose(
+        liquid_only, LIQUID_ONLY_RESIDENCE_TIME, rtol=REFERENCE_RTOL
+    )
+    assert residence_time > liquid_only
+
+
+def test_residence_time_responds_to_the_solid_holdup():
+    """More suspended solid lengthens the residence time.
+
+    Because the slurry volume carries the crystals, doubling the population
+    does not double the washout rate: the vessel holds more, so each crystal
+    stays longer. The withdrawal law still holds at both loadings with its
+    own residence time.
+    """
+    light = _build_crystallizer(distrib=_seed_distribution())
+    heavy = _build_crystallizer(distrib=_seed_distribution(scale=2.0))
+
+    _, light_rates = _derivatives(light)
+    _, heavy_rates = _derivatives(heavy)
+
+    light_tau = _mechanism(light)._slurry_volume() / _outlet_vol_flow(light)
+    heavy_tau = _mechanism(heavy)._slurry_volume() / _outlet_vol_flow(heavy)
+
+    np.testing.assert_allclose(
+        light_rates, -_seed_distribution() / light_tau, rtol=ALGEBRAIC_RTOL
+    )
+    np.testing.assert_allclose(
+        heavy_rates,
+        -_seed_distribution(scale=2.0) / heavy_tau,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+    # The extra solid really did lengthen the residence time, so the washout
+    # rate grows by less than the factor of two applied to the population.
+    assert heavy_tau > light_tau
+    peak_ratio = np.min(heavy_rates) / np.min(light_rates)  # [-]
+    assert 1.0 < peak_ratio < 2.0
+    np.testing.assert_allclose(
+        peak_ratio, 2.0 * light_tau / heavy_tau, rtol=ALGEBRAIC_RTOL
+    )
+
+
+def test_matched_feed_leaves_the_liquid_stationary():
+    """A crystal-free vessel fed its own composition holds every species.
+
+    The controller withdraws the fed volume, and with no solid present the
+    discharge is pure liquid, so inflow and outflow cancel exactly.
+    """
+    vessel = _build_crystallizer()
+
+    species_rates, distribution_rates = _derivatives(vessel)
+
+    assert np.all(species_rates == 0.0)
+    assert np.all(distribution_rates == 0.0)
+    # Guard against a vacuous pass in which nothing flows at all.
+    assert _outlet_vol_flow(vessel) > 0
+
+
+def test_volume_controller_withdraws_the_fed_volumetric_flow():
+    """At its target volume the controller discharges exactly what is fed."""
+    vessel = _build_crystallizer()
+    _derivatives(vessel)
+
+    feed = LiquidStream(
+        DATA_PATH,
+        mass_flow=FEED_MASS_FLOW,
+        mass_frac=CHARGE_MASS_FRAC,
+        temp=WARM_TEMP,
+    )
+
+    np.testing.assert_allclose(
+        _outlet_vol_flow(vessel), feed.vol_flow, rtol=ALGEBRAIC_RTOL
+    )
+
+
+def test_slurry_discharge_leaves_the_liquid_accumulating():
+    """Crystals occupy part of the discharge, so liquid builds up.
+
+    The controller withdraws a fixed volume of slurry. When a fraction of
+    that volume is solid, less liquid leaves than enters, and the liquid
+    holdup grows at the volumetric flow times the solid volume fraction times
+    the liquid density. The accumulation carries the feed composition.
+    """
+    vessel = _build_crystallizer(distrib=_seed_distribution())
+
+    species_rates, _ = _derivatives(vessel)
+    mechanism = _mechanism(vessel)
+    liquid = _liquid(vessel)
+
+    outlet_flow = _outlet_vol_flow(vessel)  # [m**3/s]
+    slurry_volume = mechanism._slurry_volume()  # [m**3]
+    solid_fraction = (slurry_volume - liquid.vol) / slurry_volume  # [-]
+
+    expected_gain = (
+        outlet_flow * solid_fraction * liquid.getDensity()
+    )  # [kg/s]
+    np.testing.assert_allclose(
+        species_rates.sum(), expected_gain, rtol=ALGEBRAIC_RTOL
+    )
+
+    # Guard against a vacuous pass: solids really occupy part of the volume.
+    assert solid_fraction > 0
+    assert species_rates.sum() > 0
+
+    # What accumulates is feed, so it arrives in the feed composition.
+    np.testing.assert_allclose(
+        species_rates / species_rates.sum(),
+        CHARGE_MASS_FRAC,
+        atol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_idle_undersaturated_vessel_does_nothing():
+    """An unfed, crystal-free, undersaturated vessel is inert.
+
+    A seeded vessel would not qualify: the controller still resolves a
+    residual outlet of order 1e-20 m**3/s, and against a population of 1e10
+    that still withdraws crystals at a measurable rate. With no crystals
+    there is nothing to withdraw and nothing to form, so what remains is
+    roundoff, compared against an absolute floor for that reason.
+    """
+    vessel = _build_crystallizer(with_feed=False)
+
+    species_rates, distribution_rates = _derivatives(vessel)
+
+    np.testing.assert_allclose(
+        species_rates, np.zeros(len(SPECIES)), atol=IDLE_RATE_ATOL
+    )
+    np.testing.assert_allclose(
+        distribution_rates, np.zeros(NUM_GRID), atol=IDLE_RATE_ATOL
+    )
+
+    # Guard against a vacuous pass: the same vessel with a feed is active.
+    fed_species, fed_distribution = _derivatives(
+        _build_crystallizer(distrib=_seed_distribution())
+    )
+    assert np.min(fed_distribution) < -IDLE_RATE_ATOL
+
+
+def test_product_stream_carries_both_phases():
+    """The discharge is a slurry, not a clarified liquid.
+
+    A continuous crystallizer exists to remove crystals, so its outlet must
+    map the solid phase as well as the liquid one.
+    """
+    vessel = _build_crystallizer(distrib=_seed_distribution())
+
+    assert len(vessel.outlet_connections) == 1
+    mapped = {
+        mapping.sink_phaseref.phase_type
+        for mapping in vessel.outlet_connections[0].phase_mappings
+    }
+    assert mapped == {"liquid", "solid"}
+
+    families = [phase.phase_family for phase in vessel.Outlet.Phases]
+    assert "liquid" in families
+    assert "solid" in families
+
+
+# Slurry flow of a crystal-laden feed. Only its ratio to the vessel volume
+# enters the inlet term, so any positive value serves.
+FEED_SLURRY_VOL_FLOW = 1.0e-5  # [m**3/s]
+
+
+def _feed_solid(distrib):
+    """Return a solid phase carrying a feed crystal population.
+
+    Parameters
+    ----------
+    distrib : numpy.ndarray
+        Feed number density per m**3 of feed slurry [#/(um m**3)], on the
+        vessel's size grid.
+
+    Returns
+    -------
+    SolidPhase
+        Phase whose mechanism publishes ``distrib`` as the inlet population.
+    """
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=[0.0, 0.0, 1.0, 0.0, 0.0], temp=WARM_TEMP
+    )
+    solid.mechanisms = OneDFVMMechanism(
+        solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        x_grid=_size_grid(),
+        distrib_init=distrib,
+    )
+    return solid
+
+
+def test_crystal_inflow_is_scaled_by_the_slurry_volume():
+    """A crystal-laden feed enters as ``(Q / V_slurry) * n_in``.
+
+    Q is the whole slurry flow of the feed, so it is divided by the vessel's
+    slurry volume. Dividing it by the volume of the solid phase, which is the
+    crystal volume ``phi * V_slurry``, overstates the inflow by ``1 / phi``.
+    """
+    from PharmaPy.DataClasses import PhaseRef
+
+    vessel = _build_crystallizer(distrib=_seed_distribution(), with_feed=False)
+    mechanism = _mechanism(vessel)
+    solid = vessel.Phases.get_phase_from_ref(PhaseRef("solid", 0))
+
+    held = getattr(mechanism, mechanism.distribution_state_name)
+    phi = mechanism.solid_volume_fraction(held)  # [-]
+    vol_slurry = float(_liquid(vessel).vol) / (1.0 - phi)  # [m**3]
+    feed_distrib = _seed_distribution(scale=0.5)  # [#/(um m**3)]
+
+    rates = mechanism.get_inlet_contributions(
+        _feed_solid(feed_distrib), solid, FEED_SLURRY_VOL_FLOW, {}
+    )
+    assert list(rates) == [mechanism._flow_state_key()]
+    rate = rates[mechanism._flow_state_key()]
+
+    # Anti-vacuity: the crystals are a small part of the slurry, so the
+    # crystal volume and the slurry volume differ by orders of magnitude.
+    assert 0.0 < phi < 0.1
+    np.testing.assert_allclose(
+        rate, FEED_SLURRY_VOL_FLOW / vol_slurry * feed_distrib,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_crystal_inflow_reaches_a_vessel_without_crystals():
+    """Feed crystals enter a vessel that holds none yet.
+
+    With no crystals the slurry is all liquid, so the inlet term is
+    ``(Q / V_liquid) * n_in``, not zero.
+    """
+    from PharmaPy.DataClasses import PhaseRef
+
+    vessel = _build_crystallizer(with_feed=False)
+    mechanism = _mechanism(vessel)
+    solid = vessel.Phases.get_phase_from_ref(PhaseRef("solid", 0))
+    feed_distrib = _seed_distribution()  # [#/(um m**3)]
+
+    rates = mechanism.get_inlet_contributions(
+        _feed_solid(feed_distrib), solid, FEED_SLURRY_VOL_FLOW, {}
+    )
+    # A vessel without crystals used to get no inlet term at all.
+    assert list(rates) == [mechanism._flow_state_key()]
+    rate = rates[mechanism._flow_state_key()]
+
+    np.testing.assert_allclose(
+        rate,
+        FEED_SLURRY_VOL_FLOW / float(_liquid(vessel).vol) * feed_distrib,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_check_module_sees_a_connected_inlet():
+    """A fed vessel passes the modeling-object check without a warning.
+
+    The refactored vessels store their feeds in ``inlet_connections``; their
+    ``Inlet`` attribute is write-only, so it cannot be read to find them.
+    """
+    import warnings
+
+    from PharmaPy.CheckModule import check_modeling_objects
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        check_modeling_objects(_build_crystallizer(with_feed=True), "CR01")
+
+    with pytest.warns(UserWarning, match="Inlet"):
+        check_modeling_objects(_build_crystallizer(with_feed=False), "CR01")
+
+
+# Integrating a fed semibatch crystallizer. The runtime is a design choice:
+# the feed adds half the charge mass, so the slurry volume grows by about
+# half and a missing dilution term would raise the crystal count by as much.
+DILUTION_RUNTIME = 50.0  # [s]
+# Tight solver settings, so the check probes the balance and not the error
+# control. At the population's declared absolute tolerance of 1e4
+# #/(um m**3) the uncontrolled tails of the seed alone move the crystal count
+# by 1e-5; at 1 #/(um m**3) and this relative tolerance it holds to 3e-9.
+DILUTION_ABS_TOL = 1.0  # [#/(um m**3)]
+DILUTION_SOLVER_RTOL = 1e-10  # [-]
+# A budget far below the 50 % that a missing dilution term gives and well
+# above the 3e-9 measured with the settings above.
+COUNT_CONSERVATION_RTOL = 1e-7  # [-]
+# Over DILUTION_RUNTIME the slurry grows by a factor of about 1.47; a guard a
+# little below that shows the feed acted without pinning its exact value.
+MIN_VOLUME_GROWTH = 1.4  # [-]
+
+
+def _semibatch_feed():
+    """Return a liquid feed matching the charge in composition and temperature.
+
+    Returns
+    -------
+    LiquidStream
+        Feed of ``FEED_MASS_FLOW`` [kg/s] at ``WARM_TEMP`` [K].
+    """
+    return LiquidStream(
+        DATA_PATH, mass_flow=FEED_MASS_FLOW, mass_frac=CHARGE_MASS_FRAC,
+        temp=WARM_TEMP,
+    )
+
+
+def _build_semibatch(integrator=None, abs_tol=None):
+    """Build a seeded semibatch crystallizer fed with its own liquid.
+
+    Parameters
+    ----------
+    integrator : IntegratorBackend, optional
+        Backend for a solve. Defaults to None, for solver-free evaluation.
+    abs_tol : float, optional
+        Absolute tolerance on the number density [#/(um m**3)]. Defaults to
+        the population's own.
+
+    Returns
+    -------
+    SemiBatchCrystallizer
+        Vessel with its array layout compiled. Undersaturated, so only the
+        feed acts on the crystals, and the feed matches the charge in
+        composition and temperature, so it does not change the density.
+    """
+    vessel = SemiBatchCrystallizer(
+        integrator=integrator, h_conv=0, diam=VESSEL_DIAMETER, isothermal=True
+    )
+    liquid = LiquidPhase(
+        DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC, temp=WARM_TEMP
+    )
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=[0.0, 0.0, 1.0, 0.0, 0.0], temp=WARM_TEMP
+    )
+    solid.mechanisms = OneDFVMMechanism(
+        solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        x_grid=_size_grid(),
+        distrib_init=_seed_distribution(),
+        abs_tol=abs_tol,
+    )
+    vessel.Phases = [liquid, solid]
+    vessel.CrystKinetics = CrystKinetics(
+        APELBLAT_COEFFS,
+        nucl_prim=NUCL_PRIM,
+        nucl_sec=NUCL_SEC,
+        growth=GROWTH,
+        solubility_type="apelblat",
+    )
+    vessel.Inlet = _semibatch_feed()
+    vessel.compile_structure()
+    return vessel
+
+
+def test_semibatch_feed_dilutes_the_population():
+    """A liquid feed into a semibatch crystallizer dilutes its crystals.
+
+    With no outlet and no crystals in the feed, d(n V)/dt = 0, so the
+    population per m**3 of slurry falls as dn/dt = -(Q_in / V_slurry) * n.
+    Without this term the growing volume multiplied the crystal mass.
+    """
+    vessel = _build_semibatch()
+    feed_vol_flow = float(_semibatch_feed().vol_flow)  # [m**3/s]
+
+    mechanism = _mechanism(vessel)
+    held = np.array(getattr(mechanism, mechanism.distribution_state_name))
+    phi = mechanism.solid_volume_fraction(held)  # [-]
+    vol_slurry = float(_liquid(vessel).vol) / (1.0 - phi)  # [m**3]
+
+    _, distrib_rate = _derivatives(vessel)
+
+    np.testing.assert_allclose(
+        distrib_rate, -(feed_vol_flow / vol_slurry) * held,
+        rtol=ALGEBRAIC_RTOL,
+    )
+
+
+def test_semibatch_feed_keeps_the_crystal_count():
+    """Fed with its own liquid, a semibatch crystallizer keeps its crystals.
+
+    Undersaturated, nothing nucleates, grows or dissolves, and the feed
+    carries no crystals, so the total count, the population per m**3 of
+    slurry times the slurry volume, stays put while the volume grows.
+    """
+    vessel = _build_semibatch(
+        ScipyBackend(options={"rtol": DILUTION_SOLVER_RTOL}),
+        abs_tol=DILUTION_ABS_TOL,
+    )
+    vessel.solve_unit(runtime=DILUTION_RUNTIME, verbose=False)
+
+    mechanism = _mechanism(vessel)
+    density = np.asarray(vessel.result.distrib_solid0)  # [#/(um m**3)]
+    count_per_volume = np.array([
+        mechanism.integrate_over_size(row) for row in density
+    ])  # [#/m**3 of slurry]
+    vol_slurry = np.asarray(vessel.result.vessel_vol).ravel()  # [m**3]
+    crystal_count = count_per_volume * vol_slurry  # [#]
+
+    # Guard against a vacuous pass: the feed did grow the slurry.
+    assert vol_slurry[-1] > MIN_VOLUME_GROWTH * vol_slurry[0]
+    np.testing.assert_allclose(
+        crystal_count, crystal_count[0], rtol=COUNT_CONSERVATION_RTOL
+    )

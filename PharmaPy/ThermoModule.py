@@ -486,7 +486,7 @@ class ThermoPhysicalManager:
     def __init__(self, path_data):
 
         props_dict = ParseDatabase(path_data)
-        self.__dict__ = props_dict
+        self.__dict__.update(props_dict)
         self.name_species = props_dict['name_species']
 
         self.num_species = len(self.name_species)

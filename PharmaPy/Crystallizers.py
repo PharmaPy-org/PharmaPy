@@ -19,6 +19,7 @@ from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 
 from PharmaPy.jac_module import numerical_jac, numerical_jac_central, dx_jac_x
 from PharmaPy.Connections import get_inputs, get_inputs_new
+from PharmaPy.Errors import PharmaPyNonImplementedError
 
 from PharmaPy.Results import DynamicResult
 from PharmaPy.Plotting import plot_function, plot_distrib
@@ -48,6 +49,13 @@ gas_ct = 8.314  # J/mol/K
 # reference volumes are documented under "Crystallizer jacket volume" in
 # doc/online_docs/advanced_usage.rst.
 DEFAULT_JACKET_VOLUME_RATIO = 0.14  # [-]
+
+# The legacy crystallizers evaluate the size-independent growth rate
+# k_g * exp(-E_g/RT) * S**g, and CrystKinetics.deriv_cryst returns one
+# partial per entry of that law, so their estimation paths carry exactly
+# these three growth parameters. Entries past them are the size factor
+# (1 + beta*L)**alpha that only the refactored OneDFVMMechanism applies.
+NUM_LEGACY_GROWTH_PARAMS = 3  # [-]: k_g, E_g, g
 
 
 def _caller_stacklevel() -> int:
@@ -570,6 +578,38 @@ class _BaseCryst(StructuralPresenceMixin):
 
     @Kinetics.setter
     def Kinetics(self, instance):
+        """Attach crystallization kinetics and derive the estimation mask.
+
+        Parameters
+        ----------
+        instance : CrystKinetics
+            Kinetics whose ``name_params`` and ``num_params`` define the
+            estimable parameters; ``mask_params`` selects among them.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If the growth law has more than ``NUM_LEGACY_GROWTH_PARAMS``
+            entries. These units evaluate the size-independent rate
+            ``k_g * exp(-E_g/RT) * S**g``; the entries past ``k_g, E_g, g``
+            are the size factor that only the refactored
+            ``OneDFVMMechanism`` applies, and since ``deriv_cryst`` returns
+            three growth partials, a longer law would list alpha and beta as
+            estimable in ``name_params`` and ``mask_params`` while the
+            analytic ``jac_params`` builds no column for them.
+        """
+        num_growth_params = len(instance.params['growth'])  # [-]
+
+        if num_growth_params > NUM_LEGACY_GROWTH_PARAMS:
+            raise PharmaPyNonImplementedError(
+                '%s takes a growth law of %d entries (k_g, E_g, g), got %d: '
+                'the legacy crystallizers evaluate a size-independent growth '
+                'rate and estimate only those three growth parameters. Use '
+                'the refactored OneDFVMMechanism for size-dependent growth '
+                '(alpha, beta), or give growth only its first three entries.'
+                % (type(self).__name__, NUM_LEGACY_GROWTH_PARAMS,
+                   num_growth_params))
+
         self._Kinetics = instance
 
         name_params = self._Kinetics.name_params
@@ -2496,7 +2536,8 @@ class BatchCryst(_BaseCryst):
                 size_exponent = self.Kinetics.params['dissolution'][-1]  # [-]
             else:
                 size_rate = self.Kinetics.growth  # [um/s], nonnegative growth
-                size_exponent = self.Kinetics.params['growth'][-1]  # [-]
+                # Index 2 is the growth exponent g in both formulations.
+                size_exponent = self.Kinetics.params['growth'][2]  # [-]
             bp_exp = self.Kinetics.params['nucl_prim'][-1]
             k_s, _, bs_exp, bs2_exp = self.Kinetics.params['nucl_sec']
 

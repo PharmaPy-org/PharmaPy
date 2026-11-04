@@ -29,6 +29,17 @@ AFFECTED_MODULES = (
     "PharmaPy.Reactors",
     "PharmaPy.SolidLiquidSep",
     "PharmaPy.ThreePhaseSettler",
+    # MultiPhaseVessel refactor modules.
+    "PharmaPy.Crystallizers_Refactored",
+    "PharmaPy.DataClasses",
+    "PharmaPy.IntegratorBackends",
+    "PharmaPy.Mechanisms",
+    "PharmaPy.MixedPhases_Refactored",
+    "PharmaPy.MultiPhaseVessel",
+    "PharmaPy.Phases_Refactored",
+    "PharmaPy.ProcessControl_Refactored",
+    "PharmaPy.Reactors_Refactored",
+    "PharmaPy.Streams_Refactored",
 )
 LAZY_CONSTRUCTORS = (
     "CVode",
