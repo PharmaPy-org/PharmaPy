@@ -200,12 +200,15 @@ def test_custom_ambiguous_bounds_warn_without_losing_intervals():
         estimator = ParameterEstimation(affine_model, [initial, rate], {'run': experiment},
             output_names=('concentration',), name_params=['initial', 'rate'])
         estimator.optimize_fn(method=method, bounds=bounds, verbose=False)
+        np.testing.assert_allclose(estimator.params_convg, [initial, rate], rtol=1e-7, atol=0.)  # [g/L; g/(L s)]; independently known linear-fit coefficients
         if callable(method):
             with pytest.warns(RuntimeWarning, match='Custom optimizer bounds cannot be interpreted'):
                 result = estimator.get_confidence_intervals(verbose=False)
         else:
             result = estimator.get_confidence_intervals(verbose=False)
         intervals.append(np.array([result['initial'], result['rate']]))  # [g/L; g/(L s)]
+        assert intervals[-1].shape == (2, 2)
+        assert np.isfinite(intervals[-1]).all()
     np.testing.assert_allclose(intervals[1], intervals[0], rtol=1e-7, atol=0.)  # [-]; smooth linear model, finite-difference roundoff
 
 
