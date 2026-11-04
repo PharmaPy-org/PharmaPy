@@ -30,9 +30,12 @@ that measures ``c_A`` [mol/L] at four times and ``T`` [K] once, and a
 standard deviation of its errors (``uncertainty``), so the residuals are
 divided by them and are dimensionless. The fit uses PharmaPy's
 Levenberg-Marquardt solver (``method='LM'``). Calibration records can
-capture LM and IPOPT fits; SciPy least-squares fits (``method='scipy'`` or
-``'least_squares'``) cannot be recorded yet (issue
-`#534 <https://github.com/PharmaPy-org/PharmaPy/issues/534>`__).
+capture LM, IPOPT, SciPy least-squares (``method='scipy'`` or
+``'least_squares'``), and custom-optimizer fits (issue
+`#534 <https://github.com/PharmaPy-org/PharmaPy/issues/534>`__). Custom records
+require a callable accepting canonical per-parameter bounds for replay;
+callables are supplied again after loading JSON. See :doc:`calibration_records`
+for the bounds declaration required when custom bounds have shape ``(2, 2)``.
 
 .. testcode::
 
