@@ -5,13 +5,14 @@ that seed but cannot fit bootstrap datasets with different means.
 """
 
 import warnings
+from functools import partial
 
 import numpy as np
 import pytest
-from scipy.optimize import Bounds
+from scipy.optimize import Bounds, least_squares
 
 from PharmaPy.ParamEstim import Experiment, Measurement, ParameterEstimation
-from PharmaPy.StatsModule import StatisticsClass
+from PharmaPy.StatsModule import StatisticsClass, _interval_bounds
 from test_statistics_bootstrap_state import _seeded
 
 pytestmark = pytest.mark.unit
@@ -36,7 +37,30 @@ def mean_model(parameters, times):
     return np.full((len(times), 1), parameters[0])
 
 
-def mean_estimator(values, budget=64, bounds=(0., 6.)):
+def scipy_optimizer(seed, objective_fun, gradient_fun, **options):
+    """Use real SciPy through the native custom-optimizer interface.
+
+    Parameters
+    ----------
+    seed : array_like
+        Initial parameters [model parameter units], shape (n_parameters,).
+    objective_fun : callable
+        Native objective; ``out_array=True`` returns weighted residuals [-].
+    gradient_fun : callable
+        Native gradient callback [1 / parameter unit]. SciPy's forward differences
+        are used here, so this callback is not required by the adapter.
+    **options : dict
+        Native solver options, including evaluation budget [-] and parameter bounds.
+
+    Returns
+    -------
+    scipy.optimize.OptimizeResult
+        Real solver status and fitted values [model parameter units].
+    """
+    return least_squares(partial(objective_fun, out_array=True), seed, **options)
+
+
+def mean_estimator(values, budget=64, bounds=(0., 6.), *, custom=False):
     """Fit a mean with known unit measurement standard deviation.
 
     Parameters
@@ -47,6 +71,9 @@ def mean_estimator(values, budget=64, bounds=(0., 6.)):
         Evaluation budget [-]; 64 permits convergence for this linear case.
     bounds : tuple, optional
         Lower and upper mean concentration [g/L].
+    custom : bool, optional
+        Exercise the native custom-optimizer entry point with real SciPy.
+        Otherwise use the native built-in least-squares entry point.
 
     Returns
     -------
@@ -57,7 +84,8 @@ def mean_estimator(values, budget=64, bounds=(0., 6.)):
         values, uncertainty=1., units='g/L', x_units=None)})
     estimator = ParameterEstimation(mean_model, [3.], {'mean': experiment},
         output_names=('mean',), name_params=['mean'], dx_finitediff=1e-6)
-    estimator.optimize_fn(method='least_squares', bounds=bounds,
+    method = scipy_optimizer if custom else 'least_squares'
+    estimator.optimize_fn(method=method, bounds=bounds,
         optim_options={'max_nfev': budget}, verbose=False)
     return estimator
 
@@ -81,9 +109,17 @@ def affine_model(parameters, times):
 
 
 # Public-path regressions, independent balances, and failure qualification.
-def test_bootstrap_marks_unsuccessful_refits_without_changing_fit():
+@pytest.mark.parametrize('custom', [False, True])
+def test_bootstrap_marks_unsuccessful_refits_without_changing_fit(custom):
+    """Retain failure status through both native optimizer entry points.
+
+    Parameters
+    ----------
+    custom : bool
+        Use the real custom SciPy adapter instead of the built-in entry point.
+    """
     values = np.arange(1., 6.)  # [g/L], symmetric observations about 3
-    estimator = mean_estimator(values, budget=1)
+    estimator = mean_estimator(values, budget=1, custom=custom)
     statistics = StatisticsClass(estimator)
     samples = _seeded(statistics.get_bootsamples, 32)[0]  # [g/L]
     with warnings.catch_warnings(record=True) as caught:
@@ -103,8 +139,16 @@ def test_bootstrap_marks_unsuccessful_refits_without_changing_fit():
     np.testing.assert_array_equal(estimator.y_data[0][:, 0], values)
 
 
-def test_bootstrap_adequate_budget_recovers_sample_means():
-    estimator = mean_estimator(np.arange(1., 6.))
+@pytest.mark.parametrize('custom', [False, True])
+def test_bootstrap_adequate_budget_recovers_sample_means(custom):
+    """Recover independently calculated sample means through both entry points.
+
+    Parameters
+    ----------
+    custom : bool
+        Use the real custom SciPy adapter instead of the built-in entry point.
+    """
+    estimator = mean_estimator(np.arange(1., 6.), custom=custom)
     statistics = StatisticsClass(estimator)
     samples = _seeded(statistics.get_bootsamples, 32)[0]  # [g/L]
     draws = _seeded(statistics.bootstrap_params, 32)  # [g/L]
@@ -124,11 +168,52 @@ def test_single_observation_absolute_information_is_defined():
 
 
 @pytest.mark.parametrize('bounds', [(0., 4.), Bounds(0., 4.)])
-def test_intervals_warn_when_crossing_parameter_bounds(bounds):
-    estimator = mean_estimator([4., 5., 6., 7., 8.], bounds=bounds)
+@pytest.mark.parametrize('custom', [False, True])
+def test_intervals_warn_when_crossing_parameter_bounds(bounds, custom):
+    """Preserve untruncated intervals for both native optimization routes.
+
+    Parameters
+    ----------
+    bounds : tuple or scipy.optimize.Bounds
+        Mean concentration limits [g/L].
+    custom : bool
+        Use the real custom SciPy adapter instead of the built-in entry point.
+    """
+    estimator = mean_estimator([4., 5., 6., 7., 8.], bounds=bounds, custom=custom)
     with pytest.warns(RuntimeWarning, match='bound'):
         intervals = estimator.get_confidence_intervals(verbose=False)
     assert intervals['mean'][1] > 4.  # [g/L], diagnostic preserved, never clipped
+
+
+def test_custom_ambiguous_bounds_warn_without_losing_intervals():
+    """A two-parameter custom layout cannot be inferred from the fitted values."""
+    times = np.arange(5.)  # [s]; five observations for two independent parameters
+    offsets = np.array([.1, -.2, .2, -.2, .1])  # [g/L]; orthogonal to constant and time columns
+    initial = 3.  # [g/L]; synthetic intercept
+    rate = 1.  # [g/(L s)]; synthetic constant production rate
+    values = initial + rate * times + offsets  # [g/L]; orthogonal noise preserves both exact coefficients
+    bounds = ([0., 0.], [2 * initial, 2 * rate])  # [g/L; g/(L s)] per side; positive ranges twice the true coefficients
+    experiment = Experiment({'concentration': Measurement('concentration', times,
+        values, uncertainty=1., units='g/L', x_units='s')})
+    intervals = []
+    for method in ('least_squares', scipy_optimizer):
+        estimator = ParameterEstimation(affine_model, [initial, rate], {'run': experiment},
+            output_names=('concentration',), name_params=['initial', 'rate'])
+        estimator.optimize_fn(method=method, bounds=bounds, verbose=False)
+        if callable(method):
+            with pytest.warns(RuntimeWarning, match='Custom optimizer bounds cannot be interpreted'):
+                result = estimator.get_confidence_intervals(verbose=False)
+        else:
+            result = estimator.get_confidence_intervals(verbose=False)
+        intervals.append(np.array([result['initial'], result['rate']]))  # [g/L; g/(L s)]
+    np.testing.assert_allclose(intervals[1], intervals[0], rtol=1e-7, atol=0.)  # [-]; smooth linear model, finite-difference roundoff
+
+
+def test_interval_bounds_preserve_ipopt_parameter_pairs():
+    """Qualify the solver-independent IPOPT layout without substituting a solver."""
+    lower, upper = _interval_bounds([(0., 4.), (None, 7.)], ['first', 'second'], 'IPOPT')  # [g/L]; second parameter is unbounded below
+    np.testing.assert_array_equal(lower, [0., -np.inf])
+    np.testing.assert_array_equal(upper, [4., 7.])
 
 
 def test_information_assessment_uses_exact_mean_derivative():

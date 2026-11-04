@@ -334,7 +334,18 @@ def test_utility_heat_transfer_honors_custom_cp_and_dynamic_cooling_water_contro
 
 
 def test_reaction_enthalpy_normalization_and_reversible_shape_contract():
-    """#22, #270: non-unit stoichiometry normalizes delta_hrxn and reversible kinetics run in non-isothermal vessels."""
+    """Preserve raw-reaction heat normalization in a reversible vessel.
+
+    Notes
+    -----
+    The single reaction ``2 B --> A`` requires one equilibrium constant,
+    with units [L/mol] so ``c_A / Keq`` and ``c_B**2`` both have units
+    [(mol/L)**2]. Its value is specified at ``INITIAL_TEMP``; the nonzero
+    reaction heat makes it temperature-dependent through van't Hoff's law.
+    The former second entry was silently unused before reaction-count
+    validation. Removing it preserves the heat and trajectory expectations
+    for issues #22 and #270.
+    """
     liquid = LiquidPhase(
         DATA_PATH,
         temp=INITIAL_TEMP,
@@ -348,7 +359,7 @@ def test_reaction_enthalpy_normalization_and_reversible_shape_contract():
         rxn_list=["2 B --> A"],
         k_params=1.0e-2,  # [L/(mol*s)]
         ea_params=0.0,  # [J/mol]
-        keq_params=[2.5, 0.0],  # [-], temperature-independent Keq = 2.5
+        keq_params=[2.5],  # [L/mol], one raw-basis Keq at INITIAL_TEMP
         delta_hrxn=-4.0e4,  # [J/mol of reaction as written]
         tref_hrxn=INITIAL_TEMP,  # [K], eliminates sensible delta_Cp correction at INITIAL_TEMP
     )
@@ -366,12 +377,14 @@ def test_reaction_enthalpy_normalization_and_reversible_shape_contract():
     # Q_gen = -(delta_hrxn / stoich_norm) * r_rxn * 1000 * V_liq [W], stoich_norm = 2.0 [-].
     # Note: RxnKinetics orders partic_species in database order: ['A', 'B'].
     conc_init = liquid.mole_conc[:2]  # [mol/L]
-    rxn_rates, _ = kinetics.get_rxn_rates(
+    rxn_rates, species_rates = kinetics.get_rxn_rates(  # [mol/L/s], both arrays
         conc_init,
         INITIAL_TEMP,
         return_both=True,
         delta_hrxn=np.array([-4.0e4]),
     )
+    assert rxn_rates.shape == (1,)
+    assert species_rates.shape == (2,)
     expected_q_gen = (
         -(-4.0e4 / 2.0) * float(rxn_rates[0]) * LITERS_PER_M3 * liquid.vol
     )  # [W]

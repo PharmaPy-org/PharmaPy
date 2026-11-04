@@ -80,10 +80,11 @@ class _BaseCrystallizer(MultiPhaseVessel):
             self._bind_population_balance_liquid()
             pbm.owning_phase_ref = solidphase_ref
             weights = pbm.fraction
+            if getattr(ck, "target_idx", None) is None and pbm.target_ind:
+                ck.target_idx = pbm.target_ind[0]
             if pbm._mechanism_kinetics is None:
                 try:
-                    ck.target_idx = pbm.target_ind[0]
-                    pbm.mechanism_kinetics=ck
+                    pbm.mechanism_kinetics = ck
                 except AttributeError:
                     raise AttributeError("Your solid phase does not have kinetics in its mechanism. The solidphase you assign to the vessel must have a mechanism with kinetics or crystallization cannot occur")
             reversible = ReversibleTransferMechanism(source_mechanism=pbm)
