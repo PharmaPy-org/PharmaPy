@@ -811,6 +811,9 @@ class LiquidPhase(ThermoPhysicalManager):
         compared with ``None`` rather than tested for truth, so a solvent
         declared as the first species (index ``0``) is honored and the
         concentration converters' three-value return is unpacked correctly.
+        A candidate solvent-blend mapping is retained only after composition
+        and amount reconciliation succeeds. A rejected candidate leaves the
+        previous blend available to later concentration-only updates.
 
         Raises
         ------
@@ -837,7 +840,7 @@ class LiquidPhase(ThermoPhysicalManager):
 
         # Support solute concentrations alongside a solvent-blend mass_frac mapping (#336, #338).
         has_single_conc = (mole_conc is not None) ^ (mass_conc is not None)
-        solv_mass_frac = None
+        solv_mass_frac = None  # [-], candidate solute-free solvent mass fractions
         if has_single_conc and isinstance(mass_frac, Mapping) and mole_frac is None:
             conc_arg = mole_conc if mole_conc is not None else mass_conc
             if isinstance(conc_arg, Mapping):
@@ -848,7 +851,6 @@ class LiquidPhase(ThermoPhysicalManager):
                         "solute concentrations and solvent mass_frac."
                     )
             solv_mass_frac = dict(mass_frac)
-            self._solv_mass_frac = solv_mass_frac
             mass_frac = None
 
         mole_conc = self._coerce_composition_mapping(mole_conc, 'mole_conc')
@@ -893,7 +895,6 @@ class LiquidPhase(ThermoPhysicalManager):
             if has_solvent_closure:
                 mass_frac, mole_frac, mole_conc = frac_out
             else:
-                self._solv_mass_frac = None
                 mass_frac, mole_frac = frac_out
 
             mass_conc = mole_conc * self.mw
@@ -909,13 +910,11 @@ class LiquidPhase(ThermoPhysicalManager):
             if has_solvent_closure:
                 mass_frac, mole_frac, mass_conc = frac_out
             else:
-                self._solv_mass_frac = None
                 mass_frac, mole_frac = frac_out
 
             mole_conc = mass_conc / self.mw
 
         elif mass_frac is not None:
-            self._solv_mass_frac = None
             concentration_basis = False
             mass_frac = _as_float_array(mass_frac)  # [-]
             mole_conc = self.frac_to_conc(mass_frac)
@@ -923,7 +922,6 @@ class LiquidPhase(ThermoPhysicalManager):
             mole_frac = self.frac_to_frac(mass_frac)
 
         elif mole_frac is not None:
-            self._solv_mass_frac = None
             concentration_basis = False
             mole_frac = _as_float_array(mole_frac)  # [-]
             mole_conc = self.frac_to_conc(mole_frac=mole_frac)
@@ -962,6 +960,8 @@ class LiquidPhase(ThermoPhysicalManager):
         self.__set_amounts(mass, vol, moles, mass_frac, mole_frac,
                            mole_conc, mass_conc,
                            concentration_basis=concentration_basis)
+        if composition_supplied:
+            self._solv_mass_frac = solv_mass_frac
 
     def getDensity(self, mass_frac: Optional[np.ndarray] = None,
                    mole_frac: Optional[np.ndarray] = None,

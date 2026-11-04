@@ -201,6 +201,94 @@ def test_solvent_blend_mass_conc_and_update_phase(solvent_blend_db: str) -> None
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize('failure', ['blend_sum', 'amount_shape'])
+def test_rejected_solvent_blend_update_preserves_accepted_blend(
+    solvent_blend_db: str, failure: str,
+) -> None:
+    """Retain the accepted blend through conversion and amount-shape errors.
+
+    Parameters
+    ----------
+    solvent_blend_db : str
+        Four-species constant-property fixture database, with densities
+        [kg/m**3] and molar masses [g/mol] defined above.
+    failure : {'blend_sum', 'amount_shape'}
+        Reject a non-normalized blend [-] during composition conversion,
+        or a valid candidate blend with mismatched per-point volumes [m**3].
+    """
+    initial_solute_conc = 0.5  # [mol/L], dilute A in pure THF
+    initial_volume = 0.1  # [m**3], positive liquid inventory
+    accepted_blend = {'THF': 1.0}  # [-], pure solvent reference case
+    phase = LiquidPhase(
+        path_thermo=solvent_blend_db,
+        mole_conc={'A': initial_solute_conc},
+        mass_frac=accepted_blend,
+        vol=initial_volume,
+    )
+    retained_blend = phase._solv_mass_frac
+    initial_mole_conc = phase.mole_conc.copy()  # [mol/L]
+    initial_mass = phase.mass  # [kg]
+    relative_tolerance = 1e-12  # [-], roundoff allowance for ideal-volume arithmetic
+
+    if failure == 'blend_sum':
+        invalid_blend = {'ACN': 0.5}  # [-], deliberately sums to one half
+        with pytest.raises(ValueError, match='must sum to 1.0'):
+            phase.updatePhase(
+                mole_conc={'A': initial_solute_conc},
+                mass_frac=invalid_blend,
+            )
+    else:
+        candidate_blend = {'ACN': 1.0}  # [-], valid replacement solvent
+        proposed_conc = {'A': [0.5, 1.0]}  # [mol/L], two-point profile
+        proposed_volume = [0.1, 0.1, 0.1]  # [m**3], deliberately three amounts
+        with pytest.raises(ValueError, match='supply one amount per point'):
+            phase.updatePhase(
+                mole_conc=proposed_conc,
+                mass_frac=candidate_blend,
+                vol=proposed_volume,
+            )
+
+    np.testing.assert_allclose(
+        phase.mole_conc, initial_mole_conc, rtol=relative_tolerance,
+    )
+    assert phase.mass == pytest.approx(initial_mass, rel=relative_tolerance)
+
+    # Recovery must reuse the last accepted THF blend, not either rejected ACN blend.
+    recovered_solute_conc = 1.0  # [mol/L], feasible A volume fraction of one eighth
+    phase.updatePhase(mole_conc={'A': recovered_solute_conc})
+    assert phase._solv_mass_frac is retained_blend
+    assert phase._solv_mass_frac == accepted_blend
+    assert phase.concentration_basis is False
+
+    # Independent ideal-volume closure using the fixture's pure-component data.
+    molar_mass_a = 150.0  # [g/mol], database species A
+    molar_mass_thf = 72.11  # [g/mol], database species THF
+    density_a = 1200.0  # [kg/m**3], database species A
+    density_thf = 889.0  # [kg/m**3], database species THF
+    solute_mass_conc = recovered_solute_conc * molar_mass_a  # [kg/m**3]
+    solvent_volume_fraction = 1.0 - solute_mass_conc / density_a  # [-]
+    solvent_mass_conc = density_thf * solvent_volume_fraction  # [kg/m**3]
+    expected_mass_conc = np.array([
+        solute_mass_conc, 0.0, 0.0, solvent_mass_conc,
+    ])  # [kg/m**3], ordered A, B, ACN, THF
+    expected_mole_conc = np.array([
+        recovered_solute_conc, 0.0, 0.0, solvent_mass_conc / molar_mass_thf,
+    ])  # [mol/L], ordered A, B, ACN, THF
+    expected_density = solute_mass_conc + solvent_mass_conc  # [kg/m**3]
+    expected_volume = initial_mass / expected_density  # [m**3], mass conserved
+    expected_moles = expected_volume * np.sum(expected_mole_conc) * 1000.0  # [mol], L/m**3
+    np.testing.assert_allclose(
+        phase.mass_conc, expected_mass_conc, rtol=relative_tolerance,
+    )
+    np.testing.assert_allclose(
+        phase.mole_conc, expected_mole_conc, rtol=relative_tolerance,
+    )
+    assert phase.mass == pytest.approx(initial_mass, rel=relative_tolerance)
+    assert phase.vol == pytest.approx(expected_volume, rel=relative_tolerance)
+    assert phase.moles == pytest.approx(expected_moles, rel=relative_tolerance)
+
+
+@pytest.mark.unit
 def test_solvent_blend_validation_errors(solvent_blend_db: str) -> None:
     """Reject invalid solvent blends, overlapping solute/solvent, or infeasible conc."""
     vol_holdup = 0.1  # [m**3]
