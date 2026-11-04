@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "biology": {
+    "conditions": {
+      "temperature_k": 309.65
+    }
+  },
+  "numerics": {
+    "backend": "fixed-step",
+    "step": {
+      "unit": "day",
+      "value": 0.00625
+    },
+    "relative_tolerance": null,
+    "absolute_tolerance": null,
+    "maximum_step": {
+      "unit": null,
+      "value": null
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  },
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 0.21,
+    "initial_volume": {
+      "unit": "L",
+      "value": 0.21
+    },
+    "mode": "fed-batch",
+    "runtime": {
+      "unit": "day",
+      "value": 7.0
+    },
+    "temperature_k": 309.65,
+    "volume_policy": "working-volume"
+  },
+  "recipe": {
+    "name": "process",
+    "require_complete_inputs": true
+  },
+  "$comment": "Khare 2026 control/SOM adaptation through native reconciliation, not exact source solver reproduction. Nominal 210 mL initial working volume, 36.5 C, seven-day pre-feed endpoint. Aqueous carrier density 1 kg/L and constant working volume between additions are explicit approximations. See ../README.md for provenance and assumptions."
+}

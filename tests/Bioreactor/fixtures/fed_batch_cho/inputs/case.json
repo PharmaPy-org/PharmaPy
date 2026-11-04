@@ -1,0 +1,25 @@
+{
+  "schema_version": 2,
+  "biology": {"conditions": {"osmolality": 320.0, "ph": 7.0}},
+  "numerics": {
+    "backend": "fixed-step",
+    "step": {"unit": "day", "value": 0.0125},
+    "relative_tolerance": null,
+    "absolute_tolerance": null,
+    "maximum_step": null,
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  },
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 0.75,
+    "initial_volume": {"unit": "L", "value": 0.75},
+    "mode": "fed-batch",
+    "runtime": {"unit": "day", "value": 12.0},
+    "temperature_k": 310.15,
+    "volume_policy": "native"
+  },
+  "recipe": {"name": "fed_batch", "require_complete_inputs": false},
+  "$comment": "Schema 2. Fill the shared template; see doc/online_docs/bioreactors/templates/guide.json."
+}

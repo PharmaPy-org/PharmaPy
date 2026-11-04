@@ -1,0 +1,640 @@
+{
+  "GLC": {
+    "formula": "GLC",
+    "mw": 180.156,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "LAC": {
+    "formula": "LAC",
+    "mw": 90.078,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "GLN": {
+    "formula": "GLN",
+    "mw": 146.145,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "GLU": {
+    "formula": "GLU",
+    "mw": 147.13,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ASN": {
+    "formula": "ASN",
+    "mw": 132.119,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ASP": {
+    "formula": "ASP",
+    "mw": 133.104,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ALA": {
+    "formula": "ALA",
+    "mw": 89.094,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "TRP": {
+    "formula": "TRP",
+    "mw": 204.225,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "NH3": {
+    "formula": "NH3",
+    "mw": 17.031,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "PHE": {
+    "formula": "PHE",
+    "mw": 165.192,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "TYR": {
+    "formula": "TYR",
+    "mw": 181.191,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "SER": {
+    "formula": "SER",
+    "mw": 105.093,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "GLY": {
+    "formula": "GLY",
+    "mw": 75.067,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "MET": {
+    "formula": "MET",
+    "mw": 149.211,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "THR": {
+    "formula": "THR",
+    "mw": 119.119,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ILE": {
+    "formula": "ILE",
+    "mw": 131.175,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "VAL": {
+    "formula": "VAL",
+    "mw": 117.148,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "ARG": {
+    "formula": "ARG",
+    "mw": 174.204,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "HIS": {
+    "formula": "HIS",
+    "mw": 155.154,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "LEU": {
+    "formula": "LEU",
+    "mw": 131.175,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "LYS": {
+    "formula": "LYS",
+    "mw": 146.189,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  },
+  "water": {
+    "formula": "H2O",
+    "mw": 18.015,
+    "t_crit": 650,
+    "p_crit": 5000,
+    "cp_liq": [
+      75
+    ],
+    "cp_solid": [
+      40
+    ],
+    "rho_liq": 1000,
+    "rho_solid": 1200,
+    "visc_liq": [
+      -3,
+      500,
+      0,
+      0
+    ],
+    "p_vap": [
+      1,
+      1000,
+      -50
+    ],
+    "mol_vol": 0.1,
+    "delta_hvap": 40000,
+    "tref_hvap": 373.15,
+    "surf_tension": 0.07
+  }
+}

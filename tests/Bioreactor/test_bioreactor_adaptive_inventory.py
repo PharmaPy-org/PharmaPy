@@ -5,10 +5,12 @@ experimental parameter assumptions. CVode cases require the real Assimulo lane.
 """
 
 from pathlib import Path
+import json
 
 import numpy as np
 import pytest
 
+from PharmaPy.Bioreactors import build_bioreactor
 from PharmaPy.DataClasses import IntraPhaseProcess, PhaseRef, StateKey, TransferResult
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Mechanisms import Mechanism
@@ -18,7 +20,8 @@ from PharmaPy.Phases_Refactored import LiquidPhase
 
 # Synthetic first-order networks have closed-form, independently derived states.
 THERMO = Path(__file__).parents[1] / 'fixtures/native_four_species.json'
-RATE = 4.  # [1/s]; exhausts a pool within the unrelated default 1 s limiter horizon
+EXAMPLE = Path(__file__).parent / 'fixtures/analytical_conversion'
+RATE = 4.  # [1/s]; fast enough to exhaust a pool within the unrelated default 1 s limiter horizon
 
 
 class SequentialReaction(Mechanism):
@@ -73,7 +76,6 @@ class SequentialReaction(Mechanism):
                                np.array([-first, first-second, second, 0.])}, {}, 0.)
 
 
-
 def vessel(backend, invalid=False):
     """Build a real native vessel with equal-mass conversion and inert carrier.
 
@@ -100,8 +102,45 @@ def vessel(backend, invalid=False):
     return unit
 
 
+def configured_case(backend, method=None):
+    """Declare a fast first-order equal-mass conversion through ordinary JSON.
 
-# Native adaptive solver and acceptance contracts.
+    Parameters
+    ----------
+    backend : str
+        Native adaptive backend name.
+    method : str, optional
+        SciPy method; omitted retains BDF.
+
+    Returns
+    -------
+    dict
+        Batch case with 1 g biomass converted to substrate over 2 s at 4/s.
+        Formal 1000 g/mol species make mmol/L equal to kg/m3 in this fixture.
+    """
+    case = json.loads((EXAMPLE/'mechanism.json').read_text())
+    case['operation'].update(mode='batch', runtime={'unit':'s','value':2.},
+                             recipe={'name':'batch','require_complete_inputs':True})
+    case['recipes'] = {'batch':[]}
+    case['state']['species']['amounts'] = {'biomass':1., 'substrate':0., 'product':0.}  # [g]
+    case['parameters']['rates']['decay'] = RATE  # [1/s]; same analytical coefficient
+    case['model']['kinetics'] = {
+        'rule_graph':[
+            {'identifier':'loss','expression':{'op':'multiply','args':[
+                {'parameter':'rates.decay'}, {'concentration':'biomass'}]}},
+            {'identifier':'negative','expression':{'op':'multiply','args':[-1.,{'ref':'loss'}]}}],
+        'species_mass_rates':{'biomass':'negative','substrate':'loss'},
+        'rate_unit':'kg/(m3 s)', 'constants':{}}
+    case['rate_provider'] = None
+    case['numerical'].update({'backend':backend,'step':{'unit':'s','value':.1},
+                         'relative_tolerance':1e-8,'absolute_tolerance':1e-13,
+                         'maximum_step':{'unit':'s','value':.1}})  # [s], [-], [kg,m3]; 20 reports and 1e-10 relative initial-mass budget
+    if method is not None:
+        case['numerical']['method'] = method
+    return case
+
+
+# Public solver paths are checked against physical solutions, not event layout.
 @pytest.mark.integration
 def test_scipy_sequential_reaction_conserves_and_resolves_transient():
     """B starts empty, grows, and decays; compare with t*exp(-t) exactly."""
@@ -117,14 +156,12 @@ def test_scipy_sequential_reaction_conserves_and_resolves_transient():
     assert np.min(states[:,:3]) >= 0.
 
 
-
 @pytest.mark.integration
 def test_scipy_rejects_consumption_of_empty_inventory():
     """Preserve genuine infeasibility; do not fix failures by zeroing a sink."""
     unit = vessel(ScipyBackend({'rtol':1e-7,'atol':1e-12}, inventory_boundaries=True), invalid=True)
     with pytest.raises(RuntimeError, match='negative rate at empty inventory'):
         unit.solve_unit(time_grid=np.array([0., 1.]), verbose=False)  # [s]
-
 
 
 @pytest.mark.assimulo
@@ -144,7 +181,6 @@ def test_cvode_adaptive_contract_resolves_fast_sequential_reaction():
     assert backend._inventory_rates is None
 
 
-
 @pytest.mark.assimulo
 @pytest.mark.integration
 def test_cvode_empty_inventory_remains_infeasible():
@@ -156,7 +192,6 @@ def test_cvode_empty_inventory_remains_infeasible():
     with pytest.raises(RuntimeError, match='negative rate at empty inventory'):
         unit.solve_unit(time_grid=np.array([0.,1.]), verbose=False)  # [s]
     assert backend._inventory_rates is None
-
 
 
 @pytest.mark.assimulo
@@ -178,6 +213,45 @@ def test_cvode_derivative_does_not_alias_reused_native_buffer():
     assert not np.shares_memory(first, second)
     assert second[0] == pytest.approx(.5*saved[0])
 
+
+@pytest.mark.integration
+@pytest.mark.parametrize('method', [None, 'BDF', 'Radau', 'LSODA', 'RK45', 'RK23', 'DOP853'])
+def test_json_method_preserves_analytical_conversion(method):
+    """Pass solver choice through normalization, construction and native solve.
+
+    Parameters
+    ----------
+    method : str or None
+        Existing native solver method, or unchanged BDF default.
+    """
+    assembly = build_bioreactor(configured_case('scipy', method), thermo_path=EXAMPLE/'thermo.json')
+    history, = assembly.solve()
+    biomass = assembly.phase.name_species.index('biomass')
+    substrate = assembly.phase.name_species.index('substrate')
+    expected = .001*np.exp(-RATE*history.time)  # [kg]; 1 g initial mass
+    np.testing.assert_allclose(history.mass_j_liquid0[:,biomass], expected, atol=1e-10, rtol=1e-6)
+    np.testing.assert_allclose(history.mass_j_liquid0[:,[biomass,substrate]].sum(axis=1), .001, atol=1e-12, rtol=0.)
+    assert assembly.unit.integrator.method == (method or 'BDF')
+
+
+@pytest.mark.assimulo
+@pytest.mark.integration
+def test_json_cvode_preserves_analytical_conversion():
+    """The optional solver must work through the user JSON, not manual swapping."""
+    pytest.importorskip('assimulo')
+    assembly = build_bioreactor(configured_case('assimulo'), thermo_path=EXAMPLE/'thermo.json')
+    history, = assembly.solve()
+    biomass = assembly.phase.name_species.index('biomass')
+    expected = .001*np.exp(-RATE*history.time)  # [kg]; same independent analytical oracle
+    np.testing.assert_allclose(history.mass_j_liquid0[:,biomass], expected, atol=1e-10, rtol=1e-6)
+    assert assembly.unit.integrator.inventory_boundaries
+
+
+@pytest.mark.unit
+def test_unknown_method_is_rejected_before_solving():
+    """A misspelling must not silently select a different numerical algorithm."""
+    with pytest.raises(ValueError, match='scipy method must be'):
+        build_bioreactor(configured_case('scipy','radau'), thermo_path=EXAMPLE/'thermo.json')
 
 
 @pytest.mark.integration

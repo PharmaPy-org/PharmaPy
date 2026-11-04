@@ -1,0 +1,2161 @@
+{
+  "schema_version": 2,
+  "mechanism": "rate-reconciled-culture",
+  "parameters": {
+    "rates": {
+      "u01": 9.150577530253079e-05,
+      "u02": 0.00013162647226160138,
+      "u03": 0.0001893380843203997,
+      "u04": 0.0002723533462392791,
+      "u05": 0.0003917666404726622,
+      "u06": 0.0005635366802227339,
+      "u07": 0.0008106192747123912,
+      "u08": 0.0011660352051538656,
+      "u09": 0.0016772832105930603,
+      "u10": 0.00241268784690436,
+      "u11": 0.003470530563852579,
+      "u12": 0.00499218430187266,
+      "u13": 0.007181006951340153,
+      "u14": 0.010329518646948168,
+      "u15": 0.014858494943767923,
+      "u16": 0.021373200391985776,
+      "u17": 0.030744277716201775,
+      "u18": 0.04422410284635533,
+      "u19": 0.06361415579896194,
+      "u20": 0.09150577530253079,
+      "g": 0.15,
+      "p": 0.1,
+      "w": 0.05,
+      "death": 0.03,
+      "degradation": 0.2
+    },
+    "affinities": {
+      "N01": 0.0,
+      "N02": 0.0,
+      "N03": 3.786761686407994e-07,
+      "N04": 5.447066924785581e-07,
+      "N05": 7.835332809453245e-07,
+      "N06": 1.1270733604454679e-06,
+      "N07": 1.6212385494247826e-06,
+      "N08": 2.3320704103077314e-06,
+      "N09": 3.3545664211861208e-06,
+      "N10": 4.82537569380872e-06,
+      "N11": 6.941061127705158e-06,
+      "N12": 9.98436860374532e-06,
+      "N13": 1.4362013902680306e-05,
+      "N14": 2.0659037293896337e-05,
+      "N15": 2.9716989887535847e-05,
+      "N16": 4.274640078397155e-05,
+      "N17": 6.148855543240355e-05,
+      "N18": 8.844820569271066e-05,
+      "N19": 0.00012722831159792388,
+      "N20": 0.00018301155060506159
+    },
+    "yields": {},
+    "maintenance": {},
+    "responses": {
+      "phase": {
+        "midpoint": 0.00022,
+        "slope": 30000.0,
+        "uptake_late": 0.6,
+        "growth_late": 0.4,
+        "product_late": 1.8
+      }
+    },
+    "coefficients": {},
+    "corrections": {}
+  },
+  "model": {
+    "pathways": {},
+    "kinetics": {
+      "extracellular_species": [
+        "N01",
+        "N02",
+        "N03",
+        "N04",
+        "N05",
+        "N06",
+        "N07",
+        "N08",
+        "N09",
+        "N10",
+        "N11",
+        "N12",
+        "N13",
+        "N14",
+        "N15",
+        "N16",
+        "N17",
+        "N18",
+        "N19",
+        "N20",
+        "W"
+      ],
+      "rule_graph": [
+        {
+          "identifier": "late",
+          "expression": {
+            "op": "divide",
+            "args": [
+              1.0,
+              {
+                "op": "add",
+                "args": [
+                  1.0,
+                  {
+                    "op": "exp",
+                    "args": [
+                      {
+                        "op": "negate",
+                        "args": [
+                          {
+                            "op": "multiply",
+                            "args": [
+                              {
+                                "parameter": "responses.phase.slope"
+                              },
+                              {
+                                "op": "subtract",
+                                "args": [
+                                  {
+                                    "state": "ivcd_million_cell_day_per_ml"
+                                  },
+                                  {
+                                    "parameter": "responses.phase.midpoint"
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "uptake_factor",
+          "expression": {
+            "op": "add",
+            "args": [
+              1.0,
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "parameter": "responses.phase.uptake_late"
+                      },
+                      1.0
+                    ]
+                  },
+                  {
+                    "ref": "late"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "growth_factor",
+          "expression": {
+            "op": "add",
+            "args": [
+              1.0,
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "parameter": "responses.phase.growth_late"
+                      },
+                      1.0
+                    ]
+                  },
+                  {
+                    "ref": "late"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "product_factor",
+          "expression": {
+            "op": "add",
+            "args": [
+              1.0,
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "parameter": "responses.phase.product_late"
+                      },
+                      1.0
+                    ]
+                  },
+                  {
+                    "ref": "late"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u01",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.u01"
+              },
+              {
+                "ref": "uptake_factor"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u02",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.u02"
+              },
+              {
+                "ref": "uptake_factor"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u03",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u03"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N03"
+                  },
+                  {
+                    "parameter": "affinities.N03"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u04",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u04"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N04"
+                  },
+                  {
+                    "parameter": "affinities.N04"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u05",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u05"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N05"
+                  },
+                  {
+                    "parameter": "affinities.N05"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u06",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u06"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N06"
+                  },
+                  {
+                    "parameter": "affinities.N06"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u07",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u07"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N07"
+                  },
+                  {
+                    "parameter": "affinities.N07"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u08",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u08"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N08"
+                  },
+                  {
+                    "parameter": "affinities.N08"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u09",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u09"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N09"
+                  },
+                  {
+                    "parameter": "affinities.N09"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u10",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u10"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N10"
+                  },
+                  {
+                    "parameter": "affinities.N10"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u11",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u11"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N11"
+                  },
+                  {
+                    "parameter": "affinities.N11"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u12",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u12"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N12"
+                  },
+                  {
+                    "parameter": "affinities.N12"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u13",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u13"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N13"
+                  },
+                  {
+                    "parameter": "affinities.N13"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u14",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u14"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N14"
+                  },
+                  {
+                    "parameter": "affinities.N14"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u15",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u15"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N15"
+                  },
+                  {
+                    "parameter": "affinities.N15"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u16",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u16"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N16"
+                  },
+                  {
+                    "parameter": "affinities.N16"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u17",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u17"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N17"
+                  },
+                  {
+                    "parameter": "affinities.N17"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u18",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u18"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N18"
+                  },
+                  {
+                    "parameter": "affinities.N18"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u19",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u19"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N19"
+                  },
+                  {
+                    "parameter": "affinities.N19"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "u20",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "op": "multiply",
+                "args": [
+                  {
+                    "parameter": "rates.u20"
+                  },
+                  {
+                    "ref": "uptake_factor"
+                  }
+                ]
+              },
+              {
+                "op": "monod",
+                "args": [
+                  {
+                    "concentration": "N20"
+                  },
+                  {
+                    "parameter": "affinities.N20"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "g",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.g"
+              },
+              {
+                "ref": "growth_factor"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "p",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "parameter": "rates.p"
+              },
+              {
+                "ref": "product_factor"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "w",
+          "expression": {
+            "parameter": "rates.w"
+          }
+        },
+        {
+          "identifier": "death",
+          "expression": {
+            "parameter": "rates.death"
+          }
+        },
+        {
+          "identifier": "degradation",
+          "expression": {
+            "parameter": "rates.degradation"
+          }
+        },
+        {
+          "identifier": "growth",
+          "expression": {
+            "ref": "g"
+          }
+        }
+      ],
+      "kinetic_outputs": {
+        "growth": "growth",
+        "death": "death",
+        "exchange_fluxes": {
+          "u01": "u01",
+          "u02": "u02",
+          "u03": "u03",
+          "u04": "u04",
+          "u05": "u05",
+          "u06": "u06",
+          "u07": "u07",
+          "u08": "u08",
+          "u09": "u09",
+          "u10": "u10",
+          "u11": "u11",
+          "u12": "u12",
+          "u13": "u13",
+          "u14": "u14",
+          "u15": "u15",
+          "u16": "u16",
+          "u17": "u17",
+          "u18": "u18",
+          "u19": "u19",
+          "u20": "u20",
+          "g": "g",
+          "p": "p",
+          "w": "w"
+        },
+        "growth_reaction": "g"
+      },
+      "exchange_mappings": [
+        {
+          "reaction": "u01",
+          "species": "N01",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u02",
+          "species": "N02",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u03",
+          "species": "N03",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u04",
+          "species": "N04",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u05",
+          "species": "N05",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u06",
+          "species": "N06",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u07",
+          "species": "N07",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u08",
+          "species": "N08",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u09",
+          "species": "N09",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u10",
+          "species": "N10",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u11",
+          "species": "N11",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u12",
+          "species": "N12",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u13",
+          "species": "N13",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u14",
+          "species": "N14",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u15",
+          "species": "N15",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u16",
+          "species": "N16",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u17",
+          "species": "N17",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u18",
+          "species": "N18",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u19",
+          "species": "N19",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "u20",
+          "species": "N20",
+          "internal_coefficient": 1.0
+        },
+        {
+          "reaction": "w",
+          "species": "W",
+          "internal_coefficient": -1.0
+        }
+      ],
+      "degradation_mappings": [
+        {
+          "source": "N20",
+          "products": {
+            "W": 1.0
+          },
+          "rate_output": "degradation"
+        }
+      ],
+      "product_mapping": {
+        "reaction": "p",
+        "molecular_weight_g_mol": 100.0
+      },
+      "constants": {
+        "seconds_per_day": 86400.0
+      },
+      "condition_bounds": {
+        "temperature_k": [
+          298.15,
+          298.15
+        ]
+      },
+      "flux_basis": {
+        "exchange": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        },
+        "growth": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day",
+          "amount_per_million_cells": 1.0
+        },
+        "product": {
+          "amount_unit": "mmol",
+          "normalization": "10^6 cell",
+          "time_unit": "day"
+        }
+      }
+    },
+    "reconciliation": {
+      "internal_reactions": [
+        "a01",
+        "a02",
+        "a03",
+        "a04",
+        "a05",
+        "a06",
+        "a07",
+        "a08",
+        "a09",
+        "a10",
+        "a11",
+        "a12",
+        "a13",
+        "a14",
+        "a15",
+        "a16",
+        "a17",
+        "a18",
+        "a19",
+        "a20",
+        "b01",
+        "b02",
+        "b03",
+        "b04",
+        "b05",
+        "b06",
+        "b07",
+        "b08",
+        "b09",
+        "b10",
+        "b11",
+        "b12",
+        "b13",
+        "b14",
+        "b15",
+        "b16",
+        "b17",
+        "b18",
+        "b19",
+        "b20",
+        "t01",
+        "t02",
+        "t03",
+        "t04",
+        "r"
+      ],
+      "normalization_exclusions": [],
+      "untargeted_exchanges": [],
+      "parameter_corrections": {},
+      "reconciliation_relative_bound": 1.0,
+      "reconciliation_bound_increment": 0.5,
+      "reconciliation_policy": "relative-regularized",
+      "problem_name": "Coupled synthetic multi-nutrient reconciliation",
+      "reconciliation_scaling": {
+        "target_floor": {
+          "value": 1e-06,
+          "basis": {
+            "amount_unit": "mmol",
+            "normalization": "10^6 cell",
+            "time_unit": "day"
+          }
+        },
+        "target_floors": {},
+        "internal_scale": null
+      }
+    }
+  },
+  "network": {
+    "identifier": "coupled20",
+    "representation": "reduced",
+    "internal_metabolites": [
+      "A01",
+      "A02",
+      "A03",
+      "A04",
+      "A05",
+      "A06",
+      "A07",
+      "A08",
+      "A09",
+      "A10",
+      "A11",
+      "A12",
+      "A13",
+      "A14",
+      "A15",
+      "A16",
+      "A17",
+      "A18",
+      "A19",
+      "A20",
+      "H01",
+      "H02",
+      "H03",
+      "H04",
+      "H05",
+      "H06",
+      "H07",
+      "H08",
+      "H09",
+      "H10",
+      "H11",
+      "H12",
+      "H13",
+      "H14",
+      "H15",
+      "H16",
+      "H17",
+      "H18",
+      "H19",
+      "H20",
+      "C",
+      "P"
+    ],
+    "reactions": [
+      {
+        "identifier": "u01",
+        "stoichiometry": {
+          "A01": 0.75,
+          "A02": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u02",
+        "stoichiometry": {
+          "A02": 0.75,
+          "A03": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u03",
+        "stoichiometry": {
+          "A03": 0.75,
+          "A04": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u04",
+        "stoichiometry": {
+          "A04": 0.75,
+          "A05": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u05",
+        "stoichiometry": {
+          "A05": 0.75,
+          "A06": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u06",
+        "stoichiometry": {
+          "A06": 0.75,
+          "A07": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u07",
+        "stoichiometry": {
+          "A07": 0.75,
+          "A08": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u08",
+        "stoichiometry": {
+          "A08": 0.75,
+          "A09": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u09",
+        "stoichiometry": {
+          "A09": 0.75,
+          "A10": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u10",
+        "stoichiometry": {
+          "A10": 0.75,
+          "A11": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u11",
+        "stoichiometry": {
+          "A11": 0.75,
+          "A12": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u12",
+        "stoichiometry": {
+          "A12": 0.75,
+          "A13": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u13",
+        "stoichiometry": {
+          "A13": 0.75,
+          "A14": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u14",
+        "stoichiometry": {
+          "A14": 0.75,
+          "A15": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u15",
+        "stoichiometry": {
+          "A15": 0.75,
+          "A16": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u16",
+        "stoichiometry": {
+          "A16": 0.75,
+          "A17": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u17",
+        "stoichiometry": {
+          "A17": 0.75,
+          "A18": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u18",
+        "stoichiometry": {
+          "A18": 0.75,
+          "A19": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u19",
+        "stoichiometry": {
+          "A19": 0.75,
+          "A20": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "u20",
+        "stoichiometry": {
+          "A20": 0.75,
+          "A01": 0.25
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a01",
+        "stoichiometry": {
+          "A01": -1.0,
+          "H01": 0.45,
+          "H02": 0.3375,
+          "H03": 0.175,
+          "H04": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a02",
+        "stoichiometry": {
+          "A02": -1.0,
+          "H02": 0.45,
+          "H03": 0.3375,
+          "H04": 0.175,
+          "H05": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a03",
+        "stoichiometry": {
+          "A03": -1.0,
+          "H03": 0.45,
+          "H04": 0.3375,
+          "H05": 0.175,
+          "H06": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a04",
+        "stoichiometry": {
+          "A04": -1.0,
+          "H04": 0.45,
+          "H05": 0.3375,
+          "H06": 0.175,
+          "H07": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a05",
+        "stoichiometry": {
+          "A05": -1.0,
+          "H05": 0.45,
+          "H06": 0.3375,
+          "H07": 0.175,
+          "H08": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a06",
+        "stoichiometry": {
+          "A06": -1.0,
+          "H06": 0.45,
+          "H07": 0.3375,
+          "H08": 0.175,
+          "H09": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a07",
+        "stoichiometry": {
+          "A07": -1.0,
+          "H07": 0.45,
+          "H08": 0.3375,
+          "H09": 0.175,
+          "H10": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a08",
+        "stoichiometry": {
+          "A08": -1.0,
+          "H08": 0.45,
+          "H09": 0.3375,
+          "H10": 0.175,
+          "H11": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a09",
+        "stoichiometry": {
+          "A09": -1.0,
+          "H09": 0.45,
+          "H10": 0.3375,
+          "H11": 0.175,
+          "H12": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a10",
+        "stoichiometry": {
+          "A10": -1.0,
+          "H10": 0.45,
+          "H11": 0.3375,
+          "H12": 0.175,
+          "H13": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a11",
+        "stoichiometry": {
+          "A11": -1.0,
+          "H11": 0.45,
+          "H12": 0.3375,
+          "H13": 0.175,
+          "H14": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a12",
+        "stoichiometry": {
+          "A12": -1.0,
+          "H12": 0.45,
+          "H13": 0.3375,
+          "H14": 0.175,
+          "H15": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a13",
+        "stoichiometry": {
+          "A13": -1.0,
+          "H13": 0.45,
+          "H14": 0.3375,
+          "H15": 0.175,
+          "H16": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a14",
+        "stoichiometry": {
+          "A14": -1.0,
+          "H14": 0.45,
+          "H15": 0.3375,
+          "H16": 0.175,
+          "H17": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a15",
+        "stoichiometry": {
+          "A15": -1.0,
+          "H15": 0.45,
+          "H16": 0.3375,
+          "H17": 0.175,
+          "H18": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a16",
+        "stoichiometry": {
+          "A16": -1.0,
+          "H16": 0.45,
+          "H17": 0.3375,
+          "H18": 0.175,
+          "H19": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a17",
+        "stoichiometry": {
+          "A17": -1.0,
+          "H17": 0.45,
+          "H18": 0.3375,
+          "H19": 0.175,
+          "H20": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a18",
+        "stoichiometry": {
+          "A18": -1.0,
+          "H18": 0.45,
+          "H19": 0.3375,
+          "H20": 0.175,
+          "H01": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a19",
+        "stoichiometry": {
+          "A19": -1.0,
+          "H19": 0.45,
+          "H20": 0.3375,
+          "H01": 0.175,
+          "H02": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "a20",
+        "stoichiometry": {
+          "A20": -1.0,
+          "H20": 0.45,
+          "H01": 0.3375,
+          "H02": 0.175,
+          "H03": 0.0375
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b01",
+        "stoichiometry": {
+          "H01": -0.6,
+          "H02": -0.25,
+          "H03": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b02",
+        "stoichiometry": {
+          "H02": -0.6,
+          "H03": -0.25,
+          "H04": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b03",
+        "stoichiometry": {
+          "H03": -0.6,
+          "H04": -0.25,
+          "H05": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b04",
+        "stoichiometry": {
+          "H04": -0.6,
+          "H05": -0.25,
+          "H06": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b05",
+        "stoichiometry": {
+          "H05": -0.6,
+          "H06": -0.25,
+          "H07": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b06",
+        "stoichiometry": {
+          "H06": -0.6,
+          "H07": -0.25,
+          "H08": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b07",
+        "stoichiometry": {
+          "H07": -0.6,
+          "H08": -0.25,
+          "H09": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b08",
+        "stoichiometry": {
+          "H08": -0.6,
+          "H09": -0.25,
+          "H10": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b09",
+        "stoichiometry": {
+          "H09": -0.6,
+          "H10": -0.25,
+          "H11": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b10",
+        "stoichiometry": {
+          "H10": -0.6,
+          "H11": -0.25,
+          "H12": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b11",
+        "stoichiometry": {
+          "H11": -0.6,
+          "H12": -0.25,
+          "H13": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b12",
+        "stoichiometry": {
+          "H12": -0.6,
+          "H13": -0.25,
+          "H14": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b13",
+        "stoichiometry": {
+          "H13": -0.6,
+          "H14": -0.25,
+          "H15": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b14",
+        "stoichiometry": {
+          "H14": -0.6,
+          "H15": -0.25,
+          "H16": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b15",
+        "stoichiometry": {
+          "H15": -0.6,
+          "H16": -0.25,
+          "H17": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b16",
+        "stoichiometry": {
+          "H16": -0.6,
+          "H17": -0.25,
+          "H18": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b17",
+        "stoichiometry": {
+          "H17": -0.6,
+          "H18": -0.25,
+          "H19": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b18",
+        "stoichiometry": {
+          "H18": -0.6,
+          "H19": -0.25,
+          "H20": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b19",
+        "stoichiometry": {
+          "H19": -0.6,
+          "H20": -0.25,
+          "H01": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "b20",
+        "stoichiometry": {
+          "H20": -0.6,
+          "H01": -0.25,
+          "H02": -0.15,
+          "C": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "t01",
+        "stoichiometry": {
+          "H01": -1.0,
+          "H06": 1.0
+        },
+        "lower": -0.03,
+        "upper": 0.03
+      },
+      {
+        "identifier": "t02",
+        "stoichiometry": {
+          "H06": -1.0,
+          "H11": 1.0
+        },
+        "lower": -0.03,
+        "upper": 0.03
+      },
+      {
+        "identifier": "t03",
+        "stoichiometry": {
+          "H11": -1.0,
+          "H16": 1.0
+        },
+        "lower": -0.03,
+        "upper": 0.03
+      },
+      {
+        "identifier": "t04",
+        "stoichiometry": {
+          "H16": -1.0,
+          "H01": 1.0
+        },
+        "lower": -0.03,
+        "upper": 0.03
+      },
+      {
+        "identifier": "r",
+        "stoichiometry": {
+          "C": -1.0,
+          "P": 1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "g",
+        "stoichiometry": {
+          "C": -1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "p",
+        "stoichiometry": {
+          "P": -1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      },
+      {
+        "identifier": "w",
+        "stoichiometry": {
+          "C": -1.0
+        },
+        "lower": 0.0,
+        "upper": 2.0
+      }
+    ],
+    "exchange_reactions": [
+      "u01",
+      "u02",
+      "u03",
+      "u04",
+      "u05",
+      "u06",
+      "u07",
+      "u08",
+      "u09",
+      "u10",
+      "u11",
+      "u12",
+      "u13",
+      "u14",
+      "u15",
+      "u16",
+      "u17",
+      "u18",
+      "u19",
+      "u20",
+      "g",
+      "p",
+      "w"
+    ],
+    "exchange_roles": {
+      "u01": "tracked",
+      "u02": "tracked",
+      "u03": "tracked",
+      "u04": "tracked",
+      "u05": "tracked",
+      "u06": "tracked",
+      "u07": "tracked",
+      "u08": "tracked",
+      "u09": "tracked",
+      "u10": "tracked",
+      "u11": "tracked",
+      "u12": "tracked",
+      "u13": "tracked",
+      "u14": "tracked",
+      "u15": "tracked",
+      "u16": "tracked",
+      "u17": "tracked",
+      "u18": "tracked",
+      "u19": "tracked",
+      "u20": "tracked",
+      "g": "tracked",
+      "p": "tracked",
+      "w": "tracked"
+    },
+    "objective": {
+      "g": 1.0
+    }
+  },
+  "rate_provider": {
+    "type": "rule-graph",
+    "identifier": "configured-synthetic-kinetics",
+    "version": "1",
+    "output_units": {
+      "u01": "mmol/(10^6 cell day)",
+      "u02": "mmol/(10^6 cell day)",
+      "u03": "mmol/(10^6 cell day)",
+      "u04": "mmol/(10^6 cell day)",
+      "u05": "mmol/(10^6 cell day)",
+      "u06": "mmol/(10^6 cell day)",
+      "u07": "mmol/(10^6 cell day)",
+      "u08": "mmol/(10^6 cell day)",
+      "u09": "mmol/(10^6 cell day)",
+      "u10": "mmol/(10^6 cell day)",
+      "u11": "mmol/(10^6 cell day)",
+      "u12": "mmol/(10^6 cell day)",
+      "u13": "mmol/(10^6 cell day)",
+      "u14": "mmol/(10^6 cell day)",
+      "u15": "mmol/(10^6 cell day)",
+      "u16": "mmol/(10^6 cell day)",
+      "u17": "mmol/(10^6 cell day)",
+      "u18": "mmol/(10^6 cell day)",
+      "u19": "mmol/(10^6 cell day)",
+      "u20": "mmol/(10^6 cell day)",
+      "g": "mmol/(10^6 cell day)",
+      "p": "mmol/(10^6 cell day)",
+      "w": "mmol/(10^6 cell day)",
+      "growth": "1/day",
+      "death": "1/day",
+      "degradation": "1/day"
+    }
+  },
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "benchmark": [
+      {
+        "time": {
+          "value": 0.1,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "inlet": "main",
+        "volume_flow": {
+          "value": 0.05,
+          "unit": "L/day"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {
+            "N01": 0.0010980693036303695,
+            "N02": 0.0015795176671392166,
+            "N03": 0.002272057011844796,
+            "N04": 0.0032682401548713488,
+            "N05": 0.004701199685671946,
+            "N06": 0.006762440162672806,
+            "N07": 0.009727431296548694,
+            "N08": 0.013992422461846385,
+            "N09": 0.02012739852711672,
+            "N10": 0.02895225416285232,
+            "N11": 0.041646366766230944,
+            "N12": 0.059906211622471915,
+            "N13": 0.08617208341608182,
+            "N14": 0.123954223763378,
+            "N15": 0.17830193932521504,
+            "N16": 0.25647840470382927,
+            "N17": 0.3689313325944213,
+            "N18": 0.5306892341562639,
+            "N19": 0.7633698695875433,
+            "N20": 1.0980693036303695
+          }
+        },
+        "composition": "supplied"
+      },
+      {
+        "time": {
+          "value": 0.21,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "inlet": "auxiliary",
+        "volume_flow": {
+          "value": 0.02,
+          "unit": "L/day"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {
+            "N01": 0.000915057753025308,
+            "N03": 0.001893380843203997,
+            "N05": 0.003917666404726622,
+            "N07": 0.008106192747123913,
+            "N09": 0.016772832105930603,
+            "N11": 0.034705305638525794,
+            "N13": 0.07181006951340153,
+            "N15": 0.14858494943767922,
+            "N17": 0.3074427771620178,
+            "N19": 0.6361415579896195
+          }
+        },
+        "composition": "supplied"
+      },
+      {
+        "time": {
+          "value": 0.31,
+          "unit": "day"
+        },
+        "event_type": "feed",
+        "volume": {
+          "value": 0.05,
+          "unit": "L"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {
+            "N01": 0.0007320462024202463,
+            "N02": 0.001053011778092811,
+            "N03": 0.0015147046745631976,
+            "N04": 0.0021788267699142327,
+            "N05": 0.0031341331237812976,
+            "N06": 0.0045082934417818715,
+            "N07": 0.006484954197699131,
+            "N08": 0.009328281641230925,
+            "N09": 0.013418265684744482,
+            "N10": 0.01930150277523488,
+            "N11": 0.027764244510820636,
+            "N12": 0.03993747441498127,
+            "N13": 0.05744805561072122,
+            "N14": 0.08263614917558534,
+            "N15": 0.11886795955014338,
+            "N16": 0.1709856031358862,
+            "N17": 0.2459542217296142,
+            "N18": 0.3537928227708426,
+            "N19": 0.5089132463916956,
+            "N20": 0.7320462024202463
+          }
+        },
+        "density": {
+          "value": 1.0,
+          "unit": "kg/L"
+        },
+        "volume_basis": "solution",
+        "composition": "supplied"
+      },
+      {
+        "time": {
+          "value": 0.35,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "inlet": "main",
+        "volume_flow": {
+          "value": 0.0,
+          "unit": "L/day"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {}
+        },
+        "composition": "nutrient-free"
+      },
+      {
+        "time": {
+          "value": 0.42,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "inlet": "main",
+        "volume_flow": {
+          "value": 0.08,
+          "unit": "L/day"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {
+            "N01": 0.0010294399721534715,
+            "N02": 0.0014807978129430155,
+            "N03": 0.0021300534486044967,
+            "N04": 0.0030639751451918894,
+            "N05": 0.00440737470531745,
+            "N06": 0.006339787652505757,
+            "N07": 0.0091194668405144,
+            "N08": 0.013117896057980988,
+            "N09": 0.01886943611917193,
+            "N10": 0.02714273827767405,
+            "N11": 0.03904346884334151,
+            "N12": 0.05616207339606742,
+            "N13": 0.08078632820257672,
+            "N14": 0.1162070847781669,
+            "N15": 0.16715806811738912,
+            "N16": 0.24044850440983997,
+            "N17": 0.34587312430726996,
+            "N18": 0.4975211570214974,
+            "N19": 0.7156592527383219,
+            "N20": 1.0294399721534715
+          }
+        },
+        "composition": "supplied"
+      },
+      {
+        "time": {
+          "value": 0.5,
+          "unit": "day"
+        },
+        "event_type": "sample",
+        "volume": {
+          "value": 0.02,
+          "unit": "L"
+        }
+      },
+      {
+        "time": {
+          "value": 0.61,
+          "unit": "day"
+        },
+        "event_type": "flow",
+        "inlet": "auxiliary",
+        "volume_flow": {
+          "value": 0.0,
+          "unit": "L/day"
+        },
+        "concentrations": {
+          "unit": "mmol/L",
+          "values": {}
+        },
+        "composition": "nutrient-free"
+      }
+    ]
+  },
+  "state": {
+    "species": {
+      "unit": "mmol",
+      "amounts": {
+        "N01": 6.679921597084748e-06,
+        "N02": 9.6087324750969e-06,
+        "N03": 2.2720570118447964e-05,
+        "N04": 3.2682401548713486e-05,
+        "N05": 4.701199685671946e-05,
+        "N06": 6.762440162672807e-05,
+        "N07": 9.727431296548694e-05,
+        "N08": 0.00013992422461846387,
+        "N09": 0.00020127398527116722,
+        "N10": 0.0002895225416285232,
+        "N11": 0.0004164636676623095,
+        "N12": 0.0005990621162247191,
+        "N13": 0.0008617208341608183,
+        "N14": 0.0012395422376337802,
+        "N15": 0.0017830193932521507,
+        "N16": 0.002564784047038293,
+        "N17": 0.003689313325944213,
+        "N18": 0.005306892341562639,
+        "N19": 0.007633698695875433,
+        "N20": 0.010980693036303694,
+        "W": 0.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": 1.0,
+    "dead_cells_million": 0.0,
+    "product_g": 0.0,
+    "integral": 0.0
+  },
+  "$comment": "Fully specified synthetic Level 6 verification problem. Coefficients, formal MW=100 g/mol and biomass content=1 mmol/million cells are manufactured test assumptions, not biological estimates. Same physical model with intracellular row rescaling in coupled20_scaled. See README for independent references and frozen acceptance criteria."
+}

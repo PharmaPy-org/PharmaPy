@@ -1,0 +1,44 @@
+{
+  "schema_version": 2,
+  "biology": {
+    "conditions": {
+      "temperature_k": 298.15
+    }
+  },
+  "numerics": {
+    "backend": "scipy",
+    "step": {
+      "unit": "day",
+      "value": 0.002
+    },
+    "relative_tolerance": 1e-11,
+    "absolute_tolerance": 1e-15,
+    "maximum_step": {
+      "value": 0.002,
+      "unit": "day"
+    },
+    "jacobian_relative_step": 1e-05,
+    "jacobian_state_scale": 1e-06
+  },
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "fed-batch",
+    "runtime": {
+      "unit": "day",
+      "value": 0.8
+    },
+    "temperature_k": 298.15,
+    "volume_policy": "working-volume"
+  },
+  "recipe": {
+    "name": "benchmark",
+    "require_complete_inputs": true
+  },
+  "$comment": "Manufactured numerical-verification input, not biological data. Adaptive tolerances allocate 1e-11 mmol local absolute error for a 100 g/mol species; the frozen output budget is 1e-10 mmol. Global accuracy requires reference verification. Fixed-step refinements are recorded separately."
+}
