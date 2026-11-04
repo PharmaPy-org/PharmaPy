@@ -29,6 +29,7 @@ from .mechanisms import ConfiguredRates, PathwayMetabolism, RateReconciledCultur
 from .input_format import normalize_forward_inputs
 from .numerical import inventory_limits
 from .construction_checks import density_contract, reaction_contract
+from .kinetic_units import unit_audit
 from .BioreactorUnitConverter import BioreactorUnitConverter
 from .thermal import thermal_options, attach_utility, positive_temperature, mixed_temperature
 
@@ -1159,6 +1160,7 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
     """
     if thermo_path is None:
         raise ValueError('thermo_path is required')
+    kinetic_unit_report = unit_audit(case, definition)
     case, definition = normalize_forward_inputs(case, definition)
     _require_keys(case, {"biology", "numerics", "operation", "recipe"}, "case")
     _require_keys(case["biology"], {"conditions", "mechanism"}, "biology")
@@ -1301,6 +1303,7 @@ def build_bioreactor(case: Mapping, definition: Optional[Mapping] = None,
             'defaulted': [name for name in ('temperature_k', 'thermal', 'volume_policy', 'density')
                           if operation.get(name) is None],
             'conservation': conservation_report,
+            'kinetic_units': kinetic_unit_report,
             'mechanism_conservation': mechanism.audit_conservation(),
             'numerical': deepcopy(case['numerics']),
             'events': 'declared order at equal times; terminal post-state retained',

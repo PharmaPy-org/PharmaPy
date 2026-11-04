@@ -1,0 +1,170 @@
+{
+  "schema_version": 3,
+  "$comment": "Schema 3: physical setup in operation; solver settings in numerical. Optional exponential-saturation correction: parameters.corrections.theta=0 [-] preserves the baseline. Each corrected substrate-dependent rate uses its own substrate and half-saturation concentration as the explicit reference scale (same concentration units). This scale choice is a configuration assumption, not a fitted correction. Derived balances and yields remain linked to these rates.",
+  "mechanism": "configured-kinetics",
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "continuous",
+    "runtime": {
+      "unit": "h",
+      "value": 100.0
+    },
+    "temperature_k": null,
+    "volume_policy": "working-volume",
+    "conditions": {},
+    "recipe": {
+      "name": "continuous",
+      "require_complete_inputs": true
+    }
+  },
+  "state": {
+    "species": {
+      "unit": "g",
+      "amounts": {
+        "biomass": 4.5,
+        "substrate": 1.0,
+        "product": 0.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "parameters": {
+    "rates": {
+      "mu_max": 0.2
+    },
+    "affinities": {
+      "Ks": 1.0
+    },
+    "yields": {
+      "biomass": 0.5
+    },
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {
+      "theta": 0.0
+    }
+  },
+  "model": {
+    "pathways": {},
+    "reconciliation": {},
+    "kinetics": {
+      "rule_graph": [
+        {
+          "identifier": "mu",
+          "expression": {
+            "relationship": "monod",
+            "inputs": {
+              "maximum": {
+                "parameter": "rates.mu_max"
+              },
+              "substrate": {
+                "concentration": "substrate"
+              },
+              "half_saturation": {
+                "parameter": "affinities.Ks"
+              }
+            },
+            "correction": {
+              "type": "exponential-saturation",
+              "parameters": {
+                "theta": {
+                  "parameter": "corrections.theta"
+                },
+                "reference_concentration": {
+                  "parameter": "affinities.Ks"
+                }
+              },
+              "concentration_unit": "mmol/L",
+              "input": {
+                "concentration": "substrate"
+              }
+            }
+          }
+        },
+        {
+          "identifier": "growth",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "ref": "mu"
+              },
+              {
+                "concentration": "biomass"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "consumption",
+          "expression": {
+            "op": "negate",
+            "args": [
+              {
+                "op": "divide",
+                "args": [
+                  {
+                    "ref": "growth"
+                  },
+                  {
+                    "parameter": "yields.biomass"
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "species_mass_rates": {
+        "biomass": "growth",
+        "substrate": "consumption"
+      },
+      "rate_unit": "g/(L h)",
+      "constants": {}
+    }
+  },
+  "network": null,
+  "rate_provider": null,
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "continuous": [
+      {
+        "event_type": "flow",
+        "time": 0.0,
+        "volume_l_h": 0.1,
+        "concentrations_g_l": {
+          "substrate": 10.0
+        },
+        "density_kg_l": 1.0,
+        "composition": "supplied"
+      }
+    ]
+  },
+  "numerical": {
+    "backend": "scipy",
+    "step": {
+      "unit": "h",
+      "value": 0.25
+    },
+    "relative_tolerance": 1e-09,
+    "absolute_tolerance": 1e-12,
+    "maximum_step": {
+      "unit": "h",
+      "value": 0.25
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  }
+}

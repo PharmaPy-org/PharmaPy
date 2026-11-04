@@ -164,8 +164,10 @@ example belongs to the later WP3.2 demonstration slice. This forward adapter doe
 
 Synthetic chemostat dilution, Monod equilibrium and washout are qualified through
 `ContinuousReactor`. This does not establish experimental continuous-culture
-predictivity or implement selective cell retention/perfusion. WP3.2 affine/hybrid
-implementations and WP3.3 calibration/design are excluded. A successful forward
+predictivity or implement selective cell retention/perfusion. WP3.2 supplies named kinetic selection, bounded positive corrections and a
+native estimation handoff. The following demonstration slice supplies its
+reproducible synthetic calibration workflow. Broad empirical calibration
+and experiment design remain WP3.3 scope. A successful forward
 run does not close those acceptance gaps. Original observations remain in
 `reference/`; generated evidence, notebook outputs and historical published
 comparison figures are not distributed.
@@ -325,3 +327,19 @@ public builder. Both routes are checked independently against exponential biomas
 growth and the nutrient/feed balance, with two biomass formula weights testing
 the configured species basis. These cases end before depletion. They qualify
 this substitution boundary, not arbitrary biological equivalence.
+
+## WP3.2 kinetics and estimation handoff
+
+Named Monod, Haldane/Andrews and Pirt selections expand into the same existing
+operator graph as the corresponding mathematical relationships. Optional
+exponential-saturation corrections preserve the underlying rate's sign and
+zeros; zero log correction recovers the mechanistic declaration. Parameters,
+concentration bases and provider validity domains remain explicit inputs.
+
+`simulate_measurements` reuses native construction, solution histories and
+observation mapping. It binds existing parameter paths before graph expansion
+and returns declared field columns at exact requested times [s], with fresh
+input copies and native state for each trial. The shared estimator owns
+weighting, residual alignment and numerical parameter derivatives. The
+independent concentration-balance and constrained-fit tests qualify this
+handoff without introducing a new reactor, optimizer or sensitivity engine.

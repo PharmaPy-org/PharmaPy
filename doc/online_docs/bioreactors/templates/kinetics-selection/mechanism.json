@@ -1,0 +1,232 @@
+{
+  "schema_version": 3,
+  "$comment": "Runnable named-kinetics template derived from the existing Doyle Exercise 4.15 example, not organism defaults or experimental validation. mu_max=0.2 [1/h], Ks=1 [g/L], biomass yield=0.5 [gDW/gS]; sterile feed=10 [gS/L], D=0.1 [1/h] at volume=1 [L]. Initial S=1 [g/L], X=4.5 [gDW/L] form the analytical Monod equilibrium. Explicit concentration conversions use each species formal MW=1000 [g/mol] divided by 1000 [mmol/mol], hence 1 [g/mmol]. Update these conversion constants when changing MW. State-domain limits follow S+X/Y=10 [gS/L] under this model. Solver settings and thermodynamic data are retained from the existing example. Select model.kinetics.rule_graph rule mu expression.relationship; parameter values and required input slots remain explicit. Optional exponential-saturation correction: parameters.corrections.theta=0 [-] preserves the baseline. Each corrected substrate-dependent rate uses its own substrate and half-saturation concentration as the explicit reference scale (same concentration units). This scale choice is a configuration assumption, not a fitted correction. Derived balances and yields remain linked to these rates.",
+  "mechanism": "configured-kinetics",
+  "operation": {
+    "carrier_density_kg_l": 1.0,
+    "carrier_species": "water",
+    "initial_mass_kg": 1.0,
+    "initial_volume": {
+      "unit": "L",
+      "value": 1.0
+    },
+    "mode": "continuous",
+    "runtime": {
+      "unit": "h",
+      "value": 100.0
+    },
+    "temperature_k": null,
+    "volume_policy": "working-volume",
+    "conditions": {},
+    "recipe": {
+      "name": "continuous",
+      "require_complete_inputs": true
+    }
+  },
+  "state": {
+    "species": {
+      "unit": "g",
+      "amounts": {
+        "biomass": 4.5,
+        "substrate": 1.0,
+        "product": 0.0
+      }
+    },
+    "biomass_kg": null,
+    "viable_cells_million": null,
+    "dead_cells_million": null,
+    "product_g": null,
+    "integral": null
+  },
+  "parameters": {
+    "rates": {
+      "mu_max": 0.2
+    },
+    "affinities": {
+      "Ks": 1.0
+    },
+    "yields": {
+      "biomass": 0.5
+    },
+    "maintenance": {},
+    "responses": {},
+    "coefficients": {},
+    "corrections": {
+      "theta": 0.0
+    }
+  },
+  "model": {
+    "pathways": {},
+    "reconciliation": {},
+    "kinetics": {
+      "rule_graph": [
+        {
+          "identifier": "substrate_g_l",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "substrate"
+              },
+              {
+                "constant": "substrate_g_per_mmol"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "biomass_g_l",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "concentration": "biomass"
+              },
+              {
+                "constant": "biomass_g_per_mmol"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "mu",
+          "expression": {
+            "relationship": "monod",
+            "inputs": {
+              "maximum": {
+                "parameter": "rates.mu_max"
+              },
+              "substrate": {
+                "ref": "substrate_g_l"
+              },
+              "half_saturation": {
+                "parameter": "affinities.Ks"
+              }
+            },
+            "correction": {
+              "type": "exponential-saturation",
+              "parameters": {
+                "theta": {
+                  "parameter": "corrections.theta"
+                },
+                "reference_concentration": {
+                  "parameter": "affinities.Ks"
+                }
+              },
+              "concentration_unit": "g/L",
+              "input": {
+                "ref": "substrate_g_l"
+              }
+            }
+          }
+        },
+        {
+          "identifier": "growth",
+          "expression": {
+            "op": "multiply",
+            "args": [
+              {
+                "ref": "mu"
+              },
+              {
+                "ref": "biomass_g_l"
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "consumption",
+          "expression": {
+            "op": "negate",
+            "args": [
+              {
+                "op": "divide",
+                "args": [
+                  {
+                    "ref": "growth"
+                  },
+                  {
+                    "parameter": "yields.biomass"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "identifier": "domain_substrate",
+          "expression": {
+            "ref": "substrate_g_l"
+          }
+        },
+        {
+          "identifier": "domain_biomass",
+          "expression": {
+            "ref": "biomass_g_l"
+          }
+        }
+      ],
+      "species_mass_rates": {
+        "biomass": "growth",
+        "substrate": "consumption"
+      },
+      "rate_unit": "g/(L h)",
+      "constants": {
+        "substrate_g_per_mmol": 1.0,
+        "biomass_g_per_mmol": 1.0
+      }
+    }
+  },
+  "network": null,
+  "rate_provider": {
+    "type": "rule-graph",
+    "identifier": "kinetics-selection-template",
+    "version": "1",
+    "output_units": {
+      "growth": "g/(L h)",
+      "consumption": "g/(L h)"
+    },
+    "validity_domain": {
+      "domain_substrate": [
+        0.0,
+        10.0
+      ],
+      "domain_biomass": [
+        0.0,
+        5.0
+      ]
+    },
+    "extrapolation": "error"
+  },
+  "transport": null,
+  "flux_time_unit": null,
+  "recipes": {
+    "continuous": [
+      {
+        "event_type": "flow",
+        "time": 0.0,
+        "volume_l_h": 0.1,
+        "concentrations_g_l": {
+          "substrate": 10.0
+        },
+        "density_kg_l": 1.0,
+        "composition": "supplied"
+      }
+    ]
+  },
+  "numerical": {
+    "backend": "scipy",
+    "step": {
+      "unit": "h",
+      "value": 0.25
+    },
+    "relative_tolerance": 1e-09,
+    "absolute_tolerance": 1e-12,
+    "maximum_step": {
+      "unit": "h",
+      "value": 0.25
+    },
+    "jacobian_relative_step": null,
+    "jacobian_state_scale": null
+  }
+}
