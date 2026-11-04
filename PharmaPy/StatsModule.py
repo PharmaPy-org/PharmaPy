@@ -616,18 +616,23 @@ def _fit_bootstrap_sample(estimator, y_sample: list) -> np.ndarray:
     Notes
     -----
     The fit runs on ``_isolated_estimator(estimator)`` with a copy of the
-    fitted estimator's effective ``optim_options``. A stateful model
-    callable is shared and is left at its last evaluation; see
-    ``_restore_model_state``.
+    fitted estimator's effective ``optim_options``. For a custom fit,
+    its retained ``_custom_optimizer`` is supplied in that private options
+    copy, so both supported custom-callable entry forms can be replayed.
+    A stateful model callable is shared and is left at its last evaluation;
+    see ``_restore_model_state``.
     """
     isolated = _isolated_estimator(estimator)
     isolated.y_data = y_sample  # [measured-state units]
 
-    options = estimator.optim_options
+    options = ({} if estimator.optim_options is None
+               else dict(estimator.optim_options))
+    if estimator.opt_method == 'custom':
+        options['optimizer'] = estimator._custom_optimizer
     params, _, _ = isolated.optimize_fn(
         method=estimator.opt_method,
         verbose=False, store_iter=False,
-        optim_options=None if options is None else dict(options))
+        optim_options=options)
 
     return params  # [model-parameter units]
 
