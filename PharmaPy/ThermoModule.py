@@ -82,6 +82,7 @@ _SCALAR_PROPERTY_DESCRIPTIONS = {
     'henry_constant': 'Henry constant',
     'surf_tension': 'surface tension',
     'visc_gas': 'vapor viscosity',
+    'mol_vol': 'pure molar volume',
     'ri': 'UNIQUAC volume parameter',
     'qi': 'UNIQUAC surface-area parameter',
     'qip': 'UNIQUAC residual surface-area parameter',
@@ -93,6 +94,7 @@ _SCALAR_PROPERTY_UNITS = {
     'henry_constant': '([Pa], liquid mole-fraction basis)',
     'surf_tension': '[N/m]',
     'visc_gas': '[Pa*s]',
+    'mol_vol': '[m**3/mol]',
     'ri': '[-]',
     'qi': '[-]',
     'qip': '[-]',
@@ -143,12 +145,10 @@ class MissingPropertyError(AttributeError, ValueError):
     message names the species and the property. It covers list-valued
     coefficients (``cp_*``, ``visc_liq``, ``p_vap``, ``diffusivity``),
     scalar properties (``rho_liq``, ``rho_solid``, ``t_crit``,
-    ``henry_constant``, ``surf_tension``, ``visc_gas``), the Watson
+    ``henry_constant``, ``surf_tension``, ``visc_gas``, ``mol_vol``), the Watson
     latent-heat data (``delta_hvap``, ``tref_hvap``), and a list-valued
     property given as one scalar per species instead of a coefficient list
-    (rejected whenever it is evaluated, whatever the fractions). Other scalar
-    properties keep their earlier behavior; for example ``getMolVolMix``
-    still returns NaN for a missing ``mol_vol`` (issue #511).
+    (rejected whenever it is evaluated, whatever the fractions).
 
     It subclasses ``AttributeError``, the type raised for a missing property
     before #414, and ``ValueError``, the type raised for missing
@@ -366,9 +366,8 @@ def ParseDatabase(
     ``ThermoPhysicalManager`` raise ``MissingPropertyError`` (a subclass of
     ``AttributeError`` and ``ValueError``) naming the species and the
     property when a result needs a NaN row, or a NaN entry of one of the
-    scalar properties that ``MissingPropertyError`` lists. Other scalar
-    properties keep their earlier behavior, for example a NaN
-    ``getMolVolMix`` for a missing ``mol_vol`` (issue #511).
+    scalar properties that ``MissingPropertyError`` lists, including
+    ``mol_vol`` in ``getMolVolMix``.
 
     A property that no species supplies creates no key: an omitted key, and
     also a list-valued key (one that some species gives as a list, or one of
@@ -998,7 +997,10 @@ class ThermoPhysicalManager:
 
         return cpMass, cpMole
 
-    def getCpMix(self, temp, mass_frac=None, mole_frac=None, phase='liquid',
+    def getCpMix(self, temp: Union[float, np.ndarray],
+                 mass_frac: Optional[np.ndarray] = None,
+                 mole_frac: Optional[np.ndarray] = None,
+                 phase: str = 'liquid',
                  basis: str = 'mass',
                  weights: Optional[np.ndarray] = None
                  ) -> Union[float, np.ndarray]:
@@ -1012,7 +1014,7 @@ class ThermoPhysicalManager:
             Species fractions [-], shape (num_species,) for fixed composition
             or (num_temperatures, num_species) for paired profiles. The
             requested basis takes precedence; the other basis is converted
-            when needed.
+            when needed. At least one fraction input is required.
         phase : {'liquid', 'solid', 'vapor'}, optional
             Pure-component Cp correlation; default liquid.
         basis : {'mass', 'mole'}, optional
@@ -1038,7 +1040,8 @@ class ThermoPhysicalManager:
         Raises
         ------
         ValueError
-            If basis is neither 'mass' nor 'mole', or ``phase`` is unknown.
+            If basis is neither 'mass' nor 'mole', ``phase`` is unknown,
+            or neither fraction input is supplied.
             Also raised if ``weights`` does not have exactly the shape of
             the fractions on the requested basis (one- or two-dimensional,
             one entry per species on the last axis), as a scalar or short
@@ -1058,6 +1061,8 @@ class ThermoPhysicalManager:
         if basis not in ('mass', 'mole'):
             raise ValueError("basis must be 'mass' or 'mole'")
         prop_name, cp_cts = self._cp_rows(phase)  # [J/mol/K/K**k], ascending k
+        if mass_frac is None and mole_frac is None:
+            raise ValueError('getCpMix requires mass_frac or mole_frac')
         cp_mass, cp_mole = self._evaluate_cp_pure(temp, cp_cts)  # [J/kg/K], [J/mol/K]
 
         if basis == 'mass':
@@ -1524,6 +1529,7 @@ class ThermoPhysicalManager:
             Species fractions [-], shape ``(num_species,)`` or
             ``(num_points, num_species)``. The fraction matching ``basis`` is
             used when supplied; otherwise the other one is converted.
+            At least one fraction input is required.
         phase : {'liquid', 'solid'}, optional
             Selects the ``rho_liq`` or ``rho_solid`` pure density
             [kg/m**3]; default liquid. ``'vapor'`` is rejected, as in
@@ -1556,8 +1562,9 @@ class ThermoPhysicalManager:
         ------
         ValueError
             If ``basis`` is neither 'mass' nor 'mole', or ``phase`` is not
-            one of ``'liquid'`` or ``'solid'``. Both checks precede any
-            computation. Also raised if ``weights`` does not have exactly
+            one of ``'liquid'`` or ``'solid'``, or neither fraction input is
+            supplied. These checks precede any computation.
+            Also raised if ``weights`` does not have exactly
             the shape of the fractions on the requested basis (one- or
             two-dimensional, one entry per species on the last axis), as a
             scalar or short array would otherwise switch the check off.
@@ -1579,6 +1586,8 @@ class ThermoPhysicalManager:
             raise ValueError("basis must be 'mass' or 'mole'")
 
         self._validate_density_phase(phase)
+        if mass_frac is None and mole_frac is None:
+            raise ValueError('getDensityMix requires mass_frac or mole_frac')
 
         if basis == 'mass':
             if mass_frac is None:
@@ -1929,30 +1938,35 @@ class ThermoPhysicalManager:
         # Unweighted species are not evaluated: a 0.0 placeholder.
         return np.where(evaluated, rows[:, 0], 0.0)  # [m**2/s]
 
-    def frac_to_conc(self, mass_frac: Optional[np.ndarray] = None,
-                     mole_frac: Optional[np.ndarray] = None,
+    def frac_to_conc(self, mass_frac: Optional[Union[Sequence[float], np.ndarray]] = None,
+                     mole_frac: Optional[Union[Sequence[float], np.ndarray]] = None,
                      basis: str = 'mole') -> np.ndarray:
         """Convert liquid fractions into ideal-mixing concentrations.
 
         Parameters
         ----------
-        mass_frac, mole_frac : ndarray, optional
+        mass_frac, mole_frac : array-like, optional
             Liquid species fractions [-], shape ``(num_species,)`` or
             ``(num_points, num_species)``. ``mass_frac`` takes precedence;
-            one of them is required.
-        basis : str, optional
-            ``'mass'`` returns mass concentrations; any other value,
-            including the default ``'mole'``, returns molar concentrations.
+            one of them is required. Lists and arrays are accepted,
+            including nested lists for profiles. Only the selected input
+            is converted to a float array.
+        basis : {'mass', 'mole'}, optional
+            ``'mass'`` returns mass concentrations [kg/m**3]; the default
+            ``'mole'`` returns molar concentrations [mol/L].
 
         Returns
         -------
         ndarray
             Species concentrations, [mol/L] (equivalently [kmol/m**3]) or
             [kg/m**3] for ``basis='mass'``, with the shape of the given
-            fractions.
+            fractions, retaining a one-row profile as ``(1, num_species)``.
 
         Raises
         ------
+        ValueError
+            If ``basis`` is neither 'mass' nor 'mole', or neither fraction
+            input is supplied.
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If a
             species with a nonzero fraction in some row has no ``rho_liq``.
@@ -1965,7 +1979,16 @@ class ThermoPhysicalManager:
         densities ``rho_liq``: ``c_i = x_i / sum_j x_j / rho_mole_j`` on the
         molar basis, with ``rho_mole_j = rho_liq_j / mw_j`` [kmol/m**3].
         """
-        frac = mole_frac if mass_frac is None else mass_frac  # [-]
+        if basis not in ('mass', 'mole'):
+            raise ValueError("basis must be 'mass' or 'mole'")
+        if mass_frac is None and mole_frac is None:
+            raise ValueError('frac_to_conc requires mass_frac or mole_frac')
+        if mass_frac is None:
+            mole_frac = np.asarray(mole_frac, dtype=float)  # [-]
+            frac = mole_frac  # [-]
+        else:
+            mass_frac = np.asarray(mass_frac, dtype=float)  # [-]
+            frac = mass_frac  # [-]
         invMass, invMole = self._inverse_densities(
             'liquid', self._needed_by_weights(frac, self.num_species),
             'carry a nonzero fraction, so their concentration')  # [m**3/kg], [m**3/kmol]
@@ -1973,7 +1996,7 @@ class ThermoPhysicalManager:
             if mole_frac.ndim == 1:
                 concentr = mole_frac / np.dot(mole_frac, invMole)  # [mol/L]
             else:
-                concentr = mole_frac.T / np.dot(mole_frac, invMole)
+                concentr = mole_frac.T / np.dot(mole_frac, invMole)  # [mol/L]
                 concentr = concentr.T  # [mol/L]
         else:
             if mass_frac.ndim == 1:
@@ -1981,11 +2004,11 @@ class ThermoPhysicalManager:
                                                           invMass)  # [mol/L]
             else:
                 concentr = (mass_frac / self.mw).T / np.dot(mass_frac,
-                                                            invMass)
+                                                            invMass)  # [mol/L]
                 concentr = concentr.T  # [mol/L]
 
         if basis == 'mass':
-            concentr *= self.mw
+            concentr *= self.mw  # [kg/m**3], (mol/L)*(g/mol) = kg/m**3
 
         return concentr  # mol/L (kmol/m**3) - kg/m**3
 
@@ -2652,10 +2675,53 @@ class ThermoPhysicalManager:
 
         return conv_conc
 
-    def getMolVolMix(self, frac):
-        molvolMix = np.dot(self.mol_vol, frac)
+    def getMolVolMix(self, frac: Union[Sequence[float], np.ndarray]
+                     ) -> Union[float, np.ndarray]:
+        """Return the mole-fraction-weighted pure molar volume.
 
-        return molvolMix
+        Parameters
+        ----------
+        frac : array-like
+            Mole fractions [-] in database species order, shape
+            ``(num_species,)`` or ``(num_species, num_points)``. Profiles
+            retain the legacy species-first layout of this method, unlike
+            the row-based profiles of ``frac_to_conc``.
+
+        Returns
+        -------
+        float or ndarray
+            Mixture molar volume [m**3/mol]: a scalar for a vector or shape
+            ``(num_points,)`` for a profile, including a one-column profile.
+
+        Raises
+        ------
+        ValueError
+            If fractions are not a vector or species-first profile with
+            one entry per database species.
+        MissingPropertyError
+            If a species with a nonzero mole fraction in any profile column
+            lacks ``mol_vol``. The message names the species, property and
+            database. Species with zero fraction everywhere need no data
+            and contribute exactly zero; stored properties are unchanged.
+
+        Notes
+        -----
+        This is an additive-volume model: ``V_mix = sum_i x_i V_i``.
+        The input is on a mole basis, never a mass basis; no excess volume
+        or temperature dependence is introduced.
+        """
+        frac = np.asarray(frac, dtype=float)  # [-]
+        if frac.ndim not in (1, 2) or frac.shape[0] != self.num_species:
+            raise ValueError(
+                'frac must have shape (num_species,) or '
+                '(num_species, num_points) in database species order')
+        molar_volumes = self._scalar_values('mol_vol')  # [m**3/mol]
+        needed = self._needed_by_weights(frac.T, self.num_species)
+        missing = self._check_species_rows(
+            'mol_vol', molar_volumes, np.arange(self.num_species), needed,
+            'carry a nonzero mole fraction, so the mixture molar volume')
+        usable_volumes = np.where(missing, 0.0, molar_volumes)  # [m**3/mol]
+        return np.dot(usable_volumes, frac)  # [m**3/mol]
 
     def AntoineEquation(self, temp: Optional[Union[float, np.ndarray]] = None,
                         pres: Optional[Union[float, np.ndarray]] = None,
