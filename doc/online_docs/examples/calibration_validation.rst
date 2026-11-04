@@ -111,6 +111,14 @@ given options merged over the optimizer's defaults (see
 at the evaluation limit ``max_fun_eval``, warns with a ``RuntimeWarning``
 and its identifiability summary starts with ``FIT DID NOT CONVERGE``.
 
+For a custom optimizer callable, convergence is retained only when the solver
+reports it. A boolean ``success=False`` emits the same warning; a parameter-only
+return does not establish convergence. ``info['tolerances']`` preserves a private
+copy of explicitly returned tolerance metadata, or an empty dictionary when the
+solver does not report it. PharmaPy does not infer stopping defaults from custom
+option names. The supplied options remain available in ``optim_options`` and
+calibration records for replay.
+
 .. testcode::
 
    print(info['success'], info['message'])

@@ -4584,7 +4584,8 @@ class ParameterEstimation:
         elif hasattr(custom_result, 'x'):
             raw_x = custom_result.x
             for key in ('status', 'success', 'message', 'nit', 'nfev', 'njev',
-                        'stop_criterion', 'num_iter', 'num_fun_eval'):
+                        'stop_criterion', 'num_iter', 'num_fun_eval',
+                        'tolerances'):
                 if hasattr(custom_result, key):
                     extra_info[key] = getattr(custom_result, key)
         elif (isinstance(custom_result, tuple)
@@ -4696,8 +4697,8 @@ class ParameterEstimation:
               ``(num_params,)``) plus optional diagnostic entries
               (``'status'``, ``'success'``, ``'message'``, ``'nit'``,
               ``'nfev'``, ``'njev'``, ``'stop_criterion'``, ``'num_iter'``,
-              ``'num_fun_eval'``), (2) an object with attribute ``.x`` (such
-              as ``scipy.optimize.OptimizeResult``), (3) a 2-tuple
+              ``'num_fun_eval'``, ``'tolerances'``), (2) an object with attribute
+              ``.x`` (such as ``scipy.optimize.OptimizeResult``), (3) a 2-tuple
               ``(x_opt, info_dict)``, or (4) a 1-D array-like ``x_opt`` of
               shape ``(num_params,)``.
         bounds : sequence, optional
@@ -4749,7 +4750,7 @@ class ParameterEstimation:
             ``info['status']`` (int, Ipopt's return status),
             ``info['message']`` (str, Ipopt's status message) and, when
             cyipopt reports it, ``info['nit']`` (int, iterations [-]).
-            Every method reports ``info['success']`` (bool) and
+            Built-in methods report ``info['success']`` (bool) and
             ``info['message']`` (str). For LM, ``success`` is True when
             ``info['stop_criterion']`` is a convergence test
             (``'Small step'``, ``'Small gradient'`` or ``'Value of the
@@ -4771,7 +4772,12 @@ class ParameterEstimation:
             means SciPy's automatic limit); and, for IPOPT, only the
             termination options present in the solver's options, with
             ``str`` keys: the caller's and cyipopt's ``tol`` default, not
-            Ipopt's native defaults (see ``_stopping_tolerances``).
+            Ipopt's native defaults (see ``_stopping_tolerances``). Custom
+            optimizers retain their reported success/message when supplied;
+            no convergence is inferred from a parameter-only return. Their
+            ``info['tolerances']`` is a private copy of explicitly returned
+            tolerance metadata, or an empty dict if unreported. No stopping
+            defaults are inferred for an arbitrary callable.
 
         Raises
         ------
@@ -4805,6 +4811,8 @@ class ParameterEstimation:
             ``'Maximum iterations exceeded'``, SciPy status 0) does it name
             the limiting option with its effective value (``max_fun_eval``
             for LM, ``max_nfev`` for SciPy) and suggest raising it.
+            A custom optimizer reporting boolean ``success=False`` also
+            warns, using its message and evaluation count when available.
             The returned parameters, covariance and statistics are those of
             the solver, unchanged. No warning is issued for the
             evaluation-only LM call ``max_fun_eval=0``. These warnings point
@@ -5026,6 +5034,16 @@ class ParameterEstimation:
                 for key, value in extra_info.items():
                     if key not in ('fun', 'jac', 'x'):
                         info[key] = value
+                custom_success = info.get('success')
+                if (isinstance(custom_success, (bool, np.bool_))
+                        and not custom_success):
+                    evaluations = (
+                        f"{info['nfev']} residual evaluations"
+                        if 'nfev' in info else 'an unreported evaluation count')
+                    _warn_unconverged(
+                        "Custom optimizer (method='custom')",
+                        str(info.get('message', 'reported success=False')),
+                        evaluations)
 
             else:  # 'scipy' or 'least_squares'
                 scipy_options = effective_options
@@ -5117,8 +5135,13 @@ class ParameterEstimation:
                         "evaluations",
                         *budget)
 
-            info['tolerances'] = _stopping_tolerances(method,
-                                                      effective_options)
+            if method_name == 'custom':
+                # A callable's option names do not establish its stopping
+                # semantics. Preserve only the solver's reported criteria.
+                info['tolerances'] = copy.deepcopy(info.get('tolerances', {}))
+            else:
+                info['tolerances'] = _stopping_tolerances(
+                    method_name, effective_options)
 
             # Statistics use the data residuals; see _data_solver_info.
             info = self._data_solver_info(info)
