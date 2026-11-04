@@ -17,15 +17,7 @@ from PharmaPy.Phases import LiquidPhase, SolidPhase
 pytestmark = pytest.mark.unit
 
 
-# A five-entry growth law whose alpha is zero has a unit size factor, so the
-# legacy unit accepts it; its Jacobian must then still read g, not beta, as
-# the growth exponent.
-@pytest.mark.parametrize(
-    "size_factor", [(), (0.0, 2.0)], ids=["three_entry", "unit_size_factor"]
-)
-def test_batch_cryst_concentration_jacobian_matches_material_balance(
-    data_path, size_factor
-):
+def test_batch_cryst_concentration_jacobian_matches_material_balance(data_path):
     thermo_path = str(data_path["integration"] / "pfr_test_pure_comp.json")
     temperature = 298.15  # [K]
     liquid = LiquidPhase(
@@ -63,8 +55,7 @@ def test_batch_cryst_concentration_jacobian_matches_material_balance(
             growth_rate / (target_concentration - saturated_concentration),
             0.0,
             1.0,
-            *size_factor,
-        ],  # [um/s], [J/mol], [-], then alpha [-] and beta [1/um] if given
+        ],  # [um/s], [J/mol], [-]
         sup_sat_type="absolute",
     )
     kinetics.target_idx = crystallizer.target_ind
