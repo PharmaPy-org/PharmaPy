@@ -2373,6 +2373,13 @@ class MultiPhaseVessel():
 
         self.scale_crossphase_transfers(buffer, scales)
         self.scale_outlet_transfers(buffer, scales)
+        if self.dilutes_intensive_states:
+            self.add_dilution_terms(
+                buffer,
+                completed_state,
+                (buffer.aux[buffer.INLET],),
+                (buffer.aux[buffer.OUTLET],),
+            )
 
         return True
 
@@ -2426,6 +2433,11 @@ class MultiPhaseVessel():
             aux["transfer_scale"] = factor
             for material_slice, rate in material_writes:
                 row[material_slice] -= (1.0 - factor) * rate
+
+            net_vol_rate = aux.get("net_vol_rate", 0.0)  # [m**3/s]
+            if net_vol_rate:
+                buffer.transfer_vol_rate -= (1.0 - factor) * net_vol_rate  # [m**3/s]
+                aux["net_vol_rate"] = factor * net_vol_rate  # [m**3/s]
 
     def scale_outlet_transfers(self, buffer, scales):
         """Scale outlet draws, and the streams that report them, together."""
@@ -2822,12 +2834,16 @@ class MultiPhaseVessel():
         ``PopulationBalanceMechanism.get_dilution_contributions`` for what
         that leaves out.
         """
+        for state_slice, value in buffer.dilution_writes:
+            buffer.contributions[buffer.INLET, state_slice] -= value
+        buffer.dilution_writes.clear()
+
         vol_in = sum(transfer.vol_flow or 0.0
                      for connection in resolved_inlets
-                     for transfer in connection)
+                     for transfer in connection)  # [m**3/s]
         vol_out = sum(transfer.vol_flow or 0.0
                       for connection in resolved_outlets
-                      for transfer in connection)
+                      for transfer in connection)  # [m**3/s]
         net_vol_flow = vol_in - vol_out + buffer.transfer_vol_rate  # [m**3/s]
 
         if not net_vol_flow:
@@ -2848,6 +2864,7 @@ class MultiPhaseVessel():
                             buffer.INLET,
                             state_slice,
                         ] += value
+                        buffer.dilution_writes.append((state_slice, value))
     
     def add_inlet_terms(
             self,
@@ -3067,7 +3084,10 @@ class MultiPhaseVessel():
                     material_writes.append((material_slice, rate))
 
             crossphase_result.aux["material_writes"] = material_writes
-            crossphase_result.aux["transfer_scale"] = 1.0
+            crossphase_result.aux["transfer_scale"] = 1.0  # [-]
+            crossphase_result.aux["net_vol_rate"] = (
+                crossphase_result.net_vol_rate
+            )  # [m**3/s]
 
             buffer.transfer_vol_rate += crossphase_result.net_vol_rate  # [m**3/s]
 

@@ -29,8 +29,9 @@ is NaN at repeated times, issue #314); it measures the A concentration
 Gaussian noise from ``numpy.random.default_rng`` with a fixed seed whose
 standard deviations the measurements declare (``Measurement.uncertainty``),
 so the declared-uncertainty noise assumption holds exactly by construction.
-The fits are Levenberg-Marquardt from the seed (0.7 um/s, 1.2), because
-SciPy fits cannot be recorded yet (#534). The record names all 13 kinetic
+The fits use Levenberg-Marquardt from the seed (0.7 um/s, 1.2) as the
+reference solver for this case; SciPy and custom fits are also recordable
+(#534). The record names all 13 kinetic
 parameters, because ``SimulationExec`` names a masked parameter vector
 inconsistently (#535). Assimulo lane; about 15 s (two fits of 3-5 s, a
 rerun of about 5 s and two derivative checks of about 1 s).

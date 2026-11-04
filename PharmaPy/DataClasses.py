@@ -80,6 +80,7 @@ class MaterialContributionBuffer:
         "rates",
         "aux",
         "transfer_vol_rate",
+        "dilution_writes",
     )
 
     INLET = 0
@@ -112,12 +113,14 @@ class MaterialContributionBuffer:
 
         # Summed over the cross-phase transfers of one evaluation.
         self.transfer_vol_rate = 0.0  # [m**3/s]
+        self.dilution_writes = []
 
     def reset(self):
         """Zero every contribution, rate, diagnostic and the volume rate."""
         self.contributions.fill(0.0)
         self.rates.fill(0.0)
         self.transfer_vol_rate = 0.0  # [m**3/s]
+        self.dilution_writes.clear()
 
         for aux in self.aux:
             aux.clear()
