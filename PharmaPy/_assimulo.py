@@ -127,7 +127,7 @@ def _construct_assimulo_object(
 
 
 class _CallbackFailure:
-    """Latch the first model error during one native solver operation.
+    """Latch the first model error during an outermost native solver operation.
 
     The native solver may retry at earlier times after a Python exception.
     Once a callback fails, all retries raise without re-entering the model.
@@ -150,6 +150,7 @@ class _CallbackFailure:
         self.active = False
         self.error = None
         self.traceback = None
+        self.diagnostic = None
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         """Evaluate the model unless an earlier callback already failed.
@@ -239,17 +240,27 @@ class _FailureHandlingSolver:
 
         Notes
         -----
-        Clear exception and traceback references even for interrupts, so
-        later solves neither retain a failed model nor inherit its error.
+        Only the outermost operation clears the shared scope. In particular,
+        IDA event handlers may call ``make_consistent`` before ``simulate``
+        resumes. Retain an inner operation's native diagnostic if the original
+        exception bubbles through the outer operation or the handler catches
+        it. Clear all records even for interrupts when the outer operation
+        ends, so later solves neither retain a failed model nor inherit its
+        error.
         """
         failure = self._callback_failure
+        owns_scope = not failure.active
         failure.active = True
         try:
             try:
                 result = operation(*args, **kwargs)
             except BaseException as backend_error:
                 if failure.error is not None:
-                    raise failure.error.with_traceback(failure.traceback) from backend_error
+                    if backend_error is not failure.error:
+                        failure.diagnostic = backend_error
+                    if failure.diagnostic is not None:
+                        raise failure.error.with_traceback(
+                            failure.traceback) from failure.diagnostic
                 raise
             if failure.error is not None:
                 if operation.__name__ == "make_consistent":
@@ -257,18 +268,21 @@ class _FailureHandlingSolver:
                     # consistency failure instead of raising IDAError.
                     native_error = _load_assimulo_symbol(
                         "assimulo.solvers.sundials", "IDAError")
-                    diagnostic = native_error(result[0], self.t)
-                else:
+                    failure.diagnostic = native_error(result[0], self.t)
+                elif failure.diagnostic is None:
                     # Defensive: event handling or a future backend must
                     # not return success after a model callback failed.
-                    diagnostic = RuntimeError(
+                    failure.diagnostic = RuntimeError(
                         "Assimulo returned after a model callback failed")
-                raise failure.error.with_traceback(failure.traceback) from diagnostic
+                raise failure.error.with_traceback(
+                    failure.traceback) from failure.diagnostic
             return result
         finally:
-            failure.active = False
-            failure.error = None
-            failure.traceback = None
+            if owns_scope:
+                failure.active = False
+                failure.error = None
+                failure.traceback = None
+                failure.diagnostic = None
 
     def simulate(self, *args: Any, **kwargs: Any) -> Any:
         """Integrate while preserving the first RHS or residual exception.

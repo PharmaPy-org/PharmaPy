@@ -661,8 +661,11 @@ with the native solver error as :code:`__cause__` for diagnostic context
 (`issue 435 <https://github.com/PharmaPy-org/PharmaPy/issues/435>`_).
 
 The same contract applies to IDA's :code:`make_consistent` initialization.
-Failure records and traceback references are cleared when each operation
-ends, including on interrupts. Existing unit rollback behavior is retained;
+Failure records and traceback references are cleared when the outermost
+operation ends, including on interrupts. An IDA event handler that calls
+:code:`make_consistent` retains the enclosing integration's failure scope and
+the inner native diagnostic, so resumed integration remains protected.
+Existing unit rollback behavior is retained;
 reactors continue to use their established :code:`reset()` API to restore the
 charge. Successful trajectories, reporting grids, tolerances and normal
 :code:`TerminateSimulation` event termination are unchanged. Explicit Assimulo

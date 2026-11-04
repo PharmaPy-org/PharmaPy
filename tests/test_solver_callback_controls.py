@@ -239,3 +239,105 @@ def test_explicit_recoverable_solver_exception_is_not_latched():
     assert len(recovered) == 1
     np.testing.assert_allclose(states[-1], CHARGE * np.exp(-RATE * END),
                                rtol=TRAJECTORY_RTOL)
+
+
+@pytest.mark.parametrize("failure_phase", [
+    None, "after_event", "during_consistency", "caught_consistency",
+], ids=["healthy", "later-residual", "inner-failure", "caught-inner-failure"])
+def test_ida_nested_consistency_preserves_outer_failure_scope(failure_phase):
+    """Consistency initialization inside an event belongs to the same solve.
+
+    The supported Assimulo 3.4.3 ``examples/ida_with_disc.py`` calls
+    ``make_consistent`` from an event handler before integration resumes.
+    Exercise that real lifecycle, including an inner failure that the
+    handler catches before requesting normal termination.
+
+    Parameters
+    ----------
+    failure_phase : str or None
+        Fail after the event, inside consistency initialization, or inside
+        initialization with the error caught by the handler; None is healthy.
+    """
+    decay = Decay()
+    error = ValueError("nested event residual failure")
+    enabled = {"failure": failure_phase is not None}
+    events = []  # [s], event-handler evaluation times
+    failure_time = (STOP + END) / 2  # [s], between event and requested end
+
+    def residual(time, states, derivatives, switches=None):
+        """Evaluate decay, optionally failing after successful event handling.
+
+        Parameters
+        ----------
+        time : float
+            Time [s].
+        states, derivatives : ndarray
+            Concentration [mol/L] and its derivative [mol/L/s], shape (1,).
+        switches : list of bool or None, optional
+            Root-enable switch; the decay equation does not depend on it.
+
+        Returns
+        -------
+        ndarray
+            Decay residual [mol/L/s], shape (1,).
+
+        Raises
+        ------
+        ValueError
+            Configured failure inside or after the event's initialization.
+        """
+        if enabled["failure"] and failure_phase == "after_event" and time > failure_time:
+            raise error
+        return decay.residual(time, states, derivatives)
+
+    def initialize_at_event(solver, event_info):
+        """Recompute consistent states once, as Assimulo's example does.
+
+        Parameters
+        ----------
+        solver : object
+            Running IDA solver with time [s] and concentration [mol/L].
+        event_info : tuple
+            State-root flags [-] and the time-event flag.
+
+        Raises
+        ------
+        ValueError
+            Original model failure from nested consistent initialization.
+        TerminateSimulation
+            Handler's termination request after catching a model failure.
+        """
+        events.append(solver.t)
+        solver.sw[0] = False
+        if enabled["failure"] and failure_phase in ("during_consistency", "caught_consistency"):
+            decay.error = error
+        try:
+            solver.make_consistent("IDA_YA_YDP_INIT")
+        except ValueError as caught:
+            if failure_phase != "caught_consistency":
+                raise
+            assert caught is error
+            raise TerminateSimulation
+
+    problem = Implicit_Problem(residual, CHARGE, -RATE * CHARGE, sw0=[True])
+    problem.state_events = lambda time, states, derivatives, switches: np.array(
+        [time - STOP if switches[0] else END])
+    problem.handle_event = initialize_at_event
+    solver = IDA(problem)
+    solver.verbosity = 50
+    if enabled["failure"]:
+        with pytest.raises(ValueError, match="nested event residual failure") as caught:
+            solver.simulate(END)
+        assert caught.value is error
+        assert isinstance(error.__cause__, IDAError)
+        assert error.__cause__ is not error
+        assert len(events) == 1
+        assert solver.statistics["nfcns"] < MAX_CALLBACKS
+        enabled["failure"] = False
+        decay.error = None
+        events.clear()
+        solver.reset()
+    _, states, _ = solver.simulate(END)  # [mol/L], state profile
+    assert len(events) == 1
+    np.testing.assert_allclose(states[-1], CHARGE * np.exp(-RATE * END),
+                               rtol=TRAJECTORY_RTOL)
