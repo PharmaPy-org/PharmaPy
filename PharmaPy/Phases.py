@@ -1027,7 +1027,7 @@ class LiquidPhase(ThermoPhysicalManager):
         return cpLiq
 
     def getEnthalpy(self, temp: Optional[ArrayLike] = None,
-                    temp_ref: float = 298.15,
+                    temp_ref: Optional[float] = None,
                     mass_frac: Optional[np.ndarray] = None,
                     mole_frac: Optional[np.ndarray] = None,
                     total_h: bool = True, basis: str = 'mass',
@@ -1041,7 +1041,8 @@ class LiquidPhase(ThermoPhysicalManager):
             Temperature [K], scalar or shape ``(num_temps,)``. The phase
             temperature is used when ``None``.
         temp_ref : float, optional
-            Lower limit of the ``cp_liq`` integral [K]; default 298.15 K.
+            Lower limit of the ``cp_liq`` integral [K]; defaults to
+            ``self.temp_ref`` when present on the phase, or 298.15 K.
         mass_frac, mole_frac : ndarray, optional
             Liquid species fractions [-], shape ``(num_species,)`` or
             ``(num_rows, num_species)``. The stored phase composition is used
@@ -1094,6 +1095,9 @@ class LiquidPhase(ThermoPhysicalManager):
 
         if temp is None:
             temp = self.temp
+
+        if temp_ref is None:
+            temp_ref = getattr(self, 'temp_ref', 298.15)  # [K]
 
         hLiq = super().getEnthalpy(temp, temp_ref, mass_frac, mole_frac,
                                    phase='liquid', total_h=total_h,
@@ -2167,7 +2171,7 @@ class VaporPhase(ThermoPhysicalManager):
     def getEnthalpy(
             self,
             temp: Optional[ArrayLike] = None,
-            temp_ref: float = 298.15,
+            temp_ref: Optional[float] = None,
             mass_frac: Optional[np.ndarray] = None,
             mole_frac: Optional[np.ndarray] = None,
             total_h: bool = True,
@@ -2195,7 +2199,8 @@ class VaporPhase(ThermoPhysicalManager):
             is ``None``.
         temp_ref : float, optional
             Liquid-reference temperature for the sensible-enthalpy integral
-            [K]. The default is 298.15 K.
+            [K]. Defaults to ``self.temp_ref`` when present on the phase, or
+            298.15 K.
         mass_frac : ndarray, optional
             Vapor-phase species mass fractions [-], ordered according to the
             phase's components: shape ``(num_species,)`` for a composition
@@ -2308,6 +2313,9 @@ class VaporPhase(ThermoPhysicalManager):
 
         if temp is None:
             temp = self.temp
+
+        if temp_ref is None:
+            temp_ref = getattr(self, 'temp_ref', 298.15)  # [K]
 
         temp_values, is_supercritical = self._classify_criticality(temp)  # [K], [-]
         num_temp, num_comp = is_supercritical.shape
