@@ -45,9 +45,24 @@ class _BaseCrystallizer(MultiPhaseVessel):
         self.nomenclature(overwrite=True)
         self._post_CrystKinetics_setter()
     def _create_default_phase_connections(self):
-        ''' Assumes everything occurs between the first liquid and the first solid phases
-        Assumes that whatever the target index is for that Crystkinetic, the massfrac is 100% that compound and 0 everything else
-        Only runs if phase_connections are not already set'''
+        """Wire the first liquid and solid phases from ``CrystKinetics``.
+
+        Builds a crystallization connection (liquid to solid) when growth or
+        nucleation is supported and a dissolution connection (solid to
+        liquid) when dissolution is, and registers the population balance's
+        ``kernel_sources``, if it has any, as an intraphase process of the
+        solid. Each kinetics' target species makes up 100 % of the crystals.
+
+        Raises
+        ------
+        RuntimeError
+            If ``phase_connections`` are already set.
+        IndexError
+            If the vessel has no solid phase.
+        AttributeError
+            If the solid carries no population balance, or no kinetics can
+            be attached to it.
+        """
 
         if len(self.phase_connections)>0:
             raise RuntimeError(
@@ -109,6 +124,15 @@ class _BaseCrystallizer(MultiPhaseVessel):
 
                                              )
                 connections.append(connection)
+            # Agglomeration acts within the solid whatever the liquid does,
+            # so it runs as an intraphase process, not on a connection.
+            kernel_sources = getattr(pbm, 'kernel_sources', None)
+            if kernel_sources is not None and not any(
+                    process.mechanism is kernel_sources
+                    for process in self.intraphase_processes):
+                self.intraphase_processes = list(self.intraphase_processes) + [
+                    IntraPhaseProcess(phaseref=solidphase_ref,
+                                      mechanism=kernel_sources)]
         self.phase_connections = connections
 
     def default_diff_states_from_phases(self):

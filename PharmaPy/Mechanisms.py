@@ -8,7 +8,9 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   TransferResult,StateEvent
 )
 from PharmaPy.Phases_Refactored import BasePhase
-from PharmaPy.Errors import PharmaPyNonImplementedError, PharmaPyValueError
+from PharmaPy.Errors import (PharmaPyNonImplementedError, PharmaPySpecificationError,
+                             PharmaPyTypeError, PharmaPyValueError)
+from PharmaPy.CrystallizationKernels import KernelConditions
 from PharmaPy.MomentInversion import invert_moments
 from time import perf_counter
 
@@ -2481,7 +2483,8 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
 
     The moment form's assumptions remain: dissolution is size independent
     with no disappearance of crystals at L = 0, and nuclei are born at size
-    ``rad``.
+    ``rad``. Agglomeration, when given a kernel, conserves crystal volume;
+    its terms come from ``QMOMKernelSources``.
     """
 
     def __init__(
@@ -2497,6 +2500,7 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
         scale=None,
         moments_state_name='mu_n',
         abs_tol=None,
+        agglomeration=None,
     ):
         """Population balance carried as 2N moments, closed by quadrature.
 
@@ -2527,6 +2531,10 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
         abs_tol : float or array-like, optional
             Absolute integration tolerance per moment [um**k/m3 slurry]. None,
             the default, keeps the integrator's own tolerance.
+        agglomeration : callable, optional
+            Agglomeration kernel ``beta(L_i, L_j, conditions)`` [m**3/s], as
+            in ``PharmaPy.CrystallizationKernels``. None, the default, means
+            no agglomeration.
 
         Raises
         ------
@@ -2534,6 +2542,11 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
             If ``moments_init`` does not hold an even number of moments, at
             least four: N nodes take 2N moments, and the crystal mass needs
             mu_3.
+        PharmaPyTypeError
+            If ``agglomeration`` is neither None nor callable.
+        PharmaPyValueError
+            If ``agglomeration`` is infinite at zero size (its
+            ``needs_finite_nuclei`` is true) and ``rad`` is not positive.
 
         Warns
         -----
@@ -2549,6 +2562,17 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
                 'least four (N >= 2 nodes take mu_0..mu_{2N-1}), got %d.'
                 % num_mom)
 
+        if agglomeration is not None and not callable(agglomeration):
+            raise PharmaPyTypeError(
+                'agglomeration must be a kernel callable '
+                'beta(L_i, L_j, conditions), got %r.' % (agglomeration,))
+
+        if getattr(agglomeration, 'needs_finite_nuclei', False) and not rad > 0:
+            raise PharmaPyValueError(
+                '%s is infinite at zero size, where nuclei born at rad = %r '
+                'sit. Give the population balance a nucleus size rad > 0 [um].'
+                % (type(agglomeration).__name__, rad))
+
         super().__init__(
             owning_phase=owning_phase,
             target_components=target_components,
@@ -2563,6 +2587,33 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
             abs_tol=abs_tol,
         )
 
+        self.kernel_sources = (QMOMKernelSources(self, agglomeration)
+                               if agglomeration is not None else None)
+
+    def add_solver_state_variables(self, collection, overwrite=False,
+                                   phase_ref=None):
+        """Register the moments, and forget any earlier kernel registration.
+
+        Parameters
+        ----------
+        collection : StateCollection
+            The vessel's solver states.
+        overwrite : bool, optional
+            Passed on to the base class.
+        phase_ref : PhaseRef, optional
+            Phase owning the moments.
+
+        Notes
+        -----
+        The vessel registers phase and connection mechanisms before its
+        intraphase processes, so ``kernel_sources`` is marked attached again
+        only if it is still one of them.
+        """
+        if self.kernel_sources is not None:
+            self.kernel_sources.attached = False
+
+        super().add_solver_state_variables(collection, overwrite, phase_ref)
+
     @staticmethod
     def _reject_size_dependent_growth(kinetics):
         """Accept any growth law: the quadrature carries the size factor.
@@ -2572,6 +2623,38 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
         kinetics : CrystKinetics
             Kinetics being attached.
         """
+
+    def solve_population_balance(self, liquid, solid, completed_state, time,
+                                 connection):
+        """Moment rates of the transfer, once the kernel terms are wired.
+
+        Parameters
+        ----------
+        liquid, solid, completed_state, time, connection
+            As ``MomentsPopulationBalance.solve_population_balance``.
+
+        Returns
+        -------
+        TransferResult
+            As ``MomentsPopulationBalance.solve_population_balance``.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If this population balance has a kernel but its
+            ``kernel_sources`` is not an intra-phase process of the vessel,
+            which would leave agglomeration out without a word.
+        """
+        if self.kernel_sources is not None and not self.kernel_sources.attached:
+            raise PharmaPySpecificationError(
+                'This QMOMPopulationBalance has an agglomeration kernel, but '
+                'its kernel_sources is not among the vessel\'s '
+                'intraphase_processes. Set CrystKinetics through the '
+                'crystallizer, or add IntraPhaseProcess(PhaseRef("solid", 0), '
+                'mechanism.kernel_sources) yourself.')
+
+        return super().solve_population_balance(liquid, solid, completed_state,
+                                                time, connection)
 
     def _growth_integrals(self, moments, orders):
         """Integrals of L**k * G(L)/G0 * n(L) over size, by quadrature.
@@ -2603,3 +2686,207 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
 
         return np.sum(rule.weights[:, None] * size_factor[:, None]
                       * rule.nodes[:, None] ** orders, axis=0)
+
+
+def _agglomeration_moment_rates(nodes, weights, kernel_values, num_mom):
+    """Moment rates of volume-conserving agglomeration over a quadrature.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Quadrature sizes L_i [um], shape ``(n,)``.
+    weights : numpy.ndarray
+        Quadrature weights w_i [#/m3 slurry], shape ``(n,)``.
+    kernel_values : numpy.ndarray
+        beta(L_i, L_j) [m**3/s], shape ``(n, n)``.
+    num_mom : int
+        Number of moments.
+
+    Returns
+    -------
+    numpy.ndarray
+        d(mu_k)/dt [um**k/(m3 slurry s)], shape ``(num_mom,)``:
+        1/2 sum_ij w_i w_j beta_ij ((L_i**3 + L_j**3)**(k/3) - L_i**k - L_j**k).
+
+    Notes
+    -----
+    Each pair of crystals that agglomerates leaves one crystal of the summed
+    volume, so mu_3 is conserved and mu_0 falls by one per event; the half
+    counts each unordered pair once.
+    """
+    orders = np.arange(num_mom)
+    summed_cubes = nodes[:, None] ** 3 + nodes[None, :] ** 3  # [um**3]
+    pair_rates = 0.5 * weights[:, None] * weights[None, :] * kernel_values  # [#/(m3 s)]
+    born = summed_cubes[..., None] ** (orders / 3)  # [um**k]
+    lost = nodes[:, None, None] ** orders + nodes[None, :, None] ** orders  # [um**k]
+
+    return np.einsum('ij,ijk->k', pair_rates, born - lost)
+
+
+class QMOMKernelSources(Mechanism):
+    """Agglomeration terms of a QMOM population balance, as an intra-phase process.
+
+    Agglomeration moves crystals within the solid whatever the liquid does,
+    so it cannot ride on the liquid-solid transfer, which the crystallizer
+    runs once per direction and drops against the sign of the mass rate.
+    The crystallizer registers this mechanism as an ``IntraPhaseProcess`` of
+    the solid instead, and the vessel adds its moment rates once per
+    right-hand side. It declares no state of its own.
+
+    Parameters
+    ----------
+    population_balance : QMOMPopulationBalance
+        Population balance whose moments the terms act on.
+    agglomeration : callable
+        Kernel ``beta(L_i, L_j, conditions)`` [m**3/s].
+    """
+
+    def __init__(self, population_balance, agglomeration):
+        super().__init__()
+        self.population_balance = population_balance
+        self.agglomeration = agglomeration
+        self.attached = False
+
+    def add_solver_state_variables(self, collection, overwrite=False,
+                                   phase_ref=None):
+        """Record that a vessel registered this process; adds no state.
+
+        Parameters
+        ----------
+        collection : StateCollection
+            The vessel's solver states.
+        overwrite : bool, optional
+            Passed on to the base class.
+        phase_ref : PhaseRef, optional
+            Phase the process runs in.
+        """
+        super().add_solver_state_variables(collection, overwrite, phase_ref)
+        self.attached = True
+
+    def get_solver_state_rates(self, process, phase, time, completed_state):
+        """Moment rates of agglomeration at the current state.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Process this mechanism serves; its ``phaseref`` names the solid.
+        phase : BasePhase
+            The solid, unused: the moments are read from ``completed_state``.
+        time : float
+            Time [s], unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        TransferResult
+            d(mu_k)/dt [um**k/(m3 slurry s)], shape ``(2N,)``, keyed by the
+            moments state, with no mass or volume transfer.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the kernel returns rates that are not finite and
+            non-negative with shape ``(n, n)`` for n nodes, or if the
+            population balance has no liquid or kinetics to evaluate the
+            kernel conditions with.
+        """
+        balance = self.population_balance
+        key = StateKey(balance.moments_state_name, process.phaseref)
+        moments = np.asarray(completed_state[key], dtype=float)  # [um**k/m3]
+        rule = invert_moments(moments, balance.num_mom // 2)  # [um], [#/m3]
+
+        rates = np.zeros(balance.num_mom)
+        if len(rule.nodes):
+            kernel_values = self._kernel_values(rule.nodes, self._conditions(moments))
+            rates += _agglomeration_moment_rates(rule.nodes, rule.weights,
+                                                 kernel_values, balance.num_mom)
+
+        return TransferResult(state_rates={key: rates}, aux={'process': process},
+                              net_mass_rate=0.0)
+
+    def _conditions(self, moments):
+        """Kernel conditions from the live liquid and the kinetics.
+
+        Parameters
+        ----------
+        moments : numpy.ndarray
+            Moments [um**k/m3 slurry], shape ``(2N,)``.
+
+        Returns
+        -------
+        KernelConditions
+            Temperature [K], supersaturation, growth rate G0 [um/s] and
+            shape factor [-], as the transfer evaluates them.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the population balance has no liquid or no kinetics.
+        """
+        balance = self.population_balance
+        liquid = getattr(balance, 'liquid_phase', None)
+        kinetics = balance.mechanism_kinetics
+
+        if liquid is None or kinetics is None:
+            raise PharmaPyValueError(
+                'Agglomeration kernels need the crystallizer\'s liquid and '
+                'CrystKinetics; set CrystKinetics on the vessel first.')
+
+        conc, supersat, _ = balance.compute_supersaturation(liquid)
+        moments_si = moments * balance.MOMENT_UNIT_FACTOR ** np.arange(len(moments))  # [m**k/m3]
+        _, growth, _ = kinetics.get_kinetics(conc, liquid.temp, balance.kv, moments_si)
+        growth = growth * kinetics.alpha_fn(conc)  # [um/s]
+
+        # One crystallizing species: its single value, whether the kinetics
+        # hand back a scalar or a one-element array.
+        return KernelConditions(
+            temp=float(np.ravel(liquid.temp)[0]),  # [K]
+            supersaturation=float(np.ravel(supersat)[0]),
+            growth_rate=float(np.ravel(growth)[0]),  # [um/s]
+            shape_factor=float(balance.kv),  # [-]
+        )
+
+    def _kernel_values(self, nodes, conditions):
+        """Evaluate and check the kernel on every pair of nodes.
+
+        Parameters
+        ----------
+        nodes : numpy.ndarray
+            Quadrature sizes [um], shape ``(n,)``.
+        conditions : KernelConditions
+            Passed to the kernel.
+
+        Returns
+        -------
+        numpy.ndarray
+            beta(L_i, L_j) [m**3/s], shape ``(n, n)``.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the rates have another shape, or are negative or not finite.
+
+        Notes
+        -----
+        No crystal is smaller than a nucleus, so the kernel sees each node at
+        no less than ``rad``. A node below it comes from rounding or
+        integration error near zero size, and would otherwise drive a
+        kernel such as the Brownian one, which grows as 1/L, without bound.
+        """
+        num_nodes = len(nodes)
+        sizes = np.maximum(nodes, self.population_balance.rad)  # [um]
+        values = np.asarray(self.agglomeration(sizes[:, None], sizes[None, :],
+                                               conditions), dtype=float)
+
+        if values.shape != (num_nodes, num_nodes):
+            raise PharmaPyValueError(
+                'The agglomeration kernel must broadcast over its two size '
+                'arrays to shape %s, got %s.' % ((num_nodes, num_nodes), values.shape))
+
+        if not np.all(np.isfinite(values)) or np.any(values < 0):
+            raise PharmaPyValueError(
+                'The agglomeration kernel must return finite, non-negative '
+                'rates [m**3/s], got %s.' % values.tolist())
+
+        return values
