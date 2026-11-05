@@ -230,8 +230,10 @@ class _BaseReactor:
         correspond to species names in the physical properties
         .json file.
     :mask_params : list of bool (optional)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     :base_units : TODO: [deprecated? or unused?]
     :temp_ref : float (optional) TODO: [only active on CSTRs?]
         Reference temperature for enthalpy calculations.
@@ -437,7 +439,22 @@ class _BaseReactor:
         return self._Kinetics
 
     @Kinetics.setter
-    def Kinetics(self, instance):
+    def Kinetics(self, instance) -> None:
+        """Attach kinetics and expose names selected for estimation.
+
+        Parameters
+        ----------
+        instance : RxnKinetics
+            Reaction kinetics with native parameter units and transformations
+            defined by ``concat_params()``. All parameters remain in the
+            physical model; ``mask_params`` selects estimation coordinates.
+
+        Notes
+        -----
+        ``name_params`` on the reactor contains only selected names. The
+        complete name vector remains on ``Kinetics.name_params``. Fixed seed
+        reconstruction belongs to ``ParameterEstimation``, not the reactor.
+        """
         self._Kinetics = instance
         self.partic_species = instance.partic_species
 
@@ -451,13 +468,6 @@ class _BaseReactor:
                                 if self.mask_params[ind]]
 
         self.mask_params = np.array(self.mask_params)
-
-        ind_true = np.where(self.mask_params)[0]
-        ind_false = np.where(~self.mask_params)[0]
-
-        self.params_fixed = self.Kinetics.concat_params()[ind_false]
-
-        self.ind_maskpar = np.argsort(np.concatenate((ind_true, ind_false)))
 
     def _get_rate_basis_heat_of_reaction(
             self, heat_of_reaction: np.ndarray) -> np.ndarray:
@@ -1730,8 +1740,10 @@ class BatchReactor(_BaseReactor):
         correspond to species names in the physical properties
         .json file.
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)
@@ -2205,8 +2217,10 @@ class CSTR(_BaseReactor):
         correspond to species names in the physical properties
         .json file.
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)
@@ -2790,8 +2804,10 @@ class SemibatchReactor(CSTR):
         Volume of the vessel in m**3. Required to ensure that the
         vessel does not overflow
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)
@@ -3063,8 +3079,9 @@ class PlugFlowReactor(_BaseReactor):
     num_discr : int
         number of finite volumes to use to discretize the volume coordinate
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Reserved estimation selection in ``Kinetics.concat_params()`` order.
+        Parameter estimation for this reactor is unsupported (issue #401).
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)

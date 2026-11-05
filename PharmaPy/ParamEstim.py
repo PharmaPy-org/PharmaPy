@@ -3150,8 +3150,12 @@ class ParameterEstimation:
         name_params : list of str, optional
             Parameter names, either one per parameter of ``param_seed`` (in
             callback order; ``name_params`` then keeps the optimized ones)
-            or one per optimized parameter (``name_params_total`` then holds
-            only these). The default is None, which names parameter ``i``
+            or one per optimized parameter in increasing full-vector index
+            order. In the latter form, fixed coordinates receive their default
+            ``'theta_<i+1>'`` names, appending ``'_fixed'`` until distinct
+            from supplied optimized names; ``name_params_total`` has one name
+            per seed coordinate. Other lengths raise ``ValueError`` before
+            optimization. The default is None, which names parameter ``i``
             of ``param_seed`` ``'theta_<i+1>'`` in ``name_params_total``
             and keeps the same name for it in ``name_params``,
             ``name_params_plot`` and the ``paramest_df`` columns when it is
@@ -3181,6 +3185,8 @@ class ParameterEstimation:
         ValueError
             Raised when:
 
+            * ``name_params`` has neither one entry per seed parameter nor
+              one per optimized parameter;
             * both ``x_data`` and ``experiments`` are supplied;
             * legacy experiment mappings (``y_data``, ``args_fun``,
               ``kwargs_fun``) have keys other than those of ``x_data``, or
@@ -3640,13 +3646,27 @@ class ParameterEstimation:
             self.name_params_plot = [r'$\theta_{{{}}}$'.format(ind + 1)
                                      for ind in optimized_ind]
         else:
-            self.name_params_total = name_params
-            if len(name_params) > sum(self.map_variable):
+            if len(name_params) not in (self.num_params_total, self.num_params):
+                raise ValueError(
+                    "name_params must contain one name per parameter "
+                    f"({self.num_params_total}) or per optimized parameter "
+                    f"({self.num_params}); got {len(name_params)}")
+            if len(name_params) == self.num_params_total:
+                self.name_params_total = list(name_params)
                 self.name_params = [name_params[ind]
-                                    for ind in range(len(name_params))
-                                    if self.map_variable[ind]]
+                                    for ind in np.flatnonzero(self.map_variable)]
             else:
-                self.name_params = name_params
+                # Complete the fixed coordinates without renumbering the
+                # caller's optimized names or changing their order.
+                self.name_params_total = ['theta_{}'.format(ind + 1)
+                                          for ind in range(self.num_params_total)]
+                self.name_params = list(name_params)
+                for ind, name in zip(np.flatnonzero(self.map_variable),
+                                     self.name_params):
+                    self.name_params_total[ind] = name
+                for ind in np.flatnonzero(~self.map_variable):
+                    while self.name_params_total[ind] in self.name_params:
+                        self.name_params_total[ind] += '_fixed'
 
             self.name_params_plot = [r'$' + name + '$'
                                      for name in self.name_params]
