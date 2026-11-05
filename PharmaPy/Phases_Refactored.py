@@ -2074,8 +2074,13 @@ class LiquidPhase(BasePhase):
             verbose=verbose,
             **kwargs,
         )
-        self.cp_liq = np.atleast_2d(self.cp_liq)
-        self.p_vap = np.atleast_2d(self.p_vap)
+        # Empty correlations are omitted by ParseDatabase. Defer missing-data
+        # errors to property evaluation; isothermal liquid construction need
+        # not evaluate heat capacity or vapor pressure.
+        for property_name in ('cp_liq', 'p_vap'):
+            if property_name in self.__dict__:
+                setattr(self, property_name,
+                        np.atleast_2d(self.__dict__[property_name]))
 
     
 
