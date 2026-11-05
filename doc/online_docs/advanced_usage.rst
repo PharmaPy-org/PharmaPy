@@ -554,9 +554,22 @@ Liquid heat capacity
 Property basis options
 ======================
 
-The :code:`basis` option of :code:`LiquidPhase.getEnthalpy`, :code:`SolidPhase.getEnthalpy`, :code:`LiquidPhase.getDensity` and :code:`SolidPhase.getDensity`, and of the shared :code:`ThermoPhysicalManager.getEnthalpy` and :code:`ThermoPhysicalManager.getDensityMix` methods, accepts exactly :code:`'mass'` or :code:`'mole'`, matching the heat-capacity, vapor and :code:`getProps` methods. Any other value, such as :code:`'Mass'` or :code:`'molar'`, raises :code:`ValueError("basis must be 'mass' or 'mole'")` before any computation. Earlier releases raised :code:`UnboundLocalError` for a mixture enthalpy and silently returned molar species enthalpies [J/mol] and molar densities [kmol/m**3] for any value other than :code:`'mass'`. Results for :code:`'mass'` and :code:`'mole'` are unchanged. See `issue 415 <https://github.com/PharmaPy-org/PharmaPy/issues/415>`_.
+The :code:`basis` option of :code:`LiquidPhase.getEnthalpy`, :code:`SolidPhase.getEnthalpy`, :code:`LiquidPhase.getDensity` and :code:`SolidPhase.getDensity`, and of the shared :code:`ThermoPhysicalManager.getEnthalpy`, :code:`ThermoPhysicalManager.getDensityMix` and :code:`ThermoPhysicalManager.frac_to_conc` methods, accepts exactly :code:`'mass'` or :code:`'mole'`, matching the heat-capacity, vapor and :code:`getProps` methods. Any other value, such as :code:`'Mass'` or :code:`'molar'`, raises :code:`ValueError("basis must be 'mass' or 'mole'")` before any computation. Earlier releases raised :code:`UnboundLocalError` for a mixture enthalpy and silently returned molar species enthalpies [J/mol] and molar densities [kmol/m**3] for any value other than :code:`'mass'`. Results for :code:`'mass'` and :code:`'mole'` are unchanged. See `issue 415 <https://github.com/PharmaPy-org/PharmaPy/issues/415>`_.
 
 The :code:`phase` option of the shared kernels is validated the same way. :code:`ThermoPhysicalManager.getCpPure`, :code:`getCpMix` and :code:`getEnthalpy` accept :code:`'liquid'`, :code:`'solid'` and :code:`'vapor'`; :code:`getDensityPure` and :code:`getDensityMix` accept only :code:`'liquid'` and :code:`'solid'`, because vapor densities come from the ideal-gas law of :code:`VaporPhase.getDensity`, not from a stored property. Any other value, such as :code:`'Liquid'`, :code:`'gas'` or :code:`None`, raises :code:`ValueError("phase must be one of ('liquid', 'solid'), got 'gas'")` (with the accepted set of the method) before any computation, as the viscosity methods do; the density methods raised :code:`UnboundLocalError` in earlier releases. The pure densities are temperature-independent constants, so :code:`getDensityPure` and :code:`getDensityMix` ignore their :code:`temp` argument and no longer need a :code:`temp` attribute. :code:`ThermoPhysicalManager.getEnthalpy(total_h=True)` without :code:`mass_frac` or :code:`mole_frac` raises a :code:`ValueError` naming the missing composition instead of an :code:`AttributeError`. Results for accepted values are unchanged. See `issue 421 <https://github.com/PharmaPy-org/PharmaPy/issues/421>`_.
+
+The direct mixture kernels :code:`getCpMix` and :code:`getDensityMix` require
+at least one of :code:`mass_frac` or :code:`mole_frac`; omitting both raises
+:code:`ValueError` naming the required inputs. When both are supplied, the
+fraction on the requested output basis takes precedence. Both kernels accept
+lists and arrays, including conversion from the other fraction basis; an unused
+input is ignored. The liquid conversion
+:code:`frac_to_conc` instead gives :code:`mass_frac` precedence on either output
+basis. It accepts lists and arrays with shape :code:`(num_species,)` or
+:code:`(num_points, num_species)` and preserves that shape, including a one-row
+profile. Its :code:`basis` must be :code:`'mass'` (kg/m³) or :code:`'mole'`
+(mol/L, the default); an unknown basis raises :code:`ValueError`. Concentrations
+retain the existing additive-volume assumption based on :code:`rho_liq`.
 
 Dynamic extraction inlet temperatures
 =====================================
@@ -610,17 +623,6 @@ Vapor enthalpy and latent heat
 :code:`VaporPhase.getEnthalpy` and :code:`VaporPhase.getHeatVaporization` accept a scalar temperature [K] or a one-dimensional array of independent temperatures, such as the nodes of a distributed model. Each (temperature, species) entry is classified separately: a species is supercritical only strictly above its critical temperature, where it contributes vapor sensible heat and no latent heat. Every other entry, including a temperature exactly equal to :code:`t_crit`, uses liquid sensible heat plus the Watson latent heat, which is zero at :code:`t_crit`. A species without critical data in the property database (its :code:`t_crit` is parsed as NaN) is treated as non-condensing, as before: liquid sensible heat and zero latent heat at every temperature, with no latent-heat data required. A scalar or one-element temperature keeps the existing shapes: a scalar mixture enthalpy, species enthalpies of shape :code:`(1, num_species)` and latent heats of shape :code:`(num_species,)`. Several temperatures give :code:`(num_temperatures,)` mixture enthalpies and :code:`(num_temperatures, num_species)` species enthalpies and latent heats. Mixture weighting accepts one composition for all temperatures or a :code:`(num_temperatures, num_species)` profile whose row :code:`i` pairs with temperature :code:`i`; every row equals the evaluation at that row's temperature and composition alone.
 
 Earlier releases compared a temperature array elementwise with the per-species critical temperatures. Enthalpy calls therefore raised unless the number of temperatures equaled the number of species. When the counts were equal, mixture rows were silently wrong if a temperature equaled the critical temperature of the species at the same index: that species lost its sensible heat in every row. Paired composition profiles were combined by a matrix product that mixed rows. Temperature sets that straddle a critical temperature raised instead of returning values. When another species was supercritical at a scalar temperature, a species exactly at its critical temperature, or without critical data, lost its column or its sensible heat. Apart from those two cases, mixture values for scalar temperatures differ from earlier releases only by floating-point summation order. Non-finite or multidimensional temperatures, fractions without one entry per species, profiles whose row count differs from the number of temperatures, and, for a species with critical data evaluated at or below its critical temperature, non-finite :code:`t_crit`, :code:`tref_hvap` or :code:`delta_hvap` or :code:`tref_hvap >= t_crit` now raise :code:`ValueError`.
-
-The direct mixture kernels :code:`getCpMix` and :code:`getDensityMix` require
-at least one of :code:`mass_frac` or :code:`mole_frac`; omitting both raises
-:code:`ValueError` naming the required inputs. When both are supplied, the
-fraction on the requested output basis takes precedence. The liquid conversion
-:code:`frac_to_conc` instead gives :code:`mass_frac` precedence on either output
-basis. It accepts lists and arrays with shape :code:`(num_species,)` or
-:code:`(num_points, num_species)` and preserves that shape, including a one-row
-profile. Its :code:`basis` must be :code:`'mass'` (kg/m³) or :code:`'mole'`
-(mol/L, the default); an unknown basis raises :code:`ValueError`. Concentrations
-retain the existing additive-volume assumption based on :code:`rho_liq`.
 
 .. _missing-property-data:
 

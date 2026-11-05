@@ -129,9 +129,29 @@ def test_public_liquid_and_name_conversion_keep_concentration_basis(tmp_path, ba
 
 
 @pytest.mark.parametrize('basis', ['mass', 'mole'])
-def test_cp_and_density_fraction_precedence_and_conversion(tmp_path, basis):
+@pytest.mark.parametrize('rows', [None, 1, 2], ids=['vector', 'one-row', 'profile'])
+@pytest.mark.parametrize('as_list', [False, True], ids=['array', 'list'])
+@pytest.mark.parametrize('method', ['getCpMix', 'getDensityMix'])
+def test_cp_and_density_fraction_precedence_and_conversion(
+        tmp_path, basis, rows, as_list, method):
+    """Check selected and converted fractions against independent charge totals.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Directory for the synthetic database.
+    basis : {'mass', 'mole'}
+        Cp and density basis: [J/kg/K], [kg/m**3] or [J/mol/K], [mol/L].
+    rows : int or None
+        Number of charge rows, or None for one fraction vector [-].
+    as_list : bool
+        Whether to supply fractions as lists instead of arrays.
+    method : {'getCpMix', 'getDensityMix'}
+        Mixture property evaluated on the selected basis.
+    """
     manager = _manager(tmp_path)
     selected = MASS_FRAC if basis == 'mass' else MOLE_FRAC  # [-]
+    converted = MOLE_FRAC if basis == 'mass' else MASS_FRAC  # [-]
     other_name = 'mole_frac' if basis == 'mass' else 'mass_frac'
     selected_name = 'mass_frac' if basis == 'mass' else 'mole_frac'
     expected_cp = np.array([1690.0, 850.0])  # [J/K], sum of charge n_i Cp_i
@@ -141,13 +161,27 @@ def test_cp_and_density_fraction_precedence_and_conversion(tmp_path, basis):
     expected_density = amounts / VOLUMES  # [kg/m**3] or [mol/m**3]
     if basis == 'mole':
         expected_density = expected_density / LITERS_PER_CUBIC_METER  # [mol/L]
-    for kwargs in ({selected_name: selected, other_name: selected[::-1]},
-                   {other_name: MOLE_FRAC if basis == 'mass' else MASS_FRAC}):
-        np.testing.assert_allclose(manager.getCpMix(TEMPERATURE, basis=basis,
-                                                    **kwargs), expected_cp,
-                                   rtol=RTOL, atol=0)
-        np.testing.assert_allclose(manager.getDensityMix(basis=basis, **kwargs),
-                                   expected_density, rtol=RTOL, atol=0)
+    selected = selected[0] if rows is None else selected[:rows]  # [-]
+    converted = converted[0] if rows is None else converted[:rows]  # [-]
+    expected_cp = expected_cp[0] if rows is None else expected_cp[:rows]
+    # [J/kg/K] or [J/mol/K]
+    expected_density = (expected_density[0] if rows is None else
+                        expected_density[:rows])  # [kg/m**3] or [mol/L]
+    if as_list:
+        selected = selected.tolist()  # [-]
+        converted = converted.tolist()  # [-]
+    for kwargs in ({selected_name: selected, other_name: ['unused']},
+                   {other_name: converted}):
+        if method == 'getCpMix':
+            actual = manager.getCpMix(TEMPERATURE, basis=basis, **kwargs)
+            # [J/kg/K] or [J/mol/K]
+            expected = expected_cp  # [J/kg/K] or [J/mol/K]
+        else:
+            actual = manager.getDensityMix(basis=basis, **kwargs)
+            # [kg/m**3] or [mol/L]
+            expected = expected_density  # [kg/m**3] or [mol/L]
+        assert np.shape(actual) == np.shape(expected)
+        np.testing.assert_allclose(actual, expected, rtol=RTOL, atol=0)
 
 
 @pytest.mark.parametrize('order', [[0, 1, 2], [2, 0, 1]])
@@ -208,3 +242,27 @@ def test_zero_fraction_missing_molar_volume_contributes_zero_without_mutation(tm
     assert manager.getMolVolMix(fractions[:, 1]) == pytest.approx(
         expected[1], rel=RTOL, abs=0)
     np.testing.assert_array_equal(manager.mol_vol, stored)
+
+
+@pytest.mark.parametrize('fractions', [
+    [0.5, 0.5],
+    MOLE_FRAC.tolist(),
+    1.0,
+    MOLE_FRAC[None, ...].tolist(),
+], ids=['short-vector', 'row-first-profile', 'scalar', 'three-dimensional'])
+def test_molar_volume_rejects_invalid_fraction_shapes(tmp_path, fractions):
+    """Require a species-first vector or profile before property evaluation.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Directory for the synthetic three-species database.
+    fractions : array-like
+        Invalid mole-fraction shape [-]; the row-first case has two charges.
+    """
+    manager = _manager(tmp_path)
+    with pytest.raises(
+            ValueError,
+            match=r'^frac must have shape \(num_species,\) or '
+                  r'\(num_species, num_points\) in database species order$'):
+        manager.getMolVolMix(fractions)

@@ -998,8 +998,8 @@ class ThermoPhysicalManager:
         return cpMass, cpMole
 
     def getCpMix(self, temp: Union[float, np.ndarray],
-                 mass_frac: Optional[np.ndarray] = None,
-                 mole_frac: Optional[np.ndarray] = None,
+                 mass_frac: Optional[Union[Sequence[float], np.ndarray]] = None,
+                 mole_frac: Optional[Union[Sequence[float], np.ndarray]] = None,
                  phase: str = 'liquid',
                  basis: str = 'mass',
                  weights: Optional[np.ndarray] = None
@@ -1010,11 +1010,13 @@ class ThermoPhysicalManager:
         ----------
         temp : float or array-like
             Temperature [K], scalar or shape (num_temperatures,).
-        mass_frac, mole_frac : ndarray, optional
+        mass_frac, mole_frac : array-like, optional
             Species fractions [-], shape (num_species,) for fixed composition
             or (num_temperatures, num_species) for paired profiles. The
             requested basis takes precedence; the other basis is converted
-            when needed. At least one fraction input is required.
+            when needed. At least one fraction input is required. Lists and
+            arrays are accepted; only the selected input is converted to a
+            float array, before any conversion between fraction bases.
         phase : {'liquid', 'solid', 'vapor'}, optional
             Pure-component Cp correlation; default liquid.
         basis : {'mass', 'mole'}, optional
@@ -1067,14 +1069,20 @@ class ThermoPhysicalManager:
 
         if basis == 'mass':
             if mass_frac is None:
-                mass_frac = self.frac_to_frac(mole_frac=mole_frac)
+                mole_frac = np.asarray(mole_frac, dtype=float)  # [-]
+                mass_frac = self.frac_to_frac(mole_frac=mole_frac)  # [-]
+            else:
+                mass_frac = np.asarray(mass_frac, dtype=float)  # [-]
 
             frac = mass_frac  # [-]
             cp_pure = cp_mass  # [J/kg/K]
 
         elif basis == 'mole':
             if mole_frac is None:
-                mole_frac = self.frac_to_frac(mass_frac)
+                mass_frac = np.asarray(mass_frac, dtype=float)  # [-]
+                mole_frac = self.frac_to_frac(mass_frac=mass_frac)  # [-]
+            else:
+                mole_frac = np.asarray(mole_frac, dtype=float)  # [-]
 
             frac = mole_frac  # [-]
             cp_pure = cp_mole  # [J/mol/K]
@@ -1515,8 +1523,8 @@ class ThermoPhysicalManager:
 
         return inv_mass, inv_mole
 
-    def getDensityMix(self, mass_frac: Optional[np.ndarray] = None,
-                      mole_frac: Optional[np.ndarray] = None,
+    def getDensityMix(self, mass_frac: Optional[Union[Sequence[float], np.ndarray]] = None,
+                      mole_frac: Optional[Union[Sequence[float], np.ndarray]] = None,
                       phase: str = 'liquid', temp: Optional[float] = None,
                       basis: str = 'mass',
                       weights: Optional[np.ndarray] = None
@@ -1525,11 +1533,13 @@ class ThermoPhysicalManager:
 
         Parameters
         ----------
-        mass_frac, mole_frac : ndarray, optional
+        mass_frac, mole_frac : array-like, optional
             Species fractions [-], shape ``(num_species,)`` or
             ``(num_points, num_species)``. The fraction matching ``basis`` is
             used when supplied; otherwise the other one is converted.
-            At least one fraction input is required.
+            At least one fraction input is required. Lists and arrays are
+            accepted; only the selected input is converted to a float array,
+            before any conversion between fraction bases.
         phase : {'liquid', 'solid'}, optional
             Selects the ``rho_liq`` or ``rho_solid`` pure density
             [kg/m**3]; default liquid. ``'vapor'`` is rejected, as in
@@ -1591,12 +1601,18 @@ class ThermoPhysicalManager:
 
         if basis == 'mass':
             if mass_frac is None:
-                mass_frac = self.frac_to_frac(mole_frac=mole_frac)
+                mole_frac = np.asarray(mole_frac, dtype=float)  # [-]
+                mass_frac = self.frac_to_frac(mole_frac=mole_frac)  # [-]
+            else:
+                mass_frac = np.asarray(mass_frac, dtype=float)  # [-]
 
             frac = mass_frac  # [-]
         else:
             if mole_frac is None:
-                mole_frac = self.frac_to_frac(mass_frac=mass_frac)
+                mass_frac = np.asarray(mass_frac, dtype=float)  # [-]
+                mole_frac = self.frac_to_frac(mass_frac=mass_frac)  # [-]
+            else:
+                mole_frac = np.asarray(mole_frac, dtype=float)  # [-]
 
             frac = mole_frac  # [-]
 
