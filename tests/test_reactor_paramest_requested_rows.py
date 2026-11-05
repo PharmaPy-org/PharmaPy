@@ -236,26 +236,56 @@ def test_multiscale_grids_keep_distinct_samples(grid, return_sens):
             np.testing.assert_array_equal(block, raw_block[raw_rows])
 
 
-def test_points_omitted_by_default_output_are_reported():
-    times = np.linspace(0.0, 10.0, 51)  # [s], 0.2 s spacing
-    reactor = _reactor(TRUE_RATE, return_sens=False)
-    params = reactor.Kinetics.concat_params()  # [1/s], [J/mol]
-    # With CVode's default tolerances and non-continuous output, the points
-    # 9.6 s and 9.8 s inside its last internal step are not reported.
-    with pytest.raises(ValueError, match=(
-            r"^Requested time 9\.600000000000001 s is absent from the reactor "
-            r"solution, which reports 49 times from 0\.0 s to 10\.0 s\. "
-            r"CVode's default \(non-continuous\) output can omit requested "
-            r"points inside its last internal step before the end time; pass "
-            r"run_args=\{'sundials_opts': \{'report_continuously': True\}\}")):
-        reactor.paramest_wrapper(params, times)
+@pytest.mark.parametrize('return_sens', [False, True])
+def test_points_omitted_by_default_output_are_reported(return_sens):
+    """Check actual CVode output, whose missing points vary by backend version.
 
-    profile = reactor.paramest_wrapper(
+    Parameters
+    ----------
+    return_sens : bool
+        Whether the real CVodes solve also returns rate sensitivities.
+
+    Notes
+    -----
+    The solver-independent requested-row tests guarantee the omission branch;
+    this real integration also accepts versions that report every output point.
+    """
+    times = np.linspace(0.0, 10.0, 51)  # [s], 0.2 s spacing
+    reactor = _reactor(TRUE_RATE, return_sens)
+    params = reactor.Kinetics.concat_params()  # [1/s], [J/mol]
+    raw = reactor.solve_unit(time_grid=times, verbose=False,
+                             eval_sens=return_sens)
+    reported = raw[0]  # [s], independent evidence from the real solver
+    missing = times[~np.isin(times, reported)]  # [s]
+    if missing.size:
+        with pytest.raises(ValueError) as error:
+            reactor.paramest_wrapper(params, times)
+        assert str(error.value).startswith(
+            f"Requested time {float(missing[0])!r} s is absent from the reactor "
+            f"solution, which reports {len(reported)} times from "
+            f"{float(reported[0])!r} s to {float(reported[-1])!r} s.")
+        assert "'report_continuously': True" in str(error.value)
+    else:
+        result = reactor.paramest_wrapper(params, times)
+        profile = result[0] if return_sens else result  # [mol/L]
+        np.testing.assert_allclose(
+            profile, _analytic(BASE_A, TRUE_RATE, times)[0],
+            rtol=DEFAULT_PROFILE_RTOL, atol=DEFAULT_PROFILE_ATOL)
+
+    result = reactor.paramest_wrapper(
         params, times,
         run_args={'sundials_opts': {'report_continuously': True}})
-    np.testing.assert_allclose(
-        profile, _analytic(BASE_A, TRUE_RATE, times)[0],
-        rtol=DEFAULT_PROFILE_RTOL, atol=DEFAULT_PROFILE_ATOL)
+    profile = result[0] if return_sens else result  # [mol/L]
+    expected, sensitivity = _analytic(BASE_A, TRUE_RATE, times)
+    np.testing.assert_allclose(profile, expected,
+                               rtol=DEFAULT_PROFILE_RTOL,
+                               atol=DEFAULT_PROFILE_ATOL)
+    if return_sens:
+        # Default 1e-6 solver tolerance, with the existing 100-fold profile
+        # budget, applied to dc/dk [mol/L*s].
+        np.testing.assert_allclose(result[1][:, 0], sensitivity.T.ravel(),
+                                   rtol=DEFAULT_PROFILE_RTOL,
+                                   atol=DEFAULT_PROFILE_ATOL)
 
 
 def _experiments():
