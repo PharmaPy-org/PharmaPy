@@ -13,6 +13,7 @@ pytestmark = [pytest.mark.assimulo, pytest.mark.integration]
 pytest.importorskip('assimulo')
 
 import test_paramestim_accepted_reactor as reactor_case
+import test_reactor_paramest_requested_rows as zero_energy_case
 import test_calibration_validation_crystallizer as growth_case
 import test_crystallizer_paramest_requested_rows as cryst
 from PharmaPy.Kinetics import RxnKinetics
@@ -130,6 +131,39 @@ def test_reactor_fit_record_preserves_fixed_and_free_coordinates(
             assert item.fitted == pytest.approx(expected[index], rel=RECOVERY_RTOL)
         else:
             assert item.fitted is None
+
+
+def test_reactor_zero_energy_seed_inherits_mask_without_optimize_flags():
+    """Pin #489's isothermal masked-zero-energy reproduction through fitting.
+
+    Notes
+    -----
+    The reused first-order reactor supplies Ea = 0 J/mol and a trial rate
+    of 0.15 1/s. RxnKinetics normalizes its zero input internally, so retain
+    its stored activation-energy seed exactly rather than replace it by a
+    literal zero. The two exact issue observations obey c_A = c_A0 exp(-k t).
+    """
+    simulation = SimulationExec(zero_energy_case.THERMO_PATH, {'R01': []})
+    simulation.R01 = zero_energy_case._reactor(
+        zero_energy_case.TRIAL_RATE, return_sens=False)
+    stored_seed = simulation.R01.Kinetics.concat_params().copy()  # [1/s], [J/mol]
+    times = np.array([1.0, 2.0])  # [s], the two samples in issue #489
+    observations = (zero_energy_case.BASE_A
+                    * np.exp(-zero_energy_case.TRUE_RATE * times))  # [mol/L]
+    experiments = {'e': Experiment({
+        'c_A': Measurement(0, times, observations, units='mol/L', x_units='s')})}
+    simulation.SetParamEstimation(experiments, wrapper_kwargs={
+        'sundials_opts': zero_energy_case.SOLVER_OPTIONS})
+    estimator = simulation.ParamInst
+    np.testing.assert_array_equal(estimator.map_variable, [True, False])
+    assert estimator.name_params_total == ['k_1', 'E_{a, 1}']
+    assert estimator.name_params == ['k_1']
+    np.testing.assert_array_equal(estimator.param_seed, stored_seed)
+    fitted, _, _ = simulation.EstimateParams(verbose=False)  # [1/s], one free k
+    np.testing.assert_allclose(fitted, [zero_energy_case.TRUE_RATE], rtol=0,
+                               atol=zero_energy_case.FIT_ATOL)
+    np.testing.assert_array_equal(simulation.R01.Kinetics.concat_params()[1:],
+                                  stored_seed[1:])  # [J/mol], fixed Ea
 
 
 @pytest.mark.parametrize('explicit', [False, True])

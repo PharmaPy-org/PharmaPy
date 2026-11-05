@@ -1,8 +1,9 @@
 """Full parameter coordinates, early name validation and record replay.
 
 The core fixture is an exact quadratic concentration history at four unequal
-times. Each fit frees one coordinate, so fixed entries precede and follow the
-estimate. Expectations are tabulated independently of the model callback.
+times. Fits free one coordinate or two coordinates around a fixed entry,
+exposing both fixed-slot placement and optimized-name ordering. Expectations
+are tabulated independently of the model callback.
 """
 
 import numpy as np
@@ -41,26 +42,40 @@ def quadratic(parameters: np.ndarray, time_s: np.ndarray) -> np.ndarray:
     return np.polynomial.polynomial.polyval(time_s, parameters)
 
 
-@pytest.mark.parametrize('free_index', [0, 1, 2])
+@pytest.mark.parametrize('free_indices', [(0,), (1,), (2,), (0, 2)],
+                         ids=['charge-only', 'rate-only', 'curvature-only',
+                              'charge-and-curvature'])
 @pytest.mark.parametrize('full_names', [False, True])
 def test_both_name_forms_preserve_coordinates_through_fit_and_record(
-        free_index, full_names):
-    flags = [index == free_index for index in range(len(TRUTH))]
-    names = NAMES.copy() if full_names else [NAMES[free_index]]
+        free_indices, full_names):
+    """Keep named free coordinates in physical order across fitting and replay.
+
+    Parameters
+    ----------
+    free_indices : tuple of int
+        Free charge, rate or curvature coordinates in full-vector order;
+        their units are [g/L], [g/L/s] and [g/L/s**2], respectively.
+    full_names : bool
+        Supply all coordinate names or only the free-coordinate names.
+    """
+    flags = [index in free_indices for index in range(len(TRUTH))]
+    optimized_names = [NAMES[index] for index in free_indices]
+    names = NAMES.copy() if full_names else optimized_names.copy()
     expected_names = (NAMES.copy() if full_names
                       else ['theta_1', 'theta_2', 'theta_3'])
-    expected_names[free_index] = NAMES[free_index]
-    seed = TRUTH.copy()  # [coefficient units], only the free entry is perturbed
-    seed[free_index] /= 2  # [-], start halfway to the known solution
+    for index in free_indices:
+        expected_names[index] = NAMES[index]
+    seed = TRUTH.copy()  # [coefficient units], perturb only free entries
+    seed[flags] /= 2  # [coefficient units], start halfway to the known solution
     experiments = {'run': Experiment({
         'concentration': Measurement(0, TIMES, OBSERVATIONS, units='g/L',
                                      x_units='s')})}
     estimator = ParameterEstimation(quadratic, seed, experiments,
                                     optimize_flags=flags, name_params=names)
-    assert estimator.name_params == [NAMES[free_index]]
+    assert estimator.name_params == optimized_names
     assert estimator.name_params_total == expected_names
     estimator.optimize_fn(verbose=False)
-    np.testing.assert_allclose(estimator.params_convg, [TRUTH[free_index]],
+    np.testing.assert_allclose(estimator.params_convg, TRUTH[flags],
                                rtol=0, atol=FIT_ATOL)
     record = CalibrationRecord.from_estimation(
         estimator, experiments, case='quadratic-identity', parameter_units=UNITS,
@@ -72,7 +87,7 @@ def test_both_name_forms_preserve_coordinates_through_fit_and_record(
     assert [item.optimized for item in loaded.parameters] == flags
     np.testing.assert_array_equal([item.seed for item in loaded.parameters], seed)
     for index, item in enumerate(loaded.parameters):
-        if index == free_index:
+        if index in free_indices:
             assert item.fitted == pytest.approx(TRUTH[index], abs=FIT_ATOL, rel=0)
         else:
             assert item.fitted is None
@@ -80,7 +95,7 @@ def test_both_name_forms_preserve_coordinates_through_fit_and_record(
     assert replay.name_params_total == expected_names
     np.testing.assert_allclose(replay.reconstruct_params(replay.params_convg),
                                TRUTH, rtol=0, atol=FIT_ATOL)
-    assert names == (NAMES if full_names else [NAMES[free_index]])
+    assert names == (NAMES if full_names else optimized_names)
 
 
 @pytest.mark.parametrize('names', [[], ['a', 'b'], ['a', 'b', 'c', 'd']])
