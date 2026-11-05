@@ -5433,6 +5433,64 @@ class ParameterEstimation:
 
         return intervals
 
+    def assess_information(self, parameter_scales: np.ndarray,
+                           relative_tolerance: float,
+                           reference_jacobian: Optional[np.ndarray] = None) -> dict:
+        """Assess scaled local information at a declared derivative resolution.
+
+        Parameters
+        ----------
+        parameter_scales : array_like
+            Positive physical parameter scales, shape (num_params,), in each
+            parameter's units. Weighted residuals must use compatible scales.
+        relative_tolerance : float
+            Resolvable singular-value fraction [-], strictly between zero and
+            one. Choose from differentiation/integration refinement; machine
+            precision alone does not establish practical identifiability.
+        reference_jacobian : numpy.ndarray, optional
+            Independently refined weighted Jacobian, same parameter-by-residual
+            shape and units as info_opt['jac']. Its discrepancy sets an
+            additional spectral perturbation floor (Weyl's inequality).
+
+        Returns
+        -------
+        dict
+            Scaled singular values, derivative discrepancy [-], resolved rank,
+            and local full-rank assessment. A single Jacobian leaves derivative
+            reliability unverified; full rank is not structural identifiability
+            or evidence of calibrated confidence coverage.
+
+        Raises
+        ------
+        ValueError
+            Scales, tolerance or Jacobians have invalid shape or finite range.
+        """
+        scales = np.asarray(parameter_scales, dtype=float)  # [parameter units]
+        jac = np.asarray(self.info_opt['jac'], dtype=float)  # [weighted residual unit / parameter unit]
+        if scales.shape != (self.num_params,) or not np.isfinite(scales).all() or np.any(scales <= 0.):
+            raise ValueError('parameter_scales must be finite positive values, one per fitted parameter')
+        if not np.isfinite(relative_tolerance) or not 0. < relative_tolerance < 1.:
+            raise ValueError('relative_tolerance must be finite and strictly between zero and one')
+        if jac.ndim != 2 or jac.shape[0] != self.num_params or not np.isfinite(jac).all():
+            raise ValueError('weighted Jacobian must be finite with one row per fitted parameter')
+        scaled = scales[:, None] * jac  # [weighted residual units]
+        singular = np.linalg.svd(scaled, compute_uv=False)  # [weighted residual units]
+        leading = float(singular[0]) if singular.size else 0.  # [weighted residual units]
+        discrepancy = 0.  # [weighted residual units]
+        if reference_jacobian is not None:
+            reference = np.asarray(reference_jacobian, dtype=float)  # [weighted residual unit / parameter unit]
+            if reference.shape != jac.shape or not np.isfinite(reference).all():
+                raise ValueError('reference_jacobian must be finite and match the fitted Jacobian shape')
+            discrepancy = float(np.linalg.norm(scales[:, None] * (jac-reference), ord=2))  # [weighted residual units]
+        threshold = max(relative_tolerance * leading, discrepancy)  # [weighted residual units]
+        rank = int(np.count_nonzero(singular > threshold))
+        return dict(scaled_singular_values=singular.tolist(), resolved_rank=rank,
+                    full_rank=rank == self.num_params,
+                    derivative_refinement_checked=reference_jacobian is not None,
+                    relative_derivative_discrepancy=(discrepancy / leading if leading else None),
+                    relative_tolerance=float(relative_tolerance),
+                    interpretation='Local information only; fit acceptance, noise assumptions and boundary coverage require separate qualification')
+
     def get_covariance(self, include_mse: bool = True) -> np.ndarray:
         """Estimate the parameter covariance at the accepted parameters.
 
@@ -5476,7 +5534,9 @@ class ParameterEstimation:
         Warns
         -----
         RuntimeWarning
-            If the covariance is undefined, with one of three diagnostics:
+            If the covariance is undefined: residual scaling requires positive
+            degrees of freedom (absolute-noise covariance does not); or one of
+            the following information-matrix diagnostics applies:
             the weighted residual Jacobian has non-finite entries (naming
             those parameters); the parameters are not (locally)
             identifiable from the observed data (naming every parameter
