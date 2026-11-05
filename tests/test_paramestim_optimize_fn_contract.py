@@ -760,7 +760,7 @@ def test_default_plot_label_keeps_two_digit_index_in_subscript():
 
 @pytest.mark.parametrize('names, optimized, total', [
     (['c0', 'k'], ['k'], ['c0', 'k']),  # one name per parameter
-    (['k'], ['k'], ['k']),  # one name per optimized parameter
+    (['k'], ['k'], ['theta_1', 'k']),  # fixed coordinate gets its default name
 ])
 def test_given_names_keep_both_documented_forms(names, optimized, total):
     estimator = ParameterEstimation(decay, DECAY_SEED, TIME_S,
