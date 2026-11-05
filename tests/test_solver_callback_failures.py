@@ -24,6 +24,7 @@ import pytest
 pytestmark = [pytest.mark.assimulo, pytest.mark.integration]
 pytest.importorskip("assimulo")
 
+from assimulo.exception import TerminateSimulation
 from assimulo.solvers.sundials import CVodeError, IDAError
 
 from PharmaPy.ProcessControl import DynamicInput
@@ -32,6 +33,7 @@ from PharmaPy.DynamicExtraction import DynamicExtractor
 from PharmaPy.Phases import LiquidPhase
 from PharmaPy.Streams import LiquidStream
 from test_reactor_correctness import _configured_reactor, CONCENTRATIONS
+from test_solver_callback_controls import Decay, END, _problem
 from test_dynamic_extractor_inlet_temperatures import (
     SPECIES, LIGHT_COMPOSITION, HEAVY_COMPOSITION, LIGHT_FLOW, HEAVY_FLOW,
     PHASE_HOLDUP, INITIAL_TEMPERATURE, distribution_coefficients,
@@ -51,6 +53,51 @@ PROBE_TIMEOUT = 60  # [s], includes interpreter/import startup
 PROBE_CPU_SECONDS = 30  # [s], secondary guard against a native retry loop
 PROBE_MEMORY_BYTES = 6 * 1024**3  # [byte], ample for small NumPy/Assimulo cases
 EXCEPTIONS = (ValueError, AttributeError, KeyError, KeyboardInterrupt, SystemExit)
+BACKEND_MODEL_EXCEPTIONS = (TerminateSimulation, CVodeError, IDAError)
+ONE_SHOT_EXCEPTIONS = (ValueError, np.linalg.LinAlgError, ZeroDivisionError)
+CALLBACK_EXCEPTIONS = EXCEPTIONS + BACKEND_MODEL_EXCEPTIONS + ONE_SHOT_EXCEPTIONS
+
+
+def _callback_error(error_type):
+    """Construct a model error, obtaining native diagnostics from a real solve.
+
+    Parameters
+    ----------
+    error_type : type
+        Model exception class; CVodeError and IDAError represent a nested
+        solver failure that the outer model subsequently raises.
+
+    Returns
+    -------
+    BaseException
+        Original error object to raise at the delayed feed handoff. Native
+        diagnostics use the backend's actual code, message and time [s].
+
+    Raises
+    ------
+    AssertionError
+        If one allowed native step unexpectedly completes one decay time scale.
+
+    Notes
+    -----
+    Generate a genuine too-much-work diagnostic rather than inventing a
+    SUNDIALS status code. The native-control test uses this same analytic
+    problem and explicit maxsteps=1 constraint.
+    """
+    if error_type in (CVodeError, IDAError):
+        family = "CVode" if error_type is CVodeError else "IDA"
+        problem, factory, _, _ = _problem(family, Decay())
+        nested_solver = factory(problem)
+        nested_solver.verbosity = 50
+        # One step cannot resolve a full first-order decay time scale.
+        nested_solver.maxsteps = 1  # [-], deliberate native work-budget failure
+        try:
+            nested_solver.simulate(END, ncp_list=[END])
+        except error_type as error:
+            assert error.__cause__ is None
+            return error
+        raise AssertionError("nested solver unexpectedly met its work budget")
+    return error_type("feed calibration unavailable: species A")
 
 
 class FailingInput:
@@ -75,7 +122,7 @@ class FailingInput:
             Allow all evaluations after the first failure to succeed.
         """
         self.values = np.array(values)  # [mol/L] or [-], as supplied
-        self.error = error_type("feed calibration unavailable: species A")
+        self.error = _callback_error(error_type)
         self.onset = onset  # [s]
         self.one_shot = one_shot
         self.enabled = True
@@ -186,8 +233,10 @@ def _probe(family, error_name, onset, one_shot):
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary)
         unit, inlet, field, values = _unit(family, path)
-        error_type = next(cls for cls in EXCEPTIONS if cls.__name__ == error_name)
+        error_type = next(cls for cls in CALLBACK_EXCEPTIONS
+                          if cls.__name__ == error_name)
         feed = FailingInput(values, error_type, onset, one_shot)
+        expected_message = str(feed.error)
         controller = DynamicInput()
         controller.add_variable(field, feed)
         inlet.DynamicInlet = controller
@@ -195,9 +244,10 @@ def _probe(family, error_name, onset, one_shot):
             unit.solve_unit(runtime=RUNTIME, verbose=False)
         except BaseException as error:
             assert error is feed.error, (type(error).__name__, str(error))
-            assert str(error) == str(error_type("feed calibration unavailable: species A"))
+            assert str(error) == expected_message
             assert feed.calls_after_failure == 0, feed.calls_after_failure
             assert isinstance(error.__cause__, CVodeError if family == "CVode" else IDAError)
+            assert error.__cause__ is not error
             traceback = error.__traceback__
             while traceback is not None and traceback is not feed.first_traceback:
                 traceback = traceback.tb_next
@@ -231,8 +281,41 @@ def test_public_solve_preserves_callback_failure(family, onset, error_type):
 
 
 @pytest.mark.parametrize("family", ["CVode", "IDA"])
-def test_public_solve_cannot_step_around_one_shot_failure(family):
-    _run_probe(family, "ValueError", DELAY, True)
+@pytest.mark.parametrize("error_type", BACKEND_MODEL_EXCEPTIONS,
+                         ids=lambda cls: cls.__name__)
+def test_public_solve_latches_backend_family_callback_failures(family, error_type):
+    """Treat backend-family errors raised by the model as model failures.
+
+    Parameters
+    ----------
+    family : {'CVode', 'IDA'}
+        Outer public unit's native integrator.
+    error_type : type
+        Termination signal or genuine nested-solver error raised after DELAY [s].
+    """
+    _run_probe(family, error_type.__name__, DELAY, False)
+
+
+@pytest.mark.parametrize("family", ["CVode", "IDA"])
+@pytest.mark.parametrize("error_type", ONE_SHOT_EXCEPTIONS,
+                         ids=lambda cls: cls.__name__)
+def test_public_solve_cannot_step_around_one_shot_failure(family, error_type):
+    """Abort on the original error even if a later callback could succeed.
+
+    Parameters
+    ----------
+    family : {'CVode', 'IDA'}
+        Public unit's native integrator.
+    error_type : type
+        ValueError, LinAlgError or ZeroDivisionError raised once after DELAY [s].
+
+    Notes
+    -----
+    One-shot numerical errors are intentionally terminal for both solver
+    families. A model that permits backend retry must request it explicitly
+    with AssimuloRecoverableError instead of an ordinary numerical error.
+    """
+    _run_probe(family, error_type.__name__, DELAY, True)
 
 
 def _run_probe(family, error_name, onset, one_shot):

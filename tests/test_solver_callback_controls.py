@@ -205,7 +205,15 @@ def test_native_failure_is_not_relabelled(family):
     assert failure.value.__cause__ is None
 
 
-def test_explicit_recoverable_solver_exception_is_not_latched():
+@pytest.mark.parametrize("family", ["CVode", "IDA"])
+def test_explicit_recoverable_solver_exception_is_not_latched(family):
+    """Allow the backend's explicit retry request for either solver family.
+
+    Parameters
+    ----------
+    family : {'CVode', 'IDA'}
+        Native public solver for the one-species concentration decay.
+    """
     recovered = []  # [s], time of the one deliberate recoverable failure
 
     def rhs(time, states):
@@ -233,9 +241,36 @@ def test_explicit_recoverable_solver_exception_is_not_latched():
             raise AssimuloRecoverableError("retry this trial")
         return -RATE * states
 
-    solver = CVode(Explicit_Problem(rhs, CHARGE))
+    def residual(time, states, derivatives):
+        """Express the same recoverable decay model as an IDA residual.
+
+        Parameters
+        ----------
+        time : float
+            Evaluation time [s].
+        states : ndarray
+            Concentration [mol/L], shape (1,).
+        derivatives : ndarray
+            Concentration derivative [mol/L/s], shape (1,).
+
+        Returns
+        -------
+        ndarray
+            Derivative minus the decay rate [mol/L/s], shape (1,).
+
+        Raises
+        ------
+        AssimuloRecoverableError
+            The model's one explicit request for a retry.
+        """
+        return derivatives - rhs(time, states)
+
+    if family == "CVode":
+        solver = CVode(Explicit_Problem(rhs, CHARGE))
+    else:
+        solver = IDA(Implicit_Problem(residual, CHARGE, -RATE * CHARGE))
     solver.verbosity = 50
-    _, states = solver.simulate(END)  # [mol/L], state profile
+    _, states, *_ = solver.simulate(END)  # [mol/L], state profile
     assert len(recovered) == 1
     np.testing.assert_allclose(states[-1], CHARGE * np.exp(-RATE * END),
                                rtol=TRAJECTORY_RTOL)

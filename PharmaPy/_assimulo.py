@@ -142,8 +142,10 @@ class _CallbackFailure:
         callback : callable
             RHS or residual; arguments, units and shapes are model-specific.
         solver_exceptions : tuple of type
-            Backend errors and control flow, including normal termination
-            and explicitly recoverable solver exceptions, to pass through.
+            Explicitly recoverable callback exceptions to pass through.
+            Backend errors from nested solves and termination requests raised
+            by a model are failures of this callback, not outer solver control
+            flow. Event handlers are outside this wrapper.
         """
         self.callback = callback
         self.solver_exceptions = solver_exceptions
@@ -169,7 +171,8 @@ class _CallbackFailure:
         ------
         BaseException
             First model error, with its saved traceback on every retry.
-            Backend control-flow exceptions pass through without latching.
+            Only explicit ``AssimuloRecoverableError`` requests pass through
+            without latching. A one-shot ordinary numerical error is terminal.
         """
         if self.active and self.error is not None:
             raise self.error.with_traceback(self.traceback)
@@ -207,9 +210,10 @@ class _FailureHandlingSolver:
         callback_name = self._callback_name
         callback = getattr(problem, callback_name)
         self._callback_failure = _CallbackFailure(callback, (
-            _load_assimulo_symbol("assimulo.exception", "AssimuloException"),
-            _load_assimulo_symbol("assimulo.solvers.sundials", "CVodeError"),
-            _load_assimulo_symbol("assimulo.solvers.sundials", "IDAError"),
+            # Only this callback exception requests native recovery in the
+            # supported Assimulo backend. Native errors from a nested solve
+            # and event exceptions raised by a model are callback failures.
+            _load_assimulo_symbol("assimulo.exception", "AssimuloRecoverableError"),
         ))
         setattr(problem, callback_name, self._callback_failure)
         try:

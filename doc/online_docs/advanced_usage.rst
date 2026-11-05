@@ -653,7 +653,8 @@ Solver callback failures
 
 All PharmaPy CVode and IDA solve paths, including the vessel backends and
 models generated with :mod:`PharmaPy.solvers`, preserve the first Python
-exception from an RHS or residual. This includes :code:`MissingPropertyError`,
+exception from an RHS or residual, except an explicit
+:code:`AssimuloRecoverableError` retry request. This includes :code:`MissingPropertyError`,
 :code:`KeyboardInterrupt` and :code:`SystemExit`. After the first failure,
 retries raise without evaluating the model again, including retries at earlier
 times. The original exception object, message and traceback reach the caller,
@@ -667,10 +668,22 @@ operation ends, including on interrupts. An IDA event handler that calls
 the inner native diagnostic, so resumed integration remains protected.
 Existing unit rollback behavior is retained;
 reactors continue to use their established :code:`reset()` API to restore the
-charge. Successful trajectories, reporting grids, tolerances and normal
-:code:`TerminateSimulation` event termination are unchanged. Explicit Assimulo
-control-flow exceptions, including :code:`AssimuloRecoverableError`, retain
-their backend meaning and are not recorded as model failures.
+charge. Trajectories whose callbacks do not fail, reporting grids, tolerances
+and normal :code:`TerminateSimulation` raised by an **event handler** are
+unchanged. Only :code:`AssimuloRecoverableError` raised by an RHS or residual
+requests a recoverable retry and is not recorded as a model failure. An
+:code:`AssimuloException` subclass such as :code:`TerminateSimulation`, or a
+:code:`CVodeError` or :code:`IDAError` from a nested solve, is a callback failure
+when raised by the model; it is not control flow for the enclosing solver.
+
+This deliberately changes recovery of ordinary numerical exceptions in user
+models: even a one-shot :code:`numpy.linalg.LinAlgError` or
+:code:`ZeroDivisionError` now aborts both CVode and IDA operations with the
+original diagnostic. Earlier releases could retry and complete after such a
+trial failure. A model that explicitly permits a retry must raise
+:code:`AssimuloRecoverableError` for that condition instead. This terminal
+policy preserves the first failure and prevents a later successful trial from
+bypassing it, consistently across both solver families.
 
 Connected inlet interpolation
 =============================
