@@ -24,6 +24,7 @@ conservation identity is asserted on the moment form; the dilution term
 itself is asserted on both forms.
 """
 
+import json
 import os
 
 import numpy as np
@@ -52,6 +53,10 @@ TEMP = 298.15  # [K]
 
 SOLUBILITY = 50.0  # [kg/m**3], constant; the charge holds about 187 kg/m**3
 GROWTH = (0.1, 0.0, 1.0)  # k_g [um/s], E_g [J/mol], g [-]: linear growth
+# 1000x growth prefactor so the unthrottled demand (2.93 kg/s) exceeds the
+# 0.2 kg solute inventory over the 1 s positivity-limiter horizon.
+LIMITED_GROWTH = (100.0, 0.0, 1.0)  # k_g [um/s], E_g [J/mol], g [-]
+ABSENT_SPECIES_MW = 28.0134  # [g/mol], molecular weight of an absent N2-like inert
 
 SEED_SIZE = 50.0  # [um]
 SEED_NUMBER = 8e11  # [#/m**3 of slurry]; kv * mu_3 * 1e-18 = 0.1 [-]
@@ -92,7 +97,9 @@ def _seed_distribution():
             * np.exp(-0.5 * ((FVM_GRID - SEED_SIZE) / FVM_SEED_WIDTH) ** 2))
 
 
-def _build(form, crystal_density, integrator=None):
+def _build(form, crystal_density, integrator=None, growth=GROWTH,
+           data_path=DATA_PATH, charge_mass_frac=CHARGE_MASS_FRAC,
+           crystal_mass_frac=CRYSTAL_MASS_FRAC):
     """Build a closed, isothermal batch crystallizer.
 
     Parameters
@@ -103,6 +110,14 @@ def _build(form, crystal_density, integrator=None):
         Crystal density [kg/m**3].
     integrator : IntegratorBackend, optional
         Backend for a solve. None for solver-free evaluation.
+    growth : tuple of float, optional
+        Growth parameters ``(k_g, E_g, g)``. Defaults to ``GROWTH``.
+    data_path : str, optional
+        Path to the compound property JSON file.
+    charge_mass_frac : sequence of float, optional
+        Liquid charge mass fractions [-].
+    crystal_mass_frac : sequence of float, optional
+        Solid phase mass fractions [-].
 
     Returns
     -------
@@ -110,9 +125,10 @@ def _build(form, crystal_density, integrator=None):
         The compiled ``BatchCrystallizer``, its population balance and its
         liquid phase.
     """
-    liquid = LiquidPhase(DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC,
-                         temp=TEMP)
-    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+    liquid = LiquidPhase(data_path, mass=CHARGE_MASS,
+                         mass_frac=charge_mass_frac, temp=TEMP)
+    solid = SolidPhase(data_path, mass=0.0, mass_frac=crystal_mass_frac,
+                       temp=TEMP)
 
     if form == "moments":
         mechanism = MomentsPopulationBalance(
@@ -128,11 +144,14 @@ def _build(form, crystal_density, integrator=None):
 
     vessel = BatchCrystallizer(integrator=integrator, isothermal=True)
     vessel.Phases = [liquid, solid]
-    vessel.CrystKinetics = CrystKinetics(coeff_solub=[SOLUBILITY], growth=GROWTH)
+    vessel.CrystKinetics = CrystKinetics(coeff_solub=[SOLUBILITY], growth=growth)
     vessel.compile_structure()
 
     # Guard the fixture's premise against the shared database.
-    liquid_densities, _ = liquid.getDensityPure("liquid")  # [kg/m**3]
+    target_weights = np.zeros(liquid.num_species, dtype=bool)
+    target_weights[TARGET_INDEX] = True
+    liquid_densities, _ = liquid.getDensityPure(
+        "liquid", weights=target_weights)  # [kg/m**3]
     assert liquid_densities[TARGET_INDEX] == LIQUID_SOLUTE_DENSITY
 
     return vessel, mechanism, liquid
@@ -196,9 +215,13 @@ def _solid_mass_rate(mechanism, liquid, species_rates, population, population_ra
     the fraction's rate. This uses only the definition of the per-volume
     basis, not the balance under test.
     """
-    liquid_densities, _ = liquid.getDensityPure("liquid")  # [kg/m**3]
+    rates = np.asarray(species_rates, dtype=float)  # [kg/s]
+    active = rates != 0.0
+    liquid_densities, _ = liquid.getDensityPure(
+        "liquid", weights=active)  # [kg/m**3]
     vol_liquid = float(liquid.vol)  # [m**3]
-    vol_liquid_rate = float(np.sum(species_rates / liquid_densities))  # [m**3/s]
+    vol_liquid_rate = float(
+        np.sum(rates[active] / liquid_densities[active]))  # [m**3/s]
 
     phi = mechanism.solid_volume_fraction(population)  # [-]
     phi_rate = mechanism.solid_volume_fraction(population_rate)  # [1/s]
@@ -297,3 +320,79 @@ def test_closed_batch_conserves_mass_over_a_solve():
     np.testing.assert_allclose(
         np.asarray(vessel.result.Total_m_in_vessel).ravel(), total_mass,
         rtol=SOLVE_CONSERVATION_RTOL)
+
+
+@pytest.mark.parametrize(
+    "crystal_density", [CRYSTAL_DENSITY, LIQUID_SOLUTE_DENSITY],
+    ids=["unequal_densities", "equal_densities"],
+)
+def test_closed_batch_conserves_mass_when_positivity_limiter_engages(
+    crystal_density,
+):
+    """Mass stays conserved when the positivity limiter throttles crystallization.
+
+    With ``LIMITED_GROWTH`` the unthrottled crystallization rate (~2.93 kg/s)
+    exceeds the 0.2 kg solute inventory over the default 1 s limiter horizon,
+    so ``apply_rate_scaling`` scales down the cross-phase transfer. Both the
+    transfer volume rate and the resulting population dilution must be scaled
+    by the same factor so the solid gains only the throttled liquid loss.
+    """
+    vessel, mechanism, liquid = _build(
+        "moments", crystal_density, growth=LIMITED_GROWTH)
+    species_mass, species_rates, population, population_rate = _state_and_rates(
+        vessel)
+
+    solute_inventory = float(species_mass[TARGET_INDEX])  # [kg]
+    liquid_mass_rate = float(species_rates.sum())  # [kg/s]
+    solid_mass_rate = _solid_mass_rate(
+        mechanism, liquid, species_rates, population, population_rate)  # [kg/s]
+
+    # The positivity limiter engaged and held solute drain to the inventory.
+    assert -species_rates[TARGET_INDEX] == pytest.approx(
+        solute_inventory, rel=ALGEBRAIC_RTOL)
+    assert liquid_mass_rate == pytest.approx(species_rates[TARGET_INDEX])
+
+    assert liquid_mass_rate + solid_mass_rate == pytest.approx(
+        0.0, abs=ALGEBRAIC_RTOL * abs(liquid_mass_rate))
+
+
+@pytest.mark.parametrize("form", ["moments", "fvm"])
+def test_volume_closure_ignores_absent_species_without_liquid_density(
+    tmp_path, form,
+):
+    """An absent database species without ``rho_liq`` does not block dilution.
+
+    Only species with a nonzero transfer rate contribute to the liquid volume
+    change, so an absent species that carries only ``mw`` is not required to
+    define a pure liquid density.
+    """
+    with open(DATA_PATH, encoding="utf-8") as handle:
+        database = json.load(handle)
+    database["inert_gas"] = {"mw": ABSENT_SPECIES_MW}
+    db_path = tmp_path / "compound_database_with_inert.json"
+    db_path.write_text(json.dumps(database), encoding="utf-8")
+
+    vessel, mechanism, liquid = _build(
+        form,
+        CRYSTAL_DENSITY,
+        data_path=str(db_path),
+        charge_mass_frac=CHARGE_MASS_FRAC + [0.0],
+        crystal_mass_frac=CRYSTAL_MASS_FRAC + [0.0],
+    )
+    _, species_rates, population, population_rate = _state_and_rates(vessel)
+    baseline, _, _ = _build(form, CRYSTAL_DENSITY)
+    _, baseline_species_rates, _, baseline_pop_rate = _state_and_rates(baseline)
+
+    assert species_rates[-1] == 0.0
+    np.testing.assert_allclose(
+        species_rates[:-1], baseline_species_rates, rtol=ALGEBRAIC_RTOL)
+    np.testing.assert_allclose(
+        population_rate, baseline_pop_rate, rtol=ALGEBRAIC_RTOL)
+
+    if form == "moments":
+        liquid_mass_rate = float(species_rates.sum())  # [kg/s]
+        solid_mass_rate = _solid_mass_rate(
+            mechanism, liquid, species_rates, population,
+            population_rate)  # [kg/s]
+        assert liquid_mass_rate + solid_mass_rate == pytest.approx(
+            0.0, abs=ALGEBRAIC_RTOL * abs(liquid_mass_rate))

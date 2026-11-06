@@ -22,7 +22,7 @@ import pytest
 
 from PharmaPy.Connections import Connection
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
-from PharmaPy.DataClasses import PhaseRef
+from PharmaPy.DataClasses import PhaseConnection, PhaseRef, StateKey
 from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics
@@ -147,9 +147,9 @@ def _build_crystallizer(temp, distrib=None, charge_mass=CHARGE_MASS,
 
     Notes
     -----
-    The mechanism must be attached to the solid before the vessel sees the phases, and the kinetics must be set
-    through the vessel property rather than the mechanism constructor, which
-    would bypass the setter that builds the size-dependent growth factor.
+    The mechanism must be attached to the solid before the vessel sees the
+    phases. Kinetics may be supplied either to the mechanism constructor or
+    through ``vessel.CrystKinetics``.
     """
     vessel = BatchCrystallizer(
         integrator=None,
@@ -978,6 +978,133 @@ def test_moments_stay_quiet_when_secondary_nucleation_cannot_switch(nucl_sec, ra
         mechanism.mechanism_kinetics.params["nucl_sec"], nucl_sec
     )
     assert not _onset_warnings(caught)
+
+
+def test_moments_refuse_size_dependent_growth_introduced_via_set_params():
+    """Mutating a unit size factor to size-dependent growth via set_params raises on evaluation."""
+    unit_factor_growth = GROWTH[:3] + (0.0, GROWTH[4])  # alpha=0 [-], beta [1/um]
+    vessel, solid = _build_moments_crystallizer(
+        _seed_moments(), growth=unit_factor_growth
+    )
+    vessel.compile_structure()
+    kinetics = solid.get_mechanism(MomentsPopulationBalance).mechanism_kinetics
+
+    updated = kinetics.concat_params().copy()
+    alpha_index = len(NUCL_PRIM) + len(NUCL_SEC) + 3
+    updated[alpha_index] = GROWTH[3]  # nonzero alpha [-]
+    kinetics.set_params(updated)
+
+    y0 = np.asarray(vessel.create_solver_init_states(), dtype=float)
+    with pytest.raises(PharmaPyNonImplementedError, match="OneDFVMMechanism"):
+        vessel.unit_model(0.0, y0, mat_bce=True)
+
+
+def test_fvm_constructor_kinetics_initializes_size_dependent_growth_factor():
+    """Passing 5-entry growth kinetics to OneDFVMMechanism.__init__ matches vessel attachment."""
+    seed = _seed_distribution()  # [#/(um m**3)]
+    kinetics = CrystKinetics(
+        APELBLAT_COEFFS,
+        nucl_prim=NUCL_PRIM,
+        nucl_sec=NUCL_SEC,
+        growth=GROWTH,
+        solubility_type="apelblat",
+        sup_sat_type="relative",
+        solubility_basis="mass_per_volume_solvent",
+    )
+    solid = SolidPhase(
+        DATA_PATH, mass=0, mass_frac=OLD_SOLID_MASS_FRAC, temp=COLD_TEMP
+    )
+    mechanism = OneDFVMMechanism(
+        solid,
+        target_components=TARGET,
+        solvent_name="solvent",
+        x_grid=_size_grid(),
+        distrib_init=seed.copy(),
+        kinetics=kinetics,
+    )
+    solid.mechanisms = mechanism
+    liquid = LiquidPhase(
+        DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC, temp=COLD_TEMP
+    )
+    vessel = BatchCrystallizer(
+        integrator=None,
+        h_conv=HEAT_TRANSFER_COEFF,
+        diam=VESSEL_DIAMETER,
+        controller=SimpleTemperatureController(temp_func=lambda time: COLD_TEMP),
+    )
+    vessel.Phases = [liquid, solid]
+    vessel.CrystKinetics = kinetics
+    vessel.compile_structure()
+
+    y0 = np.asarray(vessel.create_solver_init_states(), dtype=float)
+    rates_ctor = np.asarray(
+        vessel.unit_model(0.0, y0, mat_bce=True), dtype=float
+    ).copy()
+
+    vessel_setter = _build_crystallizer(COLD_TEMP, distrib=seed.copy())
+    y0_setter = np.asarray(
+        vessel_setter.create_solver_init_states(), dtype=float
+    )
+    rates_setter = np.asarray(
+        vessel_setter.unit_model(0.0, y0_setter, mat_bce=True), dtype=float
+    ).copy()
+
+    assert np.any(rates_setter != 0.0)
+    np.testing.assert_allclose(rates_ctor, rates_setter, rtol=ALGEBRAIC_RTOL)
+
+
+def test_fvm_set_params_updates_size_dependent_growth_factor():
+    """Updating alpha or beta through CrystKinetics.set_params updates FVM growth rates."""
+    seed = _seed_distribution()  # [#/(um m**3)]
+    vessel = _build_crystallizer(COLD_TEMP, distrib=seed.copy())
+    kinetics = _mechanism(vessel).mechanism_kinetics
+    # Start with alpha = 0 so the initial size factor is identically 1.
+    initial_params = kinetics.concat_params().copy()
+    alpha_index = len(NUCL_PRIM) + len(NUCL_SEC) + 3
+    initial_params[alpha_index] = 0.0
+    kinetics.set_params(initial_params)
+
+    y0 = np.asarray(vessel.create_solver_init_states(), dtype=float)
+    rates_unit_factor = np.asarray(
+        vessel.unit_model(0.0, y0, mat_bce=True), dtype=float
+    ).copy()
+
+    # Now restore the nonzero alpha via set_params and evaluate again.
+    updated_params = initial_params.copy()
+    updated_params[alpha_index] = GROWTH[3]
+    kinetics.set_params(updated_params)
+    rates_updated = np.asarray(
+        vessel.unit_model(0.0, y0, mat_bce=True), dtype=float
+    ).copy()
+
+    reference = _build_crystallizer(COLD_TEMP, distrib=seed.copy())
+    y0_ref = np.asarray(reference.create_solver_init_states(), dtype=float)
+    rates_reference = np.asarray(
+        reference.unit_model(0.0, y0_ref, mat_bce=True), dtype=float
+    ).copy()
+
+    # Compare against a vessel built directly with alpha = 0 (unit size factor).
+    unit_ref = _build_crystallizer(COLD_TEMP, distrib=seed.copy())
+    _mechanism(unit_ref).mechanism_kinetics = CrystKinetics(
+        APELBLAT_COEFFS,
+        nucl_prim=NUCL_PRIM,
+        nucl_sec=NUCL_SEC,
+        growth=GROWTH[:3] + (0.0, GROWTH[4]),
+        solubility_type="apelblat",
+        sup_sat_type="relative",
+        solubility_basis="mass_per_volume_solvent",
+    )
+    rates_unit_ref = np.asarray(
+        unit_ref.unit_model(0.0, y0_ref, mat_bce=True), dtype=float
+    ).copy()
+
+    assert not np.allclose(rates_unit_ref, rates_reference, rtol=1e-3)
+    np.testing.assert_allclose(
+        rates_unit_factor, rates_unit_ref, rtol=ALGEBRAIC_RTOL
+    )
+    np.testing.assert_allclose(
+        rates_updated, rates_reference, rtol=ALGEBRAIC_RTOL
+    )
 
 
 def test_old_slurry_arrives_as_a_density_per_slurry_volume():

@@ -167,6 +167,56 @@ license covers them, are not recorded upstream (#478), so the record declares
 origin `'unknown'` and states only verifiable facts. See
 `doc/online_docs/examples/calibration_records.rst` for the record format.
 
+## Calibration validation suite
+
+Three modules exercise the shared parameter-estimation contract of
+[#352](https://github.com/PharmaPy-org/PharmaPy/issues/352) on one stand-in
+case each. All three are synthetic or stand-in verification fits, not
+evidence of an empirical calibration. What each checks:
+
+- `tests/test_calibration_validation_decay.py` (core lane, `pixi run test`):
+  the analytic two-experiment decay case with declared measurement
+  uncertainties. Derivative checks (forward differences, `jac_fun`,
+  model-returned sensitivities, a fixed parameter, a lower bound);
+  experiment and measurement reordering, residual-layout alignment of
+  residuals and accepted outputs, bitwise repeatability, and unchanged
+  observations after the uncertainty, identifiability, derivative and
+  bootstrap analyses; the identifiability report in both covariance forms;
+  converged and truncated fits; and the `estimate_parameters` ->
+  `CalibrationRecord` -> JSON -> rerun path. With it,
+  `tests/test_calibration_validation_guide.py` executes
+  `doc/online_docs/examples/calibration_validation.rst`.
+- `tests/test_calibration_validation_ziegler.py` (Assimulo lane): the
+  Ziegler workshop reactor fit of the record test above. CVODES
+  sensitivities against central differences over all eight parameters,
+  unchanged observations after the analyses, the identifiability report
+  with a `jacobian_rtol` established by the derivative check, and
+  convergence. Its noise assumption: the data declare no measurement
+  uncertainties, so the fit is unweighted (`noise_model` `'identity'`);
+  both measured fields are in mol/L and one common error variance is
+  re-estimated from the residuals. Repeatability and record capture,
+  reload and rerun of this fit are checked by
+  `tests/test_records_ziegler_case.py`, not repeated here.
+- `tests/test_calibration_validation_crystallizer.py` (Assimulo lane): a
+  seeded growth-only `BatchCryst` fitted to model-generated data,
+  noise-free (parameter recovery) and with seeded Gaussian noise whose
+  standard deviations the measurements declare (fixed-seed interval check).
+  CVODES sensitivities at the default and tightened solver tolerances, the
+  identifiability report and the magnitude of the growth-rate/order
+  correlation, unchanged observations, convergence, and record capture,
+  JSON round trip and a bitwise rerun.
+
+Experiment and measurement reordering and residual-layout alignment are
+checked on the decay case only. The crystallization (#358) and bioreactor
+(#361) demonstrators must declare their measurement uncertainties.
+
+The last two skip at collection without Assimulo and run in the Assimulo
+lane (`pixi run -e assimulo test-assimulo`), each in well under a minute; run
+one alone with
+`pixi run --locked -e assimulo python -m pytest tests/test_calibration_validation_crystallizer.py -v`.
+The crystallization (#358) and bioreactor (#361) demonstrators join the suite
+as their own modules when they land; the guide lists what they must check.
+
 ## PFR/batch process-optimization workshop regression
 
 ```bash
