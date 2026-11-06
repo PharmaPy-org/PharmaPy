@@ -1,38 +1,50 @@
-"""QMOM population balance in a closed, isothermal batch crystallizer.
+"""QMOM population balance in isothermal batch, semibatch and continuous crystallizers.
 
 Nucleation, growth and dissolution run at constant rates (``CrystKinetics``
 custom mechanisms reading their first parameter), so the references are
 closed form: the moment equations on one right-hand side, and over a solve
-the method of characteristics for seeds and for nuclei born at zero size.
-Growth carries the size factor (1 + beta*L)**alpha. Agglomeration runs
-alone, with zero growth and nucleation, against collision counting and the
-exact zeroth moment of the constant, sum and product kernels. The crystal
-density equals the liquid density of the solute, so the slurry volume stays
-constant, except in the mass-balance test, which makes them differ.
+the method of characteristics for seeds and for nuclei born at zero size,
+or the steady MSMPR moments. Growth carries the size factor
+(1 + beta*L)**alpha. Agglomeration runs alone, with zero growth and
+nucleation, against collision counting and the exact zeroth moment of the
+constant, sum and product kernels. The crystal density equals the liquid
+density of the solute, so the slurry volume stays constant, except in the
+mass-balance tests, which make them differ. Flowsheet tests connect real
+units through ``SimulationExec``.
 
 Units: mass [kg], density [kg/m**3], sizes [um], moments [um**k/m**3 of
-slurry], rates per second. The solves use SciPy LSODA, about 2 s in all.
+slurry], rates per second. The solves use SciPy LSODA, about 30 s in all.
 """
 
 import os
 
 import numpy as np
 import pytest
-from scipy.integrate import quad
+from scipy.integrate import quad, solve_ivp
 
+from PharmaPy.Connections import Connection
 from PharmaPy.CrystallizationKernels import (BinaryFragmentation, BrownianKernel, ConstantKernel,
                                              ConstantSelection, DifferentialSedimentationKernel,
                                              ErosionFragmentation, KernelConditions,
                                              ParabolicFragmentation, PowerLawSelection,
                                              ProductKernel, ShearKernel, SumKernel,
                                              UniformFragmentation)
-from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
+from PharmaPy.Crystallizers_Refactored import (BatchCrystallizer, ContinuousCrystallizer,
+                                               SemiBatchCrystallizer)
+from PharmaPy.DataClasses import StateKey
 from PharmaPy.Errors import (PharmaPySpecificationError, PharmaPyTypeError,
                              PharmaPyValueError)
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics
-from PharmaPy.Mechanisms import MomentsPopulationBalance, QMOMPopulationBalance
+from PharmaPy.Mechanisms import (MomentsPopulationBalance, OneDFVMMechanism,
+                                 QMOMPopulationBalance)
+from PharmaPy.MixedPhases import Slurry as OldSlurry
+from PharmaPy.Phases import LiquidPhase as OldLiquidPhase
+from PharmaPy.Phases import SolidPhase as OldSolidPhase
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.SimExec import SimulationExec
+from PharmaPy.Streams import SolidStream as OldSolidStream
+from PharmaPy.Streams_Refactored import LiquidStream
 
 pytestmark = pytest.mark.unit
 
@@ -89,6 +101,8 @@ SPHERE_SHAPE_FACTOR = np.pi / 6  # [-]
 THREE_SIZES = ((60.0, 310.0, 5.0), (4e9, 3e7, 1e12))  # [um], [#/m**3]
 # Narrower, so the product kernel can thin it markedly before it gels.
 NARROW_SIZES = ((40.0, 60.0, 80.0), (1e10, 1e10, 1e10))  # [um], [#/m**3]
+# Two sizes, for a two-node rule.
+FEW_SIZES = ((20.0, 90.0), (3e10, 2e9))  # [um], [#/m**3]
 # The three-node closure of the square-root law misses m_5 of the seeded
 # batch by 2.5e-4 and of the unseeded one by 6.5e-5 (3 Nov 2026); a margin
 # of four. A two-node closure misses the seeded m_3 by 1e-2, and dropping
@@ -165,7 +179,8 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
            crystal_density=LIQUID_SOLUTE_DENSITY, integrator=None,
            solubility=SOLUBILITY, shape_factor=SHAPE_FACTOR, agglomeration=None,
            growth_rate=GROWTH_RATE, nucleation_rate=NUCLEATION_RATE, rad=0.0,
-           breakage=None, fragments=None):
+           breakage=None, fragments=None, vessel_cls=BatchCrystallizer,
+           feed_mass_flow=None):
     """Build the closed batch crystallizer.
 
     Parameters
@@ -193,15 +208,20 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
     breakage, fragments : optional
         Breakage selection function and fragment distribution for
         ``QMOMPopulationBalance``; None for none.
+    vessel_cls : type, optional
+        Crystallizer class. Defaults to ``BatchCrystallizer``.
+    feed_mass_flow : float, optional
+        Mass flow of a crystal-free feed of the charge's own liquid [kg/s];
+        None for no feed.
 
     Returns
     -------
     tuple
-        The compiled ``BatchCrystallizer``, its population balance and its
-        liquid phase.
+        The compiled crystallizer, its population balance and its liquid
+        phase.
     """
     liquid = LiquidPhase(DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC,
-                         temp=TEMP)
+                         temp=TEMP, name_solv="solvent")
     solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
     kernel_kwargs = {name: law for name, law in (("agglomeration", agglomeration),
                                                  ("breakage", breakage),
@@ -213,9 +233,13 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
         **kernel_kwargs)
     solid.mechanisms = mechanism
 
-    vessel = BatchCrystallizer(integrator=integrator, isothermal=True)
+    vessel = vessel_cls(integrator=integrator, isothermal=True)
     vessel.Phases = [liquid, solid]
     vessel.CrystKinetics = _kinetics(alpha, solubility, growth_rate, nucleation_rate)
+    if feed_mass_flow is not None:
+        vessel.Inlet = LiquidStream(DATA_PATH, mass_flow=feed_mass_flow,
+                                    mass_frac=CHARGE_MASS_FRAC, temp=TEMP,
+                                    name_solv="solvent")
     vessel.compile_structure()
 
     # Guard the fixture's premise against the shared database.
@@ -1043,3 +1067,515 @@ def test_incomplete_or_invalid_breakage_is_refused(kernels, error, message):
         QMOMPopulationBalance(owning_phase=solid, target_components=TARGET,
                               solvent_name="solvent", moments_init=np.zeros(NUM_MOM),
                               **kernels)
+
+
+@pytest.mark.parametrize("initial_alpha", [0.0, SQUARE_ROOT_EXPONENT],
+                         ids=["from_size_independent", "from_another_exponent"])
+def test_qmom_follows_a_size_factor_changed_through_set_params(initial_alpha):
+    # Evaluated once, then made linear: the rates must follow the new law,
+    # k G0 (mu_(k-1) + beta mu_k), whatever the first evaluation saw.
+    moments = _population_moments(*THREE_SIZES)
+    vessel, mechanism, _ = _build(moments, initial_alpha)
+    _state_and_rates(vessel)
+    kinetics = mechanism.mechanism_kinetics
+    updated = kinetics.concat_params().copy()
+    updated[kinetics.name_params.index("alpha")] = LINEAR_EXPONENT
+    kinetics.set_params(updated)
+
+    _, state, rates = _state_and_rates(vessel)
+
+    orders = np.arange(1, NUM_MOM)
+    expected = np.concatenate((
+        [NUCLEATION_RATE],
+        orders * GROWTH_RATE * (state[:-1] + SIZE_FACTOR_SLOPE * state[1:])))
+    np.testing.assert_allclose(rates, expected, rtol=ALGEBRAIC_RTOL)
+
+
+# Residence time of about 100 s for the 1 kg charge.
+FAST_FEED = 0.01  # [kg/s]
+# Slow enough that a good part of the crystals stays in the vessel for 600 s.
+SLOW_FEED = 1e-3  # [kg/s]
+# With a 100 s residence time, k beta G0 tau is at most 0.2 up to k = 5, so the
+# steady moments of linear growth stay finite.
+SLOW_GROWTH_RATE = 0.02  # G0 [um/s]
+# 40 residence times: the slowest transient, that of mu_5, is about 4e-12.
+STEADY_RUNTIME = 4000.0  # [s]
+# Over the flow solves the worst miss was 7.8e-9, on the steady moments of
+# linear growth (6 Nov 2026); a margin of ten.
+FLOW_SOLVE_RTOL = 1e-7  # [-]
+# Each state carries the solver's 1e-10 relative error; a decade of margin.
+# The worst miss was 7e-11, on the crystal volume under dilution.
+CONSERVATION_RTOL = 1e-9  # [-]
+
+
+def _lsoda():
+    """SciPy LSODA at the module's tight tolerance.
+
+    Returns
+    -------
+    ScipyBackend
+        Backend for one solve.
+    """
+    return ScipyBackend(method="LSODA", options={"rtol": SOLVER_TOL, "atol": SOLVER_TOL})
+
+
+def _residence_time(vessel):
+    """Slurry residence time at the end of a solve of a continuous vessel.
+
+    Parameters
+    ----------
+    vessel : ContinuousCrystallizer
+        Solved crystallizer.
+
+    Returns
+    -------
+    float
+        Slurry volume over outlet volumetric flow [s].
+    """
+    volume = np.ravel(vessel.result.vessel_vol)  # [m**3]
+    outlet_flow = np.ravel(vessel.result.outlet_vol_flow)  # [m**3/s]
+    return volume[-1] / outlet_flow[-1]
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("alpha, slope", [
+    (None, 0.0), (LINEAR_EXPONENT, SIZE_FACTOR_SLOPE),
+], ids=["size_independent", "linear_growth"])
+def test_continuous_crystallizer_reaches_the_steady_msmpr_moments(alpha, slope):
+    # Steady, 0 = k G0 (mu_(k-1) + beta mu_k) - mu_k / tau, with mu_0 = B tau.
+    vessel, _, _ = _build(np.zeros(NUM_MOM), alpha, vessel_cls=ContinuousCrystallizer,
+                          feed_mass_flow=FAST_FEED, growth_rate=SLOW_GROWTH_RATE,
+                          integrator=_lsoda())
+
+    vessel.solve_unit(runtime=STEADY_RUNTIME, verbose=False)
+
+    tau = _residence_time(vessel)
+    expected = [NUCLEATION_RATE * tau]
+    for k in range(1, NUM_MOM):
+        expected.append(k * SLOW_GROWTH_RATE * tau * expected[-1]
+                        / (1 - k * slope * SLOW_GROWTH_RATE * tau))
+    np.testing.assert_allclose(np.asarray(vessel.result.mu_n_solid0)[-1], expected,
+                               rtol=FLOW_SOLVE_RTOL)
+
+
+@pytest.mark.integration
+def test_continuous_crystallizer_settles_at_the_balance_of_both_kernels():
+    # Steady, 0 = B - beta_0 mu_0**2 / 2 + S_0 mu_0 - mu_0 / tau: symmetric
+    # fragments add one crystal per event, agglomeration removes one.
+    selection_rate, kernel_constant = 5e-3, 1e-12  # [1/s], [m**3/s]
+    vessel, _, _ = _build(np.zeros(NUM_MOM), None, vessel_cls=ContinuousCrystallizer,
+                          feed_mass_flow=FAST_FEED, growth_rate=SLOW_GROWTH_RATE,
+                          agglomeration=ConstantKernel(kernel_constant),
+                          breakage=ConstantSelection(selection_rate),
+                          fragments=BinaryFragmentation(), integrator=_lsoda())
+
+    vessel.solve_unit(runtime=STEADY_RUNTIME, verbose=False)
+
+    net_loss = 1 / _residence_time(vessel) - selection_rate  # [1/s]
+    expected = ((np.sqrt(net_loss ** 2 + 2 * kernel_constant * NUCLEATION_RATE) - net_loss)
+                / kernel_constant)  # [#/m**3]
+    assert np.asarray(vessel.result.mu_n_solid0)[-1, 0] == pytest.approx(
+        expected, rel=FLOW_SOLVE_RTOL)
+
+
+@pytest.mark.integration
+def test_semibatch_crystallizer_conserves_mass_with_every_mechanism_on():
+    moments = _population_moments(*THREE_SIZES)
+    vessel, _, _ = _build(moments, SQUARE_ROOT_EXPONENT, vessel_cls=SemiBatchCrystallizer,
+                          feed_mass_flow=SLOW_FEED, growth_rate=SLOW_GROWTH_RATE,
+                          crystal_density=CRYSTAL_DENSITY,
+                          agglomeration=ConstantKernel(1e-14),
+                          breakage=ConstantSelection(1e-3),
+                          fragments=BinaryFragmentation(), integrator=_lsoda())
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    result = vessel.result
+    time = np.ravel(result.time)  # [s]
+    liquid_mass = np.asarray(result.mass_j_liquid0).sum(axis=1)  # [kg]
+    solid_mass = (CRYSTAL_DENSITY * SHAPE_FACTOR * np.asarray(result.mu_n_solid0)[:, 3]
+                  * METRE_PER_MICRON ** 3 * np.ravel(result.vessel_vol))  # [kg]
+    total_mass = liquid_mass + solid_mass  # [kg]
+
+    # Guard against a vacuous pass: the crystals did grow.
+    assert solid_mass[-1] > solid_mass[0]
+    np.testing.assert_allclose(total_mass, total_mass[0] + SLOW_FEED * time,
+                               rtol=CONSERVATION_RTOL)
+    np.testing.assert_allclose(np.ravel(result.Total_m_in_vessel), total_mass,
+                               rtol=CONSERVATION_RTOL)
+
+
+@pytest.mark.integration
+def test_semibatch_feed_dilutes_the_kernels_at_constant_crystal_volume():
+    # With no growth and a crystal-free feed, the kernels alone change the
+    # count N = mu_0 V: dN/dt = V (-beta_0 (N/V)**2 / 2 + S_0 N/V), V growing
+    # at the feed's volumetric flow, while the crystal volume mu_3 V stays put.
+    kernel_constant, selection_rate = 2e-15, 1e-3  # [m**3/s], [1/s]
+    moments = _population_moments(*THREE_SIZES)
+    vessel, _, _ = _build(moments, None, vessel_cls=SemiBatchCrystallizer,
+                          feed_mass_flow=SLOW_FEED, growth_rate=0.0, nucleation_rate=0.0,
+                          agglomeration=ConstantKernel(kernel_constant),
+                          breakage=ConstantSelection(selection_rate),
+                          fragments=BinaryFragmentation(), integrator=_lsoda())
+    feed_flow = float(LiquidStream(DATA_PATH, mass_flow=SLOW_FEED, mass_frac=CHARGE_MASS_FRAC,
+                                   temp=TEMP, name_solv="solvent").vol_flow)  # [m**3/s]
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    trajectory = np.asarray(vessel.result.mu_n_solid0)  # [um**k/m**3]
+    volume = np.ravel(vessel.result.vessel_vol)  # [m**3]
+
+    def count_rate(time, count):
+        """dN/dt [#/s] at time [s] and count N [#]."""
+        held = volume[0] + feed_flow * time  # [m**3]
+        return held * (-kernel_constant * (count / held) ** 2 / 2
+                       + selection_rate * count / held)
+
+    reference = solve_ivp(count_rate, (0.0, RUNTIME), [moments[0] * volume[0]],
+                          method="LSODA", rtol=1e-12, atol=1.0)
+    assert trajectory[-1, 0] * volume[-1] == pytest.approx(reference.y[0, -1],
+                                                           rel=FLOW_SOLVE_RTOL)
+    np.testing.assert_allclose(trajectory[:, 3] * volume, moments[3] * volume[0],
+                               rtol=CONSERVATION_RTOL)
+
+
+def _inventory(result, order):
+    """Crystal inventory of one moment over a solve.
+
+    Parameters
+    ----------
+    result : DynamicResult
+        Result of a solved crystallizer.
+    order : int
+        Moment order k.
+
+    Returns
+    -------
+    numpy.ndarray
+        mu_k times the slurry volume [um**k], one value per time.
+    """
+    return np.asarray(result.mu_n_solid0)[:, order] * np.ravel(result.vessel_vol)
+
+
+def _flowsheet(upstream, downstream):
+    """Solve two units connected in series.
+
+    Parameters
+    ----------
+    upstream, downstream : MultiPhaseVessel
+        Source and destination units.
+
+    Returns
+    -------
+    SimulationExec
+        The solved flowsheet, with units ``U01`` and ``U02``.
+    """
+    flowsheet = SimulationExec(DATA_PATH, flowsheet="U01 --> U02")
+    flowsheet.U01, flowsheet.U02 = upstream, downstream
+    flowsheet.SolveFlowsheet(
+        kwargs_run={"U01": {"runtime": RUNTIME, "verbose": False},
+                    "U02": {"runtime": RUNTIME, "verbose": False}},
+        verbose=False)
+    return flowsheet
+
+
+def _washing_out_seeds(mechanism_cls=QMOMPopulationBalance):
+    """Continuous crystallizer whose seeds only wash out.
+
+    Parameters
+    ----------
+    mechanism_cls : type, optional
+        Population balance class.
+
+    Returns
+    -------
+    ContinuousCrystallizer
+        Unit holding ``SEED_COUNT`` seeds per m**3, with no growth or
+        nucleation, ready for a flowsheet.
+    """
+    vessel, _, _ = _build(SEED_COUNT * SEED_SIZE ** np.arange(NUM_MOM), None,
+                          mechanism_cls=mechanism_cls,
+                          vessel_cls=ContinuousCrystallizer, feed_mass_flow=SLOW_FEED,
+                          growth_rate=0.0, nucleation_rate=0.0, integrator=_lsoda())
+    return vessel
+
+
+def _receiver(num_mom=NUM_MOM, mechanism_cls=QMOMPopulationBalance, **kernels):
+    """Empty semibatch crystallizer with no growth or nucleation.
+
+    Parameters
+    ----------
+    num_mom : int, optional
+        Number of moments.
+    mechanism_cls : type, optional
+        Population balance class.
+    **kernels
+        Kernels for the population balance.
+
+    Returns
+    -------
+    SemiBatchCrystallizer
+        Unit ready for a flowsheet.
+    """
+    vessel, _, _ = _build(np.zeros(num_mom), None, mechanism_cls=mechanism_cls,
+                          vessel_cls=SemiBatchCrystallizer, feed_mass_flow=SLOW_FEED,
+                          growth_rate=0.0, nucleation_rate=0.0, integrator=_lsoda(), **kernels)
+    return vessel
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("upstream_cls, downstream_cls", [
+    (QMOMPopulationBalance, QMOMPopulationBalance),
+    (MomentsPopulationBalance, QMOMPopulationBalance),
+    (QMOMPopulationBalance, MomentsPopulationBalance),
+], ids=["qmom_to_qmom", "moment_form_to_qmom", "qmom_to_moment_form"])
+def test_crystals_leaving_one_moment_unit_arrive_in_the_next(upstream_cls, downstream_cls):
+    flowsheet = _flowsheet(_washing_out_seeds(upstream_cls),
+                           _receiver(mechanism_cls=downstream_cls))
+
+    for order in (0, 3):
+        upstream = _inventory(flowsheet.U01.result, order)
+        lost = upstream[0] - upstream[-1]
+        # Guard against a vacuous pass: a good part of the seeds did leave.
+        assert lost > 0.25 * upstream[0]
+        assert _inventory(flowsheet.U02.result, order)[-1] == pytest.approx(
+            lost, rel=FLOW_SOLVE_RTOL)
+
+
+@pytest.mark.integration
+def test_a_feed_keeps_the_kernels_of_the_receiving_unit():
+    # Seeds wash out at 1/tau and arrive to break at S_0, each event adding a
+    # crystal: N(T) = (N_0 / tau) exp(S_0 T) (1 - exp(-(S_0 + 1/tau) T)) / (S_0 + 1/tau).
+    # Breakage conserves the crystal volume, which still arrives in full.
+    selection_rate = 1e-3  # [1/s]
+    flowsheet = _flowsheet(
+        _washing_out_seeds(),
+        _receiver(breakage=ConstantSelection(selection_rate), fragments=BinaryFragmentation()))
+
+    upstream = _inventory(flowsheet.U01.result, 0)
+    tau = _residence_time(flowsheet.U01)
+    decay = selection_rate + 1 / tau  # [1/s]
+    expected = (upstream[0] / tau * np.exp(selection_rate * RUNTIME)
+                * (1 - np.exp(-decay * RUNTIME)) / decay)
+    assert _inventory(flowsheet.U02.result, 0)[-1] == pytest.approx(expected, rel=FLOW_SOLVE_RTOL)
+
+    volume_upstream = _inventory(flowsheet.U01.result, 3)
+    assert _inventory(flowsheet.U02.result, 3)[-1] == pytest.approx(
+        volume_upstream[0] - volume_upstream[-1], rel=FLOW_SOLVE_RTOL)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("mechanism_cls, num_mom", [
+    (QMOMPopulationBalance, 4), (MomentsPopulationBalance, 4),
+], ids=["fewer_nodes", "moment_form"])
+def test_a_feed_with_another_moment_count_is_refused(mechanism_cls, num_mom):
+    with pytest.raises(PharmaPyValueError, match="carrying 6 moments .* carries 4"):
+        _flowsheet(_washing_out_seeds(), _receiver(num_mom, mechanism_cls))
+
+
+@pytest.mark.integration
+def test_a_feed_carrying_a_resolved_distribution_is_refused():
+    # It would otherwise be skipped, and its crystals lost without a word.
+    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+    grid = np.arange(1.0, 200.0)  # [um]
+    solid.mechanisms = OneDFVMMechanism(
+        solid, target_components=TARGET, solvent_name="solvent", x_grid=grid,
+        distrib_init=1e8 * np.exp(-0.5 * ((grid - SEED_SIZE) / 5.0) ** 2),  # [#/(um m**3)]
+        density=LIQUID_SOLUTE_DENSITY, kv=SHAPE_FACTOR)
+    upstream = ContinuousCrystallizer(integrator=_lsoda(), isothermal=True)
+    upstream.Phases = [LiquidPhase(DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC,
+                                   temp=TEMP, name_solv="solvent"), solid]
+    upstream.CrystKinetics = _kinetics(None, growth_rate=0.0, nucleation_rate=0.0)
+    upstream.Inlet = LiquidStream(DATA_PATH, mass_flow=SLOW_FEED, mass_frac=CHARGE_MASS_FRAC,
+                                  temp=TEMP, name_solv="solvent")
+
+    with pytest.raises(PharmaPySpecificationError, match="'distrib'"):
+        _flowsheet(upstream, _receiver())
+
+
+@pytest.mark.integration
+def test_a_charge_of_crystals_into_a_qmom_vessel_is_refused():
+    upstream, _, _ = _build(SEED_COUNT * SEED_SIZE ** np.arange(NUM_MOM), None,
+                            growth_rate=0.0, nucleation_rate=0.0, integrator=_lsoda())
+    downstream, _, _ = _build(np.zeros(NUM_MOM), None, growth_rate=0.0, nucleation_rate=0.0,
+                              integrator=_lsoda())
+
+    with pytest.raises(PharmaPySpecificationError, match="charge of\\s+crystals"):
+        _flowsheet(upstream, downstream)
+
+
+def _legacy_solid():
+    """Pre-refactor solid carrying moments.
+
+    Returns
+    -------
+    PharmaPy.Phases.SolidPhase
+        Seeds in 1 L of slurry; total moments in metres [m**k], as that
+        stack holds them.
+    """
+    slurry_volume = 1e-3  # [m**3]
+    totals = (SEED_COUNT * slurry_volume
+              * (SEED_SIZE * METRE_PER_MICRON) ** np.arange(4))  # [m**k]
+    return OldSolidPhase(DATA_PATH, moments=totals, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+
+
+def _legacy_solid_stream():
+    """Pre-refactor solid stream carrying a distribution.
+
+    Returns
+    -------
+    PharmaPy.Streams.SolidStream
+        Crystals flowing around ``SEED_SIZE``, at number rates [#/um/s].
+    """
+    sizes = np.array([40.0, 50.0, 60.0])  # [um]
+    return OldSolidStream(DATA_PATH, temp=TEMP, mass_frac=CRYSTAL_MASS_FRAC,
+                          distrib=np.array([1e3, 2e3, 1e3]), x_distrib=sizes)
+
+
+def _legacy_liquid():
+    """Pre-refactor liquid of the charge's composition.
+
+    Returns
+    -------
+    PharmaPy.Phases.LiquidPhase
+        Liquid of mass ``CHARGE_MASS`` at ``TEMP``.
+    """
+    return OldLiquidPhase(DATA_PATH, temp=TEMP, mass=CHARGE_MASS,
+                          mass_frac=CHARGE_MASS_FRAC, name_solv="solvent")
+
+
+def _legacy_slurry():
+    """Pre-refactor slurry of liquid and seeds.
+
+    Returns
+    -------
+    PharmaPy.MixedPhases.Slurry
+        Slurry holding ``_legacy_liquid`` and ``_legacy_solid``.
+    """
+    slurry = OldSlurry()
+    slurry.Phases = (_legacy_liquid(), _legacy_solid())
+    return slurry
+
+
+@pytest.mark.parametrize("make_matter", [_legacy_solid, _legacy_solid_stream, _legacy_slurry],
+                         ids=["solid", "solid_stream", "slurry"])
+def test_legacy_crystals_are_refused_by_a_qmom_vessel(make_matter):
+    vessel, _, _ = _build(np.zeros(NUM_MOM), None, agglomeration=ConstantKernel(1e-14))
+
+    with pytest.raises(PharmaPySpecificationError, match="legacy unit"):
+        Connection(None, vessel)._match_stacks(make_matter())
+
+
+def test_a_legacy_liquid_charges_a_qmom_vessel_and_keeps_its_kernels():
+    # Only agglomeration acts, on the configured crystals, so the count falls
+    # as beta_0 mu_0**2 / 2 whichever liquid surrounds them.
+    kernel_constant = 1e-14  # [m**3/s]
+    moments = _population_moments(*THREE_SIZES)
+    vessel, mechanism, _ = _agglomeration_only(moments, ConstantKernel(kernel_constant))
+
+    liquid = Connection(None, vessel)._match_stacks(_legacy_liquid())
+    liquid.transferred_from_uo = True
+    vessel.Phases = liquid
+    vessel.compile_structure()
+
+    _, state, rates = _state_and_rates(vessel)
+
+    assert vessel.Phases.Solids[0].get_mechanism(QMOMPopulationBalance) is mechanism
+    assert rates[0] == pytest.approx(-kernel_constant * state[0] ** 2 / 2, rel=ALGEBRAIC_RTOL)
+
+
+def test_qmom_hands_its_moments_to_the_legacy_stack_as_totals():
+    moments = _population_moments(*THREE_SIZES)
+    _, mechanism, liquid = _build(moments, None, shape_factor=SHAPE_FACTOR)
+
+    handed = mechanism.to_legacy_state()
+
+    phi = SHAPE_FACTOR * moments[3] * METRE_PER_MICRON ** 3  # [-]
+    slurry_volume = float(liquid.vol) / (1 - phi)  # [m**3]
+    expected = moments * slurry_volume * METRE_PER_MICRON ** np.arange(NUM_MOM)  # [m**k]
+    assert handed["num_mom"] == NUM_MOM
+    np.testing.assert_allclose(handed["moments"], expected, rtol=ALGEBRAIC_RTOL)
+
+
+def _solved_without_kinetics(moments):
+    """Solve a batch in which the crystals do nothing, to read its outputs.
+
+    Parameters
+    ----------
+    moments : numpy.ndarray
+        Moments [um**k/m**3 of slurry], held constant.
+
+    Returns
+    -------
+    DynamicResult
+        Result of a 1 s solve.
+    """
+    vessel, _, _ = _build(moments, None, growth_rate=0.0, nucleation_rate=0.0,
+                          integrator=_lsoda())
+    vessel.solve_unit(runtime=1.0, verbose=False)
+    return vessel.result
+
+
+def test_a_solve_reports_the_quadrature_and_the_mean_sizes():
+    sizes, counts = THREE_SIZES
+    result = _solved_without_kinetics(_population_moments(sizes, counts))
+
+    order = np.argsort(sizes)
+    nodes = np.asarray(result.quadrature_nodes)  # [um], one row per time
+    weights = np.asarray(result.quadrature_weights)  # [#/m**3], one row per time
+    np.testing.assert_allclose(nodes, np.tile(np.asarray(sizes)[order], (len(nodes), 1)),
+                               rtol=ALGEBRAIC_RTOL)
+    np.testing.assert_allclose(weights, np.tile(np.asarray(counts)[order], (len(weights), 1)),
+                               rtol=ALGEBRAIC_RTOL)
+
+    sizes, counts = np.asarray(sizes), np.asarray(counts)
+    third, second = np.sum(counts * sizes ** 3), np.sum(counts * sizes ** 2)  # [um**k/m**3]
+    np.testing.assert_allclose(np.ravel(result.L32), third / second, rtol=ALGEBRAIC_RTOL)
+    np.testing.assert_allclose(np.ravel(result.L43), np.sum(counts * sizes ** 4) / third,
+                               rtol=ALGEBRAIC_RTOL)
+
+
+def test_outputs_pad_the_nodes_a_monodisperse_population_does_not_use():
+    result = _solved_without_kinetics(SEED_COUNT * SEED_SIZE ** np.arange(NUM_MOM))
+
+    np.testing.assert_allclose(np.asarray(result.quadrature_nodes)[-1],
+                               [SEED_SIZE, np.nan, np.nan], rtol=ALGEBRAIC_RTOL)
+    np.testing.assert_allclose(np.asarray(result.quadrature_weights)[-1],
+                               [SEED_COUNT, np.nan, np.nan], rtol=ALGEBRAIC_RTOL)
+    assert np.ravel(result.L43)[-1] == pytest.approx(SEED_SIZE, rel=ALGEBRAIC_RTOL)
+
+
+def test_outputs_are_undefined_without_crystals():
+    result = _solved_without_kinetics(np.zeros(NUM_MOM))
+
+    assert np.all(np.isnan(result.quadrature_nodes))
+    assert np.all(np.isnan(result.quadrature_weights))
+    assert np.all(np.isnan(result.L32))
+    assert np.all(np.isnan(result.L43))
+
+
+def test_mean_sizes_are_undefined_when_solver_noise_leaves_no_denominator():
+    # Round-off can leave a moment just below zero and the next just above: a
+    # ratio of the two would report a negative size.
+    noise = 1e-20  # [um**k/m**3]
+    _, mechanism, _ = _build(np.zeros(NUM_MOM), None)
+    key = StateKey(mechanism.moments_state_name, mechanism.owning_phase_ref)
+
+    l32 = mechanism.compute_l32_output(
+        None, 0.0, {key: np.array([0.0, 0.0, -noise, noise, noise, noise])}, None)
+    l43 = mechanism.compute_l43_output(
+        None, 0.0, {key: np.array([0.0, 0.0, 0.0, -noise, noise, noise])}, None)
+
+    assert np.isnan(l32).all()
+    assert np.isnan(l43).all()
+
+
+def test_two_nodes_report_no_l43_because_mu_4_is_not_carried():
+    moments = np.array([np.sum(np.asarray(FEW_SIZES[1]) * np.asarray(FEW_SIZES[0]) ** k)
+                        for k in range(4)])  # [um**k/m**3]
+
+    result = _solved_without_kinetics(moments)
+
+    assert not hasattr(result, "L43")
+    assert np.asarray(result.quadrature_nodes).shape[1] == 2
+    assert np.ravel(result.L32)[-1] == pytest.approx(moments[3] / moments[2], rel=ALGEBRAIC_RTOL)

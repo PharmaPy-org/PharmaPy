@@ -2395,6 +2395,33 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
     # so only the volume fraction differs, mu_3 being available directly
     # rather than needing to be integrated.
 
+    def _validate_inlet_state(self, value):
+        """Accept a feed only if it carries this vessel's number of moments.
+
+        Parameters
+        ----------
+        value : numpy.ndarray
+            Feed moments [um**k/m3 of feed slurry].
+
+        Returns
+        -------
+        numpy.ndarray
+            ``value``, unchanged.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If ``value`` does not have shape ``(num_mom,)``.
+        """
+        if value.shape != (self.num_mom,):
+            raise PharmaPyValueError(
+                'A feed carrying %d moments cannot enter this vessel, which '
+                'carries %d; the missing moments cannot be recovered. Give '
+                'both units the same number of moments.'
+                % (value.size, self.num_mom))
+
+        return value
+
     def solid_volume_fraction(self, value):
         """Solid volume per m3 of slurry, from the third moment."""
         moments = np.atleast_1d(np.asarray(value, dtype=float))
@@ -2559,7 +2586,16 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
     with no disappearance of crystals at L = 0, and nuclei are born at size
     ``rad``. Agglomeration and breakage, when given their kernels, conserve
     crystal volume; their terms come from ``QMOMKernelSources``.
+
+    A solve also reports ``quadrature_nodes`` [um] and ``quadrature_weights``
+    [#/m3 slurry], shape ``(N,)`` per time, NaN where the moments hold fewer
+    than N nodes, and the mean sizes ``L32`` = mu_3/mu_2 and, with N >= 3,
+    ``L43`` = mu_4/mu_3 [um], NaN without crystals.
     """
+
+    # Crystals from a pre-refactor unit would arrive as a plain moment form or
+    # a distribution, without this vessel's model; Connection refuses them.
+    refuses_legacy_crystals = True
 
     def __init__(
         self,
@@ -2691,6 +2727,24 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
             QMOMKernelSources(self, agglomeration, breakage, fragments)
             if agglomeration is not None or breakage is not None else None)
 
+        num_nodes = self.num_mom // 2
+        node_index = list(range(num_nodes))
+        self.output_states = list(self.output_states) + [
+            StateVariable(name='quadrature_nodes', dim=num_nodes, index=node_index,
+                          units='um', state_type='post',
+                          compute_value=self.compute_nodes_output),
+            StateVariable(name='quadrature_weights', dim=num_nodes, index=node_index,
+                          units='#/m**3', state_type='post',
+                          compute_value=self.compute_weights_output),
+            StateVariable(name='L32', dim=1, units='um', state_type='post',
+                          compute_value=self.compute_l32_output),
+        ]
+        # mu_4 is carried from three nodes on.
+        if self.num_mom > 4:
+            self.output_states.append(
+                StateVariable(name='L43', dim=1, units='um', state_type='post',
+                              compute_value=self.compute_l43_output))
+
     def add_solver_state_variables(self, collection, overwrite=False,
                                    phase_ref=None):
         """Register the moments, and forget any earlier kernel registration.
@@ -2787,6 +2841,173 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
 
         return np.sum(rule.weights[:, None] * size_factor[:, None]
                       * rule.nodes[:, None] ** orders, axis=0)
+
+    def _inlet_population_density(self, stream_phase):
+        """Feed moments per m3 of slurry, refusing any other feed population.
+
+        Parameters
+        ----------
+        stream_phase : BasePhase
+            Feed phase, whose population mechanism publishes the feed.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Feed moments [um**k/m3 of feed slurry], shape ``(2N,)``; None for
+            a feed without crystals.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If the feed carries its crystals as another state, such as a
+            resolved distribution, which the base class would skip, losing
+            those crystals without a word.
+        """
+        density = super()._inlet_population_density(stream_phase)
+
+        if density is None:
+            for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
+                state_name = getattr(mechanism, 'flow_state_name', None)
+
+                if state_name not in (None, self.flow_state_name):
+                    raise PharmaPySpecificationError(
+                        'A feed carrying its crystals as %r cannot enter this '
+                        'QMOMPopulationBalance, which takes moments as %r. '
+                        'Use a QMOM or moment-form unit upstream.'
+                        % (state_name, self.flow_state_name))
+
+        return density
+
+    def _moments_from(self, completed_state):
+        """Read the moments from a replay state.
+
+        Parameters
+        ----------
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Moments [um**k/m3 slurry], shape ``(2N,)``.
+        """
+        key = StateKey(self.moments_state_name, self.owning_phase_ref)
+        return np.asarray(completed_state[key], dtype=float)
+
+    def _padded_rule(self, completed_state):
+        """Quadrature of a replay state, padded to the output arrays' shape.
+
+        Parameters
+        ----------
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        nodes, weights : numpy.ndarray
+            Sizes [um] and weights [#/m3 slurry], shape ``(N,)``, ascending,
+            with NaN where the moments hold fewer than N nodes.
+        """
+        num_nodes = self.num_mom // 2
+        rule = invert_moments(self._moments_from(completed_state), num_nodes)
+        nodes = np.full(num_nodes, np.nan)
+        weights = np.full(num_nodes, np.nan)
+        nodes[:len(rule.nodes)] = rule.nodes
+        weights[:len(rule.weights)] = rule.weights
+        return nodes, weights
+
+    @staticmethod
+    def _mean_size(numerator, denominator):
+        """Moment-ratio mean size, undefined without crystals.
+
+        Parameters
+        ----------
+        numerator : float
+            Moment of order k+1 [um**(k+1)/m3 slurry].
+        denominator : float
+            Moment of order k [um**k/m3 slurry].
+
+        Returns
+        -------
+        numpy.ndarray
+            Their ratio [um], shape ``(1,)``; NaN unless ``denominator`` is
+            positive.
+        """
+        return np.array([numerator / denominator if denominator > 0 else np.nan])
+
+    def compute_nodes_output(self, state_var, time, completed_state, context,
+                             **kwargs):
+        """Quadrature sizes, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Sizes [um], shape ``(N,)``; see ``_padded_rule``.
+        """
+        return self._padded_rule(completed_state)[0]
+
+    def compute_weights_output(self, state_var, time, completed_state, context,
+                               **kwargs):
+        """Quadrature weights, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Weights [#/m3 slurry], shape ``(N,)``; see ``_padded_rule``.
+        """
+        return self._padded_rule(completed_state)[1]
+
+    def compute_l32_output(self, state_var, time, completed_state, context,
+                           **kwargs):
+        """Mean size mu_3/mu_2, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            L3,2 [um], shape ``(1,)``; see ``_mean_size``.
+        """
+        moments = self._moments_from(completed_state)
+        return self._mean_size(moments[3], moments[2])
+
+    def compute_l43_output(self, state_var, time, completed_state, context,
+                           **kwargs):
+        """Mean size mu_4/mu_3, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            L4,3 [um], shape ``(1,)``; see ``_mean_size``.
+        """
+        moments = self._moments_from(completed_state)
+        return self._mean_size(moments[4], moments[3])
 
 
 def _agglomeration_moment_rates(nodes, weights, kernel_values, num_mom):

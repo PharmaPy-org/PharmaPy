@@ -183,6 +183,39 @@ class _BaseCrystallizer(MultiPhaseVessel):
         """
         self.integrator.set_linear_solver("dense")
         self.integrator.request_max_step(self.NUCLEATION_STEP_CAP)
+    def _merge_by_family(self, arrivals):
+        """Merge a transfer, refusing crystals into a QMOM vessel.
+
+        Parameters
+        ----------
+        arrivals : list of BasePhase
+            Phases handed over by an upstream unit.
+
+        Returns
+        -------
+        list of BasePhase
+            The configured phases with the arrivals substituted by family.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If a solid arrives at a vessel whose solid carries a
+            ``QMOMPopulationBalance``. It would replace that solid while the
+            phase connections stay on the mechanism it held, which fails at
+            the first evaluation with an obscure message.
+        """
+        for phase in self._Phases.Phases:
+            if phase.get_mechanism(QMOMPopulationBalance) is not None and any(
+                    arriving.phase_family == phase.phase_family
+                    for arriving in arrivals):
+                raise PharmaPySpecificationError(
+                    f'{type(self).__name__} carries its crystals with '
+                    'QMOMPopulationBalance and cannot take a charge of '
+                    'crystals. Hand over the liquid only, or feed the crystals '
+                    'through the Inlet of a semibatch or continuous unit.')
+
+        return super()._merge_by_family(arrivals)
+
     def _post_set_phases(self):
         """Re-bind the population balance after the phases are replaced.
 
