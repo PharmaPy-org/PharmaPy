@@ -45,9 +45,24 @@ class _BaseCrystallizer(MultiPhaseVessel):
         self.nomenclature(overwrite=True)
         self._post_CrystKinetics_setter()
     def _create_default_phase_connections(self):
-        ''' Assumes everything occurs between the first liquid and the first solid phases
-        Assumes that whatever the target index is for that Crystkinetic, the massfrac is 100% that compound and 0 everything else
-        Only runs if phase_connections are not already set'''
+        """Wire the first liquid and solid phases from ``CrystKinetics``.
+
+        Builds a crystallization connection (liquid to solid) when growth or
+        nucleation is supported and a dissolution connection (solid to
+        liquid) when dissolution is, and registers the population balance's
+        ``kernel_sources``, if it has any, as an intraphase process of the
+        solid. Each kinetics' target species makes up 100 % of the crystals.
+
+        Raises
+        ------
+        RuntimeError
+            If ``phase_connections`` are already set.
+        IndexError
+            If the vessel has no solid phase.
+        AttributeError
+            If the solid carries no population balance, or no kinetics can
+            be attached to it.
+        """
 
         if len(self.phase_connections)>0:
             raise RuntimeError(
@@ -110,6 +125,15 @@ class _BaseCrystallizer(MultiPhaseVessel):
 
                                              )
                 connections.append(connection)
+            # Agglomeration acts within the solid whatever the liquid does,
+            # so it runs as an intraphase process, not on a connection.
+            kernel_sources = getattr(pbm, 'kernel_sources', None)
+            if kernel_sources is not None and not any(
+                    process.mechanism is kernel_sources
+                    for process in self.intraphase_processes):
+                self.intraphase_processes = list(self.intraphase_processes) + [
+                    IntraPhaseProcess(phaseref=solidphase_ref,
+                                      mechanism=kernel_sources)]
         self.phase_connections = connections
 
     def default_diff_states_from_phases(self):
@@ -159,6 +183,39 @@ class _BaseCrystallizer(MultiPhaseVessel):
         """
         self.integrator.set_linear_solver("dense")
         self.integrator.request_max_step(self.NUCLEATION_STEP_CAP)
+    def _merge_by_family(self, arrivals):
+        """Merge a transfer, refusing crystals into a QMOM vessel.
+
+        Parameters
+        ----------
+        arrivals : list of BasePhase
+            Phases handed over by an upstream unit.
+
+        Returns
+        -------
+        list of BasePhase
+            The configured phases with the arrivals substituted by family.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If a solid arrives at a vessel whose solid carries a
+            ``QMOMPopulationBalance``. It would replace that solid while the
+            phase connections stay on the mechanism it held, which fails at
+            the first evaluation with an obscure message.
+        """
+        for phase in self._Phases.Phases:
+            if phase.get_mechanism(QMOMPopulationBalance) is not None and any(
+                    arriving.phase_family == phase.phase_family
+                    for arriving in arrivals):
+                raise PharmaPySpecificationError(
+                    f'{type(self).__name__} carries its crystals with '
+                    'QMOMPopulationBalance and cannot take a charge of '
+                    'crystals. Hand over the liquid only, or feed the crystals '
+                    'through the Inlet of a semibatch or continuous unit.')
+
+        return super()._merge_by_family(arrivals)
+
     def _post_set_phases(self):
         """Re-bind the population balance after the phases are replaced.
 
