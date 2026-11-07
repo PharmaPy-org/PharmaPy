@@ -933,6 +933,30 @@ def test_volume_proportional_breakage_makes_crystals_at_a_constant_rate_over_a_s
 
 
 @pytest.mark.integration
+def test_fragments_below_the_minimum_size_stop_breaking_over_a_solve():
+    # Seeds of one size break at S_0 into two fragments smaller than the minimum
+    # size, which stay whole. With x = exp(-S_0 t) of the seeds left, mu_k =
+    # N (x L**k + 2 (1 - x) (L / 2**(1/3))**k), so the count stops short of 2 N.
+    # Without the minimum it would grow as exp(S_0 t), about 148 N here.
+    fragment_size = SEED_SIZE / 2 ** (1 / 3)  # [um]
+    minimum_size = (fragment_size + SEED_SIZE) / 2  # [um], between the two sizes
+    rate_constant = 5 / RUNTIME  # [1/s]: five e-folds of the seeds
+    moments = SEED_COUNT * SEED_SIZE ** ORDERS  # [um**k/m**3]
+    vessel, _, _ = _breakage_only(
+        moments, ConstantSelection(rate_constant, minimum_size=minimum_size), BinaryFragmentation(),
+        integrator=ScipyBackend(method="LSODA",
+                                options={"rtol": SOLVER_TOL, "atol": SOLVER_TOL}))
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    left = np.exp(-rate_constant * np.ravel(vessel.result.time))[:, None]  # [-]
+    expected = SEED_COUNT * (left * SEED_SIZE ** ORDERS
+                             + 2 * (1 - left) * fragment_size ** ORDERS)  # [um**k/m**3]
+    trajectory = np.asarray(vessel.result.mu_n_solid0)  # [um**k/m**3]
+    np.testing.assert_allclose(trajectory, expected, rtol=EXACT_CLOSURE_RTOL)
+
+
+@pytest.mark.integration
 def test_agglomeration_and_breakage_reach_their_balance_over_a_solve():
     # dmu_0/dt = -beta_0 mu_0**2 / 2 + S_0 mu_0 is logistic: mu_0 rises to
     # K = 2 S_0 / beta_0 as K / (1 + (K / mu_0(0) - 1) exp(-S_0 t)).

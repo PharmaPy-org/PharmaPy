@@ -16,7 +16,8 @@ The built-in kernels follow Tables 1 to 3 of Marchisio, Vigil and Fox
 (2003, J. Colloid Interface Sci. 258:322-334), with physical prefactors.
 Agglomeration: constant, Brownian, sum, hydrodynamic (``ShearKernel``) and
 differential force (``DifferentialSedimentationKernel``), plus
-``ProductKernel``. Selection: constant, power law and exponential.
+``ProductKernel``. Selection: constant, power law and exponential, each with
+an optional size up to which crystals do not break, as in that paper's Table 4.
 Fragments: symmetric and 1:4 (``BinaryFragmentation``), erosion, parabolic
 and uniform.
 """
@@ -446,6 +447,51 @@ class DifferentialSedimentationKernel:
 # Breakage: selection functions a(L) [1/s] (Marchisio et al., 2003, Table 2)
 # ---------------------------------------------------------------------------
 
+def _validated_minimum_size(minimum_size):
+    """Check the size up to which crystals do not break, if one is given.
+
+    Parameters
+    ----------
+    minimum_size : float or None
+        Size [um], or None for no such size.
+
+    Returns
+    -------
+    float or None
+        ``minimum_size`` as a float, or None.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If ``minimum_size`` is negative, NaN or infinite.
+    """
+    if minimum_size is None:
+        return None
+    return _validated_rate_constant(minimum_size, 'minimum_size')
+
+
+def _unbroken_up_to(rates, size, minimum_size):
+    """Set the breakage frequency to zero up to a minimum size.
+
+    Parameters
+    ----------
+    rates : numpy.ndarray
+        Breakage frequencies [1/s], shaped like ``size``.
+    size : numpy.ndarray
+        Crystal sizes [um].
+    minimum_size : float or None
+        Size [um] at and below which crystals do not break, or None.
+
+    Returns
+    -------
+    numpy.ndarray
+        The frequencies [1/s], zero at and below ``minimum_size``.
+    """
+    if minimum_size is None:
+        return rates
+    return np.where(np.asarray(size, dtype=float) <= minimum_size, 0.0, rates)
+
+
 class ConstantSelection:
     """Every crystal breaks at the same frequency, a = S_0.
 
@@ -453,15 +499,20 @@ class ConstantSelection:
     ----------
     rate_constant : float
         S_0 [1/s], at least zero.
+    minimum_size : float, optional
+        Crystals of this size [um] or smaller do not break, like the primary
+        particle in Table 4 of Marchisio et al. (2003). At least zero. Defaults
+        to None, so every crystal breaks.
 
     Raises
     ------
     PharmaPyValueError
-        If ``rate_constant`` is negative or not finite.
+        If ``rate_constant`` or ``minimum_size`` is negative or not finite.
     """
 
-    def __init__(self, rate_constant):
+    def __init__(self, rate_constant, minimum_size=None):
         self.rate_constant = _validated_rate_constant(rate_constant, 'rate_constant')  # [1/s]
+        self.minimum_size = _validated_minimum_size(minimum_size)  # [um]
 
     def __call__(self, size, conditions):
         """Breakage frequency.
@@ -476,9 +527,10 @@ class ConstantSelection:
         Returns
         -------
         numpy.ndarray
-            S_0 [1/s], shaped like ``size``.
+            S_0 [1/s], shaped like ``size``, and zero up to ``minimum_size``.
         """
-        return np.full(np.shape(size), self.rate_constant)
+        return _unbroken_up_to(np.full(np.shape(size), self.rate_constant), size,
+                               self.minimum_size)
 
 
 class PowerLawSelection:
@@ -497,18 +549,23 @@ class PowerLawSelection:
     reference_size : float, optional
         L_ref [um], above zero. Defaults to 1 um, so S_0 is the frequency of
         a one-micron crystal.
+    minimum_size : float, optional
+        Crystals of this size [um] or smaller do not break, like the primary
+        particle in Table 4 of Marchisio et al. (2003). At least zero. Defaults
+        to None, so every crystal breaks.
 
     Raises
     ------
     PharmaPyValueError
-        If ``rate_constant`` or ``exponent`` is negative or not finite, or
-        ``reference_size`` is not finite and positive.
+        If ``rate_constant``, ``exponent`` or ``minimum_size`` is negative or
+        not finite, or ``reference_size`` is not finite and positive.
     """
 
-    def __init__(self, rate_constant, exponent, reference_size=1.0):
+    def __init__(self, rate_constant, exponent, reference_size=1.0, minimum_size=None):
         self.rate_constant = _validated_rate_constant(rate_constant, 'rate_constant')  # [1/s]
         self.exponent = _validated_rate_constant(exponent, 'exponent')  # [-]
         self.reference_size = _validated_positive(reference_size, 'reference_size')  # [um]
+        self.minimum_size = _validated_minimum_size(minimum_size)  # [um]
 
     def __call__(self, size, conditions):
         """Breakage frequency.
@@ -523,10 +580,12 @@ class PowerLawSelection:
         Returns
         -------
         numpy.ndarray
-            S_0 (L / L_ref)**alpha [1/s], shaped like ``size``.
+            S_0 (L / L_ref)**alpha [1/s], shaped like ``size``, and zero up to
+            ``minimum_size``.
         """
-        return self.rate_constant * (np.asarray(size, dtype=float)
-                                     / self.reference_size) ** self.exponent
+        rates = self.rate_constant * (np.asarray(size, dtype=float)
+                                      / self.reference_size) ** self.exponent  # [1/s]
+        return _unbroken_up_to(rates, size, self.minimum_size)
 
 
 class ExponentialSelection:
@@ -539,17 +598,22 @@ class ExponentialSelection:
     volume_coefficient : float
         delta [1/um**3], at least zero, so that, as for the power law, small
         crystals do not break faster than large ones.
+    minimum_size : float, optional
+        Crystals of this size [um] or smaller do not break, like the primary
+        particle in Table 4 of Marchisio et al. (2003). At least zero. Defaults
+        to None, so every crystal breaks.
 
     Raises
     ------
     PharmaPyValueError
-        If either parameter is negative or not finite.
+        If any parameter is negative or not finite.
     """
 
-    def __init__(self, rate_constant, volume_coefficient):
+    def __init__(self, rate_constant, volume_coefficient, minimum_size=None):
         self.rate_constant = _validated_rate_constant(rate_constant, 'rate_constant')  # [1/s]
         self.volume_coefficient = _validated_rate_constant(
             volume_coefficient, 'volume_coefficient')  # [1/um**3]
+        self.minimum_size = _validated_minimum_size(minimum_size)  # [um]
 
     def __call__(self, size, conditions):
         """Breakage frequency.
@@ -564,10 +628,12 @@ class ExponentialSelection:
         Returns
         -------
         numpy.ndarray
-            S_0 exp(delta L**3) [1/s], shaped like ``size``.
+            S_0 exp(delta L**3) [1/s], shaped like ``size``, and zero up to
+            ``minimum_size``.
         """
-        return self.rate_constant * np.exp(
-            self.volume_coefficient * np.asarray(size, dtype=float) ** 3)
+        rates = self.rate_constant * np.exp(
+            self.volume_coefficient * np.asarray(size, dtype=float) ** 3)  # [1/s]
+        return _unbroken_up_to(rates, size, self.minimum_size)
 
 
 # ---------------------------------------------------------------------------

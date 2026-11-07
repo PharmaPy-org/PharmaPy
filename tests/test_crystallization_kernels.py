@@ -247,6 +247,63 @@ def test_exponential_selection_grows_log_linearly_with_crystal_volume():
                                atol=ALGEBRAIC_RTOL)
 
 
+# Each builds one selection function, with or without a minimum size. Rates are
+# in 1/s, the exponent is [-], the reference size in um and the coefficient in 1/um**3.
+SELECTION_LAWS = {
+    "constant": lambda **kwargs: ConstantSelection(2e-3, **kwargs),
+    "power_law": lambda **kwargs: PowerLawSelection(2e-3, 1.5, reference_size=60.0, **kwargs),
+    "exponential": lambda **kwargs: ExponentialSelection(2e-3, 1e-7, **kwargs),
+}
+MINIMUM_SIZE = 60.0  # [um], exactly the middle of PARENT_SIZES
+
+
+@pytest.mark.parametrize("name", SELECTION_LAWS)
+def test_crystals_up_to_the_minimum_size_do_not_break(name):
+    make_law = SELECTION_LAWS[name]
+
+    rates = make_law(minimum_size=MINIMUM_SIZE)(PARENT_SIZES, CONDITIONS)
+
+    full_rates = make_law()(PARENT_SIZES, CONDITIONS)
+    assert full_rates[2] > 0  # guards against zero matching zero
+    np.testing.assert_array_equal(rates, [0.0, 0.0, full_rates[2]])
+
+
+@pytest.mark.parametrize("name", SELECTION_LAWS)
+def test_a_minimum_size_below_every_crystal_changes_no_rate(name):
+    make_law = SELECTION_LAWS[name]
+
+    rates = make_law(minimum_size=PARENT_SIZES[0] / 2)(PARENT_SIZES, CONDITIONS)
+
+    np.testing.assert_array_equal(rates, make_law()(PARENT_SIZES, CONDITIONS))
+
+
+@pytest.mark.parametrize("name", ["constant", "exponential"])
+def test_without_a_minimum_size_even_a_crystal_of_zero_size_breaks(name):
+    # The default is no minimum, not a minimum of zero, so the laws stay exactly
+    # as they were before the parameter existed.
+    make_law = SELECTION_LAWS[name]
+
+    assert make_law()(np.array([0.0]), CONDITIONS)[0] == 2e-3
+    assert make_law(minimum_size=0.0)(np.array([0.0]), CONDITIONS)[0] == 0.0
+
+
+@pytest.mark.parametrize("name", SELECTION_LAWS)
+def test_a_minimum_size_keeps_the_shape_of_the_sizes(name):
+    selection = SELECTION_LAWS[name](minimum_size=MINIMUM_SIZE)
+
+    assert selection(SIZES_I, CONDITIONS).shape == SIZES_I.shape
+    assert np.shape(selection(MINIMUM_SIZE, CONDITIONS)) == ()
+    assert selection(MINIMUM_SIZE, CONDITIONS) == 0.0
+
+
+def test_a_minimum_size_does_not_hide_a_size_that_is_not_a_number():
+    # Zero here would read as a crystal that does not break; NaN reaches the
+    # population balance's own check of the frequencies.
+    selection = SELECTION_LAWS["power_law"](minimum_size=MINIMUM_SIZE)
+
+    assert np.isnan(selection(np.array([np.nan]), CONDITIONS)[0])
+
+
 def _moments_of_fragments(fragment_sizes):
     """Moments of each parent's fragments, from their sizes.
 
@@ -373,13 +430,19 @@ def test_fragments_are_counted_and_hold_their_parents_volume(fragments, fragment
     (lambda: PowerLawSelection(1e-3, 1.0, reference_size=0.0),
      "reference_size must be a finite, positive"),
     (lambda: ExponentialSelection(1e-3, -1e-7), "volume_coefficient must be a finite, non-negative"),
+    (lambda: ConstantSelection(1e-3, minimum_size=-1.0), "minimum_size must be a finite, non-negative"),
+    (lambda: PowerLawSelection(1e-3, 1.0, minimum_size=np.nan),
+     "minimum_size must be a finite, non-negative"),
+    (lambda: ExponentialSelection(1e-3, 1e-7, minimum_size=np.inf),
+     "minimum_size must be a finite, non-negative"),
     (lambda: BinaryFragmentation(0.0), "strictly between 0 and 1"),
     (lambda: BinaryFragmentation(1.0), "strictly between 0 and 1"),
     (lambda: ErosionFragmentation(0.0), "fragment_size must be a finite, positive"),
     (lambda: ParabolicFragmentation(-0.1), r"must lie in \[0, 3\]"),
     (lambda: ParabolicFragmentation(3.5), r"must lie in \[0, 3\]"),
 ], ids=["negative_rate", "shattering_exponent", "zero_reference_size",
-        "negative_volume_coefficient", "no_volume", "all_volume", "zero_fragment",
+        "negative_volume_coefficient", "negative_minimum_size", "nan_minimum_size",
+        "infinite_minimum_size", "no_volume", "all_volume", "zero_fragment",
         "parabolic_below", "parabolic_above"])
 def test_invalid_breakage_parameters_are_refused(make_law, message):
     with pytest.raises(PharmaPyValueError, match=message):
