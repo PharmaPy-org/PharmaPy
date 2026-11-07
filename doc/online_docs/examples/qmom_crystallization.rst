@@ -217,7 +217,8 @@ To get the paper's scaled forms, choose the constants so the factor in front is 
      :math:`1 / \mu_6(0)`.
    - ``DifferentialSedimentationKernel``: the nodes merge into one by :math:`t = 1.9`.
      Crystals of equal size never meet, so the count freezes and **the run finishes
-     without an error**, on a mean size that means nothing.
+     without an error**, on a mean size that means nothing. See issue
+     `#564 <https://github.com/PharmaPy-org/PharmaPy/issues/564>`__.
    - ``ShearKernel``: L43 reaches 358 by :math:`t = 2`, and the solve does not reach
      :math:`t = 5` in a minute.
    - ``SumKernel``: stays finite, as its closed form does (Scott, 1968), but L43 reaches
@@ -312,7 +313,8 @@ itself stays whole. That one size is the only difference.
    10 in a minute, and 7 of those finished once the threshold was removed.
    **Loosening the tolerance is not a safe way out.** On case 1, BDF at
    ``rtol=1e-4`` finished in under a second with L43 at 2271 instead of 4.2, and raised
-   no error; at ``rtol=1e-6`` it gave 4.39.
+   no error; at ``rtol=1e-6`` it gave 4.39. See issue
+   `#564 <https://github.com/PharmaPy-org/PharmaPy/issues/564>`__.
 
    When you use a minimum size, compare two tolerances, and look for a node on the
    threshold in ``result.quadrature_nodes``.
