@@ -10,5 +10,6 @@ Examples
    experiment_measurement
    calibration_records
    calibration_validation
+   qmom_crystallization
    PFR_Batch_solved
    PharmaPy_guide
