@@ -2682,32 +2682,7 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
                 'least four (N >= 2 nodes take mu_0..mu_{2N-1}), got %d.'
                 % num_mom)
 
-        if agglomeration is not None and not callable(agglomeration):
-            raise PharmaPyTypeError(
-                'agglomeration must be a kernel callable '
-                'beta(L_i, L_j, conditions), got %r.' % (agglomeration,))
-
-        if (breakage is None) != (fragments is None):
-            raise PharmaPyValueError(
-                'Breakage needs both a selection function (breakage) and a '
-                'fragment distribution (fragments); got only one of them.')
-
-        if breakage is not None and not callable(breakage):
-            raise PharmaPyTypeError(
-                'breakage must be a selection function a(L, conditions), '
-                'got %r.' % (breakage,))
-
-        if fragments is not None and not callable(getattr(fragments, 'moments', None)):
-            raise PharmaPyTypeError(
-                'fragments must have a moments(parent_sizes, orders) method, '
-                'got %r.' % (fragments,))
-
-        for rate_law in (agglomeration, breakage):
-            if getattr(rate_law, 'needs_finite_nuclei', False) and not rad > 0:
-                raise PharmaPyValueError(
-                    '%s is infinite at zero size, where nuclei born at rad = %r '
-                    'sit. Give the population balance a nucleus size rad > 0 [um].'
-                    % (type(rate_law).__name__, rad))
+        QMOMKernelSources.check_arguments(agglomeration, breakage, fragments, rad)
 
         super().__init__(
             owning_phase=owning_phase,
@@ -2800,13 +2775,8 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
             ``kernel_sources`` is not an intra-phase process of the vessel,
             which would leave agglomeration or breakage out without a word.
         """
-        if self.kernel_sources is not None and not self.kernel_sources.attached:
-            raise PharmaPySpecificationError(
-                'This QMOMPopulationBalance has agglomeration or breakage '
-                'kernels, but its kernel_sources is not among the vessel\'s '
-                'intraphase_processes. Set CrystKinetics through the '
-                'crystallizer, or add IntraPhaseProcess(PhaseRef("solid", 0), '
-                'mechanism.kernel_sources) yourself.')
+        if self.kernel_sources is not None:
+            self.kernel_sources.require_attached()
 
         return super().solve_population_balance(liquid, solid, completed_state,
                                                 time, connection)
@@ -3074,33 +3044,37 @@ def _breakage_moment_rates(nodes, weights, selection_rates, fragment_moments):
                   axis=0)
 
 
-class QMOMKernelSources(Mechanism):
-    """Agglomeration and breakage terms of a QMOM population balance, as an intra-phase process.
+class KernelSources(Mechanism):
+    """Agglomeration and breakage terms of a population balance, as an intra-phase process.
 
     Agglomeration and breakage move crystals within the solid whatever the
     liquid does, so they cannot ride on the liquid-solid transfer, which the
     crystallizer runs once per direction and drops against the sign of the
-    mass rate. The crystallizer registers this mechanism as an
-    ``IntraPhaseProcess`` of the solid instead, and the vessel adds its
-    moment rates once per right-hand side. It declares no state of its own.
+    mass rate. The crystallizer registers a population balance's
+    ``kernel_sources`` as an ``IntraPhaseProcess`` of the solid instead, and
+    the vessel adds its rates once per right-hand side. It declares no state
+    of its own.
+
+    This base holds what every form shares: the argument checks, the
+    attachment record, the kernel conditions and the checked kernel and
+    selection values. Each subclass turns them into rates of its own state.
 
     Parameters
     ----------
-    population_balance : QMOMPopulationBalance
-        Population balance whose moments the terms act on.
+    population_balance : PopulationBalanceMechanism
+        Population balance whose state the terms act on.
     agglomeration : callable, optional
         Kernel ``beta(L_i, L_j, conditions)`` [m**3/s].
     breakage : callable, optional
         Selection function ``a(L, conditions)`` [1/s], with ``fragments``.
     fragments : object, optional
-        Fragment distribution with ``moments(parent_sizes, orders)``.
+        Fragment distribution with the method named by ``FRAGMENT_METHOD``.
     """
 
-    # Fragments must hold their parent's volume (Marchisio et al., 2003, J.
-    # Colloid Interface Sci. 258:322-334). A design tolerance: far above the
-    # rounding of a size's cube, about 1e-16, yet small enough to catch a
-    # distribution that loses or makes crystal volume.
-    FRAGMENT_VOLUME_RTOL = 1e-9  # [-]
+    # The fragment distribution's method a form needs, and its call as the
+    # refusal spells it; set by each subclass.
+    FRAGMENT_METHOD = None
+    FRAGMENT_CALL = None
 
     def __init__(self, population_balance, agglomeration=None, breakage=None,
                  fragments=None):
@@ -3110,6 +3084,59 @@ class QMOMKernelSources(Mechanism):
         self.breakage = breakage
         self.fragments = fragments
         self.attached = False
+
+    @classmethod
+    def check_arguments(cls, agglomeration, breakage, fragments, rad):
+        """Refuse kernel arguments the population balance cannot use.
+
+        Parameters
+        ----------
+        agglomeration : callable or None
+            Agglomeration kernel.
+        breakage : callable or None
+            Selection function.
+        fragments : object or None
+            Fragment distribution.
+        rad : float
+            Nucleus size of the population balance [um].
+
+        Raises
+        ------
+        PharmaPyTypeError
+            If ``agglomeration`` or ``breakage`` is neither None nor
+            callable, or ``fragments`` lacks ``FRAGMENT_METHOD``.
+        PharmaPyValueError
+            If only one of ``breakage`` and ``fragments`` is given, or a rate
+            law infinite at zero size (``needs_finite_nuclei``) meets a
+            nucleus size that is not positive.
+        """
+        if agglomeration is not None and not callable(agglomeration):
+            raise PharmaPyTypeError(
+                'agglomeration must be a kernel callable '
+                'beta(L_i, L_j, conditions), got %r.' % (agglomeration,))
+
+        if (breakage is None) != (fragments is None):
+            raise PharmaPyValueError(
+                'Breakage needs both a selection function (breakage) and a '
+                'fragment distribution (fragments); got only one of them.')
+
+        if breakage is not None and not callable(breakage):
+            raise PharmaPyTypeError(
+                'breakage must be a selection function a(L, conditions), '
+                'got %r.' % (breakage,))
+
+        if fragments is not None and not callable(
+                getattr(fragments, cls.FRAGMENT_METHOD, None)):
+            raise PharmaPyTypeError(
+                'fragments must have a %s method, got %r.'
+                % (cls.FRAGMENT_CALL, fragments))
+
+        for rate_law in (agglomeration, breakage):
+            if getattr(rate_law, 'needs_finite_nuclei', False) and not rad > 0:
+                raise PharmaPyValueError(
+                    '%s is infinite at zero size, where nuclei born at rad = %r '
+                    'sit. Give the population balance a nucleus size rad > 0 [um].'
+                    % (type(rate_law).__name__, rad))
 
     def add_solver_state_variables(self, collection, overwrite=False,
                                    phase_ref=None):
@@ -3127,70 +3154,32 @@ class QMOMKernelSources(Mechanism):
         super().add_solver_state_variables(collection, overwrite, phase_ref)
         self.attached = True
 
-    def get_solver_state_rates(self, process, phase, time, completed_state):
-        """Moment rates of agglomeration and breakage at the current state.
-
-        Parameters
-        ----------
-        process : IntraPhaseProcess
-            Process this mechanism serves; its ``phaseref`` names the solid.
-        phase : BasePhase
-            The solid, unused: the moments are read from ``completed_state``.
-        time : float
-            Time [s], unused.
-        completed_state : dict
-            Solver and derived states keyed by ``StateKey``.
-
-        Returns
-        -------
-        TransferResult
-            d(mu_k)/dt [um**k/(m3 slurry s)], shape ``(2N,)``, keyed by the
-            moments state, with no mass or volume transfer.
+    def require_attached(self):
+        """Refuse to solve while the vessel does not run these terms.
 
         Raises
         ------
-        PharmaPyValueError
-            If a kernel, selection function or fragment distribution returns
-            values that fail the checks of ``_kernel_values``,
-            ``_selection_rates`` or ``_fragment_moments``, or if the
-            population balance has no liquid or kinetics to evaluate the
-            kernel conditions with.
+        PharmaPySpecificationError
+            If no vessel registered this process since the population
+            balance last registered its states, which would leave
+            agglomeration or breakage out without a word.
         """
-        balance = self.population_balance
-        key = StateKey(balance.moments_state_name, process.phaseref)
-        moments = np.asarray(completed_state[key], dtype=float)  # [um**k/m3]
-        rule = invert_moments(moments, balance.num_mom // 2)  # [um], [#/m3]
+        if not self.attached:
+            raise PharmaPySpecificationError(
+                'This %s has agglomeration or breakage kernels, but its '
+                'kernel_sources is not among the vessel\'s intraphase_processes. '
+                'Set CrystKinetics through the crystallizer, or add '
+                'IntraPhaseProcess(PhaseRef("solid", 0), mechanism.kernel_sources) '
+                'yourself.' % type(self.population_balance).__name__)
 
-        rates = np.zeros(balance.num_mom)
-        if len(rule.nodes):
-            conditions = self._conditions(moments)
-            # No crystal is smaller than a nucleus, so the rate laws see each
-            # node at no less than rad. A node below it comes from rounding or
-            # integration error near zero size, and would otherwise drive a
-            # law that grows as 1/L, such as the Brownian kernel, without
-            # bound. The fragments belong to the node itself.
-            sizes = np.maximum(rule.nodes, balance.rad)  # [um]
-
-            if self.agglomeration is not None:
-                rates += _agglomeration_moment_rates(
-                    rule.nodes, rule.weights, self._kernel_values(sizes, conditions),
-                    balance.num_mom)
-
-            if self.breakage is not None:
-                rates += _breakage_moment_rates(
-                    rule.nodes, rule.weights, self._selection_rates(sizes, conditions),
-                    self._fragment_moments(rule.nodes, balance.num_mom))
-
-        return TransferResult(state_rates={key: rates}, aux={'process': process},
-                              net_mass_rate=0.0)
-
-    def _conditions(self, moments):
+    def _conditions(self, moments_si):
         """Kernel conditions from the live liquid and the kinetics.
 
         Parameters
         ----------
-        moments : numpy.ndarray
-            Moments [um**k/m3 slurry], shape ``(2N,)``.
+        moments_si : numpy.ndarray
+            Moments mu_0..mu_k [m**k/m3 slurry], as the population balance
+            hands them to ``CrystKinetics.get_kinetics``.
 
         Returns
         -------
@@ -3213,7 +3202,6 @@ class QMOMKernelSources(Mechanism):
                 'liquid and CrystKinetics; set CrystKinetics on the vessel first.')
 
         conc, supersat, _ = balance.compute_supersaturation(liquid)
-        moments_si = moments * balance.MOMENT_UNIT_FACTOR ** np.arange(len(moments))  # [m**k/m3]
         _, growth, _ = kinetics.get_kinetics(conc, liquid.temp, balance.kv, moments_si)
         growth = growth * kinetics.alpha_fn(conc)  # [um/s]
 
@@ -3296,6 +3284,91 @@ class QMOMKernelSources(Mechanism):
                 'non-negative frequencies [1/s], got %s.' % values.tolist())
 
         return values
+
+
+class QMOMKernelSources(KernelSources):
+    """Agglomeration and breakage terms of a QMOM population balance.
+
+    Evaluates the kernels on the quadrature recovered from the moments and
+    returns the moment rates of both terms (Marchisio et al., 2003, J.
+    Colloid Interface Sci. 258:322-334).
+
+    Parameters
+    ----------
+    population_balance : QMOMPopulationBalance
+        Population balance whose moments the terms act on.
+    agglomeration, breakage : callable, optional
+        As ``KernelSources``.
+    fragments : object, optional
+        Fragment distribution with ``moments(parent_sizes, orders)``.
+    """
+
+    FRAGMENT_METHOD = 'moments'
+    FRAGMENT_CALL = 'moments(parent_sizes, orders)'
+
+    # Fragments must hold their parent's volume (Marchisio et al., 2003, J.
+    # Colloid Interface Sci. 258:322-334). A design tolerance: far above the
+    # rounding of a size's cube, about 1e-16, yet small enough to catch a
+    # distribution that loses or makes crystal volume.
+    FRAGMENT_VOLUME_RTOL = 1e-9  # [-]
+
+    def get_solver_state_rates(self, process, phase, time, completed_state):
+        """Moment rates of agglomeration and breakage at the current state.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Process this mechanism serves; its ``phaseref`` names the solid.
+        phase : BasePhase
+            The solid, unused: the moments are read from ``completed_state``.
+        time : float
+            Time [s], unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        TransferResult
+            d(mu_k)/dt [um**k/(m3 slurry s)], shape ``(2N,)``, keyed by the
+            moments state, with no mass or volume transfer.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a kernel, selection function or fragment distribution returns
+            values that fail the checks of ``_kernel_values``,
+            ``_selection_rates`` or ``_fragment_moments``, or if the
+            population balance has no liquid or kinetics to evaluate the
+            kernel conditions with.
+        """
+        balance = self.population_balance
+        key = StateKey(balance.moments_state_name, process.phaseref)
+        moments = np.asarray(completed_state[key], dtype=float)  # [um**k/m3]
+        rule = invert_moments(moments, balance.num_mom // 2)  # [um], [#/m3]
+
+        rates = np.zeros(balance.num_mom)
+        if len(rule.nodes):
+            conditions = self._conditions(
+                moments * balance.MOMENT_UNIT_FACTOR ** np.arange(len(moments)))  # [m**k/m3]
+            # No crystal is smaller than a nucleus, so the rate laws see each
+            # node at no less than rad. A node below it comes from rounding or
+            # integration error near zero size, and would otherwise drive a
+            # law that grows as 1/L, such as the Brownian kernel, without
+            # bound. The fragments belong to the node itself.
+            sizes = np.maximum(rule.nodes, balance.rad)  # [um]
+
+            if self.agglomeration is not None:
+                rates += _agglomeration_moment_rates(
+                    rule.nodes, rule.weights, self._kernel_values(sizes, conditions),
+                    balance.num_mom)
+
+            if self.breakage is not None:
+                rates += _breakage_moment_rates(
+                    rule.nodes, rule.weights, self._selection_rates(sizes, conditions),
+                    self._fragment_moments(rule.nodes, balance.num_mom))
+
+        return TransferResult(state_rates={key: rates}, aux={'process': process},
+                              net_mass_rate=0.0)
 
     def _fragment_moments(self, nodes, num_mom):
         """Evaluate and check the fragment moments of every node.
