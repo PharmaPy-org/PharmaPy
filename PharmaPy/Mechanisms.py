@@ -1356,6 +1356,15 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
 
 
 class OneDFVMMechanism(PopulationBalanceMechanism):
+    """Finite-volume population balance on a fixed one-dimensional size grid.
+
+    Carries the number density n [#/(um m3 slurry)] as cell averages on
+    ``x_grid``. Growth and dissolution move crystals between cells through a
+    Van Leer limited flux, nuclei enter the first cell through the boundary
+    flux, and moments and the crystal mass sum over the cells
+    (``integrate_over_size``). An agglomeration kernel adds the cell-average
+    term of ``FVMKernelSources`` through ``kernel_sources``.
+    """
 
     # Absolute integration tolerance on the number density [#/(um m3 slurry)].
     # A numerical design choice, checked on the case-study crystallizer
@@ -1382,6 +1391,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         scale=None,
         rad=None,
         abs_tol=None,
+        agglomeration=None,
     ):
         """Finite-volume population balance on a fixed size grid.
 
@@ -1416,12 +1426,22 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             Absolute integration tolerance on the number density
             [#/(um m3 slurry)], a scalar or one value per size class.
             Defaults to ``DEFAULT_ABS_TOL``.
+        agglomeration : callable, optional
+            Agglomeration kernel ``beta(L_i, L_j, conditions)`` [m**3/s], as
+            in ``PharmaPy.CrystallizationKernels``, evaluated on the grid
+            nodes; see ``FVMKernelSources``. None, the default, means no
+            agglomeration.
 
         Raises
         ------
         ValueError
             If the grid has fewer than two nodes or is not strictly
             increasing.
+        PharmaPyTypeError
+            If ``agglomeration`` is neither None nor callable.
+        PharmaPyValueError
+            If the kernel is infinite at zero size (its
+            ``needs_finite_nuclei`` is true) and ``rad`` is not positive.
         """
         super().__init__(
             owning_phase=owning_phase,
@@ -1459,6 +1479,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         # Overridable for a genuinely different nucleus size, but it should
         # track the grid unless you know why it should not.
         self.rad = self.x_grid[0] if rad is None else rad
+        FVMKernelSources.check_arguments(agglomeration, None, None, self.rad)
         self.distribution_state_name = distribution_state_name
         assert len(distrib_init)==len(x_grid), "x_grid and distrib must be the same length"
         setattr(self,distribution_state_name,distrib_init)
@@ -1479,6 +1500,33 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self.scale = 1
         self._update_exposed_attributes()
         self.expose('x_grid')
+
+        self.kernel_sources = (FVMKernelSources(self, agglomeration)
+                               if agglomeration is not None else None)
+
+    def add_solver_state_variables(self, collection, overwrite=False,
+                                   phase_ref=None):
+        """Register the distribution, and forget any earlier kernel registration.
+
+        Parameters
+        ----------
+        collection : StateCollection
+            The vessel's solver states.
+        overwrite : bool, optional
+            Passed on to the base class.
+        phase_ref : PhaseRef, optional
+            Phase owning the distribution.
+
+        Notes
+        -----
+        The vessel registers phase and connection mechanisms before its
+        intraphase processes, so ``kernel_sources`` is marked attached again
+        only if it is still one of them.
+        """
+        if self.kernel_sources is not None:
+            self.kernel_sources.attached = False
+
+        super().add_solver_state_variables(collection, overwrite, phase_ref)
 
     # ---------------- legacy conversion ----------------
 
@@ -1769,21 +1817,58 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         is 0.24 micron standing in for cells up to 323 micron wide -- a 1347x
         misweighting of the largest cells, in both the flux divergence and
         the moment integrals.
+
+        Parameters
+        ----------
+        x_grid : numpy.ndarray
+            Size grid [um], shape ``(num_grid,)``, strictly increasing.
+
+        Returns
+        -------
+        float or numpy.ndarray
+            Cell widths [um]: the node spacing on a uniform grid, otherwise
+            the differences of ``_cell_faces``, shape ``(num_grid,)``.
         """
         widths = np.diff(x_grid)
 
-        if np.allclose(widths, widths[0], rtol=1e-8):
+        if np.allclose(widths, widths[0], rtol=OneDFVMMechanism.UNIFORM_GRID_RTOL):
             return widths[0]
 
-        ratio = x_grid[1] / x_grid[0]
-        faces = np.zeros(len(x_grid) + 1)
-        interior = np.sqrt(x_grid[1:] * x_grid[:-1])
+        return np.diff(OneDFVMMechanism._cell_faces(x_grid))
 
-        faces[0] = interior[0] / ratio
-        faces[-1] = interior[-1] * ratio
-        faces[1:-1] = interior
+    # A grid is uniform when its node spacings agree to this relative
+    # tolerance. A design choice: far above the rounding of a linspace grid,
+    # about 1e-15, and far below any spacing change a grid is built with.
+    UNIFORM_GRID_RTOL = 1e-8  # [-]
 
-        return np.diff(faces)
+    @staticmethod
+    def _cell_faces(x_grid):
+        """Faces of the finite volume cells around the grid nodes.
+
+        Parameters
+        ----------
+        x_grid : numpy.ndarray
+            Size grid [um], shape ``(num_grid,)``, strictly increasing.
+
+        Returns
+        -------
+        numpy.ndarray
+            Cell faces [um], shape ``(num_grid + 1,)``. On a uniform grid
+            they lie midway between nodes, and half a spacing beyond the
+            outer two; on any other grid, at the geometric mean of adjacent
+            nodes, with the outer two extrapolated by the ratio of the first
+            two nodes, as ``_cell_widths`` describes.
+        """
+        widths = np.diff(x_grid)
+
+        if np.allclose(widths, widths[0], rtol=OneDFVMMechanism.UNIFORM_GRID_RTOL):
+            half_width = widths[0] / 2  # [um]
+            return np.append(x_grid - half_width, x_grid[-1] + half_width)
+
+        ratio = x_grid[1] / x_grid[0]  # [-]
+        interior = np.sqrt(x_grid[1:] * x_grid[:-1])  # [um]
+
+        return np.concatenate(([interior[0] / ratio], interior, [interior[-1] * ratio]))
 
     # ---------------- flow terms ----------------
     #
@@ -1816,6 +1901,38 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         time:float,
         connection:PhaseConnection
     ) -> TransferResult:
+        """Distribution and liquid rates of growth, nucleation and dissolution.
+
+        Parameters
+        ----------
+        liquid : BasePhase
+            Liquid the crystals grow from.
+        solid : BasePhase
+            The solid, unused: the distribution is read from
+            ``completed_state``.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+        time : float
+            Time [s], unused.
+        connection : PhaseConnection
+            Connection being solved; names the liquid.
+
+        Returns
+        -------
+        TransferResult
+            d(n)/dt [#/(um m3 slurry s)], shape ``(num_grid,)``, the liquid's
+            species rates [kg/s], the crystallized mass rate [kg/s] and the
+            slurry volume rate [m**3/s].
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If this population balance has an agglomeration kernel but its
+            ``kernel_sources`` is not an intra-phase process of the vessel.
+        """
+        if self.kernel_sources is not None:
+            self.kernel_sources.require_attached()
+
         t0=perf_counter()
         # The distribution lives on the phase that owns this mechanism (the
         # solid), not on the connection's sink. For crystallization the two
@@ -3413,3 +3530,150 @@ class QMOMKernelSources(KernelSources):
                 'parents of L**3 = %s.' % (values[:, 3].tolist(), parent_volume.tolist()))
 
         return values
+
+
+class FVMKernelSources(KernelSources):
+    """Agglomeration term of a finite-volume population balance, by cell average.
+
+    Works on the crystal count of each cell, N_i = n_i dx_i [#/m3 slurry],
+    every crystal of cell i having its node's volume v_i = L_i**3 [um**3];
+    the shape factor scales every volume alike, so it cancels from the
+    split. Each pair of cells i <= j agglomerates at beta_ij N_i N_j, halved
+    for i = j. Following the cell average technique (Kumar et al., 2006,
+    Chem. Eng. Sci. 61:3327-3342), the agglomerates are collected in the cell
+    whose faces bracket their volume v_i + v_j, then split between that
+    cell's node and its neighbour on the side of their mean volume, keeping
+    both their number and their volume. The population balance's mu_3,
+    sum N_i L_i**3, is therefore conserved to rounding.
+
+    Agglomerates whose mean volume lies above the last node stay in the last
+    cell with their volume: the cell gains their volume over v_last in
+    crystals, so the crystal mass stays exact while their size is capped at
+    the last node. The kernel sees each node at no less than the nucleus
+    size ``rad``, as in ``QMOMKernelSources``.
+
+    Parameters
+    ----------
+    population_balance : OneDFVMMechanism
+        Population balance whose distribution the term acts on.
+    agglomeration : callable
+        Kernel ``beta(L_i, L_j, conditions)`` [m**3/s].
+    """
+
+    def __init__(self, population_balance, agglomeration=None):
+        super().__init__(population_balance, agglomeration)
+
+        volumes = population_balance.x_grid ** 3  # [um**3]
+        face_volumes = population_balance._cell_faces(population_balance.x_grid) ** 3  # [um**3]
+        num_grid = len(volumes)
+
+        # Every unordered pair of cells once, its agglomerate's volume, and
+        # the cell whose faces bracket it. The agglomerate holds at least the
+        # larger parent's volume, so the cell is never below that parent's;
+        # one past the last face is kept in the last cell.
+        self._left, self._right = np.triu_indices(num_grid)
+        self._merged_volumes = volumes[self._left] + volumes[self._right]  # [um**3]
+        self._pair_weights = np.where(self._left == self._right, 0.5, 1.0)  # [-]
+        self._birth_cells = np.minimum(
+            np.searchsorted(face_volumes, self._merged_volumes, side='right') - 1,
+            num_grid - 1)
+        self._volumes = volumes
+
+    def get_solver_state_rates(self, process, phase, time, completed_state):
+        """Distribution rates of agglomeration at the current state.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Process this mechanism serves; its ``phaseref`` names the solid.
+        phase : BasePhase
+            The solid, unused: the distribution is read from
+            ``completed_state``.
+        time : float
+            Time [s], unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        TransferResult
+            d(n)/dt [#/(um m3 slurry s)], shape ``(num_grid,)``, keyed by the
+            distribution state, with no mass or volume transfer.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the kernel returns values that fail the checks of
+            ``_kernel_values``, or the population balance has no liquid or
+            kinetics to evaluate the kernel conditions with.
+        """
+        balance = self.population_balance
+        key = StateKey(balance.distribution_state_name, process.phaseref)
+        density = balance.true_state(completed_state[key])  # [#/(um m3 slurry)]
+        counts = density * balance.dx  # [#/m3 slurry]
+
+        rates = np.zeros_like(counts)  # [#/(m3 slurry s)]
+        if self.agglomeration is not None:
+            conditions = self._conditions(
+                balance.compute_moments(density, balance.x_grid))  # moments [m**k/m3]
+            sizes = np.maximum(balance.x_grid, balance.rad)  # [um]
+            rates += self._agglomeration_count_rates(
+                counts, self._kernel_values(sizes, conditions))
+
+        return TransferResult(state_rates={key: rates / balance.dx},
+                              aux={'process': process}, net_mass_rate=0.0)
+
+    def _agglomeration_count_rates(self, counts, kernel_values):
+        """Cell-count rates of cell-average agglomeration.
+
+        Parameters
+        ----------
+        counts : numpy.ndarray
+            Crystals in each cell, N_i [#/m3 slurry], shape ``(num_grid,)``.
+        kernel_values : numpy.ndarray
+            beta(L_i, L_j) [m**3/s], shape ``(num_grid, num_grid)``.
+
+        Returns
+        -------
+        numpy.ndarray
+            d(N_i)/dt [#/(m3 slurry s)], shape ``(num_grid,)``.
+
+        Notes
+        -----
+        With B_i agglomerates collected in cell i and V_i their volume, the
+        excess E_i = V_i - B_i v_i [um**3] places them: E_i / (v_{i+1} - v_i)
+        move to node i + 1 when E_i >= 0, and -E_i / (v_i - v_{i-1}) to node
+        i - 1 otherwise, which keeps their number and volume. The excess is
+        linear in the counts' products, so the split never divides by B_i.
+        The first cell has no deficit to move down: every agglomerate holds
+        at least twice the first node's volume. Only integrator noise in the
+        counts could make one, and its crystals then stay in the first cell.
+        """
+        num_grid = len(counts)
+        volumes = self._volumes  # [um**3]
+        events = (self._pair_weights * kernel_values[self._left, self._right]
+                  * counts[self._left] * counts[self._right])  # [#/(m3 s)]
+
+        born = np.bincount(self._birth_cells, events, num_grid)  # [#/(m3 s)]
+        born_volume = np.bincount(self._birth_cells, events * self._merged_volumes,
+                                  num_grid)  # [um**3/(m3 s)]
+        excess = born_volume - born * volumes  # [um**3/(m3 s)]
+        above = excess >= 0
+        spacing = np.diff(volumes)  # [um**3], v_{i+1} - v_i
+
+        moved_up = np.zeros(num_grid)  # [#/(m3 s)]
+        moved_up[:-1] = np.where(above[:-1], excess[:-1] / spacing, 0.0)
+        moved_down = np.zeros(num_grid)  # [#/(m3 s)]
+        moved_down[1:] = np.where(above[1:], 0.0, -excess[1:] / spacing)
+
+        rates = born - moved_up - moved_down
+        rates[1:] += moved_up[:-1]
+        rates[:-1] += moved_down[1:]
+        # Above the last node: its volume stays in the last cell.
+        if above[-1]:
+            rates[-1] += excess[-1] / volumes[-1]
+
+        lost = (np.bincount(self._left, events, num_grid)
+                + np.bincount(self._right, events, num_grid))  # [#/(m3 s)]
+
+        return rates - lost
