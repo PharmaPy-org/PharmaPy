@@ -14,9 +14,11 @@ counts [#/m**3 of slurry], rates per second. The solves use SciPy LSODA on
 """
 
 import os
+import warnings
 
 import numpy as np
 import pytest
+from scipy.special import gamma
 
 from PharmaPy.CrystallizationKernels import (BinaryFragmentation, BrownianKernel, ConstantKernel,
                                              ConstantSelection, DifferentialSedimentationKernel,
@@ -25,10 +27,11 @@ from PharmaPy.CrystallizationKernels import (BinaryFragmentation, BrownianKernel
                                              ProductKernel, ShearKernel, SumKernel,
                                              UniformFragmentation)
 from PharmaPy.Crystallizers_Refactored import BatchCrystallizer
+from PharmaPy.DataClasses import StateKey
 from PharmaPy.Errors import PharmaPySpecificationError, PharmaPyTypeError, PharmaPyValueError
 from PharmaPy.IntegratorBackends import ScipyBackend
 from PharmaPy.Kinetics import CrystKinetics
-from PharmaPy.Mechanisms import OneDFVMMechanism
+from PharmaPy.Mechanisms import OneDFVMMechanism, QMOMPopulationBalance
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
 
 pytestmark = pytest.mark.unit
@@ -72,7 +75,8 @@ SOLVER_ATOL = 1e-2  # [#/(um m**3)]
 # for the sum kernel and 1.2e-12 for symmetric breakage at SOLVER_ATOL
 # (10 Nov 2026), a margin of 11.
 EXACT_ZEROTH_MOMENT_RTOL = 1e-9  # [-]
-# Agglomeration conserves the mechanism's mu_3 to rounding: 1.8e-15 at most.
+# Agglomeration and breakage conserve the mechanism's mu_3 to rounding:
+# 1.8e-15 at most alone, 2.0e-13 over the solve with both (10 Nov 2026).
 MU3_CONSERVATION_RTOL = 1e-12  # [-]
 # Volume-weighted error of the cell counts against Scott's solution at
 # tau = 10: 5.40e-3 for the cell average on GRID, independent of the solver
@@ -925,3 +929,204 @@ def test_selection_values_that_are_not_rates_are_refused():
 
     with pytest.raises(PharmaPyValueError, match="selection function must return finite"):
         _rates(vessel)
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize("top, crowded", [(150.0, True), (1000.0, False)],
+                         ids=["short_grid", "wide_grid"])
+def test_agglomerates_crowding_the_last_size_class_are_reported(top, crowded):
+    # Crystals up to 60 um agglomerate to tau = 10 on 60 geometric cells.
+    # Ending at 150 um, the last cell holds 0.187 % of the crystal volume by
+    # the end; ending at 1000 um, none (10 Nov 2026).
+    sizes = np.geomspace(1.0, top, 60)  # [um]
+    counts = np.where(sizes <= 60.0, _spread_counts(sizes), 0.0)  # [#/m**3]
+    beta = FINAL_TAU / (np.sum(counts) * RUNTIME)  # [m**3/s]
+    vessel, _, _ = _build(counts, ConstantKernel(beta), sizes=sizes, integrator=ScipyBackend(
+        method="LSODA", options={"rtol": SOLVER_TOL, "atol": SOLVER_ATOL}))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    reports = [str(warning.message) for warning in caught
+               if "last size class held" in str(warning.message)]
+    assert len(reports) == (1 if crowded else 0)
+    if crowded:
+        assert "%.6g um" % sizes[-1] in reports[0]
+
+
+def test_the_largest_share_over_the_solve_is_reported():
+    # A solved history whose last cell holds 0.5 % of the crystal volume
+    # midway and none at either end, as breakage could leave it.
+    vessel, mechanism, _ = _build(_spread_counts(), ConstantKernel(1e-14))
+    process = next(process for process in vessel.intraphase_processes
+                   if process.mechanism is mechanism.kernel_sources)
+    widths = np.diff(_faces(GRID))  # [um]
+    density = _spread_counts() / widths  # [#/(um m**3)]
+    peaked = density.copy()
+    rest_volume = np.sum(density * widths * GRID ** 3)  # [um**3/m**3]
+    peaked[-1] = rest_volume * (0.005 / 0.995) / (widths[-1] * GRID[-1] ** 3)
+    history = {StateKey("distrib", process.phaseref): np.array([density, peaked, density]),
+               "time": np.array([0.0, 300.0, 600.0])}  # [s]
+
+    with pytest.warns(RuntimeWarning, match="last size class held") as caught:
+        mechanism.kernel_sources.review_solution(process, history)
+
+    assert len(caught) == 1
+    assert "0.5 %" in str(caught[0].message) and "t = 300 s" in str(caught[0].message)
+
+
+# Patil and Andrews (1998) and Lage (2002): with a constant kernel beta_0,
+# a = S v and uniform fragments, an exponential start stays exponential,
+# n(v, t) = (N**2 / phi) exp(-N v / phi) in v = L**3 with phi = N_0 v_0 the
+# crystal volume, because each term alone keeps that shape (Scott, 1968;
+# Ziff and McGrady, 1985). The count then follows the Riccati equation
+# dN/dt = S phi - beta_0 N**2 / 2, settling at N_inf = sqrt(2 S phi / beta_0)
+# at the rate gamma = beta_0 N_inf / 2. Derived by substitution.
+EQUILIBRIUM_COUNT = 2 * INITIAL_COUNT  # N_inf [#/m**3]
+SETTLING_RATE = 3.0 / RUNTIME  # gamma [1/s]; tanh(3) = 0.995 by the end
+# Errors of this case at RUNTIME on GRID (10 Nov 2026), each bound about
+# twice its measurement: the FVM count 9.1e-4 from N(t) and its cells 2.43e-3
+# from the exact distribution (volume-weighted); QMOM's moments up to 1.6e-3
+# (mu_0 exact to 1e-12); the FVM's moments up to 5.3e-3, most of it already
+# at the start, where the grid holds mu_5 of the exponential 5.1e-3 high.
+BALANCE_COUNT_RTOL = 2e-3  # [-]
+BALANCE_DISTRIBUTION_TOL = 5e-3  # [-]
+QMOM_BALANCE_MOMENT_RTOL = 3e-3  # [-]
+FVM_BALANCE_MOMENT_RTOL = 1e-2  # [-]
+
+
+def _balance_kernels():
+    """Kernels whose balance holds EQUILIBRIUM_COUNT, reached at SETTLING_RATE.
+
+    Returns
+    -------
+    dict
+        ``kernel``, ``breakage`` and ``fragments`` for ``_build``.
+    """
+    crystal_volume = INITIAL_COUNT * MEAN_VOLUME  # phi [um**3/m**3]
+    beta = 2 * SETTLING_RATE / EQUILIBRIUM_COUNT  # beta_0 [m**3/s]
+    selection_per_volume = beta * EQUILIBRIUM_COUNT ** 2 / (2 * crystal_volume)  # S [1/(s um**3)]
+    return {"kernel": ConstantKernel(beta),
+            "breakage": PowerLawSelection(selection_per_volume * MEAN_VOLUME, 3.0,
+                                          reference_size=np.cbrt(MEAN_VOLUME)),
+            "fragments": UniformFragmentation()}
+
+
+def _balance_count(time):
+    """Crystal count N(t) of the Riccati equation, from INITIAL_COUNT.
+
+    Parameters
+    ----------
+    time : float
+        Time [s].
+
+    Returns
+    -------
+    float
+        N [#/m**3].
+    """
+    settled = np.tanh(SETTLING_RATE * time)  # [-]
+    return (EQUILIBRIUM_COUNT * (INITIAL_COUNT + EQUILIBRIUM_COUNT * settled)
+            / (EQUILIBRIUM_COUNT + INITIAL_COUNT * settled))
+
+
+def _balance_counts(time):
+    """The exact distribution integrated over each cell of GRID.
+
+    Parameters
+    ----------
+    time : float
+        Time [s].
+
+    Returns
+    -------
+    numpy.ndarray
+        Cell counts [#/m**3], shape ``GRID.shape``.
+    """
+    count = _balance_count(time)  # [#/m**3]
+    mean_volume = INITIAL_COUNT * MEAN_VOLUME / count  # phi / N [um**3]
+    return count * -np.diff(np.exp(-_faces(GRID) ** 3 / mean_volume))
+
+
+def _balance_moments(time, orders):
+    """Moments of the exact distribution in size.
+
+    Parameters
+    ----------
+    time : float
+        Time [s].
+    orders : numpy.ndarray
+        Orders k [-].
+
+    Returns
+    -------
+    numpy.ndarray
+        mu_k = N (phi / N)**(k/3) Gamma(1 + k/3) [um**k/m**3].
+    """
+    count = _balance_count(time)  # [#/m**3]
+    mean_volume = INITIAL_COUNT * MEAN_VOLUME / count  # [um**3]
+    orders = np.asarray(orders, dtype=float)
+    return count * mean_volume ** (orders / 3) * gamma(1 + orders / 3)
+
+
+@pytest.mark.integration
+def test_agglomeration_and_breakage_settle_on_their_exact_balance():
+    start = _balance_counts(0.0)
+
+    trajectory = _solved_counts(**_balance_kernels(), counts=start)
+
+    final, exact = trajectory[-1], _balance_counts(RUNTIME)
+    volumes = GRID ** 3  # [um**3]
+    np.testing.assert_allclose(trajectory @ volumes, start @ volumes, rtol=MU3_CONSERVATION_RTOL)
+    assert np.sum(final) == pytest.approx(_balance_count(RUNTIME), rel=BALANCE_COUNT_RTOL)
+    volume_error = np.sum(np.abs(final - exact) * volumes) / np.sum(exact * volumes)  # [-]
+    assert volume_error < BALANCE_DISTRIBUTION_TOL
+
+
+QMOM_ORDERS = np.arange(6)  # [-], mu_0..mu_5, three quadrature nodes
+
+
+def _qmom_moments_over_a_solve(kernels):
+    """Solve the same batch with QMOMPopulationBalance.
+
+    Parameters
+    ----------
+    kernels : dict
+        ``kernel``, ``breakage`` and ``fragments``.
+
+    Returns
+    -------
+    numpy.ndarray
+        Moments [um**k/m**3] at the end of RUNTIME, shape ``(6,)``.
+    """
+    liquid = LiquidPhase(DATA_PATH, mass=CHARGE_MASS, mass_frac=CHARGE_MASS_FRAC,
+                         temp=TEMP, name_solv="solvent")
+    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+    solid.mechanisms = QMOMPopulationBalance(
+        owning_phase=solid, target_components=TARGET, solvent_name="solvent",
+        moments_init=_balance_moments(0.0, QMOM_ORDERS), density=LIQUID_SOLUTE_DENSITY,
+        agglomeration=kernels["kernel"], breakage=kernels["breakage"],
+        fragments=kernels["fragments"])
+    vessel = BatchCrystallizer(integrator=ScipyBackend(
+        method="LSODA", options={"rtol": SOLVER_TOL, "atol": SOLVER_TOL}), isothermal=True)
+    vessel.Phases = [liquid, solid]
+    vessel.CrystKinetics = _kinetics()
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+    return np.asarray(vessel.result.mu_n_solid0)[-1]
+
+
+@pytest.mark.integration
+def test_fvm_and_qmom_agree_on_the_exact_balance():
+    # The same case through both population balances: each moment against
+    # the exact one. QMOM closes mu_0 exactly here; its other moments and
+    # all the FVM's carry their method's error.
+    kernels = _balance_kernels()
+    exact = _balance_moments(RUNTIME, QMOM_ORDERS)
+
+    qmom = _qmom_moments_over_a_solve(kernels)
+    final_counts = _solved_counts(**kernels, counts=_balance_counts(0.0))[-1]
+    fvm = np.array([np.sum(final_counts * GRID ** k) for k in QMOM_ORDERS])  # [um**k/m**3]
+
+    np.testing.assert_allclose(qmom, exact, rtol=QMOM_BALANCE_MOMENT_RTOL)
+    np.testing.assert_allclose(fvm, exact, rtol=FVM_BALANCE_MOMENT_RTOL)

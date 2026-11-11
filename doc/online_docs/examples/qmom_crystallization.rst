@@ -6,7 +6,9 @@ method of moments (QMOM). QMOM tracks a few moments of the crystal size
 distribution and, at every right-hand side, recovers from them a small set of
 sizes (the nodes) and counts (the weights). Terms that plain moment equations
 cannot close, namely size-dependent growth, agglomeration and breakage, are then
-evaluated on those nodes (McGraw, 1997; Marchisio et al., 2003).
+evaluated on those nodes (McGraw, 1997; Marchisio et al., 2003). The finite-volume
+form takes the same kernels on its size grid; see `Agglomeration and breakage on a
+size grid`_.
 
 .. important::
 
@@ -41,7 +43,7 @@ The three forms attach to the solid phase in the same way, and work in
    * - Agglomeration and breakage
      - No
      - Yes
-     - No
+     - Yes
    * - Size distribution available
      - No
      - No, only the N nodes
@@ -49,7 +51,7 @@ The three forms attach to the solid phase in the same way, and work in
 
 Use QMOM when you need agglomeration, breakage or size-dependent growth and the
 moments and mean sizes are enough. Use the FVM form when you need the
-distribution itself.
+distribution itself, at the cost of one state per size class.
 
 Setting up a crystallizer
 -------------------------
@@ -400,7 +402,9 @@ a ``KernelConditions``, whose fields are ``temp`` [K], ``supersaturation``,
 ``growth_rate`` :math:`G_0` [um/s] and ``shape_factor`` :math:`k_v` [-], and it
 must broadcast over the two arrays. A selection function is
 ``selection(size, conditions)``, and a fragment distribution is any object with a
-``moments(parent_sizes, orders)`` method.
+``moments(parent_sizes, orders)`` method for QMOM, and a
+``grid_counts(grid_sizes)`` method for the FVM form (see `Agglomeration and
+breakage on a size grid`_).
 
 A kernel or selection function that is infinite at zero size should set
 ``needs_finite_nuclei = True``, and the population balance then asks for ``rad``
@@ -422,6 +426,113 @@ above zero. The law below is an illustration, not a fitted model.
 .. testoutput::
 
    Crystal count: 9.000e+09 to 5.169e+09 #/m**3
+
+Agglomeration and breakage on a size grid
+-----------------------------------------
+
+``OneDFVMMechanism`` takes the same ``agglomeration``, ``breakage`` and
+``fragments`` and evaluates them on its grid nodes, so it keeps the size
+distribution itself.
+
+- **Agglomeration** uses the cell average technique (Kumar et al., 2006). The
+  agglomerates of each pair of cells are collected in the cell whose faces bracket
+  their volume, then split between neighbouring nodes so that both their number and
+  their volume are kept.
+- **Breakage** uses the fixed pivot (Kumar and Ramkrishna, 1996). Each fragment
+  distribution's ``grid_counts`` places the fragments of one parent on the nodes
+  once per grid, keeping their number and volume. A distribution of your own needs
+  that method; one with only ``moments`` is refused when the population balance is
+  built.
+
+Kumar et al. (2009) compare these schemes. On 35 to 100 geometric cells, the cell
+average placed agglomerates two to six times as accurately as the fixed pivot, at the
+same cost. Breakage keeps the fixed pivot, whose split is linear in the counts and so
+is built once. In crystallization, the discretized balance of Hounslow et al. (1988)
+set agglomeration on a grid whose node volumes double; both schemes here work on any
+grid, uniform or geometric.
+
+Here seeds near 60 um agglomerate and break with the kernels of the batch above.
+The count follows the same logistic balance, now toward
+:math:`2 S_0 / \beta_0 = 2 \times 10^9` from below.
+
+.. testcode::
+
+   from PharmaPy.Mechanisms import OneDFVMMechanism
+
+   grid = np.geomspace(1.0, 1000.0, 100)  # [um]
+   seed_density = 1e9 / (5.0 * np.sqrt(2 * np.pi)) * np.exp(
+       -0.5 * ((grid - 60.0) / 5.0) ** 2)  # [#/(um m**3 of slurry)], seeds near 60 um
+
+   solid = SolidPhase(path_data, mass=0.0, mass_frac=CRYSTAL, temp=TEMP)
+   on_grid = OneDFVMMechanism(
+       owning_phase=solid, target_components="C", solvent_name="solvent",
+       x_grid=grid, distrib_init=seed_density, density=1200.0, kv=0.5,
+       agglomeration=ConstantKernel(KERNEL), breakage=ConstantSelection(SELECTION),
+       fragments=BinaryFragmentation())
+   solid.mechanisms = on_grid
+   fvm = BatchCrystallizer(
+       integrator=ScipyBackend(method="LSODA", options={"rtol": 1e-10, "atol": 1e-2}),
+       isothermal=True)
+   fvm.Phases = [LiquidPhase(path_data, mass=1.0, mass_frac=LIQUID, temp=TEMP,
+                             name_solv="solvent"), solid]
+   fvm.CrystKinetics = CrystKinetics(coeff_solub=[SOLUBILITY], growth=(0.0, 0.0, 1.0))
+   fvm.solve_unit(runtime=RUNTIME, verbose=False)
+
+   cell_counts = np.asarray(fvm.result.distrib_solid0) * on_grid.dx  # [#/m**3 of slurry]
+   fvm_count = cell_counts.sum(axis=1)  # [#/m**3 of slurry], one value per time
+   fvm_l43 = (cell_counts @ grid ** 4) / (cell_counts @ grid ** 3)  # [um]
+   print(f"Crystal count: {fvm_count[0]:.3e} to {fvm_count[-1]:.3e} #/m**3")
+   print(f"L43: {fvm_l43[0]:.1f} to {fvm_l43[-1]:.1f} um")
+
+.. testoutput::
+
+   Crystal count: 1.000e+09 to 1.291e+09 #/m**3
+   L43: 61.2 to 62.9 um
+
+Against exact solutions on 100 geometric cells from 1 to 1000 um, the volume-weighted
+error of the cell counts was:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 46 30 24
+
+   * - Case
+     - Exact solution
+     - Error
+   * - Constant-kernel agglomeration, to :math:`\tau = 10`
+     - Scott (1968)
+     - 0.54 %
+   * - Breakage at a rate proportional to volume into uniform fragments, to ten
+       times the count
+     - Ziff and McGrady (1985)
+     - 0.34 %
+   * - Both, settling on their balance
+     - Patil and Andrews (1998); Lage (2002)
+     - 0.24 %
+
+With 35 cells, similar cases gave 1.8 to 2.8 %. Both schemes keep the count and the
+crystal volume of the cells exactly, apart from the grid's two edges:
+
+- **The top.** Agglomerates past the last node stay in the last cell with their
+  volume, so the crystal mass is right but their size is capped there. After a
+  solve, a warning reports when that cell held more than 0.1 % of the crystal
+  volume (``FVMKernelSources.TOP_CELL_VOLUME_SHARE``). Extend ``x_grid`` if you see
+  it.
+- **The bottom.** Fragments below the first node keep their volume there, as fewer
+  crystals. Start the grid well below the smallest fragments, or at zero size.
+
+.. warning::
+
+   Tighten the absolute tolerance. The FVM form's default, 1e4 #/(um m**3) on the
+   density, left the count of the constant-kernel case 8.4e-5 from exact under LSODA;
+   ``atol`` of 1e-2, as above, left 4.5e-11.
+
+   On a 100-cell batch with growing seeds, agglomeration made the solve faster on
+   CVode, the default backend (0.68 times the growth-only time), but 2.1 to 2.3 times
+   slower on SciPy LSODA. LSODA took 53 % more right-hand-side evaluations with the
+   cell average, against 22 % more with a fixed pivot: the cell average switches each
+   cell's agglomerates between neighbours as their mean volume crosses the node, and
+   LSODA pays for those switches.
 
 Semibatch, continuous and flowsheets
 ------------------------------------
@@ -492,7 +603,7 @@ Assumptions and limits
 ----------------------
 
 - **Refactored crystallizers only.** The legacy ``BatchCryst``, ``MSMPR`` and
-  ``SemibatchCryst`` do not have QMOM.
+  ``SemibatchCryst`` have neither QMOM nor the kernels on a size grid.
 - **Isothermal so far.** The tests run isothermal vessels, and agglomeration and
   breakage add no heat term.
 - **Dissolution** is size independent, and crystals do not disappear at
@@ -545,6 +656,14 @@ Verification
    * - Mass and crystal balances
      - Total mass in a semibatch with every mechanism on, and crystals leaving one
        unit against those arriving in the next
+   * - Fragments on a size grid
+     - Volume and count of every distribution, placements derived by hand, and the
+       densities integrated over each node's share
+       (``tests/test_crystallization_kernels.py``)
+   * - Agglomeration and breakage on a size grid
+     - Splits derived by hand, collision and fragment counting, the distributions of
+       Scott (1968), Ziff and McGrady (1985) and Patil and Andrews (1998), and QMOM
+       on that last case (``tests/test_fvm_kernels.py``)
    * - This page
      - ``tests/test_qmom_guide.py`` runs every block above and checks the printed
        numbers against closed forms
@@ -676,12 +795,34 @@ References
 - Golub, G. H.; Welsch, J. H. (1969). Calculation of Gauss quadrature rules.
   *Mathematics of Computation*, 23, 221-230.
   https://doi.org/10.1090/S0025-5718-69-99647-1
+- Hounslow, M. J.; Ryall, R. L.; Marshall, V. R. (1988). A discretized population
+  balance for nucleation, growth, and aggregation. *AIChE Journal*, 34, 1821-1832.
+  https://doi.org/10.1002/aic.690341108
+- Kumar, J.; Peglow, M.; Warnecke, G.; Heinrich, S.; Mörl, L. (2006). Improved
+  accuracy and convergence of discretized population balance for aggregation: The
+  cell average technique. *Chemical Engineering Science*, 61, 3327-3342.
+  https://doi.org/10.1016/j.ces.2005.12.014
+- Kumar, J.; Warnecke, G.; Peglow, M.; Heinrich, S. (2009). Comparison of numerical
+  methods for solving population balance equations incorporating aggregation and
+  breakage. *Powder Technology*, 189, 218-229.
+  https://doi.org/10.1016/j.powtec.2008.04.014
+- Kumar, S.; Ramkrishna, D. (1996). On the solution of population balance equations
+  by discretization - I. A fixed pivot technique. *Chemical Engineering Science*, 51,
+  1311-1332. https://doi.org/10.1016/0009-2509(96)88489-2
+- Lage, P. L. C. (2002). Comments on the "An analytical solution to the population
+  balance equation with coalescence and breakage - the special case with constant
+  number of particles" by D.P. Patil and J.R.G. Andrews. *Chemical Engineering
+  Science*, 57, 4253-4254. https://doi.org/10.1016/S0009-2509(02)00369-X
 - Marchisio, D. L.; Vigil, R. D.; Fox, R. O. (2003). Quadrature method of moments
   for aggregation-breakage processes. *Journal of Colloid and Interface Science*,
   258, 322-334. https://doi.org/10.1016/S0021-9797(02)00054-1
 - McGraw, R. (1997). Description of aerosol dynamics by the quadrature method of
   moments. *Aerosol Science and Technology*, 27, 255-265.
   https://doi.org/10.1080/02786829708965471
+- Patil, D. P.; Andrews, J. R. G. (1998). An analytical solution to continuous
+  population balance model describing floc coalescence and breakage - a special
+  case. *Chemical Engineering Science*, 53, 599-601.
+  https://doi.org/10.1016/S0009-2509(97)00314-X
 - Scott, W. T. (1968). Analytic studies of cloud droplet coalescence I. *Journal of
   the Atmospheric Sciences*, 25, 54-65.
 - Smoluchowski, M. (1917). Versuch einer mathematischen Theorie der

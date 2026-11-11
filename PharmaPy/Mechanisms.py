@@ -3566,7 +3566,8 @@ class FVMKernelSources(KernelSources):
     Agglomerates whose mean volume lies above the last node stay in the last
     cell with their volume: the cell gains their volume over v_last in
     crystals, so the crystal mass stays exact while their size is capped at
-    the last node.
+    the last node. After a solve, ``review_solution`` warns when that cell
+    held more than ``TOP_CELL_VOLUME_SHARE`` of the crystal volume.
 
     Breakage follows the fixed pivot (Kumar and Ramkrishna, 1996, Chem. Eng.
     Sci. 51:1311-1332): the cells break at a(L_i) N_i, and the fragment
@@ -3597,6 +3598,14 @@ class FVMKernelSources(KernelSources):
 
     FRAGMENT_METHOD = 'grid_counts'
     FRAGMENT_CALL = 'grid_counts(grid_sizes)'
+
+    # Share of the crystal volume the last cell may hold before a solve
+    # warns, a design choice (10 Nov 2026). A grid that reaches past the
+    # population leaves that cell all but empty (below 1e-100 in the Scott
+    # solves of test_fvm_kernels), while agglomerates kept there are capped
+    # at the last node's size; at 0.1 % of the volume the grid should be
+    # extended well before such crystals shape the distribution.
+    TOP_CELL_VOLUME_SHARE = 1e-3  # [-]
 
     def __init__(self, population_balance, agglomeration=None, breakage=None,
                  fragments=None):
@@ -3707,6 +3716,43 @@ class FVMKernelSources(KernelSources):
 
         return TransferResult(state_rates={key: rates / balance.dx},
                               aux={'process': process}, net_mass_rate=0.0)
+
+    def review_solution(self, process, solver_history):
+        """Warn when the last size class held too much of the crystal volume.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Process this mechanism served; its ``phaseref`` names the solid.
+        solver_history : dict
+            Solved states over time keyed by ``StateKey``, with the times
+            [s] under ``'time'``.
+
+        Warns
+        -----
+        RuntimeWarning
+            If at any reported time the last cell held more than
+            ``TOP_CELL_VOLUME_SHARE`` of the crystal volume, naming the
+            largest share and when it occurred.
+        """
+        balance = self.population_balance
+        key = StateKey(balance.distribution_state_name, process.phaseref)
+        density = np.atleast_2d(balance.true_state(solver_history[key]))  # [#/(um m3 slurry)]
+        cell_volumes = density * balance.dx * self._volumes  # [um**3/m3 slurry], per cell
+        total = cell_volumes.sum(axis=1)  # [um**3/m3 slurry]
+        share = np.divide(cell_volumes[:, -1], total, out=np.zeros_like(total),
+                          where=total > 0)  # [-]
+        worst = int(np.argmax(share))
+
+        if share[worst] > self.TOP_CELL_VOLUME_SHARE:
+            warnings.warn(
+                'The last size class held %.3g %% of the crystal volume at t = %.6g s, '
+                'above the %.3g %% that FVMKernelSources.TOP_CELL_VOLUME_SHARE allows. '
+                'Agglomerates past the last node, %.6g um, are kept there at its size; '
+                'extend x_grid to larger sizes.'
+                % (100 * share[worst], np.asarray(solver_history['time'])[worst],
+                   100 * self.TOP_CELL_VOLUME_SHARE, balance.x_grid[-1]),
+                RuntimeWarning, stacklevel=2)
 
     def _agglomeration_count_rates(self, counts, kernel_values):
         """Cell-count rates of cell-average agglomeration.

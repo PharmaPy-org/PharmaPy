@@ -183,6 +183,38 @@ class _BaseCrystallizer(MultiPhaseVessel):
         """
         self.integrator.set_linear_solver("dense")
         self.integrator.request_max_step(self.NUCLEATION_STEP_CAP)
+
+    def retrieve_results(self, time, solver_states):
+        """Store the solution, then let the intraphase processes review it.
+
+        Parameters
+        ----------
+        time : array-like
+            Integration times [s].
+        solver_states : array-like
+            Solver states at those times, as the integrator returns them.
+
+        Returns
+        -------
+        object
+            The result of ``MultiPhaseVessel.retrieve_results``.
+
+        Warns
+        -----
+        RuntimeWarning
+            From a process mechanism's ``review_solution``, such as
+            ``FVMKernelSources.review_solution`` when agglomerates crowd the
+            last size class.
+        """
+        result = super().retrieve_results(time, solver_states)
+
+        for process in self.intraphase_processes:
+            review = getattr(process.mechanism, 'review_solution', None)
+            if review is not None:
+                review(process, self.build_solver_history(time, solver_states))
+
+        return result
+
     def _merge_by_family(self, arrivals):
         """Merge a transfer, refusing crystals into a QMOM vessel.
 
