@@ -1,4 +1,4 @@
-"""Agglomeration and breakage kernels for the QMOM population balance.
+"""Agglomeration and breakage kernels for the QMOM and finite-volume population balances.
 
 An agglomeration kernel is a callable ``kernel(size_i, size_j, conditions)``
 returning the rate coefficient beta [m**3/s] of a crystal of size L_i with
@@ -7,7 +7,9 @@ the two size arrays. A breakage selection function is a callable
 ``selection(size, conditions)`` returning the frequency a(L) [1/s] at which
 a crystal of size L breaks. ``conditions`` is a ``KernelConditions``. A
 fragment distribution has ``moments(parent_sizes, orders)``, the moments
-b_k(L) [um**k] of the fragments of one parent of each size. User versions
+b_k(L) [um**k] of the fragments of one parent of each size, for QMOM, and
+``grid_counts(grid_sizes)``, its fragments placed on the nodes of a size
+grid, for the finite-volume form. User versions
 are any objects of these shapes; a kernel or selection function that is
 infinite at zero size sets ``needs_finite_nuclei = True``, and the
 population balance then asks for nuclei born at a finite size.
@@ -658,6 +660,125 @@ def _size_powers(parent_sizes, orders):
     return np.asarray(parent_sizes, dtype=float)[:, None] ** np.asarray(orders)[None, :]
 
 
+# ``grid_counts`` places fragments on a size grid by the fixed pivot (Kumar
+# and Ramkrishna, 1996, Chem. Eng. Sci. 51:1311-1332): each node's share of a
+# fragment is a hat function, linear in the fragment volume, so integrated
+# against a density at most quadratic in that volume it is a cubic, which
+# Gauss-Legendre quadrature of two points integrates exactly.
+HAT_QUADRATURE_POINTS = 2  # [-]
+
+
+def _grid_volumes(grid_sizes):
+    """Node volumes of a size grid, after checking the grid.
+
+    Parameters
+    ----------
+    grid_sizes : array-like
+        Node sizes L_i [um], shape ``(n,)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        L_i**3 [um**3], shape ``(n,)``. The shape factor multiplies every
+        volume alike, so it cancels from the split.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If the grid is not one-dimensional with at least two finite,
+        non-negative, strictly increasing sizes.
+    """
+    sizes = np.asarray(grid_sizes, dtype=float)
+    if (sizes.ndim != 1 or len(sizes) < 2 or not np.all(np.isfinite(sizes))
+            or sizes[0] < 0 or np.any(np.diff(sizes) <= 0)):
+        raise PharmaPyValueError(
+            'grid_sizes must be a one-dimensional grid of at least two finite, '
+            'non-negative, strictly increasing sizes [um], got %r.' % (grid_sizes,))
+    return sizes ** 3
+
+
+def _placed(volumes, fragment_volumes):
+    """Fixed-pivot counts at the nodes of one fragment per column.
+
+    Parameters
+    ----------
+    volumes : numpy.ndarray
+        Node volumes [um**3], shape ``(n,)``.
+    fragment_volumes : numpy.ndarray
+        Volume of one fragment per column [um**3], shape ``(m,)``, none above
+        the last node's.
+
+    Returns
+    -------
+    numpy.ndarray
+        Counts [-], shape ``(n, m)``. A fragment of volume w between nodes i
+        and i + 1 leaves (v_{i+1} - w) / (v_{i+1} - v_i) at node i and the
+        rest at node i + 1, keeping its number and volume; one below the
+        first node keeps its volume there, as w / v_0 crystals.
+    """
+    num_nodes = len(volumes)
+    columns = np.arange(len(fragment_volumes))
+    counts = np.zeros((num_nodes, len(fragment_volumes)))
+    nodes_below = np.searchsorted(volumes, fragment_volumes, side='right')
+
+    below_grid = nodes_below == 0
+    counts[0, columns[below_grid]] = fragment_volumes[below_grid] / volumes[0]
+
+    on_grid = ~below_grid
+    lower = nodes_below[on_grid] - 1
+    upper = np.minimum(lower + 1, num_nodes - 1)
+    spacing = np.where(upper > lower, volumes[upper] - volumes[lower], 1.0)  # [um**3]
+    share = np.where(upper > lower, (fragment_volumes[on_grid] - volumes[lower]) / spacing, 0.0)
+    counts[lower, columns[on_grid]] += 1 - share
+    counts[upper, columns[on_grid]] += share
+    return counts
+
+
+def _spread(volumes, density):
+    """Fixed-pivot counts at the nodes of fragments spread by a density.
+
+    Parameters
+    ----------
+    volumes : numpy.ndarray
+        Node volumes [um**3], shape ``(n,)``.
+    density : callable
+        Fragments of one parent per unit x = w / v_parent [-] as a function
+        of x on 0 < x < 1, a polynomial of degree at most two.
+
+    Returns
+    -------
+    numpy.ndarray
+        Counts [-], shape ``(n, n)``: entry [i, k] is the fragments at node
+        i of one parent at node k.
+
+    Notes
+    -----
+    On each interval between neighbouring nodes up to the parent, the
+    fragments split linearly in volume between the two ends; on the
+    interval below the first node they all go to it, as w / v_0 crystals,
+    which keeps their volume. A parent of zero volume, a first node at zero
+    size, leaves all its fragments at that node.
+    """
+    num_nodes = len(volumes)
+    points, weights = np.polynomial.legendre.leggauss(HAT_QUADRATURE_POINTS)
+    rise = (points + 1) / 2  # [-], each point's share of the interval's upper node
+    lower_ends = np.concatenate(([0.0], volumes[:-1]))  # [um**3], interval j ends at node j
+    half_widths = (volumes - lower_ends) / 2  # [um**3]
+    abscissae = (lower_ends + volumes)[:, None] / 2 + half_widths[:, None] * points  # [um**3]
+
+    counts = np.zeros((num_nodes, num_nodes))
+    for parent, parent_volume in enumerate(volumes):
+        if parent_volume == 0:
+            counts[parent, parent] = np.sum(weights * density(rise)) / 2
+            continue
+        # Fragments of each interval at each quadrature point [-].
+        fragments = (density(abscissae[:parent + 1] / parent_volume) / parent_volume
+                     * half_widths[:parent + 1, None] * weights)
+        counts[:parent + 1, parent] += fragments @ rise
+        counts[:parent, parent] += (fragments @ (1 - rise))[1:]
+    return counts
+
+
 class BinaryFragmentation:
     """Two fragments holding the fractions f and 1 - f of the parent's volume.
 
@@ -702,6 +823,31 @@ class BinaryFragmentation:
         share = self.volume_fraction ** thirds + (1 - self.volume_fraction) ** thirds  # [-]
         return share[None, :] * _size_powers(parent_sizes, orders)
 
+    def grid_counts(self, grid_sizes):
+        """Fragments of a parent at each node, placed on the nodes by fixed pivot.
+
+        Parameters
+        ----------
+        grid_sizes : array-like
+            Node sizes [um], shape ``(n,)``, strictly increasing.
+
+        Returns
+        -------
+        numpy.ndarray
+            Counts [-], shape ``(n, n)``: entry [i, k] is the fragments at
+            node i of one parent at node k. The two fragments, of volumes
+            f v_k and (1 - f) v_k, each split between the nodes around them;
+            see ``_placed``.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the grid is not strictly increasing, finite and non-negative.
+        """
+        volumes = _grid_volumes(grid_sizes)  # [um**3]
+        return (_placed(volumes, self.volume_fraction * volumes)
+                + _placed(volumes, (1 - self.volume_fraction) * volumes))
+
 
 class ErosionFragmentation:
     """A small fragment of fixed size chipped off the parent.
@@ -745,6 +891,35 @@ class ErosionFragmentation:
         remaining_cube = np.where(erodes, parent_sizes ** 3 - self.fragment_size ** 3, 0.0)  # [um**3]
         eroded = (self.fragment_size ** np.asarray(orders))[None, :] + remaining_cube[:, None] ** thirds
         return np.where(erodes[:, None], eroded, _size_powers(parent_sizes, orders))
+
+    def grid_counts(self, grid_sizes):
+        """Fragment and eroded parent at each node, placed on the nodes by fixed pivot.
+
+        Parameters
+        ----------
+        grid_sizes : array-like
+            Node sizes [um], shape ``(n,)``, strictly increasing.
+
+        Returns
+        -------
+        numpy.ndarray
+            Counts [-], shape ``(n, n)``: entry [i, k] is the crystals at
+            node i left by one parent at node k. A parent larger than L_0
+            leaves a fragment of volume L_0**3 and itself less that volume,
+            each split between the nodes around it (see ``_placed``); any
+            other parent stays whole at its node.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the grid is not strictly increasing, finite and non-negative.
+        """
+        volumes = _grid_volumes(grid_sizes)  # [um**3]
+        erodes = np.asarray(grid_sizes, dtype=float) > self.fragment_size
+        chip_volume = self.fragment_size ** 3  # [um**3]
+        counts = _placed(volumes, np.where(erodes, volumes - chip_volume, volumes))
+        counts[:, erodes] += _placed(volumes, np.full(np.count_nonzero(erodes), chip_volume))
+        return counts
 
 
 class ParabolicFragmentation:
@@ -798,6 +973,32 @@ class ParabolicFragmentation:
                                                         + 18 / (orders + 3)))  # [-]
         return share[None, :] * _size_powers(parent_sizes, orders)
 
+    def grid_counts(self, grid_sizes):
+        """Fragments of a parent at each node, placed on the nodes by fixed pivot.
+
+        Parameters
+        ----------
+        grid_sizes : array-like
+            Node sizes [um], shape ``(n,)``, strictly increasing.
+
+        Returns
+        -------
+        numpy.ndarray
+            Counts [-], shape ``(n, n)``: entry [i, k] is the fragments at
+            node i of one parent at node k; see ``_spread``. In the volume
+            fraction x = L**3 / lambda**3, with L**2 dL = lambda**3 dx / 3,
+            the density b(L|lambda) dL becomes
+            (C + (1 - C/2)(24 x**2 - 24 x + 6)) dx.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the grid is not strictly increasing, finite and non-negative.
+        """
+        c = self.shape_parameter  # [-]
+        return _spread(_grid_volumes(grid_sizes),
+                       lambda x: c + (1 - c / 2) * (24 * x ** 2 - 24 * x + 6))
+
 
 class UniformFragmentation:
     """Fragments spread evenly in volume below the parent's size.
@@ -823,3 +1024,25 @@ class UniformFragmentation:
         """
         share = 6 / (np.asarray(orders, dtype=float) + 3)  # [-]
         return share[None, :] * _size_powers(parent_sizes, orders)
+
+    def grid_counts(self, grid_sizes):
+        """Fragments of a parent at each node, placed on the nodes by fixed pivot.
+
+        Parameters
+        ----------
+        grid_sizes : array-like
+            Node sizes [um], shape ``(n,)``, strictly increasing.
+
+        Returns
+        -------
+        numpy.ndarray
+            Counts [-], shape ``(n, n)``: entry [i, k] is the fragments at
+            node i of one parent at node k; see ``_spread``. In the volume
+            fraction x = L**3 / lambda**3, b(L|lambda) dL = 2 dx.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the grid is not strictly increasing, finite and non-negative.
+        """
+        return _spread(_grid_volumes(grid_sizes), lambda x: np.full(np.shape(x), 2.0))
