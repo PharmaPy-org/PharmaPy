@@ -1362,8 +1362,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
     ``x_grid``. Growth and dissolution move crystals between cells through a
     Van Leer limited flux, nuclei enter the first cell through the boundary
     flux, and moments and the crystal mass sum over the cells
-    (``integrate_over_size``). An agglomeration kernel adds the cell-average
-    term of ``FVMKernelSources`` through ``kernel_sources``.
+    (``integrate_over_size``). Agglomeration and breakage kernels add the
+    terms of ``FVMKernelSources`` through ``kernel_sources``.
     """
 
     # Absolute integration tolerance on the number density [#/(um m3 slurry)].
@@ -1392,6 +1392,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         rad=None,
         abs_tol=None,
         agglomeration=None,
+        breakage=None,
+        fragments=None,
     ):
         """Finite-volume population balance on a fixed size grid.
 
@@ -1431,6 +1433,15 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             in ``PharmaPy.CrystallizationKernels``, evaluated on the grid
             nodes; see ``FVMKernelSources``. None, the default, means no
             agglomeration.
+        breakage : callable, optional
+            Selection function ``a(L, conditions)`` [1/s], the frequency at
+            which a crystal of size L breaks, evaluated on the grid nodes.
+            None, the default, means no breakage. Given with ``fragments``.
+        fragments : object, optional
+            Fragment distribution whose ``grid_counts(grid_sizes)`` gives the
+            fragments [-] at each node of one parent at each node, as the
+            built-in distributions of ``PharmaPy.CrystallizationKernels`` do.
+            Given with ``breakage``.
 
         Raises
         ------
@@ -1438,10 +1449,14 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             If the grid has fewer than two nodes or is not strictly
             increasing.
         PharmaPyTypeError
-            If ``agglomeration`` is neither None nor callable.
+            If ``agglomeration`` or ``breakage`` is neither None nor
+            callable, or ``fragments`` has no ``grid_counts`` method.
         PharmaPyValueError
-            If the kernel is infinite at zero size (its
-            ``needs_finite_nuclei`` is true) and ``rad`` is not positive.
+            If only one of ``breakage`` and ``fragments`` is given; if a
+            kernel or selection function is infinite at zero size (its
+            ``needs_finite_nuclei`` is true) and ``rad`` is not positive; or
+            if the fragments on this grid fail the checks of
+            ``FVMKernelSources``.
         """
         super().__init__(
             owning_phase=owning_phase,
@@ -1479,7 +1494,7 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         # Overridable for a genuinely different nucleus size, but it should
         # track the grid unless you know why it should not.
         self.rad = self.x_grid[0] if rad is None else rad
-        FVMKernelSources.check_arguments(agglomeration, None, None, self.rad)
+        FVMKernelSources.check_arguments(agglomeration, breakage, fragments, self.rad)
         self.distribution_state_name = distribution_state_name
         assert len(distrib_init)==len(x_grid), "x_grid and distrib must be the same length"
         setattr(self,distribution_state_name,distrib_init)
@@ -1501,8 +1516,9 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         self._update_exposed_attributes()
         self.expose('x_grid')
 
-        self.kernel_sources = (FVMKernelSources(self, agglomeration)
-                               if agglomeration is not None else None)
+        self.kernel_sources = (
+            FVMKernelSources(self, agglomeration, breakage, fragments)
+            if agglomeration is not None or breakage is not None else None)
 
     def add_solver_state_variables(self, collection, overwrite=False,
                                    phase_ref=None):
@@ -1927,8 +1943,9 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
         Raises
         ------
         PharmaPySpecificationError
-            If this population balance has an agglomeration kernel but its
-            ``kernel_sources`` is not an intra-phase process of the vessel.
+            If this population balance has an agglomeration or breakage
+            kernel but its ``kernel_sources`` is not an intra-phase process
+            of the vessel.
         """
         if self.kernel_sources is not None:
             self.kernel_sources.require_attached()
@@ -3193,6 +3210,12 @@ class KernelSources(Mechanism):
     FRAGMENT_METHOD = None
     FRAGMENT_CALL = None
 
+    # Fragments must hold their parent's volume (Marchisio et al., 2003, J.
+    # Colloid Interface Sci. 258:322-334). A design tolerance: far above the
+    # rounding of a size's cube, about 1e-16, yet small enough to catch a
+    # distribution that loses or makes crystal volume.
+    FRAGMENT_VOLUME_RTOL = 1e-9  # [-]
+
     def __init__(self, population_balance, agglomeration=None, breakage=None,
                  fragments=None):
         super().__init__()
@@ -3423,12 +3446,6 @@ class QMOMKernelSources(KernelSources):
     FRAGMENT_METHOD = 'moments'
     FRAGMENT_CALL = 'moments(parent_sizes, orders)'
 
-    # Fragments must hold their parent's volume (Marchisio et al., 2003, J.
-    # Colloid Interface Sci. 258:322-334). A design tolerance: far above the
-    # rounding of a size's cube, about 1e-16, yet small enough to catch a
-    # distribution that loses or makes crystal volume.
-    FRAGMENT_VOLUME_RTOL = 1e-9  # [-]
-
     def get_solver_state_rates(self, process, phase, time, completed_state):
         """Moment rates of agglomeration and breakage at the current state.
 
@@ -3533,7 +3550,7 @@ class QMOMKernelSources(KernelSources):
 
 
 class FVMKernelSources(KernelSources):
-    """Agglomeration term of a finite-volume population balance, by cell average.
+    """Agglomeration and breakage terms of a finite-volume population balance.
 
     Works on the crystal count of each cell, N_i = n_i dx_i [#/m3 slurry],
     every crystal of cell i having its node's volume v_i = L_i**3 [um**3];
@@ -3549,19 +3566,41 @@ class FVMKernelSources(KernelSources):
     Agglomerates whose mean volume lies above the last node stay in the last
     cell with their volume: the cell gains their volume over v_last in
     crystals, so the crystal mass stays exact while their size is capped at
-    the last node. The kernel sees each node at no less than the nucleus
-    size ``rad``, as in ``QMOMKernelSources``.
+    the last node.
+
+    Breakage follows the fixed pivot (Kumar and Ramkrishna, 1996, Chem. Eng.
+    Sci. 51:1311-1332): the cells break at a(L_i) N_i, and the fragment
+    distribution's ``grid_counts`` places their fragments on the nodes once
+    for the grid, keeping their number and volume, so d(N)/dt =
+    F (a N) - a N. Fragments below the first node keep their volume there.
+
+    The kernel and selection function see each node at no less than the
+    nucleus size ``rad``, as in ``QMOMKernelSources``.
 
     Parameters
     ----------
     population_balance : OneDFVMMechanism
-        Population balance whose distribution the term acts on.
-    agglomeration : callable
+        Population balance whose distribution the terms act on.
+    agglomeration : callable, optional
         Kernel ``beta(L_i, L_j, conditions)`` [m**3/s].
+    breakage : callable, optional
+        Selection function ``a(L, conditions)`` [1/s], with ``fragments``.
+    fragments : object, optional
+        Fragment distribution with ``grid_counts(grid_sizes)``.
+
+    Raises
+    ------
+    PharmaPyValueError
+        If the fragments on the grid fail the checks of
+        ``_checked_fragment_counts``.
     """
 
-    def __init__(self, population_balance, agglomeration=None):
-        super().__init__(population_balance, agglomeration)
+    FRAGMENT_METHOD = 'grid_counts'
+    FRAGMENT_CALL = 'grid_counts(grid_sizes)'
+
+    def __init__(self, population_balance, agglomeration=None, breakage=None,
+                 fragments=None):
+        super().__init__(population_balance, agglomeration, breakage, fragments)
 
         volumes = population_balance.x_grid ** 3  # [um**3]
         face_volumes = population_balance._cell_faces(population_balance.x_grid) ** 3  # [um**3]
@@ -3578,9 +3617,50 @@ class FVMKernelSources(KernelSources):
             np.searchsorted(face_volumes, self._merged_volumes, side='right') - 1,
             num_grid - 1)
         self._volumes = volumes
+        self._fragment_counts = (self._checked_fragment_counts()
+                                 if fragments is not None else None)  # [-]
+
+    def _checked_fragment_counts(self):
+        """Place the fragments on the grid once, and check them.
+
+        Returns
+        -------
+        numpy.ndarray
+            F [-], shape ``(num_grid, num_grid)``: entry [i, k] is the
+            fragments at node i of one parent at node k.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the counts have another shape or are negative or not finite,
+            or if any parent's fragments do not hold its volume,
+            sum_i F[i, k] v_i = v_k, to ``FRAGMENT_VOLUME_RTOL``.
+        """
+        grid = self.population_balance.x_grid  # [um]
+        num_grid = len(grid)
+        counts = np.asarray(self.fragments.grid_counts(grid), dtype=float)
+
+        if counts.shape != (num_grid, num_grid):
+            raise PharmaPyValueError(
+                'The fragment distribution must return grid counts of shape %s '
+                '(nodes, parents), got %s.' % ((num_grid, num_grid), counts.shape))
+
+        if not np.all(np.isfinite(counts)) or np.any(counts < 0):
+            raise PharmaPyValueError(
+                'The fragment distribution must return finite, non-negative '
+                'grid counts, got %s.' % counts.tolist())
+
+        placed_volume = self._volumes @ counts  # [um**3], per parent
+        if np.any(np.abs(placed_volume - self._volumes)
+                  > self.FRAGMENT_VOLUME_RTOL * self._volumes):
+            raise PharmaPyValueError(
+                'The fragments must hold their parent\'s volume: they place %s '
+                'for parents of L**3 = %s.' % (placed_volume.tolist(), self._volumes.tolist()))
+
+        return counts
 
     def get_solver_state_rates(self, process, phase, time, completed_state):
-        """Distribution rates of agglomeration at the current state.
+        """Distribution rates of agglomeration and breakage at the current state.
 
         Parameters
         ----------
@@ -3603,22 +3683,27 @@ class FVMKernelSources(KernelSources):
         Raises
         ------
         PharmaPyValueError
-            If the kernel returns values that fail the checks of
-            ``_kernel_values``, or the population balance has no liquid or
-            kinetics to evaluate the kernel conditions with.
+            If the kernel or selection function returns values that fail the
+            checks of ``_kernel_values`` or ``_selection_rates``, or the
+            population balance has no liquid or kinetics to evaluate the
+            kernel conditions with.
         """
         balance = self.population_balance
         key = StateKey(balance.distribution_state_name, process.phaseref)
         density = balance.true_state(completed_state[key])  # [#/(um m3 slurry)]
         counts = density * balance.dx  # [#/m3 slurry]
+        conditions = self._conditions(
+            balance.compute_moments(density, balance.x_grid))  # moments [m**k/m3]
+        sizes = np.maximum(balance.x_grid, balance.rad)  # [um]
 
         rates = np.zeros_like(counts)  # [#/(m3 slurry s)]
         if self.agglomeration is not None:
-            conditions = self._conditions(
-                balance.compute_moments(density, balance.x_grid))  # moments [m**k/m3]
-            sizes = np.maximum(balance.x_grid, balance.rad)  # [um]
             rates += self._agglomeration_count_rates(
                 counts, self._kernel_values(sizes, conditions))
+
+        if self.breakage is not None:
+            broken = self._selection_rates(sizes, conditions) * counts  # [#/(m3 s)]
+            rates += self._fragment_counts @ broken - broken
 
         return TransferResult(state_rates={key: rates / balance.dx},
                               aux={'process': process}, net_mass_rate=0.0)
