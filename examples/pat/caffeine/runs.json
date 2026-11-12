@@ -1,0 +1,58 @@
+{
+  "description": "Seeded cooling crystallization of caffeine from water, four runs, 2 x 2 in seed load and final cooling rate (Nagy group, Purdue, October and November 2026).",
+  "charge": {
+    "water_mass_g": 350.0,
+    "caffeine_mass_g": 16.5434,
+    "theoretical_yield_g": 11.4265,
+    "basis": "Targets from the lab's recipe sheet. The load is the saturation amount at 40 C from Shalmashi and Golmohammad 2010, Table 1 (mole fraction 4.367e-3 at 313 K). The yield is that load minus 5.1169 g, the sheet's estimate of what stays dissolved at 20 C. Weighed masses were not reported."
+  },
+  "seeding": {
+    "temperature_C": 37.0,
+    "basis": "Seed mass is a percentage of the theoretical yield. The seed was slurried in liquid taken from the vessel and returned during the hold at 37 C, so the water mass does not change. Seed size was not measured."
+  },
+  "temperature_program": "20 C for 30 min, heat to 45 C in 50 min, hold 30 min, cool to 37 C in 16 min, hold 30 min, cool to 20 C at the final ramp rate, hold.",
+  "temperature_log": {"file": "expttsd1.csv", "layout": "huber_log.layout.json"},
+  "clock_basis": "The temperature log has relative time only. Its start relative to the first FBRM sample interval is estimated from file modification times; treat it as good to about one minute. FBRM stamps are local time of the acquisition computer; IR and Raman stamps are UTC.",
+  "runs": [
+    {
+      "id": "high_seed_slow_cool",
+      "folder": "20261023 Caffeine JLR High Seed Slow Cool",
+      "seed_percent_of_yield": 5.0,
+      "seed_mass_g": 0.5713,
+      "final_ramp_rate_C_per_min": 0.1,
+      "temperature_log_start_after_fbrm_start_s": 170.0,
+      "fbrm_local_time_utc_offset_h": -4.0,
+      "notes": "Only run with vendor CSV exports."
+    },
+    {
+      "id": "low_seed_slow_cool",
+      "folder": "20261024 Caffeine JLR Low Seed Slow Cool",
+      "seed_percent_of_yield": 1.0,
+      "seed_mass_g": 0.1143,
+      "final_ramp_rate_C_per_min": 0.1,
+      "temperature_log_start_after_fbrm_start_s": 50.0,
+      "fbrm_local_time_utc_offset_h": -4.0,
+      "notes": "IR is sparse after the 37 C hold: about 20 spectra in 12 hours."
+    },
+    {
+      "id": "low_seed_fast_cool",
+      "folder": "20261025 Caffeine JLR Low Seed Fast Cool",
+      "seed_percent_of_yield": 1.0,
+      "seed_mass_g": 0.1143,
+      "final_ramp_rate_C_per_min": 0.5,
+      "temperature_log_start_after_fbrm_start_s": -15.0,
+      "fbrm_local_time_utc_offset_h": -4.0,
+      "notes": ""
+    },
+    {
+      "id": "high_seed_fast_cool",
+      "folder": "20261108 Caffeine JLR High Seed Fast Cool",
+      "seed_percent_of_yield": 5.0,
+      "seed_mass_g": 0.5713,
+      "final_ramp_rate_C_per_min": 0.5,
+      "temperature_log_start_after_fbrm_start_s": 1344.0,
+      "fbrm_local_time_utc_offset_h": -5.0,
+      "notes": "The iC IR file was never finalized; its spectra are recovered by block scan. Fine FBRM counts of unknown cause appear early in the 45 C hold, before seeding."
+    }
+  ]
+}

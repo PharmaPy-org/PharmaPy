@@ -4,6 +4,17 @@ Readers for process-analytical-technology data, started for the work package 2
 demonstrator (#153, #358). They are not part of the PharmaPy package API. Nothing
 in them is specific to a compound; case inputs live in a subdirectory per case.
 
+## Text tables and the run table
+
+| Module | Purpose |
+|---|---|
+| `table_layout.py` | Reads a delimited text file through a layout description (JSON): the column titles a file must have, their units, and a plausible range. Columns are found by title, so their order does not matter. Times are returned in seconds and temperatures in kelvin. A file that does not match is refused. |
+| `run_table.py` | The common table of one run: named series, each with its own sample times, on a single run clock. Nothing is resampled. |
+
+A new dataset needs a layout description per text-file kind and a dataset
+description; `caffeine/` is the first example. Someone, or an assistant, writes the
+layout once by looking at the file; from then on reading is deterministic.
+
 ## Native-file readers
 
 Mettler Toledo iC IR, iC Raman and iC FBRM store each experiment in a native file.

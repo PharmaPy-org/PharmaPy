@@ -1,0 +1,14 @@
+{
+  "description": "Thermostat log written every 2 s by the lab's LabVIEW program (expttsd1.csv). Time starts at zero when the temperature program starts.",
+  "delimiter": ",",
+  "header_row": 0,
+  "units_row": 1,
+  "first_data_row": 2,
+  "range_basis": "Aqueous runs at ambient pressure: liquid water exists between 0 and 100 C. A value outside that range is a corrupted row, not a temperature.",
+  "columns": {
+    "time": {"header": "Time", "unit": "s", "role": "time", "minimum": 0.0},
+    "jacket_temperature": {"header": "H01:Jacket T", "unit": "C", "minimum": 0.0, "maximum": 100.0},
+    "external_temperature": {"header": "H01:External T", "unit": "C", "minimum": 0.0, "maximum": 100.0},
+    "setpoint_temperature": {"header": "H01:T Setpt", "unit": "C", "minimum": 0.0, "maximum": 100.0}
+  }
+}
