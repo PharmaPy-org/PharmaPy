@@ -1,0 +1,33 @@
+{
+  "description": "Thermostat temperatures of one run as 30 s block means, written by reduce_runs.py. Time is the run clock: zero at the start of the temperature program.",
+  "header_row": 0,
+  "units_row": 1,
+  "first_data_row": 2,
+  "range_basis": "Aqueous runs at ambient pressure: liquid water exists between 273.15 and 373.15 K.",
+  "columns": {
+    "time": {
+      "header": "time",
+      "unit": "s",
+      "role": "time",
+      "minimum": 0.0
+    },
+    "jacket_temperature": {
+      "header": "jacket_temperature",
+      "unit": "K",
+      "minimum": 273.15,
+      "maximum": 373.15
+    },
+    "external_temperature": {
+      "header": "external_temperature",
+      "unit": "K",
+      "minimum": 273.15,
+      "maximum": 373.15
+    },
+    "setpoint_temperature": {
+      "header": "setpoint_temperature",
+      "unit": "K",
+      "minimum": 273.15,
+      "maximum": 373.15
+    }
+  }
+}

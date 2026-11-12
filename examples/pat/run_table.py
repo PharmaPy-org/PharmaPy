@@ -11,6 +11,34 @@ from dataclasses import dataclass
 import numpy as np
 
 
+def block_mean(values: np.ndarray, size: int) -> np.ndarray:
+    """Average consecutive blocks of samples along the first axis.
+
+    Parameters
+    ----------
+    values : numpy.ndarray
+        Samples, shape ``(n_samples,)`` or ``(n_samples, n_columns)``.
+    size : int
+        Number of samples per block [-]; at least 1.
+
+    Returns
+    -------
+    numpy.ndarray
+        Block means in the unit of ``values``, shape ``(n_samples // size, ...)``.
+        Samples after the last complete block are dropped.
+
+    Raises
+    ------
+    ValueError
+        If ``size`` is below 1 or exceeds the number of samples.
+    """
+    values = np.asarray(values, dtype=float)
+    if size < 1 or size > values.shape[0]:
+        raise ValueError("Block size %d does not fit %d samples." % (size, values.shape[0]))
+    blocks = values.shape[0] // size
+    return values[: blocks * size].reshape((blocks, size) + values.shape[1:]).mean(axis=1)
+
+
 @dataclass(frozen=True)
 class Series:
     """One measured quantity of a run.

@@ -11,7 +11,24 @@
     "basis": "Seed mass is a percentage of the theoretical yield. The seed was slurried in liquid taken from the vessel and returned during the hold at 37 C, so the water mass does not change. Seed size was not measured."
   },
   "temperature_program": "20 C for 30 min, heat to 45 C in 50 min, hold 30 min, cool to 37 C in 16 min, hold 30 min, cool to 20 C at the final ramp rate, hold.",
-  "temperature_log": {"file": "expttsd1.csv", "layout": "huber_log.layout.json"},
+  "temperature_log": {
+    "file": "expttsd1.csv",
+    "layout": "huber_log.layout.json",
+    "block_samples": 15,
+    "basis": "The log has one row every 2 s. Reduced temperatures are means of 15 consecutive rows (30 s). The fastest ramp is 0.5 C/min, so a block spans at most 0.25 C, and the mean of a linear ramp equals its value at the mean time."
+  },
+  "fbrm": {
+    "sample_interval_s": 10.0,
+    "band_edges_um": [1.0, 10.0, 100.0, 1000.0],
+    "basis": "Measurement interval set in iC FBRM. The count bands are the ones the vendor software reports, split at exactly 10 and 100 um."
+  },
+  "ir_band": {
+    "peak_cm-1": 1700.0,
+    "baseline_cm-1": [1760.0, 1720.0],
+    "solvent_position_cm-1": 1640.0,
+    "solvent_basis": "The absorbance at the water bending band is written beside the band height as a contact check. It reads 0.86 to 0.99 during the temperature program of the three runs with the probe immersed.",
+    "basis": "A band that grows when the caffeine dissolves, taken to be a caffeine carbonyl stretch (assignment not checked against a reference spectrum). Both baseline anchors are on the high-wavenumber side because the water bending band near 1640 cm-1 occupies the other side. Water alone reads 0.065 with this definition, so the calibration must carry an intercept."
+  },
   "clock_basis": "The temperature log has relative time only. Its start relative to the first FBRM sample interval is estimated from file modification times; treat it as good to about one minute. FBRM stamps are local time of the acquisition computer; IR and Raman stamps are UTC.",
   "runs": [
     {
@@ -52,7 +69,7 @@
       "final_ramp_rate_C_per_min": 0.5,
       "temperature_log_start_after_fbrm_start_s": 1344.0,
       "fbrm_local_time_utc_offset_h": -5.0,
-      "notes": "The iC IR file was never finalized; its spectra are recovered by block scan. Fine FBRM counts of unknown cause appear early in the 45 C hold, before seeding."
+      "notes": "The iC IR file was never finalized; its spectra are recovered by block scan. The IR probe was not in proper contact with the liquid for most of the run: the absorbance at the water band stays below 0.8, against 0.86 to 0.99 in the other runs, until 23,900 s on the run clock, long after the crystallization. The band height is not a concentration signal before that. Fine FBRM counts of unknown cause appear early in the 45 C hold, before seeding."
     }
   ]
 }

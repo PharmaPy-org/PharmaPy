@@ -1,0 +1,21 @@
+{
+  "description": "Height of the caffeine IR band and absorbance at the water band of one run at every spectrum, written by reduce_runs.py. Time is the run clock.",
+  "header_row": 0,
+  "units_row": 1,
+  "first_data_row": 2,
+  "columns": {
+    "time": {
+      "header": "time",
+      "unit": "s",
+      "role": "time"
+    },
+    "band_height": {
+      "header": "band_height",
+      "unit": "-"
+    },
+    "solvent_absorbance": {
+      "header": "solvent_absorbance",
+      "unit": "-"
+    }
+  }
+}

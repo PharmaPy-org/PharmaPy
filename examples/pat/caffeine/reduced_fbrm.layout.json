@@ -1,0 +1,36 @@
+{
+  "description": "FBRM band counts and square-weighted mean chord of one run at every sample, written by reduce_runs.py. Time is the run clock and is negative before the temperature program starts.",
+  "header_row": 0,
+  "units_row": 1,
+  "first_data_row": 2,
+  "range_basis": "Counts cannot be negative. The mean chord lies inside the 1 to 1000 um grid it is computed on, and is empty for a sample without counts.",
+  "columns": {
+    "time": {
+      "header": "time",
+      "unit": "s",
+      "role": "time"
+    },
+    "counts_1_to_10um": {
+      "header": "counts_1_to_10um",
+      "unit": "counts",
+      "minimum": 0.0
+    },
+    "counts_10_to_100um": {
+      "header": "counts_10_to_100um",
+      "unit": "counts",
+      "minimum": 0.0
+    },
+    "counts_100_to_1000um": {
+      "header": "counts_100_to_1000um",
+      "unit": "counts",
+      "minimum": 0.0
+    },
+    "mean_chord_square_weighted": {
+      "header": "mean_chord_square_weighted",
+      "unit": "um",
+      "minimum": 1.0,
+      "maximum": 1000.0,
+      "allow_missing": true
+    }
+  }
+}

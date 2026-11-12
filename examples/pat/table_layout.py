@@ -23,9 +23,11 @@ UNIT_CONVERSIONS = {
     "K": ("K", 1.0, 0.0),
     "C": ("K", 1.0, 273.15),
     "-": ("-", 1.0, 0.0),
+    "counts": ("counts", 1.0, 0.0),
+    "um": ("um", 1.0, 0.0),
 }
 ROLES = ("time", "value")
-COLUMN_KEYS = {"header", "unit", "role", "minimum", "maximum"}
+COLUMN_KEYS = {"header", "unit", "role", "minimum", "maximum", "allow_missing"}
 LAYOUT_KEYS = {"description", "delimiter", "header_row", "units_row", "first_data_row", "columns", "range_basis"}
 
 
@@ -45,6 +47,9 @@ class ColumnLayout:
         ``"time"`` for the single strictly increasing time column, else ``"value"``.
     minimum, maximum : float
         Inclusive plausible range in the file's unit; infinite when not limited.
+    allow_missing : bool
+        Whether an empty cell is accepted and returned as NaN. Not allowed for the
+        time column.
     """
 
     name: str
@@ -53,6 +58,7 @@ class ColumnLayout:
     role: str = "value"
     minimum: float = -math.inf
     maximum: float = math.inf
+    allow_missing: bool = False
 
 
 @dataclass(frozen=True)
@@ -101,8 +107,8 @@ def load_layout(path: str | Path) -> TableLayout:
     Raises
     ------
     ValueError
-        If a key, unit or role is unknown, or the layout does not have exactly one
-        time column.
+        If a key, unit or role is unknown, the layout does not have exactly one
+        time column, or that column allows missing values.
     """
     with open(path, encoding="utf-8") as handle:
         raw = json.load(handle)
@@ -119,6 +125,8 @@ def load_layout(path: str | Path) -> TableLayout:
             raise ValueError("Layout %s, column %r: unit %r is not one of %s." % (path, name, column.unit, sorted(UNIT_CONVERSIONS)))
         if column.role not in ROLES:
             raise ValueError("Layout %s, column %r: role %r is not one of %s." % (path, name, column.role, ROLES))
+        if column.role == "time" and column.allow_missing:
+            raise ValueError("Layout %s, column %r: the time column cannot allow missing values." % (path, name))
         columns.append(column)
     if sum(column.role == "time" for column in columns) != 1:
         raise ValueError("Layout %s must declare exactly one column with role 'time'." % path)
@@ -126,7 +134,8 @@ def load_layout(path: str | Path) -> TableLayout:
     return TableLayout(columns=tuple(columns), **options)
 
 
-def write_table(path: str | Path, columns: dict[str, np.ndarray], units: dict[str, str], digits: dict[str, int]) -> None:
+def write_table(path: str | Path, columns: dict[str, np.ndarray], units: dict[str, str], digits: dict[str, int],
+                missing: tuple[str, ...] = ()) -> None:
     """Write columns as a comma-separated table with a title row and a unit row.
 
     Parameters
@@ -140,12 +149,15 @@ def write_table(path: str | Path, columns: dict[str, np.ndarray], units: dict[st
         ``{column title: unit}``; written as the second row.
     digits : dict
         ``{column title: number of decimals}`` [-] for each column.
+    missing : tuple of str, optional
+        Titles of the columns in which NaN marks an undefined value; it is written
+        as an empty cell. Default none.
 
     Raises
     ------
     ValueError
-        If the columns differ in length, hold a non-finite value, or lack a unit
-        or a number of decimals.
+        If the columns differ in length, lack a unit or a number of decimals, or
+        hold an infinite value or a NaN outside the ``missing`` columns.
     """
     names = list(columns)
     arrays = [np.asarray(columns[name], dtype=float) for name in names]
@@ -153,14 +165,15 @@ def write_table(path: str | Path, columns: dict[str, np.ndarray], units: dict[st
         raise ValueError("Every column needs a unit and a number of decimals.")
     if len({array.shape for array in arrays}) != 1 or arrays[0].ndim != 1:
         raise ValueError("Columns must be one-dimensional and of equal length; got %s." % [array.shape for array in arrays])
-    if not all(np.all(np.isfinite(array)) for array in arrays):
-        raise ValueError("A column holds a non-finite value; a reduced table must be complete.")
+    for name, array in zip(names, arrays):
+        if not np.all(np.isfinite(array) | (np.isnan(array) & (name in missing))):
+            raise ValueError("Column %r holds a non-finite value that is not declared as missing." % name)
     with open(path, "w", newline="", encoding="utf-8") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(names)
         writer.writerow([units[name] for name in names])
         for row in zip(*arrays):
-            writer.writerow(["%.*f" % (digits[name], value) for name, value in zip(names, row)])
+            writer.writerow(["" if np.isnan(value) else "%.*f" % (digits[name], value) for name, value in zip(names, row)])
 
 
 def read_table(path: str | Path, layout: TableLayout) -> tuple[dict[str, np.ndarray], dict[str, str]]:
@@ -178,7 +191,8 @@ def read_table(path: str | Path, layout: TableLayout) -> tuple[dict[str, np.ndar
     tuple of (dict, dict)
         ``{field name: values}`` with each array of shape ``(n_rows,)``, converted
         with `UNIT_CONVERSIONS` (times in [s], temperatures in [K]), and
-        ``{field name: unit of the returned values}``.
+        ``{field name: unit of the returned values}``. An empty cell of a column
+        that allows missing values is returned as NaN.
 
     Raises
     ------
@@ -207,14 +221,16 @@ def read_table(path: str | Path, layout: TableLayout) -> tuple[dict[str, np.ndar
     for column in layout.columns:
         position = positions[column.name]
         try:
-            raw = np.array([float(row[position]) for row in rows[layout.first_data_row:]])
+            cells = [row[position].strip() for row in rows[layout.first_data_row:]]
+            raw = np.array([math.nan if cell == "" and column.allow_missing else float(cell) for cell in cells])
         except (ValueError, IndexError) as error:
             raise ValueError("%s: column %r holds a missing or non-numeric cell (%s)." % (path, column.header, error)) from error
-        if not np.all(np.isfinite(raw)):
+        present = raw[[cell != "" for cell in cells]]
+        if not np.all(np.isfinite(present)):
             raise ValueError("%s: column %r holds a non-finite value." % (path, column.header))
-        if raw.min() < column.minimum or raw.max() > column.maximum:
+        if present.size and (present.min() < column.minimum or present.max() > column.maximum):
             raise ValueError("%s: column %r spans %g to %g %s, outside the declared range %g to %g."
-                             % (path, column.header, raw.min(), raw.max(), column.unit, column.minimum, column.maximum))
+                             % (path, column.header, present.min(), present.max(), column.unit, column.minimum, column.maximum))
         if column.role == "time" and not np.all(np.diff(raw) > 0):
             raise ValueError("%s: time column %r does not increase strictly." % (path, column.header))
         units[column.name], factor, offset = UNIT_CONVERSIONS[column.unit]
