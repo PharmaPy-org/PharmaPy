@@ -126,6 +126,43 @@ def load_layout(path: str | Path) -> TableLayout:
     return TableLayout(columns=tuple(columns), **options)
 
 
+def write_table(path: str | Path, columns: dict[str, np.ndarray], units: dict[str, str], digits: dict[str, int]) -> None:
+    """Write columns as a comma-separated table with a title row and a unit row.
+
+    Parameters
+    ----------
+    path : str or pathlib.Path
+        File to write.
+    columns : dict
+        ``{column title: values}`` with each array of shape ``(n_rows,)``, written
+        in this order.
+    units : dict
+        ``{column title: unit}``; written as the second row.
+    digits : dict
+        ``{column title: number of decimals}`` [-] for each column.
+
+    Raises
+    ------
+    ValueError
+        If the columns differ in length, hold a non-finite value, or lack a unit
+        or a number of decimals.
+    """
+    names = list(columns)
+    arrays = [np.asarray(columns[name], dtype=float) for name in names]
+    if any(name not in units or name not in digits for name in names):
+        raise ValueError("Every column needs a unit and a number of decimals.")
+    if len({array.shape for array in arrays}) != 1 or arrays[0].ndim != 1:
+        raise ValueError("Columns must be one-dimensional and of equal length; got %s." % [array.shape for array in arrays])
+    if not all(np.all(np.isfinite(array)) for array in arrays):
+        raise ValueError("A column holds a non-finite value; a reduced table must be complete.")
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(names)
+        writer.writerow([units[name] for name in names])
+        for row in zip(*arrays):
+            writer.writerow(["%.*f" % (digits[name], value) for name, value in zip(names, row)])
+
+
 def read_table(path: str | Path, layout: TableLayout) -> tuple[dict[str, np.ndarray], dict[str, str]]:
     """Read the columns a layout declares.
 

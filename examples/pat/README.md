@@ -11,6 +11,16 @@ in them is specific to a compound; case inputs live in a subdirectory per case.
 | `table_layout.py` | Reads a delimited text file through a layout description (JSON): the column titles a file must have, their units, and a plausible range. Columns are found by title, so their order does not matter. Times are returned in seconds and temperatures in kelvin. A file that does not match is refused. |
 | `run_table.py` | The common table of one run: named series, each with its own sample times, on a single run clock. Nothing is resampled. |
 
+`table_layout.write_table` writes a table with a title row and a unit row, so reduced
+tables are read back through a layout like any other file.
+
+## Signal statistics
+
+| Module | Purpose |
+|---|---|
+| `fbrm_statistics.py` | Counts per chord-length band and the weighted mean chord, defined as iC FBRM reports them. Against the statistics stored by the vendor software for the four caffeine runs: 10 to 100 um band within 0.6 %, 100 to 1000 um band within 3 %, square-weighted mean within 0.02 %. The band below 10 um was compared on three samples only (within 0.05 %). |
+| `band_height.py` | Height of a spectral band above a straight line through two anchor points. Band and anchors are inputs; they belong to the compound and solvent. |
+
 A new dataset needs a layout description per text-file kind and a dataset
 description; `caffeine/` is the first example. Someone, or an assistant, writes the
 layout once by looking at the file; from then on reading is deterministic.
