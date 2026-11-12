@@ -12,6 +12,7 @@ in the repository; the reduced tables are.
 | `reduced/<run>_fbrm.csv` | Counts in the bands 1 to 10, 10 to 100 and 100 to 1000 um [counts] and the square-weighted mean chord [um], every 10 s sample. The mean chord is empty for a sample without counts. |
 | `reduced/<run>_ir.csv` | Height of the 1700 cm-1 band above the line through 1760 and 1720 cm-1 [-], and the absorbance at 1640 cm-1 [-], every spectrum. |
 | `reduced_*.layout.json` | Layouts of the three reduced tables, for `table_layout.read_table`. |
+| `plot_runs.py` | Draws one quality figure per run from the reduced tables: `python -m examples.pat.caffeine.plot_runs "<output folder>"`. The figures are not kept in the repository. |
 
 Time in every reduced table is the run clock [s]: zero when the temperature program
 starts. Each run folder holds one `.iCIR`, one `.iCRaman` and one `.icFbrm` file,
