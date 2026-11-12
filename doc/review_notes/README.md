@@ -11,3 +11,4 @@ remaining work. Consult its linked issues for current ownership and status, and
 
 - [Crystallizer concentration ownership (#312)](crystallizer_state_ownership.md)
 - [Crystal-grid inventory convergence (#391)](crystallizer_grid_conservation.md)
+- [Crystallization case selection, data provenance and PAT observables (#358)](crystallization_case_selection.md)
