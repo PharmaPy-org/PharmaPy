@@ -1,0 +1,140 @@
+{
+  "solute": "caffeine",
+  "solvent": "water",
+  "charge_ratio": 0.0472669,
+  "reference_temperature_K": 310.15,
+  "solvent_baseline": {
+    "band_height": 0.0666,
+    "minimum": 0.06506,
+    "maximum": 0.06811,
+    "count": 11
+  },
+  "runs": {
+    "high_seed_slow_cool": {
+      "plateaus": {
+        "dissolved_first": {
+          "band_height": 0.13507,
+          "scatter": 0.000199477,
+          "count": 17,
+          "temperature_K": 318.111
+        },
+        "dissolved_second": {
+          "band_height": 0.13705,
+          "scatter": 0.000188915,
+          "count": 9,
+          "temperature_K": 310.327
+        },
+        "slurry_start": {
+          "band_height": 0.09667,
+          "scatter": 0.000316172,
+          "count": 17,
+          "temperature_K": 293.21
+        },
+        "slurry_end": {
+          "band_height": 0.098665,
+          "scatter": 0.000201186,
+          "count": 28,
+          "temperature_K": 293.15
+        }
+      },
+      "common_baseline": {
+        "baseline": 0.0666,
+        "slope": 1.49143,
+        "slope_per_kelvin": -0.00538189,
+        "slurry_start_ratio": 0.0190004,
+        "slurry_end_ratio": 0.0202569
+      },
+      "common_slope": {
+        "baseline": 0.0666,
+        "slope": 1.49143,
+        "slope_per_kelvin": -0.00538189,
+        "slurry_start_ratio": 0.0190004,
+        "slurry_end_ratio": 0.0202569
+      }
+    },
+    "low_seed_slow_cool": {
+      "plateaus": {
+        "dissolved_first": {
+          "band_height": 0.13082,
+          "scatter": 0.0001912,
+          "count": 15,
+          "temperature_K": 318.099
+        },
+        "dissolved_second": {
+          "band_height": 0.13254,
+          "scatter": 0.000307214,
+          "count": 9,
+          "temperature_K": 310.346
+        },
+        "slurry_start": {
+          "band_height": 0.08969,
+          "scatter": 0.000371833,
+          "count": 11,
+          "temperature_K": 293.158
+        },
+        "slurry_end": {
+          "band_height": 0.091585,
+          "scatter": 0.000179946,
+          "count": 6,
+          "temperature_K": 293.063
+        }
+      },
+      "common_baseline": {
+        "baseline": 0.0666,
+        "slope": 1.39598,
+        "slope_per_kelvin": -0.00469364,
+        "slurry_start_ratio": 0.0156464,
+        "slurry_end_ratio": 0.0169254
+      },
+      "common_slope": {
+        "baseline": 0.0622209,
+        "slope": 1.49143,
+        "slope_per_kelvin": -0.00538189,
+        "slurry_start_ratio": 0.0173539,
+        "slurry_end_ratio": 0.0185451
+      }
+    },
+    "low_seed_fast_cool": {
+      "plateaus": {
+        "dissolved_first": {
+          "band_height": 0.13078,
+          "scatter": 0.000208164,
+          "count": 17,
+          "temperature_K": 318.106
+        },
+        "dissolved_second": {
+          "band_height": 0.13293,
+          "scatter": 0.000290861,
+          "count": 9,
+          "temperature_K": 309.944
+        },
+        "slurry_start": {
+          "band_height": 0.09104,
+          "scatter": 0.000163633,
+          "count": 17,
+          "temperature_K": 293.159
+        },
+        "slurry_end": {
+          "band_height": 0.09329,
+          "scatter": 0.000223109,
+          "count": 28,
+          "temperature_K": 293.15
+        }
+      },
+      "common_baseline": {
+        "baseline": 0.0666,
+        "slope": 1.40216,
+        "slope_per_kelvin": -0.00557246,
+        "slurry_start_ratio": 0.0163277,
+        "slurry_end_ratio": 0.0178303
+      },
+      "common_slope": {
+        "baseline": 0.0623456,
+        "slope": 1.49143,
+        "slope_per_kelvin": -0.00538189,
+        "slurry_start_ratio": 0.018128,
+        "slurry_end_ratio": 0.0195489
+      }
+    }
+  }
+}

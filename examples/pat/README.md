@@ -20,6 +20,11 @@ tables are read back through a layout like any other file.
 |---|---|
 | `fbrm_statistics.py` | Counts per chord-length band and the weighted mean chord, defined as iC FBRM reports them. Against the statistics stored by the vendor software for the four caffeine runs: 10 to 100 um band within 0.6 %, 100 to 1000 um band within 3 %, square-weighted mean within 0.02 %. The band below 10 um was compared on three samples only (within 0.05 %). |
 | `band_height.py` | Height of a spectral band above a straight line through two anchor points. Band and anchors are inputs; they belong to the compound and solvent. |
+| `band_calibration.py` | Band height against dissolved solute per solvent, linear with a temperature-dependent slope. The constants are solved from plateaus of known composition. |
+| `calibrate_band.py` | Applies that calibration to a described dataset: `python -m examples.pat.calibrate_band "<dataset folder>"`. The `band_calibration` block of the description names the table and columns, the runs, the reference run with solvent-only spectra, and the time windows of known composition. Its `solute_ratio` returns the dissolved solute per solvent [kg/kg] of a run over time. |
+| `solubility.py` | Solubility against temperature in van't Hoff form, `ln(ratio) = intercept + slope / T`, with its fit and its inverse. |
+| `fit_solubility.py` | Fits that curve to a described dataset: `python -m examples.pat.fit_solubility "<dataset folder>"`. Each spectrum taken on a heating ramp while solid is still present gives one point. The `solubility` block of the description gives the time window and the solid signal with its threshold. Run it after `calibrate_band.py`. The points are a lower bound of the solubility, because dissolution lags the heating. |
+| `dataset.py` | Reads a dataset description and its reduced tables. A dataset folder holds `runs.json`, one `reduced_<kind>.layout.json` per kind of table, and `reduced/<run>_<kind>.csv`. The description names the solute and the solvent and gives their charged masses. |
 
 A new dataset needs a layout description per text-file kind and a dataset
 description; `caffeine/` is the first example. Someone, or an assistant, writes the

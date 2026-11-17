@@ -11,13 +11,12 @@ of the caffeine IR band. ``runs.json`` holds every setting used here.
 from __future__ import annotations
 
 import datetime
-import json
 import sys
 from pathlib import Path
 
 import numpy as np
 
-from .. import fbrm_statistics, ic_fbrm, ic_spectra, table_layout
+from .. import dataset, fbrm_statistics, ic_fbrm, ic_spectra, table_layout
 from ..band_height import band_height
 from ..run_table import block_mean
 
@@ -38,7 +37,7 @@ def load_description() -> dict:
     dict
         Contents of ``runs.json``.
     """
-    return json.loads((CASE / "runs.json").read_text(encoding="utf-8"))
+    return dataset.load_description(CASE)
 
 
 def run_clock_origin(first_fbrm_sample: datetime.datetime, run: dict, description: dict) -> datetime.datetime:

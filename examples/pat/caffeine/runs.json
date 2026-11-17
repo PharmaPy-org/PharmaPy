@@ -1,8 +1,10 @@
 {
   "description": "Seeded cooling crystallization of caffeine from water, four runs, 2 x 2 in seed load and final cooling rate (Nagy group, Purdue, October and November 2026).",
   "charge": {
-    "water_mass_g": 350.0,
-    "caffeine_mass_g": 16.5434,
+    "solute": "caffeine",
+    "solvent": "water",
+    "solvent_mass_g": 350.0,
+    "solute_mass_g": 16.5434,
     "theoretical_yield_g": 11.4265,
     "basis": "Targets from the lab's recipe sheet. The load is the saturation amount at 40 C from Shalmashi and Golmohammad 2010, Table 1 (mole fraction 4.367e-3 at 313 K). The yield is that load minus 5.1169 g, the sheet's estimate of what stays dissolved at 20 C. Weighed masses were not reported."
   },
@@ -28,6 +30,27 @@
     "solvent_position_cm-1": 1640.0,
     "solvent_basis": "The absorbance at the water bending band is written beside the band height as a contact check. It reads 0.86 to 0.99 during the temperature program of the three runs with the probe immersed.",
     "basis": "A band that grows when the caffeine dissolves, taken to be a caffeine carbonyl stretch (assignment not checked against a reference spectrum). Both baseline anchors are on the high-wavenumber side because the water bending band near 1640 cm-1 occupies the other side. Water alone reads 0.065 with this definition, so the calibration must carry an intercept."
+  },
+  "band_calibration": {
+    "table": "ir",
+    "height_column": "band_height",
+    "temperature_table": "temperature",
+    "temperature_column": "external_temperature",
+    "runs": ["high_seed_slow_cool", "low_seed_slow_cool", "low_seed_fast_cool"],
+    "reference_run": "high_seed_slow_cool",
+    "reference_temperature_K": 310.15,
+    "solvent_window_s": [-1300.0, -500.0],
+    "dissolved_windows_s": [[5400.0, 6500.0], [8000.0, 8600.0]],
+    "slurry_start_window_s": [600.0, 1700.0],
+    "slurry_end_duration_s": 1800.0,
+    "basis": "Windows on the run clock. Solvent: the spectra of the reference run taken before the caffeine was added, the only water-only spectra of the dataset. Dissolved: the second half of the 45 C hold, and the 37 C hold from 440 s after the end of the cooling step to before the earliest seeding spike (8618 s). Slurry start: the 20 C hold after the hydrate has formed (complete by 700 s in the reference run). Slurry end: the last 30 minutes of spectra. The reference temperature is the seeding hold, 37 C. high_seed_fast_cool is left out: its probe was not in proper contact with the liquid."
+  },
+  "solubility": {
+    "window_s": [600.0, 5000.0],
+    "solid_table": "fbrm",
+    "solid_columns": ["counts_1_to_10um", "counts_10_to_100um", "counts_100_to_1000um"],
+    "minimum_solid_signal": 100.0,
+    "basis": "Window on the run clock: from the 20 C hold, once the hydrate has formed, through the heating ramp to 45 C. A spectrum counts as taken with solid present while the total FBRM counts are at least 100, the limit used for the clear point; the clear solution reads below 60 counts. Dissolution lags the heating of about 0.5 C/min, so the points are a lower bound of the solubility."
   },
   "clock_basis": "The temperature log has relative time only. Its start relative to the first FBRM sample interval is estimated from file modification times; treat it as good to about one minute. FBRM stamps are local time of the acquisition computer; IR and Raman stamps are UTC.",
   "runs": [

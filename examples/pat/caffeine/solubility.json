@@ -1,0 +1,87 @@
+{
+  "solute": "caffeine",
+  "solvent": "water",
+  "charge_ratio": 0.0472669,
+  "treatments": {
+    "common_baseline": {
+      "pooled": {
+        "intercept": 10.9248,
+        "slope_K": -4390.95,
+        "scatter": 0.0775011,
+        "count": 177,
+        "minimum_temperature_K": 292.793,
+        "maximum_temperature_K": 314.111,
+        "charge_saturation_temperature_K": 314.162
+      },
+      "runs": {
+        "high_seed_slow_cool": {
+          "intercept": 9.89305,
+          "slope_K": -4053.96,
+          "scatter": 0.028536,
+          "count": 62,
+          "minimum_temperature_K": 292.793,
+          "maximum_temperature_K": 312.487,
+          "charge_saturation_temperature_K": 313.168
+        },
+        "low_seed_slow_cool": {
+          "intercept": 12.0689,
+          "slope_K": -4748.23,
+          "scatter": 0.0271704,
+          "count": 53,
+          "minimum_temperature_K": 293.133,
+          "maximum_temperature_K": 313.977,
+          "charge_saturation_temperature_K": 314.018
+        },
+        "low_seed_fast_cool": {
+          "intercept": 11.2718,
+          "slope_K": -4511.69,
+          "scatter": 0.0139636,
+          "count": 62,
+          "minimum_temperature_K": 293.138,
+          "maximum_temperature_K": 314.111,
+          "charge_saturation_temperature_K": 314.979
+        }
+      }
+    },
+    "common_slope": {
+      "pooled": {
+        "intercept": 9.97595,
+        "slope_K": -4094.26,
+        "scatter": 0.0451256,
+        "count": 177,
+        "minimum_temperature_K": 292.793,
+        "maximum_temperature_K": 314.111,
+        "charge_saturation_temperature_K": 314.269
+      },
+      "runs": {
+        "high_seed_slow_cool": {
+          "intercept": 9.89305,
+          "slope_K": -4053.96,
+          "scatter": 0.028536,
+          "count": 62,
+          "minimum_temperature_K": 292.793,
+          "maximum_temperature_K": 312.487,
+          "charge_saturation_temperature_K": 313.168
+        },
+        "low_seed_slow_cool": {
+          "intercept": 10.5724,
+          "slope_K": -4281.31,
+          "scatter": 0.0216802,
+          "count": 53,
+          "minimum_temperature_K": 293.133,
+          "maximum_temperature_K": 313.977,
+          "charge_saturation_temperature_K": 314.239
+        },
+        "low_seed_fast_cool": {
+          "intercept": 9.75128,
+          "slope_K": -4035.78,
+          "scatter": 0.0152995,
+          "count": 62,
+          "minimum_temperature_K": 293.138,
+          "maximum_temperature_K": 314.111,
+          "charge_saturation_temperature_K": 315.216
+        }
+      }
+    }
+  }
+}

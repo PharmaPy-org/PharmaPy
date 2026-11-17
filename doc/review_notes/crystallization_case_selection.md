@@ -57,7 +57,7 @@ temperature may not be the liquid temperature.
 | Property | Value | Source |
 | --- | --- | --- |
 | Caffeine molar mass | 194.194 g/mol | C8H10N4O2, standard atomic weights |
-| Solid that crystallizes | Caffeine hydrate, needle shaped | Nagy et al. (2007): anhydrous caffeine added to water converts to hydrate needles 5 to 12 minutes after the addition, depending on agitation. To be confirmed on these runs with the Raman spectra. |
+| Solid that crystallizes | Caffeine hydrate, needle shaped | Nagy et al. (2007): anhydrous caffeine added to water converts to hydrate needles 5 to 12 minutes after the addition, depending on agitation. `high_seed_slow_cool` records the same event at 20 C: within a quarter of an hour of the addition the fine FBRM counts rise eightfold and the IR band falls from 0.15 to 0.097. To be confirmed with the Raman spectra. |
 | Hydrate unit cell | a = 14.8(1), b = 16.7(1), c = 3.97(3) angstrom, beta = 97(5) degrees, Z = 4, volume 973.9 cubic angstrom | Sutor (1958), from Crystallography Open Database entry 5000108 |
 | Caffeine per crystal volume, `rho_c` | 1324 kg caffeine per m3 of hydrate crystal, about +/- 21 | Derived: Z caffeine molecules per cell volume. The cell uncertainties give 1.6 %. |
 | Volume shape factor, `k_v` | pi/6 | Definition, see section 5 |
@@ -75,17 +75,25 @@ Basis: `X` [kg caffeine per kg water]. The kinetics receive the mass fraction
 `w = X / (1 + X)` [kg caffeine per kg solution], which is exact for a
 two-component liquid.
 
-The curve will be built from the lab's own anchors and checked against
-literature. It has not been fitted yet.
+The curve is built from the lab's own data and checked against literature.
 
 1. The load dissolves completely on heating between 39.9 and 41.4 C (last FBRM
    sample above 100 counts, three runs, heating at about 0.5 C/min).
 2. The saturated slurry at 20 C at the start and the end of each run, through
    the IR calibration of section 7.
-3. The heating ramp of each run, while solid is present, as a lower bound.
+3. The heating ramp of each run: every spectrum taken while solid is present
+   gives the dissolved caffeine at its temperature. Dissolution lags the
+   heating, so these 177 points between 19.6 and 41 C are a lower bound.
+
+The lab curve is the fit `ln(X) = intercept + slope / T` to the points of
+item 3 over the three runs, under each calibration treatment of section 7. The
+constants are in
+[`solubility.json`](../../examples/pat/caffeine/solubility.json).
 
 | Source | 20 C | 25 C | 37 C | 40 C | 45 C | Saturation temperature of the load |
 | --- | --- | --- | --- | --- | --- | --- |
+| Lab curve, runs share the calibration slope | 1.85 | 2.34 | 3.98 | 4.51 | outside the fit | 41.1 C |
+| Lab curve, runs share the water baseline | 1.74 | 2.23 | 3.94 | 4.52 | outside the fit | 41.0 C |
 | Nagy et al. (2007), van't Hoff fit | 1.45 (extrapolated) | 1.92 (extrapolated) | 3.63 | 4.23 | 5.41 | 42.2 C |
 | Shalmashi and Golmohammad (2010), Table 1 | not measured | 2.27 | | 4.73 | 8.6 | 40 C |
 | Zhong et al. (2017), Apelblat fit | 1.53 | 1.78 | 2.55 | 2.78 | 3.22 | about 58 C |
@@ -100,8 +108,14 @@ Values are in g caffeine per 100 g water. The Nagy et al. fit is
 - Zhong et al. is not used: with their curve the load could not dissolve at
   45 C, and the runs show that it does.
 - No source measured 20 C with the hydrate characterized. The 20 C solubility
-  therefore rests on anchor 2 and carries the calibration uncertainty. The
-  first estimate from anchor 2 is 1.6 to 2.1 g per 100 g water (section 7).
+  therefore rests on the lab data and carries the calibration uncertainty:
+  item 2 gives 1.6 to 2.0 g per 100 g water (section 7).
+- The lab curve lies between the two literature sources: within about 3 % of
+  Shalmashi and Golmohammad at 25 C, and 7 % above Nagy et al. at 40 C.
+- The three runs scatter 4.5 % about the pooled curve when they share the
+  calibration slope and 7.8 % when they share the water baseline. The
+  solubility is one physical curve, so this favors a shifted baseline as the
+  cause of the difference between runs. It is an indication, not a proof.
 
 ## 5. Model path and assumptions
 
@@ -158,9 +172,10 @@ Every prediction is evaluated at the measurement times of its own channel.
 
     h = h_0 + (a_0 + a_1 * (T - T_ref)) * X,    T_ref = 310.15 K
 
-- `h_0` is the band height of water alone: 0.0651, the first spectrum of
-  `high_seed_slow_cool`, taken before the caffeine was added. The other runs
-  have no spectrum of water alone.
+- `h_0` is the band height of water alone: 0.0666, the median of the eleven
+  spectra of `high_seed_slow_cool` taken before the caffeine was added. They
+  drift from 0.0651 to 0.0681, which bounds `h_0`. The other runs have no
+  spectrum of water alone.
 - `a_0` and `a_1` come from the two dissolved plateaus of each run, at 45 C
   and 37 C, where `X` is the known load.
 - The model predicts `X = c_caffeine / c_water` from its two liquid
@@ -183,13 +198,14 @@ Two things are unresolved and enter the calibration uncertainty:
 - The dissolved plateaus differ by 0.004 between runs at the same nominal
   load, 6 % of the signal above water. The data cannot tell a shifted
   baseline from a different slope. Both treatments are carried.
-- The slurry reads 0.0020 to 0.0023 higher at the end of every run than at
+- The slurry reads 0.0019 to 0.0023 higher at the end of every run than at
   its start. Either one of the two is not at equilibrium, or solid on the
   probe window adds to the band.
 
 Over the three runs, both treatments and both ends, the 20 C slurry gives 1.6
-to 2.1 g caffeine per 100 g water. That is above the extrapolated literature
-values of section 4 (1.45 and 1.53).
+to 2.0 g caffeine per 100 g water. That is above the extrapolated literature
+values of section 4 (1.45 and 1.53). The constants are in
+[`band_calibration.json`](../../examples/pat/caffeine/band_calibration.json).
 
 **Solid concentration.** `m_solid = rho_c * k_v * mu_3` [kg caffeine], with
 `mu_3` in [m**3]. Conservation check for every output row: dissolved caffeine

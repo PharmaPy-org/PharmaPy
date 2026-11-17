@@ -15,8 +15,8 @@ from pathlib import Path
 import numpy as np
 from matplotlib.figure import Figure
 
-from .. import table_layout
-from .reduce_runs import CASE, MEAN_CHORD, REDUCED, load_description
+from .. import dataset
+from .reduce_runs import CASE, MEAN_CHORD, load_description
 
 SECONDS_PER_HOUR = 3600.0  # [s/h]
 ZERO_CELSIUS = 273.15  # [K]
@@ -45,8 +45,7 @@ def read_reduced(run_id: str, kind: str) -> dict:
         ``{column: values}``; times in [s], temperatures in [K], counts in
         [counts], mean chord in [um], IR columns dimensionless.
     """
-    layout = table_layout.load_layout(CASE / ("reduced_%s.layout.json" % kind))
-    return table_layout.read_table(REDUCED / ("%s_%s.csv" % (run_id, kind)), layout)[0]
+    return dataset.read_reduced(CASE, run_id, kind)
 
 
 def plot_run(run_id: str) -> Figure:
