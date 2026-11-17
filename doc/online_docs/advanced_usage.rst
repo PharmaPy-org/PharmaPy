@@ -328,13 +328,37 @@ the optimized parameter is :code:`theta_2` in :code:`name_params`,
 :code:`name_params_plot`, the :code:`paramest_df` columns and
 :code:`name_params_total` alike. Earlier releases numbered the optimized
 parameters only, so that parameter was labelled :code:`theta_1`, the name of
-the fixed parameter in :code:`name_params_total`. :code:`name_params`,
-:code:`name_params_total` and the :code:`paramest_df` columns are unchanged
-when every parameter is optimized or :code:`name_params` is given. Default
+the fixed parameter in :code:`name_params_total`. Default
 plot labels (:code:`name_params_plot`) now brace the index, e.g.
 :code:`$\theta_{10}$`, so that multi-digit indices form one subscript
 (earlier :code:`$\theta_10$` rendered as theta_1 followed by 0); single-digit
 labels render as before.
+
+Explicit :code:`name_params` accepts either one name per seed coordinate or
+one per optimized coordinate, in full-vector order. Other lengths raise
+:code:`ValueError` at construction, before optimization (issue #506).
+:code:`name_params_total` now always covers the full seed vector: with
+:code:`optimize_flags=[False, True]` and :code:`name_params=['rate']`, it is
+:code:`['theta_1', 'rate']`. The fixed coordinate receives its default name,
+with :code:`_fixed` appended repeatedly if needed to avoid supplied optimized
+names. The
+optimized names, plot labels and iteration-table columns retain the supplied
+names. This extends the previously shortened :code:`name_params_total` for the
+optimized-only form, so calibration records can retain every parameter.
+
+Through :code:`SimulationExec.SetParamEstimation`, omitted or None
+:code:`optimize_flags` uses the unit's :code:`mask_params`: True selects a
+parameter and False fixes it at its seed. An explicit flag vector may narrow an
+all-True unit mask, preserving the established explicit-selection workflow.
+If the unit mask already fixes parameters, explicit flags must match it exactly;
+otherwise setup raises :code:`ValueError`. Configure the unit mask before setup
+to select different coordinates. This keeps crystallizer sensitivity columns
+aligned with the estimator's free parameters; it does not remove fixed
+parameters from the physical rate equations. Default names come from the full
+kinetic name vector, including fixed parameters, so masked reactor and
+crystallizer fits can be passed directly to
+:code:`CalibrationRecord.from_estimation` (issues #489 and #535). Explicit
+:code:`param_seed` and both name-list forms remain supported.
 
 Parameter uncertainty and identifiability
 -----------------------------------------
