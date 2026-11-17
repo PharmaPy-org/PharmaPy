@@ -1079,7 +1079,7 @@ WP1.5 and WP4:
 14. **Pople, D., Wang, Z., Kozyryev, A., Patel, B., Appiah-Amponsah, E., &
     Feng, H. (2026)**. Raman spectroscopy for characterizing monoclonal antibody
     reduction: A process analytical technology approach for antibody–drug
-    conjugation process development. *Pharmaceutical Research*.
+    conjugation process development. *Pharmaceutical Research*, 43(9), 3299–3315.
     `doi:10.1007/s11095-026-04154-9`.
 15. **Schiemer, R., Weggen, J. T., Schmitt, K. M., & Hubbuch, J. (2023)**. An
     adaptive soft-sensor for advanced real-time monitoring of an antibody-drug
