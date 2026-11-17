@@ -111,7 +111,7 @@ practice:
      (`doi:10.1021/acs.oprd.3c00264`); Weggen et al. (2024), *Front. Bioeng.
      Biotechnol.* 12, 1403644 (`doi:10.3389/fbioe.2024.1403644`); Weggen,
      González, Hui, Bean, Wendeler, and Hubbuch (2025), *Biotechnol. Bioeng.*
-     122(2), 342–356 (`doi:10.1002/bit.28899`, `PMC11808428`).
+     122(3), 579–593 (`doi:10.1002/bit.28899`, `PMC11808428`).
    - *Chemistry & two-step mechanism*: Mild reduction of the four interchain
      disulfide bonds of human IgG1 (two hinge heavy–heavy $\text{HH}$ bonds and
      two heavy–light $\text{HL}$ bonds) by TCEP generates even-numbered free
@@ -249,8 +249,9 @@ open-access KIT/AstraZeneca kinetic series (Andris et al., 2019; Weggen et al.,
        2019; Weggen et al., 2023, Eqs. 3–5)**: tracks intact unconjugated
        antibody ($\text{mAb}_0$), mono-conjugate ($\text{mAb}_1$),
        bi-conjugate ($\text{mAb}_2$), free payload ($D$), and inactivated
-       payload ($D_{\text{depl}}$) measured by non-reducing intact-ADC RP-UHPLC
-       across batch (`BatchReactor`), fed-batch (`SemibatchReactor`, e.g., $60\text{ s}$
+       payload ($D_{\text{depl}}$). The protein conjugate species are measured by
+       non-reducing intact-ADC RP-UHPLC. Simulation modes include batch
+       (`BatchReactor`), fed-batch (`SemibatchReactor`, e.g., $60\text{ s}$
        syringe-pump addition in $300\text{ mL}$ `GST-1`, Weggen et al., 2023,
        Sec. 2.2.6), and continuous (`Mixer` + `PlugFlowReactor`) operating modes.
      - **Model 1B (Reduced heavy-chain `Simple 1k + sink` and `Detailed 2k + sink`
@@ -267,6 +268,15 @@ open-access KIT/AstraZeneca kinetic series (Andris et al., 2019; Weggen et al.,
        balance (Eqs. 1–2) provides a benchmark for **practical identifiability
        analysis** ($k_1$ vs. $k_2$) and **model-based experiment design (MBDoE)**
        via feed-rate manipulation.
+
+2. **Two-stage extension (`Tier 2`) and WP4 scheduling baseline**:
+   - Combine TCEP partial interchain-disulfide reduction (Weggen et al., 2025,
+     `WithInt + ReOx` `8k-model`) with chain-resolved payload conjugation
+     (Weggen et al., 2024, `Detailed 4k` model). This is the M9–M12 extension;
+     Tier 1 remains the primary M7–M10 kinetic/PAT calibration target.
+   - The direct partial-reduction route supplies the canonical four-task WP4
+     sequence in Section 8.2. The engineered-Cys Tier 1 route instead expands
+     activation into uncapping, UF/DF, and DHAA re-oxidation sub-tasks.
 
 ---
 
@@ -485,9 +495,15 @@ $[\text{s}^{-1}]$, which are invariant to the molar concentration scale.
 
 ### 3.4 Published kinetic parameter tables and provenance
 
-| Model & System | Parameter | Literature Estimate $\hat{\theta}_j$, Standard Deviation $\sigma_j$, & $95\%$ CI $[\text{lb}, \text{ub}]$ | PharmaPy Value (`[mol/L, s]` basis) | Conditions & Validated Range | Primary Source |
+The original Model 1A kinetic model is described as covering concentrations up
+to $2.5\text{ g/L}$ in Weggen et al. (2024, Introduction). The 2023 validation
+condition and its higher-concentration CFD parameter study are separate evidence.
+The illustrative initial-state range in Section 3.1 is an operating scenario,
+not a claim of empirical validation across that range.
+
+| Model & System | Parameter | Literature Estimate $\hat{\theta}_j$, Standard Deviation $\sigma_j$, & $95\%$ CI $[\text{lb}, \text{ub}]$ | PharmaPy Value (`[mol/L, s]` basis) | Conditions & Evidence Scope | Primary Source |
 | --- | --- | --- | --- | --- | --- |
-| **Model 1A**: Intact $\text{DAR } 2$ (`ADC1 + NPM`, `2k + sink`, non-reducing RP-UHPLC) | $k_1$ ($\text{mAb}_0 + D$) | $\hat{\theta}_1 = 0.797\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$ | $797.0\text{ L}\cdot\text{mol}^{-1}\cdot\text{s}^{-1}$ | $22\ ^\circ\text{C}$ ($295.15\text{ K}$), $\text{pH } 7.0$, $20\text{ mM}$ $\text{NaH}_2\text{PO}_4$, $1\text{ mM}$ EDTA, $10\%\text{ v/v}$ DMSO; $c_{\text{mAb},0} \in [1.5, 10]\text{ g/L}$ ($10\text{–}66.7\ \mu\text{mol/L}$), $5\times$ payload excess | Andris et al. (2019), `10.1016/j.jbiotec.2019.09.013`; Weggen et al. (2023), `10.3389/fbioe.2023.1123842`, Sec. 2.2.5, Eq. (3) |
+| **Model 1A**: Intact $\text{DAR } 2$ (`ADC1 + NPM`, `2k + sink`, non-reducing RP-UHPLC) | $k_1$ ($\text{mAb}_0 + D$) | $\hat{\theta}_1 = 0.797\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$ | $797.0\text{ L}\cdot\text{mol}^{-1}\cdot\text{s}^{-1}$ | $22\ ^\circ\text{C}$ ($295.15\text{ K}$), $\text{pH } 7.0$, $20\text{ mM}$ $\text{NaH}_2\text{PO}_4$, $1\text{ mM}$ EDTA, $10\%\text{ v/v}$ DMSO; Empirical CFD-model validation at $1.5\text{ g/L}$ ($10\ \mu\text{mol/L}$), $5\times$ payload excess (Weggen et al., 2023, Sec. 2.2.6); $5$ and $10\text{ g/L}$ are CFD parameter-study inputs (Sec. 2.2.7, Table 2), not a validated concentration interval | Andris et al. (2019), `10.1016/j.jbiotec.2019.09.013`; Weggen et al. (2023), `10.3389/fbioe.2023.1123842`, Sec. 2.2.5, Eq. (3) |
 | **Model 1A**: Intact $\text{DAR } 2$ (`ADC1 + NPM`, `2k + sink`, non-reducing RP-UHPLC) | $k_2$ ($\text{mAb}_1 + D$) | $\hat{\theta}_2 = 1.476\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$ | $1476.0\text{ L}\cdot\text{mol}^{-1}\cdot\text{s}^{-1}$ | Same as above (positive hinge cooperativity $k_2 / k_1 = 1.852$) | Andris et al. (2019); Weggen et al. (2023), `10.3389/fbioe.2023.1123842`, Sec. 2.2.5, Eq. (4) |
 | **Model 1A**: Intact $\text{DAR } 2$ (`ADC1 + NPM`, `2k + sink`, non-reducing RP-UHPLC) | $k_3$ ($D \to D_{\text{depl}}$) | $\hat{\theta}_3 = 1.55 \times 10^{-3}\text{ s}^{-1}$ | $1.55 \times 10^{-3}\text{ s}^{-1}$ | Same as above ($R^2 = 0.979$ for 0D model and $0.985$ for 3D CFD in $300\text{ mL}$ `GST-1`, Sec. 3.2.2) | Andris et al. (2019); Weggen et al. (2023), `10.3389/fbioe.2023.1123842`, Sec. 2.2.5, Eq. (5) |
 | **Model 1B**: Heavy-chain $\text{DAR } 2$ `Simple 1k` (`ADC1 + Drug1`, reducing RP-UHPLC) | $k_1$ ($H_0^1, H_0^2, H_1^2 + D$) | $\hat{\theta}_1 = 0.251$, $\sigma_1 = 0.023$, $95\%$ CI $[0.204, 0.298]\text{ L}\cdot\text{mmol}^{-1}\cdot\text{s}^{-1}$ | $\hat{\theta}_1 = 251.0$, $\sigma_1 = 23.0$, $95\%$ CI $[204.0, 298.0]\text{ L}\cdot\text{mol}^{-1}\cdot\text{s}^{-1}$ | $22\ ^\circ\text{C}$ ($295.15\text{ K}$), $\text{pH } 7.0$, $10\%\text{ v/v}$ DMSO; Dataset 1 ($1\text{ mL}$ batch, $1.5\text{–}10\text{ g/L}$ mAb, $1\text{–}8\times$ Drug1, 8 conditions), $\text{RMSE}_{\text{CV}} = 1.863\ \mu\text{mol/L}$, $\text{RMSE}_{\text{P}} = 3.188\ \mu\text{mol/L}$ | Weggen et al. (2024), `10.3389/fbioe.2024.1403644`, Table 1 & Table 2 |
@@ -502,10 +518,13 @@ $[\text{s}^{-1}]$, which are invariant to the molar concentration scale.
 ## 4. Public dataset availability, data-access gap, and fallback policy
 
 1. **Open-access literature data policy and raw time-series availability**:
-   - WP1.5 relies exclusively on open-access public literature data rather than
-     proprietary industrial datasets, ensuring that all repository benchmarks,
-     calibration records, and tutorials are self-contained and publicly
-     reproducible without data-release restrictions.
+   - WP1.5 uses public literature and explicitly identified synthetic fixtures.
+     Open access does not imply uniform reuse terms: Weggen et al. (2023, 2024)
+     are CC BY 4.0, whereas the 2025 Tier 2 source is CC BY-NC 4.0. Record each
+     source's actual terms in `DataSource.sharing`; do not promise unrestricted
+     reuse of the 2025 article or its supplementary material. The current
+     synthetic calibration record uses the 2024 source and does not contain
+     empirical observations copied from the 2025 source.
    - In the open-access KIT/AstraZeneca publications, the complete ODE equations,
      initial concentrations, reactor volumes, syringe-pump dosing durations,
      calibrated rate constants, standard deviations, $95\%$ confidence intervals,
@@ -518,8 +537,8 @@ $[\text{s}^{-1}]$, which are invariant to the molar concentration scale.
        S3–S9, with the Data Availability Statement *"The raw data supporting the
        conclusion of this article will be made available by the authors, without
        undue reservation."*
-     - **Weggen et al. (2025)** (*Biotechnol. Bioeng.* 122(2), 342–356,
-       `PMC11808428`, CC BY 4.0): Section 2.1.3.2 notes that CGE and RP-UHPLC
+     - **Weggen et al. (2025)** (*Biotechnol. Bioeng.* 122(3), 579–593,
+       `PMC11808428`, **CC BY-NC 4.0**): Section 2.1.3.2 notes that CGE and RP-UHPLC
        data are referenced as Supporting Information S2 (`bit28899-suppl-0002`),
        and the Data Availability Statement states *"The data that support the
        findings of this study are available from the corresponding author upon
@@ -533,7 +552,10 @@ $[\text{s}^{-1}]$, which are invariant to the molar concentration scale.
        reactant concentrations, reactor volumes, feed rates, and $248/280\text{ nm}$
        UV-Vis extinction coefficients from Weggen et al. (2023, 2024, 2025),
        Hamblett et al. (2004), and Cruz & Kayser (2019), citing the exact DOI,
-       page/equation/table numbers, and CC BY 4.0 license terms where applicable.
+       page/equation/table numbers, and source-specific sharing terms. Keep the
+       2023/2024 CC BY 4.0 sources separate from the 2025 CC BY-NC 4.0 Tier 2
+       source; citing that source does not establish unrestricted redistribution
+       of its figures or supplementary data.
      - `origin='synthetic'`: records forward-simulated concentration and spectral
        time-course observations generated from those literature models (pinned by
        the SHA-256 digest of the serialized synthetic observation arrays and
@@ -597,7 +619,7 @@ and concentrated feed stock $c_{\text{Drug,feed}} = 10.0\text{ mmol/L} = 1.00 \t
 
 | Vessel / Reactor Configuration | Liquid Volume $V$ $[\text{L}]$ | Blend Time $\tau_{\text{mix,95}}$ $[\text{s}]$ | Vessel-Mean Engulfment Time $\tau_E$ $[\text{s}]$ | Bulk $\text{Da}_{\text{blend},1}^{\text{bulk}}$ $[-]$ | Plume $\text{Da}_{\text{blend},1}^{\text{plume}}$ $[-]$ (bolus) | Plume $\text{Da}_{E,1}^{\text{plume}}$ $[-]$ (vessel-mean $\varepsilon$) | Max $\|\Delta\text{DAR}(t)\|$ (0D vs. 3D CFD) | PharmaPy Unit-Operation Mapping & Assumption |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Internally stirred $1\text{–}4\text{ mL}$ tube / cuvette (`origin="synthetic"` engineering bound) | $1.0 \times 10^{-3}\text{–}4.0 \times 10^{-3}$ | $\approx 0.5$ (bound) | $\approx 0.02$ (bound) | $0.080$ | $4.00$ | $0.16$ | $< 0.002$ (bound) | `BatchReactor` or `SemibatchReactor` (ideal 0D well-mixed assumption valid; $\text{Da}_{\text{blend},1}^{\text{bulk}} \ll 1$) |
+| Internally stirred $1\text{–}4\text{ mL}$ tube / cuvette (`origin="synthetic"` illustrative scenario) | $1.0 \times 10^{-3}\text{–}4.0 \times 10^{-3}$ | $\approx 0.5$ (assumed) | $\approx 0.02$ (bound) | $0.080$ | $4.00$ | $0.16$ | $< 0.002$ (bound) | `BatchReactor` or `SemibatchReactor` (ideal 0D well-mixed assumption valid; $\text{Da}_{\text{blend},1}^{\text{bulk}} \ll 1$) |
 | Lab-scale glass stirred tank (`GST-1`, $60\text{ rpm}$, $P/V = 3.81\text{ W/m}^3$, Table 1) | $0.300$ | $9.4$ | $0.288$ | $1.50$ | $75.2$ | $2.30$ | $0.0035$ ($60\text{ s}$ feed, Sec. 3.2.3) | `SemibatchReactor` with $t_{\text{add}} \ge 60\text{ s}$ (ideal 0D model agrees with experimental DAR time course to $R^2 = 0.979$, Sec. 3.2.2) |
 | Large-scale single-use mixer (`SUM`, $400\text{ rpm}$, $P/V = 23.71\text{ W/m}^3$, Table 1) | $25.0$ | $17.6$ | $0.115$ | $2.81$ | $141$ | $0.922$ | $0.035$ ($60\text{ s}$ feed, Sec. 3.2.3; surface dosing experiences lower local $\varepsilon$ than vessel-mean $P/V$) | `SemibatchReactor` with subsurface payload dosing ($t_{\text{add}} = 60\text{–}300\text{ s}$) |
 | Large-scale glass stirred tank (`GST-2`, $60\text{ rpm}$, $P/V = 2.44\text{ W/m}^3$, Table 1) | $22.0$ | $32.2$ | $0.359$ | $5.13$ | $257$ | $2.87$ | $0.20$ (bolus, $t_{\text{add}}=0\text{ s}$); $0.08$ ($60\text{ s}$); $< 0.01$ ($300\text{ s}$) | **Mixing-sensitive under bolus addition** ($\text{Da}_{\text{blend},1}^{\text{plume}} \gg 1$, $\text{Da}_{E,1}^{\text{plume}} > 1$); requires `SemibatchReactor` controlled addition ($t_{\text{add}} \ge 300\text{ s}$) to restore 0D validity |
@@ -625,8 +647,20 @@ and concentrated feed stock $c_{\text{Drug,feed}} = 10.0\text{ mmol/L} = 1.00 \t
 
 Offline or at-line samples quenched with $N$-acetylcysteine (NAC) and analyzed by
 non-reducing RP-UHPLC / HIC (Model 1A) or reducing RP-UHPLC (Model 1B) provide
-direct molar concentration measurements $y_i(t_k)$ $[\text{mol/L}]$ of the
-protein conjugate species and free payload. The derived quality attributes are:
+protein-species observations. In Weggen et al. (2024, Secs. 2.1.2–2.1.3), heavy-
+and light-chain concentrations $y_i(t_k)$ $[\text{mol/L}]$ are obtained from
+normalized chromatographic peak areas and the corresponding chain concentration.
+NAC consumes residual reactive maleimide; these quenched samples do **not**
+establish a directly measured pre-quench free-payload `Drug` channel. Payload
+depletion was characterized separately by UV/Vis (Sec. 2.1.4), and its rate was
+fixed in the published conjugation fit because direct payload kinetic data were
+absent (Sec. 2.2.1.3).
+
+The executable synthetic fit additionally observes `Drug` to verify the
+multi-output estimation interface. Applying that fit to empirical data requires
+a separately validated free-payload assay or quench-adduct recovery calculation;
+until then, use the measured protein-species projections and the separately
+characterized depletion rate. The derived quality attributes are:
 
 - **Intact-antibody basis (Model 1A)**:
   $$c_{\text{mAb,total}}(t) = c_{\text{mAb}}(t) + c_{\text{mAb\_1Drug}}(t) + c_{\text{mAb\_2Drug}}(t) \quad [\text{mol/L}]$$
@@ -640,6 +674,11 @@ uncertainty, units='mol/L', basis='molar concentration', x_units='s')` inside an
 `Experiment` (`PharmaPy.ParamEstim`).
 
 ### 6.2 Channel 2 — Dual- and multi-wavelength UV-Vis Beer–Lambert spectroscopic contract
+
+Pairing `ADC1 + NPM/Drug1` kinetic trajectories with the `cAC10 + vc-MMAE`
+248/280 nm extinction coefficients below is a **synthetic molar-basis interface
+benchmark**, not an empirical spectrum for the kinetic system. Calibrating an
+actual reaction requires antibody- and payload-specific spectra.
 
 #### Forward multi-wavelength observation operator and optical pathlength regime
 
@@ -709,7 +748,7 @@ R = \frac{A(\lambda_1)}{A(280)} \quad [\text{-}]$$
 | Chromophore / Wavelength Channel | $\varepsilon(\lambda)$ $[\text{L}\cdot\text{mol}^{-1}\cdot\text{cm}^{-1}]$ | Provenance Classification (`origin`) | Physical Basis, Source & Primary-Text Reconciliation |
 | --- | --- | --- | --- |
 | Monoclonal antibody (`cAC10` IgG1, $\text{mAb}_0$) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{\text{mAb}}^{248} = 9.413 \times 10^4$, $\varepsilon_{\text{mAb}}^{280} = 2.3415 \times 10^5$ | `origin="literature"` | Intact antibody molar basis; Hamblett et al. (2004), *Clin. Cancer Res.* 10(20), 7063–7070, pp. 7064–7065 (`doi:10.1158/1078-0432.CCR-04-0789`) |
-| Maleimide linker-payload (`vc-MMAE`, `SGD-1006`) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{D}^{248} = 1.59 \times 10^4$, $\varepsilon_{D}^{280} = 1.50 \times 10^3$ (note: Hamblett et al., 2004, p. 7064 prints $\varepsilon_{\text{drug}}^{248} = 1.50 \times 10^3$, $\varepsilon_{\text{drug}}^{280} = 1.59 \times 10^4$) | `origin="literature"` | Per mole of drug-linker moiety; Hamblett et al. (2004, p. 7064) state that $248\text{ nm}$ and $280\text{ nm}$ *"are the absorbance maxima of the drug and the antibody, respectively"*, and open-access literature directly confirms $\varepsilon_{\text{MMAE}}^{248} = 1.59 \times 10^4\text{ M}^{-1}\text{cm}^{-1}$ and $\varepsilon_{\text{MMAE}}^{280} = 1.50 \times 10^3\text{ M}^{-1}\text{cm}^{-1}$ (Cruz & Kayser, 2019, *Cancers* 11(6), 870, `doi:10.3390/cancers11060870`, `PMC6628445`, Sec. 4.4; Chen, 2013; Wakankar et al., 2011) |
+| Maleimide linker-payload (`vc-MMAE`, `SGD-1006`) at $248\text{ nm}$ / $280\text{ nm}$ | $\varepsilon_{D}^{248} = 1.59 \times 10^4$, $\varepsilon_{D}^{280} = 1.50 \times 10^3$ (note: Hamblett et al., 2004, p. 7064 prints $\varepsilon_{\text{drug}}^{248} = 1.50 \times 10^3$, $\varepsilon_{\text{drug}}^{280} = 1.59 \times 10^4$) | `origin="literature"` | Per mole of drug-linker moiety; Hamblett et al. (2004, p. 7064) state that $248\text{ nm}$ and $280\text{ nm}$ *"are the absorbance maxima of the drug and the antibody, respectively"*, and open-access literature directly confirms $\varepsilon_{\text{MMAE}}^{248} = 1.59 \times 10^4\text{ M}^{-1}\text{cm}^{-1}$ and $\varepsilon_{\text{MMAE}}^{280} = 1.50 \times 10^3\text{ M}^{-1}\text{cm}^{-1}$ (Cruz & Kayser, 2019, *Cancers* 11(6), 870, `doi:10.3390/cancers11060870`, Table 4, Sec. 4.5.2; Chen, 2013; Wakankar et al., 2011) |
 | 4-wavelength verification matrix ($\lambda \in \{248, 280, 310, 342\}\text{ nm}$) for $\text{mAb}$, conjugated site ($\boldsymbol{\varepsilon}_{\text{conj\_site}}$), free maleimide $\text{Drug}$, and depleted $\text{Drug\_depl}$ | $\boldsymbol{\varepsilon}_{\text{mAb}} = [94130, 234150, 1200, 150]$; $\boldsymbol{\varepsilon}_{\text{conj\_site}} = [15900, 1500, 8200, 4100]$; $\boldsymbol{\varepsilon}_{\text{Drug}} = [15900, 1500, 14500, 9800]$; $\boldsymbol{\varepsilon}_{\text{Drug\_depl}} = [14200, 1200, 2100, 600]$ | `origin="synthetic"` (all `Drug_depl` values and all $310/342\text{ nm}$ columns are synthetic conditioning-driven test fixtures) | **Synthetic verification fixture** (`tests/test_bioconjugation_case_selection.py`) constructed with full row rank 4 to verify `MultipleCurveResolution` and `PCR_calibration` numerical recovery when pairing the Weggen et al. (2024) kinetic trajectory with a multi-wavelength UV-Vis observation operator. Not claimed as an empirical literature spectrum |
 
 #### In-situ optical rank, stoichiometry invariants, and hybrid soft-sensor observability (Schiemer et al., 2023, `10.1002/bit.28428`)
@@ -763,7 +802,7 @@ creates two exact linear algebraic constraints on in-situ UV-Vis spectroscopy:
 2. **Optical rank-4 limitation for individual intact species ($\text{mAb}_0$, $\text{mAb}_1$, $\text{mAb}_2$) and hybrid kinetic-model resolution**:
    Because $\boldsymbol{\varepsilon}_{\text{mAb\_1Drug}} = \frac{1}{2}\left(\boldsymbol{\varepsilon}_{\text{mAb}} + \boldsymbol{\varepsilon}_{\text{mAb\_2Drug}}\right)$,
    two moles of $\text{mAb}_1$ have the exact same UV-Vis spectrum as one mole of
-   $\text{mAb}_0$ plus one mole of $\text{mAb}_2$. The 5-species stoichiometry matrix
+   $\text{mAb}_0$ plus one mole of $\text{mAb}_2$. The 5-species molar extinction matrix
    $\mathbf{E} \in \mathbb{R}^{5 \times N_\lambda}$ for
    $[\text{mAb}_0, \text{mAb}_1, \text{mAb}_2, \text{Drug}, \text{Drug\_depl}]$
    therefore has **maximum column rank 4** regardless of $N_\lambda$: pure optical
@@ -779,6 +818,19 @@ creates two exact linear algebraic constraints on in-situ UV-Vis spectroscopy:
    `SemibatchReactor`, $k_1, k_2, k_3$) to reconstruct the individual intact
    conjugate species $c_{\text{mAb}}(t)$, $c_{\text{mAb\_1Drug}}(t)$, and
    $c_{\text{mAb\_2Drug}}(t)$ in real time.
+
+**Calibration-design rank is a separate requirement.** A known, rank-4
+extinction matrix can be inverted as above, but fitting unknown spectra or a
+PCR/PLS calibration also requires independent concentration variation. In a
+single closed batch, antibody and payload totals are constant. For the four
+chromophore coordinates this implies concentration rank at most 3, and rank at
+most 2 after mean-centering. The executable MCR example subtracts the known
+antibody-core background and fits the three remaining component spectra; its
+PCR example additionally combines two initial payload concentrations to span
+three centered target directions. Apply the same rank check to the selected
+targets before calibrating on multiple initial ratios or fed-batch trajectories;
+neither more wavelengths nor background subtraction alone guarantees a
+full-rank centered calibration design.
 
 ### 6.3 Channel 3 — In-line Raman spectroscopy for Stage 1 disulfide reduction (and prospective Stage 2 monitoring)
 
@@ -845,6 +897,9 @@ concentrations $[\text{mol/L}]$.
      including the $248/280\text{ nm}$ dual-wavelength channel and short-pathlength
      $\ell = 0.10\text{ cm}$ flow cell) and to `MultipleCurveResolution` /
      `PCR_calibration` / `PLS_calibration` (`#352`) spectral deconvolution.
+     Keep the cross-system optical pairing synthetic until system-specific
+     spectra are available, and verify concentration-design rank as described
+     in Section 6.2 before fitting component spectra or PCR/PLS coefficients.
    - Quantify the semi-batch payload addition window ($t_{\text{add}} \in [0, 1800]\text{ s}$)
      across lab (`GST-1`, $0.3\text{ L}$) and manufacturing (`GST-2`, $22\text{ L}$;
      `SUM`, $25\text{ L}$) mixing timescales.
@@ -855,6 +910,9 @@ concentrations $[\text{mol/L}]$.
      received from KIT/AstraZeneca.
 2. **Months 9–10 (M9–M10 — Multi-Experiment Parameter Estimation, Identifiability,
    and Experiment Design)**:
+   - Resolve the free-payload measurement-access gap from Section 6.1 before
+     treating `Drug` as an empirical fit channel; otherwise fit protein-species
+     observations with the independently characterized payload-depletion rate.
    - Calibrate Model 1A (`2k + sink`) and Model 1B (`Simple 1k + sink` vs.
      `Detailed 2k + sink`) across combined batch and syringe-pump fed-batch
      `Experiment` / `Measurement` datasets through `SimulationExec` and
@@ -890,7 +948,7 @@ WP1.5 and WP4:
 
 - **Explicit physical basis of STN/RTN material proportions**: Every input and
   output state proportion $p_{s,t}$ $[-]$ in the canonical four-task table below
-  is defined on an **exact liquid volume fraction basis $[\text{L/L}]$** so that
+  is defined on an **additive liquid-volume scheduling basis $[\text{L/L}]$** so that
   $\sum_{s \in \text{In}(t)} p_{s,t} = 1.0000$ and
   $\sum_{s \in \text{Out}(t)} p_{s,t} = 1.0000$ hold identically for each task
   $t \in \{\text{T1}, \text{T2}, \text{T3}, \text{T4}\}$. Because neat DMSO in
@@ -900,8 +958,21 @@ WP1.5 and WP4:
   al., 2023, Sec. 2.2.2), both the exact liquid volumes $[\text{L}]$, total
   solution masses $[\text{kg}]$ (and mass fractions $[\text{kg/kg}]$), reagent
   stock concentrations $[\text{mol/L}]$, and protein active pharmaceutical
-  ingredient (mAb/ADC solute) masses $[\text{kg}]$ are reported explicitly in the
-  fifth column.
+  ingredient inventories are reported explicitly in the fifth column.
+  Volume additivity is a scheduling assumption; the resulting mixture density
+  is not a measurement or a model of DMSO/water volume contraction. Protein
+  solute inventories and recoveries use **antibody-backbone mass
+  $[\text{kg mAb-equivalent}]$**: bound payload adds conjugate mass but does not
+  increase that protein inventory. Total solution masses include the incoming
+  payload stock; protein recovery is not a total-conjugate mass yield.
+- **T2 cosolvent trajectory**: Neat DMSO payload stock is added to initially
+  DMSO-free aqueous protein, followed by aqueous NAC quench. The bulk DMSO
+  fraction therefore varies during dosing and reaches the tabulated final
+  $10\%\text{ v/v}$ after quench. Applying constant-$10\%$ kinetic parameters
+  throughout this ramp is a synthetic scheduling/kinetic assumption, not an
+  experimentally validated cosolvent-dependent reaction model. Empirical
+  execution requires a characterized cosolvent trajectory or a revised,
+  explicitly balanced pre-conditioning recipe.
 - **Canonical 4-task baseline (`Tier 2` direct TCEP partial reduction) vs.
   expanded `Tier 1` activation sub-tasks**:
   - **Canonical 4-task baseline (`T1`–`T4` in table below)**: `T1_reduction`
@@ -965,7 +1036,7 @@ WP1.5 and WP4:
    Vol. 1045, pp. 267–273). Humana Press. `doi:10.1007/978-1-62703-541-5_16`.
 3. **Cruz, E., & Kayser, V. (2019)**. Synthesis and enhanced cellular uptake in
    vitro of anti-HER2 multifunctional gold nanoparticles. *Cancers*, 11(6), 870.
-   `doi:10.3390/cancers11060870` (`PMC6628445`).
+   `doi:10.3390/cancers11060870` (Table 4, Sec. 4.5.2).
 4. **Fernandez-Cerezo, L., Holstein, M., Thirumalairajan, S., Romanini, D.,
    Kos, P., & Raglione, T. (2023)**. Strategies for UF/DF-based impurity removal
    in the post-conjugation purification of antibody-drug conjugates. *Organic
@@ -1042,5 +1113,5 @@ WP1.5 and WP4:
 22. **Weggen, J. T., González, P., Hui, K., Bean, R., Wendeler, M., & Hubbuch,
     J. (2025)**. Kinetic modeling of the antibody disulfide bond reduction
     reaction with integrated prediction of the drug load profile for
-    cysteine-conjugated ADCs. *Biotechnology and Bioengineering*, 122(2),
-    342–356. `doi:10.1002/bit.28899` (`PMC11808428`).
+    cysteine-conjugated ADCs. *Biotechnology and Bioengineering*, 122(3),
+    579–593. `doi:10.1002/bit.28899` (`PMC11808428`).

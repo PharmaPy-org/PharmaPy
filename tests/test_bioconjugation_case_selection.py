@@ -13,7 +13,7 @@ in ``doc/review_notes/bioconjugation_case_selection.md``.
 
 Data provenance:
 - ``origin='literature'``: kinetic rate constants, standard deviations, 95%
-  confidence intervals, initial concentrations, vessel mixing times, buffer
+  confidence intervals, initial concentrations, stirred-tank mixing times, buffer
   density and viscosity, and 248/280 nm molar extinction coefficients from
   peer-reviewed literature (Andris et al., 2019,
   doi:10.1016/j.jbiotec.2019.09.013; Weggen et al., 2023,
@@ -31,8 +31,9 @@ Data provenance:
   reference wavelengths (including the entire ``Drug_depl`` row and the
   310/342 nm columns), schema placeholder thermal properties (``cp_liq``,
   ``t_crit``), and WP4 scheduling task durations and hold-time design
-  parameters. These verify the model, PAT, and scheduling interfaces and are
-  not claimed as an empirical calibration dataset.
+  parameters, the illustrative sub-second tube mixing scenario, and the use
+  of DAR 2 batch-derived parameters in a 4 mL fed-batch design. These verify
+  the model, PAT, and scheduling interfaces and are not an empirical dataset.
 
 Core unit tests run in under three seconds without Assimulo; the final
 integration test uses ``pytest.importorskip("assimulo")`` to exercise native
@@ -88,7 +89,7 @@ K2_MODEL_1A = K2_LIT_MMOL * MMOL_PER_MOL  # [L/(mol*s)]
 K3_MODEL_1A = 1.55e-3  # [1/s], payload sink, Weggen et al. (2023), Eq. (5)
 
 # Tier 2 rate constants: Stage 1 TCEP disulfide reduction (WithInt + ReOx
-# 8k-model, Weggen et al., 2025, Biotechnol. Bioeng. 122(2):342-356, Sec. 2.4,
+# 8k-model, Weggen et al., 2025, Biotechnol. Bioeng. 122(3):579-593, Sec. 2.4,
 # Sec. 3.1, Fig. 3, and SI Table S4). Published in [L/(umol*s)].
 K1_RED_LIT_UMOL = 6.98e-4  # [L/(umol*s)], fastest inter-HL reduction step at 293.15 K
 K3_RED_LIT_UMOL = 6.81e-5  # [L/(umol*s)], slowest inter-HL reduction step at 293.15 K
@@ -171,8 +172,10 @@ BIOCONJUGATION_DATABASE = {
 }
 
 # Model 1B rate constants: reduced heavy-chain DAR 2 Simple (1k + sink) model
-# for ADC1 + Drug1 across batch (1 mL) and fed-batch (4 mL) runs (Weggen et
-# al., 2024, Front. Bioeng. Biotechnol. 12:1403644, Table 2, Eqs. 13-14 &
+# calibrated on ADC1 + Drug1 batch runs (1 mL, Dataset 1). The 4 mL fed-batch
+# test is a synthetic design using the general fed-batch balance, experimentally
+# applied to ADC2 + NPM in Dataset 3 (Weggen et al., 2024, Table 1, Eqs. 1-2).
+# Parameter sources: Front. Bioeng. Biotechnol. 12:1403644, Table 2, Eqs. 13-14 &
 # Sec. 3.1). Table 2 reports both parameter standard deviation sigma_1 (Eq. 13)
 # and the 95% confidence interval [lb, ub] (Eq. 14).
 K1_DAR2_DRUG1_MMOL = 0.251  # [L/(mmol*s)], Weggen et al. (2024), Table 2
@@ -182,10 +185,13 @@ K1_DAR2_DRUG1_CI95_HALF_MMOL = 0.047  # [L/(mmol*s)], 95% CI half-width (Eq. 14)
 K1_DAR2_DRUG1 = K1_DAR2_DRUG1_MMOL * MMOL_PER_MOL  # [L/(mol*s)]
 K_DRUG_DRUG1 = 1.0e-3  # [1/s], Weggen et al. (2024), Sec. 3.1
 
-# Mixing vessel 95% homogenization times, specific power inputs, and standard
+# Illustrative rapid, sub-second tube-blending scenario for a mixing screen;
+# origin='synthetic', not a measured time or a guaranteed equipment bound.
+TAU_MIX_TUBE = 0.5  # [s], assumed internally stirred 1.5 mL tube blend time
+
+# Published vessel 95% homogenization times, specific power inputs, and standard
 # reactant concentrations from Weggen et al. (2023, Table 1, Table 2,
 # Sec. 2.2.2, Sec. 2.2.5, Sec. 2.2.8 & Sec. 3.2.1).
-TAU_MIX_TUBE = 0.5  # [s], internally stirred 1.5 mL reaction tube
 TAU_MIX_GST1 = 9.4  # [s], 300 mL lab glass stirred tank at 60 rpm
 TAU_MIX_SUM = 17.6  # [s], 25 L single-use mixer at 400 rpm
 TAU_MIX_GST2 = 32.2  # [s], 22 L glass stirred tank at 60 rpm
@@ -202,7 +208,8 @@ C_DRUG_FEED_PLUME = 1.0e-2  # [mol/L], 10 mM stock feed plume, Sec. 2.2.5
 # Dual-wavelength UV-Vis molar extinction coefficients at 248 nm and 280 nm
 # for cAC10 IgG1 mAb and vc-MMAE (SGD-1006) drug-linker (origin='literature':
 # Hamblett et al., 2004, Clin. Cancer Res. 10(20):7063-7070, p. 7064-7065;
-# Cruz & Kayser, 2019, Cancers 11(6):870, doi:10.3390/cancers11060870, Sec. 4.4).
+# Cruz & Kayser, 2019, Cancers 11(6):870, doi:10.3390/cancers11060870,
+# Table 4, Sec. 4.5.2).
 # SHORT_PATHLENGTH_CM = 0.10 cm represents a micro-volume / flow-cell optical
 # pathlength (e.g., Unchained Labs Stunner, Weggen et al., 2024, Sec. 2.1.4)
 # that keeps undiluted 5 g/L mAb absorbance inside the linear detector regime
@@ -730,7 +737,7 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
 
     c_mab_rec, c_drug_rec, dar_rec = _dual_wavelength_uv_invert(
         spectra_desalted, pathlength_cm=SHORT_PATHLENGTH_CM
-    )
+    )  # [mol/L], [mol/L], [-]
     np.testing.assert_allclose(
         c_mab_rec, np.full_like(dar_targets, c_mab_true), rtol=CLOSED_FORM_RTOL
     )
@@ -779,7 +786,7 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
     )
     _c_h_aliased, _c_d_aliased, ratio_aliased = _dual_wavelength_uv_invert(
         spectra_aliased_2wl, pathlength_cm=SHORT_PATHLENGTH_CM
-    )
+    )  # [mol/L], [mol/L], [-]
     np.testing.assert_allclose(
         ratio_aliased,
         np.full(times_s.size, c_drug_init / c_h0_init),
@@ -843,7 +850,7 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
     )
     _c_m1a_aliased, _c_d1a_aliased, dar_1a_aliased = _dual_wavelength_uv_invert(
         spectra_1a_aliased, pathlength_cm=SHORT_PATHLENGTH_CM
-    )
+    )  # [mol/L], [mol/L], [-]
     np.testing.assert_allclose(
         dar_1a_aliased,
         np.full(times_1a_s.size, PAYLOAD_EXCESS_STD),
@@ -936,12 +943,12 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
         measured_ind=[1, 2, 3],
         kwargs_fun={"c_h0_init_mol_l": c_h0_init, "c_drug_init_mol_l": c_drug_init},
     )
-    mcr_obj = mcr.get_objective(mcr_true_params, out_array=False)
+    mcr_obj = mcr.get_objective(mcr_true_params, out_array=False)  # [-]
     assert mcr_obj == pytest.approx(0.0, abs=1e-20)
     np.testing.assert_allclose(mcr.epsilon_mcr, pure_absorptivities, rtol=1e-9)
     y_runs, _resid_runs, _weighted_resid, absorptivity_pure = mcr.get_global_analysis(
         mcr_true_params
-    )
+    )  # spectra/residuals [-], [-], [-]; effective absorptivity [L/mol]
     np.testing.assert_allclose(absorptivity_pure, pure_absorptivities, rtol=1e-9)
     np.testing.assert_allclose(y_runs[0], spectral_matrix_batch, rtol=1e-9)
 
@@ -1001,7 +1008,18 @@ def test_dual_wavelength_uv_vis_contract_and_in_situ_mcr_deconvolution():
 def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     tmp_path,
 ):
-    """Fit the Weggen et al. (2024) Simple 1k + sink model and round-trip its record."""
+    """Fit the Simple 1k + sink model and round-trip its synthetic record.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Temporary directory for the calibration-record JSON file.
+
+    Notes
+    -----
+    The synthetic observations include free payload to exercise multi-output
+    estimation; they do not reproduce the published chromatographic channels.
+    """
     # Equal observation budget (N_t = 8 sampling times per run, 3 species = 24
     # observations per run, 48 total observations across two runs):
     # - Experiment 1: 1.0 mL batch run (c_H0_1,0 = 6.0e-5 mol/L, c_Drug,0 = 1.5e-4 mol/L).
@@ -1041,6 +1059,8 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     )  # [mol/L]
 
     output_names = ("H0_1", "H1_1", "Drug", "Drug_depl")
+    # Drug is a synthetic observation channel, not a pre-quench free-payload
+    # measurement established by NAC-quenched RP-UHPLC; see review-note Sec. 6.1.
     measured_species = ("H0_1", "H1_1", "Drug")
     # Synthetic homoscedastic measurement weighting assumption: set per-sample
     # standard deviation sigma to the published cross-validation RMSE_CV
@@ -1080,6 +1100,7 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         ),
     }
 
+    # Off-truth synthetic starting values require both fitted rates to move.
     param_seed = np.array([180.0, 1.8e-3])  # [L/(mol*s)], [1/s]
     estimator = ParameterEstimation(
         _solve_dar2_heavy_chain_experiment,
@@ -1088,6 +1109,7 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         name_params=["k1", "k_drug"],
         output_names=output_names,
     )
+    # Parameter units u = [L/(mol*s), 1/s]; covariance entry (i, j) has u_i*u_j.
     fitted, covariance, info = estimator.estimate_parameters(
         method="LM", verbose=False
     )
@@ -1160,9 +1182,11 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
         name_params=["k1", "k_drug"],
         output_names=output_names,
     )
+    # Parameter units u = [L/(mol*s), 1/s]; covariance entry (i, j) has u_i*u_j.
     noisy_fitted, noisy_cov, noisy_info = noisy_estimator.estimate_parameters(
         method="LM", verbose=False
     )
+    # Confidence intervals: k1 [L/(mol*s)], k_drug [1/s].
     noisy_intervals = noisy_estimator.get_confidence_intervals(verbose=False)
     n_obs_total = (batch_times.size + fedbatch_times.size) * len(measured_species)
     dof = n_obs_total - len(true_params)
@@ -1205,7 +1229,7 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
     #     (F_01 > 0 in batch vs F_01 < 0 in fed-batch) so their combination
     #     cancels off-diagonal correlation and reduces normalized parameter
     #     collinearity by >30x compared to the equal-budget two-batch design
-    #     (Weggen et al., 2024, Sec. 3.3.2).
+    #     for this synthetic design; this is not a published Drug1 experiment.
     batch_only_est = ParameterEstimation(
         _solve_dar2_heavy_chain_experiment,
         param_seed=true_params,
@@ -1418,12 +1442,14 @@ def test_weggen_2024_dar2_batch_and_fedbatch_estimation_and_calibration_record(
 
 @pytest.mark.unit
 def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
-    """Verify WP4 STN/RTN balances, Tier 1 UF/DF+DHAA expansion, and review-note sync."""
+    """Verify WP4 balances, Tier 1 activation, and review-note reference presence."""
     # Densities [kg/L] for converting liquid volumes [L] to solution masses [kg]:
     # - DMSO-free dilute aqueous phosphate buffer / reagent streams: 1.000 kg/L
     # - Neat DMSO payload stock in T2: 1.1004 kg/L (DMSO_DENSITY)
     # Combining 20.00 L aqueous mAb + 2.25 L neat DMSO + 0.25 L aqueous NAC in
     # T2 yields 22.7259 kg in 22.50 L -> rho_mix = 1.01004 kg/L (~1010.5 kg/m**3).
+    # Volumes are additive scheduling assumptions. Protein inventories below
+    # use antibody-backbone mass [kg mAb-equivalent], excluding bound payload.
     rho_aq_kg_l = 1.000  # [kg/L], DMSO-free dilute aqueous phosphate buffer
     rho_dmso_kg_l = DMSO_DENSITY * 1.0e-3  # [kg/L], 1.1004 kg/L
 
@@ -1583,7 +1609,7 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         assert (
             task["mass_out_main_kg"] + task["mass_out_waste_kg"]
         ) == pytest.approx(task["mass_in_kg"], rel=CLOSED_FORM_RTOL)
-        low_s, high_s = task["duration_range_s"]
+        low_s, high_s = task["duration_range_s"]  # [s], [s]
         assert low_s <= task["duration_s"] <= high_s
         assert task["storage_policy"] in {"FW", "UIS"}
 
@@ -1649,16 +1675,27 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
     # small-molecule clearance against the 1.333e-3 mol mAb basis
     # (0.200 kg / 150 kg/mol = 1.333333e-3 mol mAb).
     moles_mab_batch = 200.0 / MAB_MW  # [mol], 1.333333e-3 mol
-    moles_tcep_tier2 = 0.40 * (2.20 * moles_mab_batch / 0.40)  # [mol], 2.933e-3 mol (2.20 eq)
+    # Independent stock molarities from Section 8.2's rounded recipe, rather
+    # than deriving the concentrations from the equivalents being asserted.
+    moles_tcep_tier2 = 0.40 * 7.333e-3  # [mol], 0.40 L of 7.333 mmol/L TCEP
     moles_tcep_tier1 = 0.40 * 50.0e-3  # [mol], 20.00e-3 mol (15.0 eq)
     moles_dhaa_tier1 = 0.40 * 15.0e-3  # [mol], 6.00e-3 mol (4.5 eq)
-    moles_payload_t2 = 2.25 * (5.0 * moles_mab_batch / 2.25)  # [mol], 6.667e-3 mol (5.0 eq)
+    moles_payload_t2 = 2.25 * 2.963e-3  # [mol], 2.25 L of 2.963 mmol/L payload
     moles_nac_t2 = 0.25 * 40.0e-3  # [mol], 10.00e-3 mol (1.5 eq per payload)
-    assert moles_tcep_tier2 / moles_mab_batch == pytest.approx(2.20, rel=CLOSED_FORM_RTOL)
+    # Four-significant-figure stocks have relative rounding bounds of
+    # 0.0005/7.333 and 0.0005/2.963; both fit within this explicit recipe bound.
+    stock_rounding_rtol = 2.0e-4  # [-], bounds rounding of both stated stocks
+    assert moles_tcep_tier2 / moles_mab_batch == pytest.approx(
+        2.20, rel=stock_rounding_rtol
+    )
     assert moles_tcep_tier1 / moles_mab_batch == pytest.approx(15.0, rel=CLOSED_FORM_RTOL)
     assert moles_dhaa_tier1 / moles_mab_batch == pytest.approx(4.5, rel=CLOSED_FORM_RTOL)
-    assert moles_payload_t2 / moles_mab_batch == pytest.approx(5.0, rel=CLOSED_FORM_RTOL)
-    assert moles_nac_t2 / moles_payload_t2 == pytest.approx(1.5, rel=CLOSED_FORM_RTOL)
+    assert moles_payload_t2 / moles_mab_batch == pytest.approx(
+        5.0, rel=stock_rounding_rtol
+    )
+    assert moles_nac_t2 / moles_payload_t2 == pytest.approx(
+        1.5, rel=stock_rounding_rtol
+    )
     diavolumes_t1b = 100.00 / 20.00  # [-], 5.0 diavolumes in T1b
     diavolumes_t3 = 140.00 / 20.00  # [-], 7.0 diavolumes in T3
     assert diavolumes_t1b == pytest.approx(5.0, rel=CLOSED_FORM_RTOL)
@@ -1666,9 +1703,10 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
     assert float(np.exp(-diavolumes_t1b)) < 0.01  # <1% residual TCEP after 5 DV
     assert float(np.exp(-diavolumes_t3)) < 0.001  # <0.1% residual small molecules after 7 DV
 
-    # 4. Direct synchronization check against doc/review_notes/bioconjugation_case_selection.md:
-    # verify that all WP4 task IDs, key Section 8.2 proportions, and all Section 7.1
-    # test file paths referenced in the review note match the repository.
+    # 4. Token-presence and test-path checks for the review note. These confirm
+    # that the expected identifiers/numbers occur and referenced tests exist;
+    # they do not associate numbers with table rows or verify the table's bases.
+    # The independently specified fixture above verifies its own balances.
     note_text = REVIEW_NOTE.read_text(encoding="utf-8")
     assert round(wp4_tasks[1]["inputs_kg_kg"]["S_payload_DMSO"], 4) == 0.1089
     for required_token in (
@@ -1687,6 +1725,8 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
         "0.8801",
         "0.1089",
         "0.0110",
+        "7.333",
+        "2.963",
     ):
         assert required_token in note_text, (
             f"Expected WP4 Section 8.2 token {required_token!r} in {REVIEW_NOTE}"
@@ -1705,7 +1745,18 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
 @pytest.mark.assimulo
 @pytest.mark.integration
 def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
-    """Run native BatchReactor and SemibatchReactor solves and reproduce Section 7.2 blockers (#486, #531)."""
+    """Verify native reactor trajectories, sensitivities, and documented blockers.
+
+    Parameters
+    ----------
+    tmp_path : pathlib.Path
+        Temporary directory for the synthetic component-property database.
+
+    Notes
+    -----
+    The default-tolerance and missing-semibatch-sensitivity assertions remain
+    provisional while issues #531 and #486 are open, respectively.
+    """
     pytest.importorskip("assimulo")
     db_path = _write_bioconjugation_db(tmp_path)
 
@@ -1785,9 +1836,9 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
         eval_sens=True,
         verbose=False,
         sundials_opts=micromolar_sundials_opts,
-    )
+    )  # time [s], states [mol/L]; sensitivities [state units / parameter units]
 
-    prof = batch_reactor.result.mole_conc  # [mol/L], shape (31, 5)
+    prof = batch_reactor.result.mole_conc  # [mol/L], shape (31, 6), including buffer
     mab_total = prof[:, 0] + prof[:, 1] + prof[:, 2]  # [mol/L]
     drug_moiety_total = (
         prof[:, 3] + prof[:, 4] + prof[:, 1] + 2.0 * prof[:, 2]
@@ -1799,15 +1850,148 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
     assert np.all(prof[:, :5] >= -1e-11)
     assert 1.98 < dar_final <= 2.0 + 1e-6
 
-    # Verify BatchReactor forward sensitivity output (eval_sens=True) is
-    # populated on batch_reactor.sensit (and returned as sensit_out), finite,
-    # and non-zero with respect to k1, k2, k3.
+    # The returned/stored sensitivities use (parameter, time, species) axes:
+    # k1/k2 rows [mol**2*s/L**2], k3 row [mol*s/L], and Ea rows [mol**2/(L*J)].
+    # With reformulate_kin=False and Ea=0, the first three parameters are the
+    # physical rate constants, ordered (k1, k2, k3).
     assert hasattr(batch_reactor, "sensit")
-    sens = np.asarray(batch_reactor.sensit, dtype=float)
+    sens = np.asarray(batch_reactor.sensit, dtype=float)  # [units per row above]
     np.testing.assert_array_equal(sens, np.asarray(sensit_out, dtype=float))
     assert sens.shape == (6, len(time_grid), 5)
     assert np.all(np.isfinite(sens))
-    assert np.linalg.norm(sens[:3, :, :]) > 0.0
+
+    # Tighten the independent reference below the native solver's tolerances
+    # so finite differences are not dominated by the reference integration.
+    reference_rtol = 1e-11  # [-], three decades below native rtol=1e-8
+    reference_atol = 1e-15  # [mol/L], four decades below native atol=1e-11
+
+    def _reference_batch_profile(rate_constants):
+        """Integrate the independent isothermal Model 1A batch balance.
+
+        Parameters
+        ----------
+        rate_constants : numpy.ndarray
+            Shape (3,), ordered (k1, k2, k3), in [L/(mol*s)], [L/(mol*s)],
+            and [1/s]. Initial concentrations and times come from this test.
+
+        Returns
+        -------
+        numpy.ndarray
+            Concentrations [mol/L], shape (31, 5), ordered as mAb,
+            mAb_1Drug, mAb_2Drug, Drug, and Drug_depl at ``time_grid`` [s].
+
+        Notes
+        -----
+        Evaluates the three elementary balances directly, independently of
+        RxnKinetics and the native reactor's state/parameter Jacobians.
+        """
+        k1_ref, k2_ref, k3_ref = rate_constants  # [L/(mol*s), L/(mol*s), 1/s]
+
+        def _rhs(_time_s, concentrations):
+            """Evaluate the five closed-batch concentration derivatives.
+
+            Parameters
+            ----------
+            _time_s : float
+                Elapsed time [s]; the isothermal model is autonomous.
+            concentrations : numpy.ndarray
+                Shape (5,), in Model 1A participating-species order [mol/L].
+
+            Returns
+            -------
+            list of float
+                Shape (5,) concentration derivatives [mol/(L*s)] in the
+                same species order.
+            """
+            c_mab, c_mab1, _c_mab2, c_drug, _c_depl = concentrations  # [mol/L]
+            first_rate = k1_ref * c_mab * c_drug  # [mol/(L*s)]
+            second_rate = k2_ref * c_mab1 * c_drug  # [mol/(L*s)]
+            depletion_rate = k3_ref * c_drug  # [mol/(L*s)]
+            return [
+                -first_rate,
+                first_rate - second_rate,
+                second_rate,
+                -first_rate - second_rate - depletion_rate,
+                depletion_rate,
+            ]
+
+        reference = solve_ivp(
+            _rhs,
+            (time_grid[0], time_grid[-1]),
+            batch_conc_init[:5],
+            t_eval=time_grid,
+            method="RK45",
+            rtol=reference_rtol,
+            atol=reference_atol,
+        )
+        assert reference.success, reference.message
+        return reference.y.T
+
+    physical_rates = np.array(
+        [K1_MODEL_1A, K2_MODEL_1A, K3_MODEL_1A]
+    )  # [L/(mol*s), L/(mol*s), 1/s]
+    reference_profile = _reference_batch_profile(physical_rates)  # [mol/L]
+    # Near zero, use the same 1e-4 accuracy target on the initial antibody
+    # concentration scale rather than requiring a relative error at depletion.
+    comparison_atol = REACTOR_REF_RTOL * C_MAB_STD  # [mol/L]
+    np.testing.assert_allclose(
+        prof[:, :5], reference_profile,
+        rtol=REACTOR_REF_RTOL, atol=comparison_atol,
+    )
+
+    # A centered difference has O(h**2) truncation and O(error/h) amplified
+    # integration error. Their balance gives h=cbrt(relative reference error).
+    reference_relative_error = (
+        reference_rtol + reference_atol / C_MAB_STD
+    )  # [-], reference error scale at the initial antibody concentration
+    relative_step = np.cbrt(reference_relative_error)  # [-]
+    normalized_reference_sens = np.empty(
+        (3, time_grid.size, 5)
+    )  # [mol/L], k_j * dc_i/dk_j for each physical rate
+    for rate_index in range(physical_rates.size):
+        rates_plus = physical_rates.copy()  # [L/(mol*s), L/(mol*s), 1/s]
+        rates_minus = physical_rates.copy()  # [L/(mol*s), L/(mol*s), 1/s]
+        rates_plus[rate_index] *= 1.0 + relative_step
+        rates_minus[rate_index] *= 1.0 - relative_step
+        profile_plus = _reference_batch_profile(rates_plus)  # [mol/L]
+        profile_minus = _reference_batch_profile(rates_minus)  # [mol/L]
+        normalized_reference_sens[rate_index] = (
+            profile_plus - profile_minus
+        ) / (2.0 * relative_step)  # [mol/L], k_j cancels the absolute step
+
+    normalized_native_sens = (
+        physical_rates[:, None, None] * sens[:3]
+    )  # [mol/L], k_j * dc_i/dk_j
+    np.testing.assert_allclose(
+        normalized_native_sens, normalized_reference_sens,
+        rtol=REACTOR_REF_RTOL, atol=comparison_atol,
+    )
+    # Each rate must have a resolved effect, preventing an all-zero row from
+    # satisfying the absolute error allowance for a negligible reference row.
+    assert np.all(
+        np.max(np.abs(normalized_reference_sens), axis=(1, 2)) > comparison_atol
+    )
+
+    # The fixed initial antibody and drug inventories are parameter-independent:
+    # differentiating their exact batch invariants gives zero for every rate.
+    # Check native conservation to its requested absolute concentration accuracy.
+    antibody_sensitivity_sum = np.sum(
+        normalized_native_sens[:, :, :3], axis=2
+    )  # [mol/L]
+    drug_sensitivity_sum = (
+        normalized_native_sens[:, :, 3]
+        + normalized_native_sens[:, :, 4]
+        + normalized_native_sens[:, :, 1]
+        + 2.0 * normalized_native_sens[:, :, 2]
+    )  # [mol/L]
+    np.testing.assert_allclose(
+        antibody_sensitivity_sum, 0.0,
+        rtol=0.0, atol=micromolar_sundials_opts["atol"],
+    )
+    np.testing.assert_allclose(
+        drug_sensitivity_sum, 0.0,
+        rtol=0.0, atol=micromolar_sundials_opts["atol"],
+    )
 
     # 2. SemibatchReactor native solve with 60 s payload dosing into 0.300 L
     # (3.0e-4 m**3) inside a 0.500 L (5.0e-4 m**3) tank.
