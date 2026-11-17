@@ -158,11 +158,10 @@ class MissingPropertyError(AttributeError, ValueError):
     instead (``ParseDatabase`` raises ``TypeError`` for a property given as
     a scalar by one species and as a list by another).
 
-    Reactor solves (``Reactors._BaseReactor._simulate``) use the subclass to
-    recognize it and re-raise it, chained from the CVode error, when the
-    solver hides the original exception. In other solver-based unit
-    operations such an error can still be lost behind the solver's error,
-    or stall the solver, which issue #435 tracks.
+    PharmaPy's shared CVode/IDA constructors preserve this error, like
+    other model callback failures, and re-raise it chained from the native
+    solver diagnostic. Every later RHS or residual retry fails without
+    re-entering the model, so integration cannot bypass missing data.
     """
 
 

@@ -21,7 +21,6 @@ from PharmaPy.CheckModule import check_modeling_objects
 from PharmaPy.Errors import PharmaPyNonImplementedError
 from PharmaPy.jac_module import (numerical_jac_central,
                                  CENTRAL_DIFFERENCE_REL_STEP)
-from PharmaPy.ThermoModule import MissingPropertyError
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,7 +29,6 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.animation import FFMpegWriter
 
 import copy
-import functools
 from typing import Optional, Union
 from functools import partial
 from itertools import cycle
@@ -112,72 +110,6 @@ def _ordered_state_layout(metadata: dict) -> tuple[list[str], list[int]]:
     names = order_state_names(list(metadata))
     dimensions = [metadata[name]['dim'] for name in names]
     return names, dimensions
-
-
-def _records_missing_data(method):
-    """Record missing-property errors raised by a solver callback.
-
-    Parameters
-    ----------
-    method : callable
-        Reactor right-hand-side method, called as ``method(self, ...)``.
-
-    Returns
-    -------
-    callable
-        Wrapper that, while ``_simulate`` runs, stores a
-        ``MissingPropertyError`` in ``self._missing_data_error`` before
-        re-raising it, so that
-        ``_BaseReactor._simulate`` can re-raise it after the solver, which
-        reports only its own error, fails.
-
-    Notes
-    -----
-    Assimulo treats a right-hand-side exception as recoverable, so CVode
-    may retry with other steps and states. The presence latches of the
-    energy balances already make a missing-data failure persist (a species
-    stays required once present). Inside ``_simulate`` the record is also
-    sticky, as defense in depth for any failure that is not latched: once an
-    error is recorded, every later call re-raises it before evaluating
-    anything, so the solve ends instead of stepping around it. The re-raise
-    reuses the traceback stored with the first failure, so repeated
-    attempts do not stack solver frames.
-    """
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        """Call ``method``, recording a missing-property error.
-
-        Parameters
-        ----------
-        *args, **kwargs
-            Arguments of the wrapped right-hand side.
-
-        Returns
-        -------
-        numpy.ndarray
-            The wrapped method's derivatives.
-
-        Raises
-        ------
-        MissingPropertyError
-            Raised by the wrapped method, or re-raised from an earlier call
-            of the same ``_simulate``.
-        """
-        if self._simulating and self._missing_data_error is not None:
-            raise self._missing_data_error.with_traceback(
-                self._missing_data_traceback)
-
-        try:
-            return method(self, *args, **kwargs)
-        except MissingPropertyError as error:
-            if self._simulating:
-                # Only a running solve needs it; outside, the error
-                # propagates directly and nothing is kept on the unit.
-                self._missing_data_error = error
-                self._missing_data_traceback = error.__traceback__
-            raise
-
-    return wrapper
 
 
 def get_sundials_callable(events, eval_sens, param_vals, unit_model, get_jac):
@@ -366,10 +298,7 @@ class _BaseReactor:
         self.reset_states = reset_states
         self.elapsed_time = 0
 
-        # Missing-data bookkeeping for the energy balances (#414)
-        self._missing_data_error = None
-        self._missing_data_traceback = None
-        self._simulating = False
+        # Species presence for the energy balances (#414)
         self._reset_species_presence()
 
         self.reset_states = reset_states
@@ -501,58 +430,6 @@ class _BaseReactor:
         """
         self._present_latch = None
         self._present_fed = None
-
-    def _simulate(self, solver: object, *args, **kwargs) -> tuple:
-        """Run ``solver.simulate`` and expose missing property data.
-
-        Parameters
-        ----------
-        solver : assimulo.solvers.CVode
-            Configured solver.
-        *args, **kwargs
-            Passed to ``solver.simulate``.
-
-        Returns
-        -------
-        tuple
-            Whatever ``solver.simulate`` returns: times or volumes and the
-            state profile.
-
-        Raises
-        ------
-        MissingPropertyError
-            A subclass of ``AttributeError``. If a right-hand-side
-            evaluation of this call raised one, it is re-raised chained from
-            the solver's own error, which does not name the species or the
-            property.
-        Exception
-            Any other solver failure, unchanged.
-
-        Notes
-        -----
-        The record and its traceback are cleared at the start and at the
-        end of every call, so a later, unrelated failure is never relabeled.
-        While the solver runs, the record is sticky (see
-        ``_records_missing_data``): every later right-hand side fails the
-        same way, so the failure persists until CVode gives up. The chaining
-        relies on that persistence; any solver error after a recorded
-        missing-data error is attributed to it, whatever its flag
-        (right-hand-side or convergence failure).
-        """
-        self._missing_data_error = None
-        self._missing_data_traceback = None
-        self._simulating = True
-        try:
-            return solver.simulate(*args, **kwargs)
-        except Exception as solver_error:
-            if self._missing_data_error is not None:
-                raise self._missing_data_error.with_traceback(
-                    self._missing_data_traceback) from solver_error
-            raise
-        finally:
-            self._simulating = False
-            self._missing_data_error = None
-            self._missing_data_traceback = None
 
     def _charge_state_profile(self, states_init: np.ndarray,
                               eval_sens: bool) -> tuple:
@@ -1151,7 +1028,6 @@ class _BaseReactor:
 
         return inputs
 
-    @_records_missing_data
     def unit_model(self, time: float, states: np.ndarray,
                    sw: Optional[list] = None,
                    params: Optional[np.ndarray] = None) -> np.ndarray:
@@ -1190,8 +1066,8 @@ class _BaseReactor:
         MissingPropertyError
             A subclass of ``AttributeError``. If a present species lacks
             ``cp_liq`` data where the energy balance needs it (see
-            ``_present_species``). Inside ``_simulate`` a recorded error is
-            re-raised by every later call (see ``_records_missing_data``).
+            ``_present_species``). During integration the shared solver guard
+            preserves this error and prevents retries from bypassing it.
         """
         # Calculate inlets
         u_values = self.get_inputs(time)
@@ -2110,8 +1986,8 @@ class BatchReactor(_BaseReactor):
             solver.verbosity = 50
 
         # Solve model
-        time, states = self._simulate(solver, final_time,
-                                      ncp_list=time_grid)
+        time, states = solver.simulate(final_time,
+                                       ncp_list=time_grid)
 
         # Store results
         self.retrieve_results(time, states)
@@ -2653,8 +2529,8 @@ class CSTR(_BaseReactor):
             solver.verbosity = 50
 
         # Solve model
-        time, states = self._simulate(solver, final_time,
-                                      ncp_list=time_grid)
+        time, states = solver.simulate(final_time,
+                                       ncp_list=time_grid)
 
         # Store results
         self.statesProf = states
@@ -3038,8 +2914,8 @@ class SemibatchReactor(CSTR):
             solver.verbosity = 50
 
         # Solve model
-        time, states = self._simulate(solver, final_time,
-                                      ncp_list=time_grid)
+        time, states = solver.simulate(final_time,
+                                       ncp_list=time_grid)
 
         # Store results
         self.time_runs.append(time)
@@ -3320,7 +3196,6 @@ class PlugFlowReactor(_BaseReactor):
 
         return dtemp_dv
 
-    @_records_missing_data
     def unit_steady(self, time: float, states: np.ndarray,
                     params: Optional[np.ndarray] = None) -> np.ndarray:
         """Evaluate participating-species and temperature balances along volume.
@@ -3350,9 +3225,8 @@ class PlugFlowReactor(_BaseReactor):
         MissingPropertyError
             A subclass of ``AttributeError``. If a species of the steady
             inlet or the reactions lacks ``cp_liq`` data (see
-            ``_steady_present_species``). Inside ``_simulate`` a recorded
-            error is re-raised by every later call (see
-            ``_records_missing_data``).
+            ``_steady_present_species``). During integration the shared solver
+            guard preserves this error and prevents retries from bypassing it.
         """
         conc = states[:self.num_species_steady]  # [mol/L]
 
@@ -3454,7 +3328,7 @@ class PlugFlowReactor(_BaseReactor):
             problem = Explicit_Problem(self.unit_steady, states_init, t0=0)
             solver = CVode(problem)
 
-            volPosition, states_solver = self._simulate(solver, vol_rxn)
+            volPosition, states_solver = solver.simulate(vol_rxn)
 
             num_x = len(volPosition)
 
@@ -3573,7 +3447,6 @@ class PlugFlowReactor(_BaseReactor):
 
             return dtemp_dt
 
-    @_records_missing_data
     def unit_model(self, time: float, states: np.ndarray,
                    sw: Optional[list] = None,
                    params: Optional[np.ndarray] = None,
@@ -3610,8 +3483,8 @@ class PlugFlowReactor(_BaseReactor):
         MissingPropertyError
             A subclass of ``AttributeError``. If a present species lacks
             ``cp_liq`` data where the energy balance needs it (see
-            ``_present_species``). Inside ``_simulate`` a recorded error is
-            re-raised by every later call (see ``_records_missing_data``).
+            ``_present_species``). During integration the shared solver guard
+            preserves this error and prevents retries from bypassing it.
         """
         di_states = unpack_discretized(states, self.len_states,
                                        self.name_states)
@@ -3789,7 +3662,7 @@ class PlugFlowReactor(_BaseReactor):
         MissingPropertyError
             If the energy balance needs ``cp_liq`` for a present species
             without data, re-raised chained from the CVode error when it
-            occurs during integration (see ``_simulate``).
+            occurs during integration, through the shared solver guard.
 
         Notes
         -----
@@ -3865,8 +3738,8 @@ class PlugFlowReactor(_BaseReactor):
         if not verbose:
             solver.verbosity = 50
 
-        time, states_solver = self._simulate(solver, final_time,
-                                             ncp_list=time_grid)
+        time, states_solver = solver.simulate(final_time,
+                                              ncp_list=time_grid)
 
         self.retrieve_results(time, states_solver)
 
