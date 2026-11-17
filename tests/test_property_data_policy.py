@@ -1084,6 +1084,7 @@ def test_metadata_keys_do_not_warn(tmp_path):
     ("tests/integration/data/pfr_test_pure_comp.json", []),
     ("workshop_data/Case_study_1/compounds_ziegler.json", []),
     ("workshop_data/Case_study_3/compound_database.json", []),
+    ("workshop_data/Case_study_3/compounds_lomustine.json", []),
     ("workshop_data/Case_study_1/pure_components_ziegler.json",
      [("cp_vap", "cp_vapor")]),
     ("workshop_data/Case_study_1/pure_component_database.json",
