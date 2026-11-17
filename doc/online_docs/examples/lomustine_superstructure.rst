@@ -550,6 +550,17 @@ In this hybrid campaign model:
    so the 10-hour campaign spans :math:`\sim 48.1` hydraulic residence times and
    reaches steady state.
 
+3. **Coolant inlet temperature and slurry temperature**: As in
+   ``make_units.py`` (``add_crystallizer``), the optimized ``260.00096 K`` value
+   sets the initial liquid temperature and the cooling-water inlet temperature.
+   The ``MSMPR`` energy balance evolves freely, with no temperature control.
+   With the upstream feed arriving at approximately ``306.1 K`` and the
+   independently specified crystallizer coolant flow of ``1.0 kg/s``, the slurry
+   warms to approximately ``271.14 K`` by the end of the campaign. The hybrid
+   productivity therefore describes this nonisothermal trajectory; the all-batch
+   train instead follows its prescribed cooling profile to ``260 K``. These are
+   complete flowsheet comparisons with different thermal histories.
+
 .. testcode::
 
    # Unscaled NOMAD optimum for combo "1" in optimal_points_2.json + bounds.json
@@ -562,7 +573,8 @@ In this hybrid campaign model:
    time_vap_hybrid = 3600.0  # [s], VAP01 batch evaporation duration
    pressure_vap_hybrid = 25000.0  # [Pa], VAP01 operating pressure
    tau_nom_cr01_hybrid = 5399.64  # [s], drum-referenced holdup-volume design parameter (make_units.py)
-   temp_cr01_hybrid = 260.00096  # [K], CR01 MSMPR operating temperature
+   coolant_temp_cr01_hybrid = 260.00096  # [K], coolant inlet and initial liquid temperature
+   coolant_flow_cr01_hybrid = 1.0  # [kg/s], make_units.py add_crystallizer utility design assumption
    dp_filt_hybrid = 100000.0  # [Pa], F01 filtration pressure driving force
    diam_filt_hybrid = 0.5  # [m], F01 filter station diameter
    campaign_horizon = 10.0 * 3600.0  # [s], 10-hour continuous operating horizon
@@ -618,14 +630,13 @@ In this hybrid campaign model:
    # Pre-solve superstructure holdup volume parameterization (make_units.py add_crystallizer)
    effective_flow = vol_drum_hybrid / campaign_horizon  # [m**3/s]
    vol_cryst_hybrid = effective_flow * tau_nom_cr01_hybrid  # [m**3], 30.0 L holdup volume
-   tau_cr01_hybrid = tau_nom_cr01_hybrid  # [s], alias retained for backward compatibility
    sim_hybrid.CR01 = MSMPR(
        target_comp="lom", method="1D-FVM", scale=cryst_scale,
    )
    sim_hybrid.CR01.Phases = (
        LiquidPhase(
            path_phys, mass_frac=mass_frac_hept, vol=vol_cryst_hybrid,
-           temp=temp_cr01_hybrid,
+           temp=coolant_temp_cr01_hybrid,
        ),
        SolidPhase(
            path_phys, distrib=np.zeros_like(x_grid), x_distrib=x_grid,
@@ -634,7 +645,7 @@ In this hybrid campaign model:
    )
    sim_hybrid.CR01.Kinetics = build_crystallization_kinetics()
    sim_hybrid.CR01.Utility = CoolingWater(
-       temp_in=temp_cr01_hybrid, mass_flow=evap_utility_flow,
+       temp_in=coolant_temp_cr01_hybrid, mass_flow=coolant_flow_cr01_hybrid,
    )
 
    sim_hybrid.HOLD01 = DynamicCollector()

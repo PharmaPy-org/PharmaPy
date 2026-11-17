@@ -228,7 +228,14 @@ def test_lomustine_solubility_input_validation_and_precedence() -> None:
 @pytest.mark.integration
 @pytest.mark.slow
 def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
-    """Execute the printed code and check batch and hybrid physical invariants."""
+    """Execute the printed code and check batch and hybrid physical invariants.
+
+    Notes
+    -----
+    The hybrid MSMPR has a finite coolant flow and no temperature control. Its
+    slurry warms above the coolant inlet temperature; its productivity baseline
+    therefore covers a different thermal history from the controlled batch case.
+    """
     pytest.importorskip("assimulo")
 
     original_directory = Path.cwd()
@@ -374,6 +381,19 @@ def test_lomustine_guide_runs_batch_and_hybrid_flowsheets() -> None:
             unit_hydraulic_tau, rel=roundoff_rtol, abs=0.0
         )  # [s]
         assert unit_hydraulic_tau == pytest.approx(748.9310, rel=solver_rtol)  # [s]
+
+        # make_units.py add_crystallizer supplies 1 kg/s coolant independently
+        # of the evaporator utility; the energy balance evolves the slurry temperature.
+        assert sim_hybrid.CR01.Utility.mass_flow == pytest.approx(
+            namespace["coolant_flow_cr01_hybrid"], rel=roundoff_rtol, abs=0.0
+        )  # [kg/s]
+        hybrid_cryst_temps = np.asarray(sim_hybrid.CR01.result.temp)  # [K]
+        assert hybrid_cryst_temps[0] == pytest.approx(
+            namespace["coolant_temp_cr01_hybrid"], rel=roundoff_rtol, abs=0.0
+        )
+        # Same combo "1" regression trajectory as the productivity/size baselines;
+        # solver_rtol allows integration error in the two-decimal temperature [K].
+        assert hybrid_cryst_temps[-1] == pytest.approx(271.14, rel=solver_rtol)  # [K]
 
         hybrid_held_solids = sim_hybrid.HOLD01.Solid_1.mass  # [kg]
         hybrid_cake_mass = sim_hybrid.F01.result.mass_cake_dry[-1]  # [kg]
