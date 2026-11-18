@@ -26,6 +26,10 @@ tables are read back through a layout like any other file.
 | `fit_solubility.py` | Fits that curve to a described dataset: `python -m examples.pat.fit_solubility "<dataset folder>"`. Each spectrum taken on a heating ramp while solid is still present gives one point. The `solubility` block of the description gives the time window and the solid signal with its threshold. Run it after `calibrate_band.py`. The points are a lower bound of the solubility, because dissolution lags the heating. |
 | `dataset.py` | Reads a dataset description and its reduced tables. A dataset folder holds `runs.json`, one `reduced_<kind>.layout.json` per kind of table, and `reduced/<run>_<kind>.csv`. The description names the solute and the solvent and gives their charged masses. |
 
+The model side of these signals is in the package: `PharmaPy.SlurryMeasurements`
+predicts the dissolved solute per solvent, the solute in the solid and a
+particle-count signal from a crystallizer result.
+
 A new dataset needs a layout description per text-file kind and a dataset
 description; `caffeine/` is the first example. Someone, or an assistant, writes the
 layout once by looking at the file; from then on reading is deterministic.

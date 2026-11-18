@@ -8,4 +8,5 @@ Documentation
    kinetics.rst
    phases.rst
    records.rst
+   slurry_measurements.rst
 

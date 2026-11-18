@@ -249,8 +249,15 @@ equations wrap `paramest_wrapper` from outside.
 | [#537](https://github.com/PharmaPy-org/PharmaPy/issues/537) | A grid at the charge time only is refused | The first sample is after the seeding time |
 
 The legacy volume equation carries a note that it is not consistent with
-`mu_3`. The conservation check of #358 on the public solver path will measure
-it for this case. The list is extended there if the check finds more.
+`mu_3`. On a synthetic seeded cooling case
+(`tests/test_slurry_measurements_models.py`) the legacy unit conserves the solute
+to 2e-7 of the charge, but its liquid volume ends 0.6 % below the volume that
+its own ideal-mixing density gives for the same contents. The predictions then
+differ from the refactored `BatchCrystallizer` by up to 1 %. This is a known
+limitation, not a new defect: the legacy crystallizers treat the liquid
+density as constant, and the refactored ones do not. The conservation
+check of #358 will repeat this on the caffeine case. The list is extended
+there if the check finds more.
 
 ## 9. Open inputs
 
