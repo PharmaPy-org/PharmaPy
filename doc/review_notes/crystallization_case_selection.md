@@ -56,7 +56,7 @@ temperature may not be the liquid temperature.
 
 | Property | Value | Source |
 | --- | --- | --- |
-| Caffeine molar mass | 194.194 g/mol | C8H10N4O2, standard atomic weights |
+| Caffeine molar mass | 194.19 g/mol | NIST Chemistry WebBook |
 | Solid that crystallizes | Caffeine hydrate, needle shaped | Nagy et al. (2007): anhydrous caffeine added to water converts to hydrate needles 5 to 12 minutes after the addition, depending on agitation. `high_seed_slow_cool` records the same event at 20 C: within a quarter of an hour of the addition the fine FBRM counts rise eightfold and the IR band falls from 0.15 to 0.097. To be confirmed with the Raman spectra. |
 | Hydrate unit cell | a = 14.8(1), b = 16.7(1), c = 3.97(3) angstrom, beta = 97(5) degrees, Z = 4, volume 973.9 cubic angstrom | Sutor (1958), from Crystallography Open Database entry 5000108 |
 | Caffeine per crystal volume, `rho_c` | 1324 kg caffeine per m3 of hydrate crystal, about +/- 21 | Derived: Z caffeine molecules per cell volume. The cell uncertainties give 1.6 %. |
@@ -66,8 +66,22 @@ The model solid is counted as caffeine, not as hydrate. `rho_c` is the mass of
 caffeine in a unit volume of hydrate crystal, so `rho_c * k_v * mu_3` is the
 crystallized caffeine mass whatever the water content of the hydrate.
 
-Property data for caffeine in the liquid phase are not in the repository
-database. They will be added with sources when the simulation is built.
+The property database of the case is
+[`compounds.json`](../../examples/pat/caffeine/compounds.json); each entry
+states its sources. It holds only what the two crystallizers use here:
+
+| Property | Value | Source and limit |
+| --- | --- | --- |
+| Water density | 996.6 kg/m3 | NIST fluid properties at 300 K and 1 atm; 998.8 to 989.4 between 290 and 320 K. The models take it as constant. |
+| Water heat capacity | 75.3 J/mol/K | Same NIST table |
+| Dissolved caffeine, as a liquid density | 1344 kg/m3 | Molar mass over the limiting apparent molar volume in water, 144.45 cm3/mol at 303.15 K (Vraneš et al. 2022); 1359 to 1331 between 293 and 313 K |
+| Caffeine solid heat capacity | 232 J/mol/K | Bothe and Cammenga (1979) through NIST, anhydrous caffeine at 298 K. Cesàro and Starec (1980) give 173. |
+| Dissolved caffeine heat capacity | 232 J/mol/K | Assumption: equal to the solid. No measurement was found. |
+| Water vapor pressure | Antoine constants | NIST, from Stull (1947), 256 to 373 K |
+
+The heat capacities enter only the heat duty that the legacy unit reports. The
+vapor pressure is never evaluated; the refactored liquid phase requires it to
+exist when it is built.
 
 ## 4. Solubility
 
@@ -95,6 +109,7 @@ constants are in
 | Lab curve, runs share the calibration slope | 1.85 | 2.34 | 3.98 | 4.51 | outside the fit | 41.1 C |
 | Lab curve, runs share the water baseline | 1.74 | 2.23 | 3.94 | 4.52 | outside the fit | 41.0 C |
 | Nagy et al. (2007), van't Hoff fit | 1.45 (extrapolated) | 1.92 (extrapolated) | 3.63 | 4.23 | 5.41 | 42.2 C |
+| Vraneš et al. (2022), Table 1 | 1.63 | 2.07 | 3.82 (interpolated) | 4.39 | not measured | about 41.6 C (extrapolated) |
 | Shalmashi and Golmohammad (2010), Table 1 | not measured | 2.27 | | 4.73 | 8.6 | 40 C |
 | Zhong et al. (2017), Apelblat fit | 1.53 | 1.78 | 2.55 | 2.78 | 3.22 | about 58 C |
 
@@ -107,11 +122,18 @@ Values are in g caffeine per 100 g water. The Nagy et al. fit is
   2 K. Either can serve as the cross-check between 33 and 45 C.
 - Zhong et al. is not used: with their curve the load could not dissolve at
   45 C, and the runs show that it does.
-- No source measured 20 C with the hydrate characterized. The 20 C solubility
-  therefore rests on the lab data and carries the calibration uncertainty:
+- Vraneš et al. measured 20 to 40 C by weighing the residue of filtered
+  saturated solutions, five repeats per temperature, with a stated uncertainty
+  of 0.001 in mass fraction (about 0.1 g per 100 g water). They did not
+  characterize the solid.
+- No source measured 20 C with the hydrate characterized. From the lab data,
   item 2 gives 1.6 to 2.0 g per 100 g water (section 7).
-- The lab curve lies between the two literature sources: within about 3 % of
-  Shalmashi and Golmohammad at 25 C, and 7 % above Nagy et al. at 40 C.
+- Near 40 C the lab curve agrees with Vraneš et al. within 3 % and lies
+  between Nagy et al. and Shalmashi and Golmohammad.
+- Between 20 and 30 C the lab curve is 13 to 16 % above Vraneš et al. The lab
+  points should be a lower bound, so the likely cause is the IR calibration,
+  whose temperature term is measured at 37 and 45 C only. The fit of #359
+  must be repeated with the Vraneš et al. values to show what this changes.
 - The three runs scatter 4.5 % about the pooled curve when they share the
   calibration slope and 7.8 % when they share the water baseline. The
   solubility is one physical curve, so this favors a shifted baseline as the
@@ -134,7 +156,7 @@ caffeine and water [kg/m**3], and liquid volume [m**3].
 | The solid is counted as caffeine. Water taken up by the hydrate is neglected. | At most 1.06 g of water for the full theoretical yield, 0.3 % of the solvent (one water per caffeine, the cell formula). |
 | The model starts at the seeding spike: all caffeine of the load dissolved, solid equal to the seed mass. | In the runs used, FBRM counts stay at the background level from the clear point to the seeding spike. The seed was slurried in liquid taken from the vessel, which is supersaturated and cools, so the returned seed may exceed the weighed mass. |
 | The seed mass is counted as caffeine. | The lab believes the seed was as-received caffeine, which is not recorded. Nagy et al. (2007) indicate that such a seed turns into hydrate within minutes of meeting the liquid. If it was weighed as hydrate instead, its caffeine content is up to 8.5 % lower. |
-| The seed is one size, `L_seed`. | No seed size was measured. `L_seed` is scanned over a range bounded by the chords measured during the seeding spike, not estimated. |
+| The seed is one size, `L_seed`. | No seed size was measured. The nominal `L_seed` is 31.6 um, the geometric mean of 10 and 100 um, the chord band that holds about two thirds of the FBRM counts at the seeding spike. It is scanned between 10 and 150 um, not estimated. |
 | Well mixed, no agglomeration, no breakage, size-independent growth. | Counts fall and chords grow for hours at 20 C after the crystallization. The fit window ends before that drift. |
 
 ## 6. Kinetics and parameters to estimate
@@ -247,6 +269,7 @@ equations wrap `paramest_wrapper` from outside.
 | [#535](https://github.com/PharmaPy-org/PharmaPy/issues/535) | A masked fit cannot be recorded with a partial name list | The record names all 13 kinetic parameters |
 | [#494](https://github.com/PharmaPy-org/PharmaPy/issues/494) | `param_wrapper` fails with the finite-volume method | Moments only, and no `param_wrapper` |
 | [#537](https://github.com/PharmaPy-org/PharmaPy/issues/537) | A grid at the charge time only is refused | The first sample is after the seeding time |
+| No issue | In CVode's default output mode the legacy unit leaves out requested times inside its last internal step: 3 of 329 spectrum times on this case | Solve with `report_continuously`, and check that every requested time came back |
 
 The legacy volume equation carries a note that it is not consistent with
 `mu_3`. On a synthetic seeded cooling case
@@ -255,9 +278,25 @@ to 2e-7 of the charge, but its liquid volume ends 0.6 % below the volume that
 its own ideal-mixing density gives for the same contents. The predictions then
 differ from the refactored `BatchCrystallizer` by up to 1 %. This is a known
 limitation, not a new defect: the legacy crystallizers treat the liquid
-density as constant, and the refactored ones do not. The conservation
-check of #358 will repeat this on the caffeine case. The list is extended
-there if the check finds more.
+density as constant, and the refactored ones do not.
+
+The caffeine case runs on both units through
+[`batch_cooling.py`](../../examples/pat/batch_cooling.py), with the starting
+kinetics of the dataset description, which are not fitted values. Checked on
+`high_seed_slow_cool` at 52 spectrum times
+(`tests/test_pat_batch_cooling_models.py`):
+
+- One row per requested time, also for all 3422 FBRM sample times.
+- The solute in the vessel drifts by 4e-8 of the charge on the legacy unit
+  and 3e-7 on the refactored one.
+- The predictions of the two units agree within 0.9 %. The refactored unit
+  ends at saturation; the legacy unit ends 0.7 % below it, the effect of its
+  constant liquid density on this case.
+- Doubling the growth constant lowers the dissolved caffeine during the
+  desupersaturation by 9 %, a hundredfold nucleation constant gives 8.5
+  times the crystals, and repeating the first parameters gives the first
+  result bit for bit.
+- One simulation of the run takes a few seconds on either unit.
 
 ## 9. Open inputs
 
@@ -288,6 +327,16 @@ there if the check finds more.
   crystal structure of caffeine. Acta Crystallographica 11, 453-458.
   doi:10.1107/S0365110X58001286. Cell read from Crystallography Open Database
   entry 5000108.
+- NIST Chemistry WebBook, SRD 69. Caffeine (CAS 58-08-2): molar mass and
+  solid heat capacities of Bothe and Cammenga (1979, J. Therm. Anal. 16, 267)
+  and Cesàro and Starec (1980, J. Phys. Chem. 84, 1345). Water (CAS
+  7732-18-5): fluid properties at 0.101325 MPa, and Antoine constants from
+  the data of Stull (1947, Ind. Eng. Chem. 39, 517).
+- Vraneš, M., Borović, T. T., Drid, P., Trivić, T., Tomaš, R. and Janković, N.
+  (2022). Influence of sodium salicylate on self-aggregation and caffeine
+  solubility in water: a new hypothesis from experimental and computational
+  data. Pharmaceutics 14, 2304. doi:10.3390/pharmaceutics14112304. Table 1
+  (solubility in water) and Tables 3 and 5 (volume of dissolved caffeine).
 - Zhong, J. et al. (2017). Journal of Chemical and Engineering Data,
   supporting information, Table S6. Read and not used.
 - Bothe, H. and Cammenga, H. K. (1980). Composition, properties, stability and

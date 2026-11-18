@@ -52,10 +52,33 @@
     "minimum_solid_signal": 100.0,
     "basis": "Window on the run clock: from the 20 C hold, once the hydrate has formed, through the heating ramp to 45 C. A spectrum counts as taken with solid present while the total FBRM counts are at least 100, the limit used for the clear point; the clear solution reads below 60 counts. Dissolution lags the heating of about 0.5 C/min, so the points are a lower bound of the solubility."
   },
+  "properties": {
+    "file": "compounds.json",
+    "basis": "Property database of caffeine and water for the crystallizer models. Each species entry states the source of every value."
+  },
+  "solid": {
+    "solute_density_kg_m3": 1324.4,
+    "volume_shape_factor": 0.5235987755982988,
+    "basis": "The solid is counted as caffeine: the density is the caffeine in a unit volume of hydrate crystal (rho_solid of compounds.json). The shape factor is pi/6 exactly, because the characteristic length is defined as the diameter of the sphere with the volume of the crystal. Sizes of the model are therefore volume-equivalent diameters, not needle lengths."
+  },
+  "simulation": {
+    "temperature_table": "temperature",
+    "temperature_column": "external_temperature",
+    "seed_size_um": 31.6,
+    "seed_size_basis": "Assumption; no seed size was measured. The seed is taken as crystals of one size, the geometric mean of 10 and 100 um, the chord band that holds about two thirds of the FBRM counts at the seeding spike (625 of 963, 225 of 346, 363 of 501 and 628 of 944 in the four runs). To be scanned between 10 and 150 um when the kinetics are fitted.",
+    "kinetics_starting_values": {
+      "growth": [0.05, 0.0, 1.0],
+      "secondary_nucleation": [1e10, 0.0, 2.0, 1.0],
+      "basis": "Starting values for a fit, not results. Growth: rate constant [um/s], activation energy [J/mol], order [-]. Secondary nucleation: rate constant [#/m3/s], activation energy [J/mol], order in supersaturation [-], order in solid volume fraction [-]. Of twelve order-of-magnitude combinations tried on high_seed_slow_cool, this one gave the time scale of the measured desupersaturation (root-mean-square difference 0.0023 kg/kg in the dissolved caffeine per water). The activation energies are zero and the last order is one by the choices of the case-selection note."
+    },
+    "basis": "The model starts at the seeding time of each run, with the measured external temperature as a prescribed control."
+  },
+  "seeding_basis": "seeding_time_s of each run is the time on the run clock of the FBRM sample with the most counts during the hold at 37 C: the spike of the seed addition. No process note records the addition.",
   "clock_basis": "The temperature log has relative time only. Its start relative to the first FBRM sample interval is estimated from file modification times; treat it as good to about one minute. FBRM stamps are local time of the acquisition computer; IR and Raman stamps are UTC.",
   "runs": [
     {
       "id": "high_seed_slow_cool",
+      "seeding_time_s": 8762.0,
       "folder": "20261023 Caffeine JLR High Seed Slow Cool",
       "seed_percent_of_yield": 5.0,
       "seed_mass_g": 0.5713,
@@ -66,6 +89,7 @@
     },
     {
       "id": "low_seed_slow_cool",
+      "seeding_time_s": 8743.0,
       "folder": "20261024 Caffeine JLR Low Seed Slow Cool",
       "seed_percent_of_yield": 1.0,
       "seed_mass_g": 0.1143,
@@ -76,6 +100,7 @@
     },
     {
       "id": "low_seed_fast_cool",
+      "seeding_time_s": 8697.0,
       "folder": "20261025 Caffeine JLR Low Seed Fast Cool",
       "seed_percent_of_yield": 1.0,
       "seed_mass_g": 0.1143,
@@ -86,6 +111,7 @@
     },
     {
       "id": "high_seed_fast_cool",
+      "seeding_time_s": 8619.0,
       "folder": "20261108 Caffeine JLR High Seed Fast Cool",
       "seed_percent_of_yield": 5.0,
       "seed_mass_g": 0.5713,

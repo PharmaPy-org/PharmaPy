@@ -14,6 +14,7 @@ in the repository; the reduced tables are.
 | `reduced_*.layout.json` | Layouts of the three reduced tables, for `table_layout.read_table`. |
 | `band_calibration.json` | Plateau band heights and IR calibration constants of the three usable runs, under two treatments of the difference between runs. Written by the general workflow: `python -m examples.pat.calibrate_band examples/pat/caffeine`. |
 | `solubility.json` | Solubility curve of caffeine in water between 19.6 and 41 C from the heating ramps of the three usable runs, per run and pooled, under both calibration treatments. Written by `python -m examples.pat.fit_solubility examples/pat/caffeine`. |
+| `compounds.json` | Property database of caffeine and water for the crystallizer models. Each entry states the source of every value. |
 | `plot_runs.py` | Draws one quality figure per run from the reduced tables: `python -m examples.pat.caffeine.plot_runs "<output folder>"`. The figures are not kept in the repository. |
 
 Time in every reduced table is the run clock [s]: zero when the temperature program
@@ -22,6 +23,11 @@ the thermostat log `expttsd1.csv` and the setpoint program `cmp1.1.csv`. To rebu
 the tables, run from the repository root:
 
     python -m examples.pat.caffeine.reduce_runs "<folder that holds the four run folders>"
+
+To simulate a run from its seeding time on either batch crystallizer, with the
+starting kinetics of `runs.json` (they are not fitted values):
+
+    python -m examples.pat.batch_cooling examples/pat/caffeine high_seed_slow_cool legacy
 
 ## What the reduced tables show
 

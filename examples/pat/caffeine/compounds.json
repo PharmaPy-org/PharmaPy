@@ -1,0 +1,17 @@
+{
+  "caffeine": {
+    "mw": 194.19,
+    "rho_solid": 1324.4,
+    "rho_liq": 1344.3,
+    "cp_solid": [232.0],
+    "cp_liq": [232.0],
+    "source": "mw [g/mol]: NIST Chemistry WebBook, caffeine, CAS 58-08-2 (194.1906). rho_solid [kg caffeine per m3 of hydrate crystal]: four caffeine molecules per unit cell of caffeine hydrate, cell volume 973.9 cubic angstrom (Sutor 1958, Acta Crystallographica 11, 453; Crystallography Open Database entry 5000108); the cell uncertainties give +/- 1.6 %; it is the caffeine content of the crystal, not the crystal density, so the model solid is counted as caffeine. rho_liq [kg/m3]: molar mass over the limiting apparent molar volume of caffeine in water, 144.45 cm3/mol at 303.15 K, which is the value in 0.1 mol/kg sodium salicylate solution (133.62, Table 3) minus the transfer volume from water (-10.83, Table 5) of Vranes et al. 2022, Pharmaceutics 14, 2304; between 293.15 and 313.15 K the same tables give 142.93 to 145.91 cm3/mol, 1359 to 1331 kg/m3; PharmaPy mixes pure-species liquid densities ideally and takes them as independent of temperature. cp_solid [J/mol/K]: anhydrous caffeine at 298.15 K, Bothe and Cammenga 1979, J. Therm. Anal. 16, 267, as listed in the NIST Chemistry WebBook; Cesaro and Starec 1980, J. Phys. Chem. 84, 1345, give 173.2 J/mol/K at 298 K by extrapolation; no value for the hydrate was found; used only for the heat duty that the legacy crystallizer reports. cp_liq [J/mol/K]: assumption, set equal to cp_solid; no measurement of the heat capacity of dissolved caffeine was found; used only for the heat duty that the legacy crystallizer reports."
+  },
+  "water": {
+    "mw": 18.015,
+    "rho_liq": 996.6,
+    "cp_liq": [75.3],
+    "p_vap": [9.6543, 1435.264, -64.848],
+    "source": "mw [g/mol]: NIST Chemistry WebBook, water, CAS 7732-18-5 (18.0153). rho_liq [kg/m3]: NIST Chemistry WebBook, thermophysical properties of fluid systems, liquid water at 300 K and 0.101325 MPa (996.557); it is 998.8 at 290 K and 989.4 at 320 K; PharmaPy takes it as independent of temperature. cp_liq [J/mol/K]: same NIST table, 75.32 at 300 K, between 75.42 at 290 K and 75.29 at 310 K. p_vap, log10(p / Pa) = A - B / (T + C) with T in K: NIST Chemistry WebBook Antoine parameters from the data of Stull 1947, Ind. Eng. Chem. 39, 517, valid from 255.9 to 373 K (A = 4.6543 for p in bar, plus 5 for Pa exactly); the refactored liquid phase requires vapor-pressure data to exist when it is built, and the crystallizer models do not evaluate it."
+  }
+}
