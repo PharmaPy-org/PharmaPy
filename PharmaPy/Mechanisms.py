@@ -8,7 +8,10 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   TransferResult,StateEvent
 )
 from PharmaPy.Phases_Refactored import BasePhase
-from PharmaPy.Errors import PharmaPyNonImplementedError
+from PharmaPy.Errors import (PharmaPyNonImplementedError, PharmaPySpecificationError,
+                             PharmaPyTypeError, PharmaPyValueError)
+from PharmaPy.CrystallizationKernels import KernelConditions
+from PharmaPy.MomentInversion import invert_moments
 from time import perf_counter
 
 eps = np.finfo(float).eps
@@ -16,6 +19,26 @@ eps = np.finfo(float).eps
 # Reaction rates are in kmol/(m**3 s), i.e. mol/(L s), and reaction enthalpies
 # in J/mol, so a rate times an enthalpy needs this exact factor to give W/m**3.
 MOL_PER_KMOL = 1e3  # [mol/kmol]
+
+
+def growth_size_factor(sizes, growth_params):
+    """Size factor of the growth rate, G(L) = G0 * (1 + beta*L)**alpha.
+
+    Parameters
+    ----------
+    sizes : float or numpy.ndarray
+        Crystal sizes L [um].
+    growth_params : array-like
+        Growth parameters of ``CrystKinetics``; entries 3 and 4 are alpha
+        [-] and beta [1/um].
+
+    Returns
+    -------
+    float or numpy.ndarray
+        ``(1 + beta*L)**alpha`` [-], shaped like ``sizes``.
+    """
+    alpha, beta = np.asarray(growth_params, dtype=float)[3:5]  # [-], [1/um]
+    return (1 + beta * np.asarray(sizes, dtype=float)) ** alpha
 
 class Mechanism:
     """
@@ -1664,9 +1687,8 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
             if (getattr(self, '_growth_size_params', None) != key
                     or getattr(self, '_growth_size_factor', None) is None):
                 self._growth_size_params = key
-                self._growth_size_factor = (
-                    (1.0 + beta * self.x_grid) ** alpha
-                )  # [-]
+                self._growth_size_factor = growth_size_factor(
+                    self.x_grid, gparams)  # [-]
         else:
             self._growth_size_params = None
             self._growth_size_factor = None
@@ -1675,6 +1697,16 @@ class OneDFVMMechanism(PopulationBalanceMechanism):
 
     @PopulationBalanceMechanism.mechanism_kinetics.setter
     def mechanism_kinetics(self,value):
+        """Attach crystallization kinetics and tabulate the growth size factor.
+
+        Parameters
+        ----------
+        value : CrystKinetics or None
+            Kinetics to attach; None leaves the current ones. A growth law
+            past three entries has the size factor of
+            ``growth_size_factor``, cached on ``x_grid`` by
+            ``_update_growth_size_factor``.
+        """
         if value is not None:
             self._bind_kinetics_target(value)
             self._mechanism_kinetics = value
@@ -1940,6 +1972,14 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
     mass basis, so the mass-basis path here is unproven.
     """
 
+    # Secondary nucleation scaling as (kv*mu_3)**s_2 with s_2 below this
+    # switches on and off at mu_3 = 0, and with nuclei born at zero size the
+    # crystal count then follows the integrator's step pattern (#529). This is
+    # what the case-study crystallizer showed over CVode step caps of 0.5 to
+    # 30 s, not a general bound: up to 17-25 % for s_2 <= 0.01, at most
+    # 0.001 % for s_2 >= 0.1 (29 Oct 2026).
+    SWITCH_LIKE_SECONDARY_ORDER = 0.1  # [-]
+
     def __init__(
         self,
         owning_phase,
@@ -1990,6 +2030,12 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         PharmaPyNonImplementedError
             If ``kinetics`` has size-dependent growth.
 
+        Warns
+        -----
+        RuntimeWarning
+            If ``kinetics`` can make the crystal count follow the integrator's
+            step pattern; see ``_warn_if_onset_follows_steps``.
+
         Notes
         -----
         Unlike ``OneDFVMMechanism``, the moments declare no tolerance of
@@ -2019,6 +2065,10 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         # rad is the nucleus size. It lived on the old unit operation as
         # rad_zero (default 0), never on the phase, so it must be supplied.
         self.rad = rad
+
+        if kinetics is not None:
+            self._warn_if_onset_follows_steps(kinetics)
+
         self._reject_scale(scale)
         self.scale = 1
 
@@ -2059,11 +2109,18 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         ------
         PharmaPyNonImplementedError
             If ``value`` has size-dependent growth.
+
+        Warns
+        -----
+        RuntimeWarning
+            If ``value`` can make the crystal count follow the integrator's
+            step pattern; see ``_warn_if_onset_follows_steps``.
         """
         if value is not None:
             self._reject_size_dependent_growth(value)
             self._bind_kinetics_target(value)
             self._mechanism_kinetics = value
+            self._warn_if_onset_follows_steps(value)
 
     @staticmethod
     def _reject_size_dependent_growth(kinetics):
@@ -2102,9 +2159,67 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
             raise PharmaPyNonImplementedError(
                 'MomentsPopulationBalance cannot carry size-dependent growth '
                 '(alpha, beta = %s): the moment equations close only for a '
-                'size-independent growth rate. Use OneDFVMMechanism for '
-                'size-dependent growth, or give growth only its first three '
-                'parameters.' % size_factor.tolist())
+                'size-independent growth rate. Use QMOMPopulationBalance or '
+                'OneDFVMMechanism for size-dependent growth, or give growth '
+                'only its first three parameters.' % size_factor.tolist())
+
+    def _warn_if_onset_follows_steps(self, kinetics):
+        """Warn when the crystal count can follow the integrator's steps.
+
+        Parameters
+        ----------
+        kinetics : CrystKinetics
+            Kinetics being attached.
+
+        Warns
+        -----
+        RuntimeWarning
+            If nuclei are born at zero size (``rad`` = 0) and built-in
+            secondary nucleation is active with an order ``s_2`` [-] on the
+            crystal moment below ``SWITCH_LIKE_SECONDARY_ORDER``.
+
+        Notes
+        -----
+        The factor ``(kv*max(0, mu_k))**s_2`` is then close to one for any
+        positive moment and zero otherwise. Just after onset the moment grows
+        from zero, far below the integrator's absolute tolerance, so
+        integration error decides when secondary nucleation is on (#529).
+        Nuclei of finite size made CVode fail outright at larger step caps
+        instead, which is not silent, so they do not warn. Secondary
+        nucleation counts as inactive with a zero prefactor or the default
+        parameters, as in ``CrystKinetics.get_kinetics``.
+        """
+        if self.rad != 0 or 'nucl_sec' in getattr(kinetics, 'custom_mechanisms', {}):
+            return
+
+        params = np.atleast_1d(np.asarray(
+            getattr(kinetics, 'params', {}).get('nucl_sec', ()), dtype=float))
+        if params.size < 4:
+            return
+
+        reformulated = getattr(kinetics, 'reformulate_kin', False)
+        default = np.zeros_like(params)
+        if reformulated:
+            default[0] = np.log(eps)  # log of a zero prefactor, as CrystKinetics stores it
+        if np.allclose(params, default) or (not reformulated and params[0] == 0):
+            return
+
+        order = params[3]  # s_2 [-]
+        if order < self.SWITCH_LIKE_SECONDARY_ORDER:
+            warnings.warn(
+                'Secondary nucleation scales as (kv*mu_%d)**s_2 with s_2 = %g, '
+                'below %g, so it switches on and off at mu_%d = 0. With nuclei '
+                'born at zero size (rad = 0), the crystal count of this moment '
+                'form can then follow the integrator\'s step pattern at '
+                'nucleation onset, by up to 25 %% on the case study (PharmaPy '
+                'issue #529). Prefer OneDFVMMechanism, or check the result '
+                'against a solve with another step cap.'
+                % (getattr(kinetics, 'mu_sec_nucl', 3), order,
+                   self.SWITCH_LIKE_SECONDARY_ORDER,
+                   getattr(kinetics, 'mu_sec_nucl', 3)),
+                RuntimeWarning,
+                stacklevel=3,
+            )
 
     # ---------------- legacy conversion ----------------
 
@@ -2280,6 +2395,33 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
     # so only the volume fraction differs, mu_3 being available directly
     # rather than needing to be integrated.
 
+    def _validate_inlet_state(self, value):
+        """Accept a feed only if it carries this vessel's number of moments.
+
+        Parameters
+        ----------
+        value : numpy.ndarray
+            Feed moments [um**k/m3 of feed slurry].
+
+        Returns
+        -------
+        numpy.ndarray
+            ``value``, unchanged.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If ``value`` does not have shape ``(num_mom,)``.
+        """
+        if value.shape != (self.num_mom,):
+            raise PharmaPyValueError(
+                'A feed carrying %d moments cannot enter this vessel, which '
+                'carries %d; the missing moments cannot be recovered. Give '
+                'both units the same number of moments.'
+                % (value.size, self.num_mom))
+
+        return value
+
     def solid_volume_fraction(self, value):
         """Solid volume per m3 of slurry, from the third moment."""
         moments = np.atleast_1d(np.asarray(value, dtype=float))
@@ -2289,6 +2431,25 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
 
         return float(self.kv * moments[3] * self.VOLUME_UNIT_FACTOR)
 
+    def _growth_integrals(self, moments, orders):
+        """Integrals of L**k * G(L)/G0 * n(L) over size, for the growth terms.
+
+        Parameters
+        ----------
+        moments : numpy.ndarray
+            Moments mu_0..mu_{n-1} [um**k/m3 slurry], shape ``(num_mom,)``.
+        orders : numpy.ndarray of int
+            Orders k wanted, each below ``num_mom``.
+
+        Returns
+        -------
+        numpy.ndarray
+            The integrals [um**k/m3 slurry], shaped like ``orders``. Growth
+            is size independent here, G(L) = G0, so they are the moments
+            mu_k themselves.
+        """
+        return moments[orders]
+
     def solve_population_balance(
         self,
         liquid,
@@ -2297,7 +2458,42 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         time,
         connection,
     ):
+        """Moment rates and the solute transfer of crystallization.
 
+        Parameters
+        ----------
+        liquid : BasePhase
+            Liquid the crystals are suspended in.
+        solid : BasePhase
+            Solid phase owning the moments.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+        time : float
+            Time [s].
+        connection : PhaseConnection
+            Connection the transfer runs along.
+
+        Returns
+        -------
+        TransferResult
+            d(mu_k)/dt [um**k/(m3 slurry s)] of the kinetics alone, the
+            liquid species rates [kg/s], the crystal mass rate [kg/s] and
+            the slurry volume rate [m**3/s] of the transfer.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If ``set_params`` has made the attached growth law size
+            dependent since it was attached.
+
+        Notes
+        -----
+        dmu_0/dt = B and, for k >= 1,
+        dmu_k/dt = k (G0 I_(k-1) + D mu_(k-1)) + B rad**k, with
+        I_k = integral of L**k G(L)/G0 n(L) dL from ``_growth_integrals``
+        and the dissolution rate D size independent. The crystal mass rate
+        is rho kv (3 (G0 I_2 + D mu_2) + B rad**3) per m**3 of slurry.
+        """
         self._reject_size_dependent_growth(self.mechanism_kinetics)
 
         statekey = StateKey(self.moments_state_name, self.owning_phase_ref)
@@ -2321,8 +2517,13 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
 
         ind_mom = np.arange(1, len(mu))
 
+        # Orders 0..n-2 for the moment rates and 2 for the mass transfer.
+        orders = np.arange(max(len(mu_true) - 1, 3))
+        growth_integrals = self._growth_integrals(mu_true, orders)  # [um**k/m3]
+
         dmu_zero_dt = np.atleast_1d(nucl)
-        dmu_1on_dt = (ind_mom * (growth + dissol) * mu[:-1]
+        dmu_1on_dt = (ind_mom * (growth * growth_integrals[:len(mu) - 1]
+                                 + dissol * mu_true[:-1])
                       + nucl * self.rad ** ind_mom)
 
         dmu_dt = np.concatenate((dmu_zero_dt, dmu_1on_dt))
@@ -2332,7 +2533,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         # and the unscaled nucleation rate, not the conditioned state.
         mass_transfer = float(np.atleast_1d(
             self.density * self.kv
-            * (3 * (growth + dissol) * mu_true[2]
+            * (3 * (growth * growth_integrals[2] + dissol * mu_true[2])
                + nucl_intensive * self.rad ** 3)
         )[0]) * (1e-6) ** 3 * vol_slurry
 
@@ -2361,3 +2562,781 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         return TransferResult(state_rates=state_rates, aux=aux,
                               net_mass_rate=mass_transfer,
                               net_vol_rate=vol_rate)
+
+
+class QMOMPopulationBalance(MomentsPopulationBalance):
+    """Quadrature method of moments (QMOM), for size-dependent growth.
+
+    Carries the same state as ``MomentsPopulationBalance``, the moments
+    mu_0..mu_{2N-1} per m**3 of slurry [um**k/m3], with the same feed,
+    outlet, dilution and legacy handling. Where the moment form needs a
+    size-independent growth rate, QMOM evaluates the growth integrals with
+    an N-node Gauss quadrature recovered from the moments at every
+    right-hand side (McGraw, 1997, Aerosol Sci. Technol. 27:255-265):
+
+        integral of L**k G(L) n(L) dL = G0 sum_i w_i L_i**k (1 + beta L_i)**alpha
+
+    with the size factor of ``OneDFVMMechanism`` (``growth_size_factor``).
+    The rule integrates polynomials of degree below 2N exactly, so linear
+    growth (alpha = 1) is exact; other alpha are approximated, the more
+    closely the more nodes. Growth without a size factor uses the moments
+    themselves and reduces exactly to ``MomentsPopulationBalance``.
+
+    The moment form's assumptions remain: dissolution is size independent
+    with no disappearance of crystals at L = 0, and nuclei are born at size
+    ``rad``. Agglomeration and breakage, when given their kernels, conserve
+    crystal volume; their terms come from ``QMOMKernelSources``.
+
+    A solve also reports ``quadrature_nodes`` [um] and ``quadrature_weights``
+    [#/m3 slurry], shape ``(N,)`` per time, NaN where the moments hold fewer
+    than N nodes, and the mean sizes ``L32`` = mu_3/mu_2 and, with N >= 3,
+    ``L43`` = mu_4/mu_3 [um], NaN without crystals.
+    """
+
+    # Crystals from a pre-refactor unit would arrive as a plain moment form or
+    # a distribution, without this vessel's model; Connection refuses them.
+    refuses_legacy_crystals = True
+
+    def __init__(
+        self,
+        owning_phase,
+        target_components,
+        solvent_name,
+        moments_init,
+        kinetics=None,
+        density=None,
+        kv=1,
+        rad=0.0,
+        scale=None,
+        moments_state_name='mu_n',
+        abs_tol=None,
+        agglomeration=None,
+        breakage=None,
+        fragments=None,
+    ):
+        """Population balance carried as 2N moments, closed by quadrature.
+
+        Parameters
+        ----------
+        owning_phase : BasePhase
+            Solid phase whose crystals the moments describe.
+        target_components : str or list of str
+            Species that crystallize.
+        solvent_name : str
+            Name of the solvent species.
+        moments_init : array-like
+            Initial moments mu_0..mu_{2N-1} [um**k/m3 slurry], shape
+            ``(2N,)`` with N >= 2 quadrature nodes.
+        kinetics : CrystKinetics, optional
+            Crystallization kinetics, usually set later through the vessel's
+            ``CrystKinetics`` property. Growth may be size dependent.
+        density : float, optional
+            Crystal density [kg/m3]. None uses the owning phase's density.
+        kv : float, optional
+            Volume shape factor [-]. Defaults to 1.
+        rad : float, optional
+            Nucleus size [um]. Defaults to 0.
+        scale : float, optional
+            Deprecated and ignored; see ``_reject_scale``.
+        moments_state_name : str, optional
+            Name of the moments state. Defaults to ``'mu_n'``.
+        abs_tol : float or array-like, optional
+            Absolute integration tolerance per moment [um**k/m3 slurry]. None,
+            the default, keeps the integrator's own tolerance.
+        agglomeration : callable, optional
+            Agglomeration kernel ``beta(L_i, L_j, conditions)`` [m**3/s], as
+            in ``PharmaPy.CrystallizationKernels``. None, the default, means
+            no agglomeration.
+        breakage : callable, optional
+            Selection function ``a(L, conditions)`` [1/s], the frequency at
+            which a crystal of size L breaks. None, the default, means no
+            breakage. Given with ``fragments``.
+        fragments : object, optional
+            Fragment distribution whose ``moments(parent_sizes, orders)``
+            gives the moments [um**k] of the fragments of one parent, as in
+            ``PharmaPy.CrystallizationKernels``. Given with ``breakage``.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If ``moments_init`` does not hold an even number of moments, at
+            least four: N nodes take 2N moments, and the crystal mass needs
+            mu_3. If only one of ``breakage`` and ``fragments`` is given. If
+            a kernel or selection function is infinite at zero size (its
+            ``needs_finite_nuclei`` is true) and ``rad`` is not positive.
+        PharmaPyTypeError
+            If ``agglomeration`` or ``breakage`` is neither None nor
+            callable, or ``fragments`` has no ``moments`` method.
+
+        Warns
+        -----
+        RuntimeWarning
+            As ``MomentsPopulationBalance``, if ``kinetics`` can make the
+            crystal count follow the integrator's step pattern (#529).
+        """
+        num_mom = np.size(moments_init)
+
+        if num_mom < 4 or num_mom % 2:
+            raise PharmaPyValueError(
+                'QMOMPopulationBalance needs an even number of moments, at '
+                'least four (N >= 2 nodes take mu_0..mu_{2N-1}), got %d.'
+                % num_mom)
+
+        if agglomeration is not None and not callable(agglomeration):
+            raise PharmaPyTypeError(
+                'agglomeration must be a kernel callable '
+                'beta(L_i, L_j, conditions), got %r.' % (agglomeration,))
+
+        if (breakage is None) != (fragments is None):
+            raise PharmaPyValueError(
+                'Breakage needs both a selection function (breakage) and a '
+                'fragment distribution (fragments); got only one of them.')
+
+        if breakage is not None and not callable(breakage):
+            raise PharmaPyTypeError(
+                'breakage must be a selection function a(L, conditions), '
+                'got %r.' % (breakage,))
+
+        if fragments is not None and not callable(getattr(fragments, 'moments', None)):
+            raise PharmaPyTypeError(
+                'fragments must have a moments(parent_sizes, orders) method, '
+                'got %r.' % (fragments,))
+
+        for rate_law in (agglomeration, breakage):
+            if getattr(rate_law, 'needs_finite_nuclei', False) and not rad > 0:
+                raise PharmaPyValueError(
+                    '%s is infinite at zero size, where nuclei born at rad = %r '
+                    'sit. Give the population balance a nucleus size rad > 0 [um].'
+                    % (type(rate_law).__name__, rad))
+
+        super().__init__(
+            owning_phase=owning_phase,
+            target_components=target_components,
+            solvent_name=solvent_name,
+            moments_init=moments_init,
+            kinetics=kinetics,
+            density=density,
+            kv=kv,
+            rad=rad,
+            scale=scale,
+            moments_state_name=moments_state_name,
+            abs_tol=abs_tol,
+        )
+
+        self.kernel_sources = (
+            QMOMKernelSources(self, agglomeration, breakage, fragments)
+            if agglomeration is not None or breakage is not None else None)
+
+        num_nodes = self.num_mom // 2
+        node_index = list(range(num_nodes))
+        self.output_states = list(self.output_states) + [
+            StateVariable(name='quadrature_nodes', dim=num_nodes, index=node_index,
+                          units='um', state_type='post',
+                          compute_value=self.compute_nodes_output),
+            StateVariable(name='quadrature_weights', dim=num_nodes, index=node_index,
+                          units='#/m**3', state_type='post',
+                          compute_value=self.compute_weights_output),
+            StateVariable(name='L32', dim=1, units='um', state_type='post',
+                          compute_value=self.compute_l32_output),
+        ]
+        # mu_4 is carried from three nodes on.
+        if self.num_mom > 4:
+            self.output_states.append(
+                StateVariable(name='L43', dim=1, units='um', state_type='post',
+                              compute_value=self.compute_l43_output))
+
+    def add_solver_state_variables(self, collection, overwrite=False,
+                                   phase_ref=None):
+        """Register the moments, and forget any earlier kernel registration.
+
+        Parameters
+        ----------
+        collection : StateCollection
+            The vessel's solver states.
+        overwrite : bool, optional
+            Passed on to the base class.
+        phase_ref : PhaseRef, optional
+            Phase owning the moments.
+
+        Notes
+        -----
+        The vessel registers phase and connection mechanisms before its
+        intraphase processes, so ``kernel_sources`` is marked attached again
+        only if it is still one of them.
+        """
+        if self.kernel_sources is not None:
+            self.kernel_sources.attached = False
+
+        super().add_solver_state_variables(collection, overwrite, phase_ref)
+
+    @staticmethod
+    def _reject_size_dependent_growth(kinetics):
+        """Accept any growth law: the quadrature carries the size factor.
+
+        Parameters
+        ----------
+        kinetics : CrystKinetics
+            Kinetics being attached.
+        """
+
+    def solve_population_balance(self, liquid, solid, completed_state, time,
+                                 connection):
+        """Moment rates of the transfer, once the kernel terms are wired.
+
+        Parameters
+        ----------
+        liquid, solid, completed_state, time, connection
+            As ``MomentsPopulationBalance.solve_population_balance``.
+
+        Returns
+        -------
+        TransferResult
+            As ``MomentsPopulationBalance.solve_population_balance``.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If this population balance has a kernel but its
+            ``kernel_sources`` is not an intra-phase process of the vessel,
+            which would leave agglomeration or breakage out without a word.
+        """
+        if self.kernel_sources is not None and not self.kernel_sources.attached:
+            raise PharmaPySpecificationError(
+                'This QMOMPopulationBalance has agglomeration or breakage '
+                'kernels, but its kernel_sources is not among the vessel\'s '
+                'intraphase_processes. Set CrystKinetics through the '
+                'crystallizer, or add IntraPhaseProcess(PhaseRef("solid", 0), '
+                'mechanism.kernel_sources) yourself.')
+
+        return super().solve_population_balance(liquid, solid, completed_state,
+                                                time, connection)
+
+    def _growth_integrals(self, moments, orders):
+        """Integrals of L**k * G(L)/G0 * n(L) over size, by quadrature.
+
+        Parameters
+        ----------
+        moments : numpy.ndarray
+            Moments mu_0..mu_{2N-1} [um**k/m3 slurry], shape ``(2N,)``.
+        orders : numpy.ndarray of int
+            Orders k wanted.
+
+        Returns
+        -------
+        numpy.ndarray
+            ``sum_i w_i L_i**k (1 + beta L_i)**alpha`` [um**k/m3 slurry],
+            shaped like ``orders``, over the N-node rule of
+            ``invert_moments``. Without a size factor, the moments mu_k.
+        """
+        kinetics = self.mechanism_kinetics
+        is_size_dependent = getattr(kinetics, 'has_size_dependent_growth',
+                                    None)
+
+        if is_size_dependent is None or not is_size_dependent():
+            return super()._growth_integrals(moments, orders)
+
+        rule = invert_moments(moments, self.num_mom // 2)  # [um], [#/m3]
+        size_factor = growth_size_factor(rule.nodes,
+                                         kinetics.params['growth'])  # [-]
+
+        return np.sum(rule.weights[:, None] * size_factor[:, None]
+                      * rule.nodes[:, None] ** orders, axis=0)
+
+    def _inlet_population_density(self, stream_phase):
+        """Feed moments per m3 of slurry, refusing any other feed population.
+
+        Parameters
+        ----------
+        stream_phase : BasePhase
+            Feed phase, whose population mechanism publishes the feed.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Feed moments [um**k/m3 of feed slurry], shape ``(2N,)``; None for
+            a feed without crystals.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If the feed carries its crystals as another state, such as a
+            resolved distribution, which the base class would skip, losing
+            those crystals without a word.
+        """
+        density = super()._inlet_population_density(stream_phase)
+
+        if density is None:
+            for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
+                state_name = getattr(mechanism, 'flow_state_name', None)
+
+                if state_name not in (None, self.flow_state_name):
+                    raise PharmaPySpecificationError(
+                        'A feed carrying its crystals as %r cannot enter this '
+                        'QMOMPopulationBalance, which takes moments as %r. '
+                        'Use a QMOM or moment-form unit upstream.'
+                        % (state_name, self.flow_state_name))
+
+        return density
+
+    def _moments_from(self, completed_state):
+        """Read the moments from a replay state.
+
+        Parameters
+        ----------
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Moments [um**k/m3 slurry], shape ``(2N,)``.
+        """
+        key = StateKey(self.moments_state_name, self.owning_phase_ref)
+        return np.asarray(completed_state[key], dtype=float)
+
+    def _padded_rule(self, completed_state):
+        """Quadrature of a replay state, padded to the output arrays' shape.
+
+        Parameters
+        ----------
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        nodes, weights : numpy.ndarray
+            Sizes [um] and weights [#/m3 slurry], shape ``(N,)``, ascending,
+            with NaN where the moments hold fewer than N nodes.
+        """
+        num_nodes = self.num_mom // 2
+        rule = invert_moments(self._moments_from(completed_state), num_nodes)
+        nodes = np.full(num_nodes, np.nan)
+        weights = np.full(num_nodes, np.nan)
+        nodes[:len(rule.nodes)] = rule.nodes
+        weights[:len(rule.weights)] = rule.weights
+        return nodes, weights
+
+    @staticmethod
+    def _mean_size(numerator, denominator):
+        """Moment-ratio mean size, undefined without crystals.
+
+        Parameters
+        ----------
+        numerator : float
+            Moment of order k+1 [um**(k+1)/m3 slurry].
+        denominator : float
+            Moment of order k [um**k/m3 slurry].
+
+        Returns
+        -------
+        numpy.ndarray
+            Their ratio [um], shape ``(1,)``; NaN unless ``denominator`` is
+            positive.
+        """
+        return np.array([numerator / denominator if denominator > 0 else np.nan])
+
+    def compute_nodes_output(self, state_var, time, completed_state, context,
+                             **kwargs):
+        """Quadrature sizes, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Sizes [um], shape ``(N,)``; see ``_padded_rule``.
+        """
+        return self._padded_rule(completed_state)[0]
+
+    def compute_weights_output(self, state_var, time, completed_state, context,
+                               **kwargs):
+        """Quadrature weights, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            Weights [#/m3 slurry], shape ``(N,)``; see ``_padded_rule``.
+        """
+        return self._padded_rule(completed_state)[1]
+
+    def compute_l32_output(self, state_var, time, completed_state, context,
+                           **kwargs):
+        """Mean size mu_3/mu_2, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            L3,2 [um], shape ``(1,)``; see ``_mean_size``.
+        """
+        moments = self._moments_from(completed_state)
+        return self._mean_size(moments[3], moments[2])
+
+    def compute_l43_output(self, state_var, time, completed_state, context,
+                           **kwargs):
+        """Mean size mu_4/mu_3, on the ``StateVariable.compute_value`` interface.
+
+        Parameters
+        ----------
+        state_var, time, context, **kwargs
+            Replay arguments, unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        numpy.ndarray
+            L4,3 [um], shape ``(1,)``; see ``_mean_size``.
+        """
+        moments = self._moments_from(completed_state)
+        return self._mean_size(moments[4], moments[3])
+
+
+def _agglomeration_moment_rates(nodes, weights, kernel_values, num_mom):
+    """Moment rates of volume-conserving agglomeration over a quadrature.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Quadrature sizes L_i [um], shape ``(n,)``.
+    weights : numpy.ndarray
+        Quadrature weights w_i [#/m3 slurry], shape ``(n,)``.
+    kernel_values : numpy.ndarray
+        beta(L_i, L_j) [m**3/s], shape ``(n, n)``.
+    num_mom : int
+        Number of moments.
+
+    Returns
+    -------
+    numpy.ndarray
+        d(mu_k)/dt [um**k/(m3 slurry s)], shape ``(num_mom,)``:
+        1/2 sum_ij w_i w_j beta_ij ((L_i**3 + L_j**3)**(k/3) - L_i**k - L_j**k).
+
+    Notes
+    -----
+    Each pair of crystals that agglomerates leaves one crystal of the summed
+    volume, so mu_3 is conserved and mu_0 falls by one per event; the half
+    counts each unordered pair once.
+    """
+    orders = np.arange(num_mom)
+    summed_cubes = nodes[:, None] ** 3 + nodes[None, :] ** 3  # [um**3]
+    pair_rates = 0.5 * weights[:, None] * weights[None, :] * kernel_values  # [#/(m3 s)]
+    born = summed_cubes[..., None] ** (orders / 3)  # [um**k]
+    lost = nodes[:, None, None] ** orders + nodes[None, :, None] ** orders  # [um**k]
+
+    return np.einsum('ij,ijk->k', pair_rates, born - lost)
+
+
+def _breakage_moment_rates(nodes, weights, selection_rates, fragment_moments):
+    """Moment rates of breakage over a quadrature.
+
+    Parameters
+    ----------
+    nodes : numpy.ndarray
+        Quadrature sizes L_i [um], shape ``(n,)``.
+    weights : numpy.ndarray
+        Quadrature weights w_i [#/m3 slurry], shape ``(n,)``.
+    selection_rates : numpy.ndarray
+        Breakage frequencies a(L_i) [1/s], shape ``(n,)``.
+    fragment_moments : numpy.ndarray
+        Moments b_k(L_i) [um**k] of the fragments of one parent of each
+        node, shape ``(n, num_mom)``.
+
+    Returns
+    -------
+    numpy.ndarray
+        d(mu_k)/dt [um**k/(m3 slurry s)], shape ``(num_mom,)``:
+        sum_i w_i a(L_i) (b_k(L_i) - L_i**k), each parent replaced by its
+        fragments.
+    """
+    orders = np.arange(fragment_moments.shape[1])
+    parents = nodes[:, None] ** orders  # [um**k]
+
+    return np.sum((weights * selection_rates)[:, None] * (fragment_moments - parents),
+                  axis=0)
+
+
+class QMOMKernelSources(Mechanism):
+    """Agglomeration and breakage terms of a QMOM population balance, as an intra-phase process.
+
+    Agglomeration and breakage move crystals within the solid whatever the
+    liquid does, so they cannot ride on the liquid-solid transfer, which the
+    crystallizer runs once per direction and drops against the sign of the
+    mass rate. The crystallizer registers this mechanism as an
+    ``IntraPhaseProcess`` of the solid instead, and the vessel adds its
+    moment rates once per right-hand side. It declares no state of its own.
+
+    Parameters
+    ----------
+    population_balance : QMOMPopulationBalance
+        Population balance whose moments the terms act on.
+    agglomeration : callable, optional
+        Kernel ``beta(L_i, L_j, conditions)`` [m**3/s].
+    breakage : callable, optional
+        Selection function ``a(L, conditions)`` [1/s], with ``fragments``.
+    fragments : object, optional
+        Fragment distribution with ``moments(parent_sizes, orders)``.
+    """
+
+    # Fragments must hold their parent's volume (Marchisio et al., 2003, J.
+    # Colloid Interface Sci. 258:322-334). A design tolerance: far above the
+    # rounding of a size's cube, about 1e-16, yet small enough to catch a
+    # distribution that loses or makes crystal volume.
+    FRAGMENT_VOLUME_RTOL = 1e-9  # [-]
+
+    def __init__(self, population_balance, agglomeration=None, breakage=None,
+                 fragments=None):
+        super().__init__()
+        self.population_balance = population_balance
+        self.agglomeration = agglomeration
+        self.breakage = breakage
+        self.fragments = fragments
+        self.attached = False
+
+    def add_solver_state_variables(self, collection, overwrite=False,
+                                   phase_ref=None):
+        """Record that a vessel registered this process; adds no state.
+
+        Parameters
+        ----------
+        collection : StateCollection
+            The vessel's solver states.
+        overwrite : bool, optional
+            Passed on to the base class.
+        phase_ref : PhaseRef, optional
+            Phase the process runs in.
+        """
+        super().add_solver_state_variables(collection, overwrite, phase_ref)
+        self.attached = True
+
+    def get_solver_state_rates(self, process, phase, time, completed_state):
+        """Moment rates of agglomeration and breakage at the current state.
+
+        Parameters
+        ----------
+        process : IntraPhaseProcess
+            Process this mechanism serves; its ``phaseref`` names the solid.
+        phase : BasePhase
+            The solid, unused: the moments are read from ``completed_state``.
+        time : float
+            Time [s], unused.
+        completed_state : dict
+            Solver and derived states keyed by ``StateKey``.
+
+        Returns
+        -------
+        TransferResult
+            d(mu_k)/dt [um**k/(m3 slurry s)], shape ``(2N,)``, keyed by the
+            moments state, with no mass or volume transfer.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If a kernel, selection function or fragment distribution returns
+            values that fail the checks of ``_kernel_values``,
+            ``_selection_rates`` or ``_fragment_moments``, or if the
+            population balance has no liquid or kinetics to evaluate the
+            kernel conditions with.
+        """
+        balance = self.population_balance
+        key = StateKey(balance.moments_state_name, process.phaseref)
+        moments = np.asarray(completed_state[key], dtype=float)  # [um**k/m3]
+        rule = invert_moments(moments, balance.num_mom // 2)  # [um], [#/m3]
+
+        rates = np.zeros(balance.num_mom)
+        if len(rule.nodes):
+            conditions = self._conditions(moments)
+            # No crystal is smaller than a nucleus, so the rate laws see each
+            # node at no less than rad. A node below it comes from rounding or
+            # integration error near zero size, and would otherwise drive a
+            # law that grows as 1/L, such as the Brownian kernel, without
+            # bound. The fragments belong to the node itself.
+            sizes = np.maximum(rule.nodes, balance.rad)  # [um]
+
+            if self.agglomeration is not None:
+                rates += _agglomeration_moment_rates(
+                    rule.nodes, rule.weights, self._kernel_values(sizes, conditions),
+                    balance.num_mom)
+
+            if self.breakage is not None:
+                rates += _breakage_moment_rates(
+                    rule.nodes, rule.weights, self._selection_rates(sizes, conditions),
+                    self._fragment_moments(rule.nodes, balance.num_mom))
+
+        return TransferResult(state_rates={key: rates}, aux={'process': process},
+                              net_mass_rate=0.0)
+
+    def _conditions(self, moments):
+        """Kernel conditions from the live liquid and the kinetics.
+
+        Parameters
+        ----------
+        moments : numpy.ndarray
+            Moments [um**k/m3 slurry], shape ``(2N,)``.
+
+        Returns
+        -------
+        KernelConditions
+            Temperature [K], supersaturation, growth rate G0 [um/s] and
+            shape factor [-], as the transfer evaluates them.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the population balance has no liquid or no kinetics.
+        """
+        balance = self.population_balance
+        liquid = getattr(balance, 'liquid_phase', None)
+        kinetics = balance.mechanism_kinetics
+
+        if liquid is None or kinetics is None:
+            raise PharmaPyValueError(
+                'Agglomeration and breakage kernels need the crystallizer\'s '
+                'liquid and CrystKinetics; set CrystKinetics on the vessel first.')
+
+        conc, supersat, _ = balance.compute_supersaturation(liquid)
+        moments_si = moments * balance.MOMENT_UNIT_FACTOR ** np.arange(len(moments))  # [m**k/m3]
+        _, growth, _ = kinetics.get_kinetics(conc, liquid.temp, balance.kv, moments_si)
+        growth = growth * kinetics.alpha_fn(conc)  # [um/s]
+
+        # One crystallizing species: its single value, whether the kinetics
+        # hand back a scalar or a one-element array.
+        return KernelConditions(
+            temp=float(np.ravel(liquid.temp)[0]),  # [K]
+            supersaturation=float(np.ravel(supersat)[0]),
+            growth_rate=float(np.ravel(growth)[0]),  # [um/s]
+            shape_factor=float(balance.kv),  # [-]
+        )
+
+    def _kernel_values(self, sizes, conditions):
+        """Evaluate and check the agglomeration kernel on every pair of nodes.
+
+        Parameters
+        ----------
+        sizes : numpy.ndarray
+            Node sizes the kernel sees [um], shape ``(n,)``.
+        conditions : KernelConditions
+            Passed to the kernel.
+
+        Returns
+        -------
+        numpy.ndarray
+            beta(L_i, L_j) [m**3/s], shape ``(n, n)``.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the rates have another shape, or are negative or not finite.
+        """
+        num_nodes = len(sizes)
+        values = np.asarray(self.agglomeration(sizes[:, None], sizes[None, :],
+                                               conditions), dtype=float)
+
+        if values.shape != (num_nodes, num_nodes):
+            raise PharmaPyValueError(
+                'The agglomeration kernel must broadcast over its two size '
+                'arrays to shape %s, got %s.' % ((num_nodes, num_nodes), values.shape))
+
+        if not np.all(np.isfinite(values)) or np.any(values < 0):
+            raise PharmaPyValueError(
+                'The agglomeration kernel must return finite, non-negative '
+                'rates [m**3/s], got %s.' % values.tolist())
+
+        return values
+
+    def _selection_rates(self, sizes, conditions):
+        """Evaluate and check the breakage frequency of every node.
+
+        Parameters
+        ----------
+        sizes : numpy.ndarray
+            Node sizes the selection function sees [um], shape ``(n,)``.
+        conditions : KernelConditions
+            Passed to the selection function.
+
+        Returns
+        -------
+        numpy.ndarray
+            a(L_i) [1/s], shape ``(n,)``.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the frequencies have another shape, or are negative or not
+            finite.
+        """
+        values = np.asarray(self.breakage(sizes, conditions), dtype=float)
+
+        if values.shape != sizes.shape:
+            raise PharmaPyValueError(
+                'The breakage selection function must return one frequency per '
+                'size, shape %s, got %s.' % (sizes.shape, values.shape))
+
+        if not np.all(np.isfinite(values)) or np.any(values < 0):
+            raise PharmaPyValueError(
+                'The breakage selection function must return finite, '
+                'non-negative frequencies [1/s], got %s.' % values.tolist())
+
+        return values
+
+    def _fragment_moments(self, nodes, num_mom):
+        """Evaluate and check the fragment moments of every node.
+
+        Parameters
+        ----------
+        nodes : numpy.ndarray
+            Parent sizes [um], shape ``(n,)``.
+        num_mom : int
+            Number of moments.
+
+        Returns
+        -------
+        numpy.ndarray
+            b_k(L_i) [um**k], shape ``(n, num_mom)``.
+
+        Raises
+        ------
+        PharmaPyValueError
+            If the moments have another shape or are not finite, or if the
+            fragments do not hold their parent's volume, b_3 = L**3, to
+            ``FRAGMENT_VOLUME_RTOL``.
+        """
+        values = np.asarray(self.fragments.moments(nodes, np.arange(num_mom)),
+                            dtype=float)
+
+        if values.shape != (len(nodes), num_mom):
+            raise PharmaPyValueError(
+                'The fragment distribution must return moments of shape %s '
+                '(parents, orders), got %s.' % ((len(nodes), num_mom), values.shape))
+
+        if not np.all(np.isfinite(values)):
+            raise PharmaPyValueError(
+                'The fragment distribution must return finite moments, got %s.'
+                % values.tolist())
+
+        parent_volume = nodes ** 3  # [um**3]
+        if np.any(np.abs(values[:, 3] - parent_volume)
+                  > self.FRAGMENT_VOLUME_RTOL * parent_volume):
+            raise PharmaPyValueError(
+                'The fragments must hold their parent\'s volume: b_3 = %s for '
+                'parents of L**3 = %s.' % (values[:, 3].tolist(), parent_volume.tolist()))
+
+        return values
