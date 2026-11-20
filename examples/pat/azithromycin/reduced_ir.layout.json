@@ -1,0 +1,35 @@
+{
+  "description": "Whole-spectrum IR score of one run at every spectrum taken while the temperature was logged, with the three probe-contact terms and the unexplained remainder, written by reduce_runs.py. Time is the run clock.",
+  "header_row": 0,
+  "units_row": 1,
+  "first_data_row": 2,
+  "range_basis": "The residual is a root-mean-square and cannot be negative. The other terms have either sign.",
+  "columns": {
+    "time": {
+      "header": "time",
+      "unit": "s",
+      "role": "time"
+    },
+    "score": {
+      "header": "score",
+      "unit": "-"
+    },
+    "scale": {
+      "header": "scale",
+      "unit": "-"
+    },
+    "offset": {
+      "header": "offset",
+      "unit": "-"
+    },
+    "tilt": {
+      "header": "tilt",
+      "unit": "-"
+    },
+    "residual": {
+      "header": "residual",
+      "unit": "-",
+      "minimum": 0.0
+    }
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "description": "Seeded cooling crystallization of azithromycin dihydrate from ethyl acetate, four runs, 2 x 2 in seed load and final cooling rate (Nagy group, Purdue, October 2026).",
+  "charge": {
+    "solute": "azithromycin_dihydrate",
+    "solvent": "ethyl_acetate",
+    "solvent_mass_g": 300.0,
+    "solute_mass_g": 140.0,
+    "theoretical_yield_g": 74.0,
+    "basis": "Recipe table of the lab for this campaign: 300 g ethyl acetate and 140 g azithromycin dihydrate. The lab confirmed the theoretical yield of 74 g. Weighed masses were not reported. The lab reuses the batch from one run to the next and adjusts it in between; the adjustments are not recorded here. The recipe is therefore the charge of a fresh batch, and the charge of each run is not stated."
+  },
+  "seeding": {
+    "temperature_C": 37.0,
+    "basis": "Seed masses are those of the recipe table, 1 % and 5 % of the theoretical yield as the lab rounded them. The seed was added during the hold at 37 C. Its size distribution was not measured."
+  },
+  "temperature_program": "20 C for 30 min, heat to 45 C in 50 min, hold 30 min, cool to 37 C in 16 min, hold 30 min, cool to 20 C at the final ramp rate, hold.",
+  "temperature_log": {
+    "file": "expttsd1.csv",
+    "layout": "huber_log.layout.json",
+    "block_samples": 15,
+    "basis": "The log has one row every 2 s. Reduced temperatures are means of 15 consecutive rows (30 s). The fastest ramp is 0.5 C/min, so a block spans at most 0.25 C, and the mean of a linear ramp equals its value at the mean time."
+  },
+  "fbrm": {
+    "sample_interval_s": 10.0,
+    "band_edges_um": [1.0, 10.0, 100.0, 1000.0],
+    "basis": "Measurement interval set in iC FBRM. The count bands are the ones the vendor software reports, split at exactly 10 and 100 um."
+  },
+  "ir_score": {
+    "temperature_column": "external_temperature",
+    "reference_run": "low_seed_slow_cool",
+    "comparison_run": "high_seed_fast_cool",
+    "reference_temperature_K": 310.15,
+    "clear_solution_window_s": [10450.0, 19600.0],
+    "dissolved_window_s": [7600.0, 8050.0],
+    "slurry_window_s": [600.0, 1750.0],
+    "wavenumber_window_cm-1": [900.0, 1800.0],
+    "maximum_absorbance": 1.3,
+    "basis": "Windows on the run clock. Ethyl acetate absorbs at every band of the solute, so no single band height follows the dissolved solute; the whole spectrum between 900 and 1800 cm-1 is used. Points where the solution absorbs more than 1.3 are left out: they lie on the ethyl acetate bands near 1736, 1236 and 1044 cm-1, which read 1.6 to 2.1. The limit of 1.3 is a design choice, not a measured limit of linear response. Clear solution: in the reference run the FBRM counts fell back to within 20 counts of their clear-solution level within five minutes of the seed addition at 9285 s and stayed there until the end of the cooling ramp, so the spectra from 20 minutes after seeding to the end of the ramp show one composition between 36 and 20 C. Dissolved: the hold at 37 C in every run, ending five minutes before the earliest seeding (8353 s). Slurry: the hold at 20 C at the start of the reference run, where its score is steady. The reference temperature is the seeding hold, 37 C. The comparison run is the first run of the campaign."
+  },
+  "seeding_basis": "seeding_time_s of a run with FBRM samples is the time on the run clock of the FBRM sample that ends the largest rise of the total counts between consecutive samples during the hold at 37 C. high_seed_slow_cool has no FBRM samples; its time is the rise of the image-probe counts in the lab's spreadsheet export, which is not in the repository. No process note records the addition.",
+  "clock_basis": "The temperature log has relative time only. temperature_log_start_local of each run is the modification time of the log file minus its last time value, in local time; treat it as good to about one minute. FBRM stamps are local time of the acquisition computer; IR stamps are UTC.",
+  "runs": [
+    {
+      "id": "high_seed_fast_cool",
+      "seeding_time_s": 8353.0,
+      "folder": "261020 JLR Azithromycin Fast Cool High Seed",
+      "seed_percent_of_yield": 5.0,
+      "seed_mass_g": 3.7,
+      "final_ramp_rate_C_per_min": 0.5,
+      "temperature_log_start_local": "2026-10-20T14:01:51",
+      "fbrm_local_time_utc_offset_h": -4.0,
+      "notes": "First run of the campaign. The IR and FBRM records continue for nine hours after the thermostat log ends; those spectra have no logged temperature and are not in the reduced IR table."
+    },
+    {
+      "id": "low_seed_fast_cool",
+      "seeding_time_s": 9148.0,
+      "folder": "261021 JLR Azithromycin Fast Cool Low Seed",
+      "seed_percent_of_yield": 1.0,
+      "seed_mass_g": 0.8,
+      "final_ramp_rate_C_per_min": 0.5,
+      "temperature_log_start_local": "2026-10-21T10:44:23",
+      "fbrm_local_time_utc_offset_h": -4.0,
+      "notes": "Starts as a clear solution at 20 C that forms crystals during the first hold."
+    },
+    {
+      "id": "high_seed_slow_cool",
+      "seeding_time_s": 8787.0,
+      "folder": "261021 JLR Azithromycin Slow Cool High Seed",
+      "seed_percent_of_yield": 5.0,
+      "seed_mass_g": 3.7,
+      "final_ramp_rate_C_per_min": 0.1,
+      "temperature_log_start_local": "2026-10-21T16:14:37",
+      "fbrm_local_time_utc_offset_h": -4.0,
+      "has_fbrm_samples": false,
+      "ir_spectra_without_metadata": 2,
+      "notes": "The iC FBRM file holds no sample. The iC IR file holds two spectra without a metadata entry, so without a sample time."
+    },
+    {
+      "id": "low_seed_slow_cool",
+      "seeding_time_s": 9285.0,
+      "folder": "261022 JLR Azithromycin Slow Cool Low Seed",
+      "seed_percent_of_yield": 1.0,
+      "seed_mass_g": 0.8,
+      "final_ramp_rate_C_per_min": 0.1,
+      "temperature_log_start_local": "2026-10-22T11:56:48",
+      "fbrm_local_time_utc_offset_h": -4.0,
+      "notes": "The seed dissolved: the FBRM counts fall back to within 20 counts of their clear-solution level within five minutes of the addition, and crystals appear only in the hold at 20 C."
+    }
+  ]
+}

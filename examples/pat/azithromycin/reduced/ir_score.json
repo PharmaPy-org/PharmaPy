@@ -1,0 +1,45 @@
+{
+  "reference_run": "low_seed_slow_cool",
+  "comparison_run": "high_seed_fast_cool",
+  "spectral_points": 214,
+  "clear_solution_spectra": 152,
+  "slurry_spectra": 14,
+  "clear_solution_temperature_min_K": 293.829,
+  "clear_solution_temperature_max_K": 308.933,
+  "temperature_effect_residual": 0.00189931,
+  "condition": 3.24748,
+  "dissolved_spectrum_against_comparison_run": {
+    "high_seed_fast_cool": {
+      "score": 0.0,
+      "scale": 0.0,
+      "offset": 0.0,
+      "tilt": 0.0,
+      "residual": 0.0,
+      "dissolved_spectra": 7
+    },
+    "low_seed_fast_cool": {
+      "score": 0.0823217,
+      "scale": 1.85536e-05,
+      "offset": -0.0029911,
+      "tilt": -0.0067857,
+      "residual": 0.000862597,
+      "dissolved_spectra": 3
+    },
+    "high_seed_slow_cool": {
+      "score": -0.17623,
+      "scale": 0.00240993,
+      "offset": -0.00370533,
+      "tilt": -0.00877373,
+      "residual": 0.00149005,
+      "dissolved_spectra": 7
+    },
+    "low_seed_slow_cool": {
+      "score": -0.742046,
+      "scale": 0.106045,
+      "offset": -0.296415,
+      "tilt": 0.41254,
+      "residual": 0.218692,
+      "dissolved_spectra": 7
+    }
+  }
+}
