@@ -8,7 +8,7 @@ from PharmaPy.DataClasses import (StateVariable,PhaseConnection,PhaseMapping,
                                   TransferResult,StateEvent
 )
 from PharmaPy.Phases_Refactored import BasePhase
-from PharmaPy.Errors import PharmaPyNonImplementedError
+from PharmaPy.Errors import PharmaPyNonImplementedError, PharmaPySpecificationError
 from time import perf_counter
 
 eps = np.finfo(float).eps
@@ -1175,18 +1175,54 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         raise NotImplementedError
 
     def _inlet_population_density(self, stream_phase):
-        """Feed population per m3 of slurry.
+        """Feed population per m3 of feed slurry.
 
-        Published in that basis by MultiPhaseVessel.outputs, which is what
-        old PharmaPy moved between units -- the old crystallizer
-        multiplied by vol_slurry again on the way back into a phase.
+        Parameters
+        ----------
+        stream_phase : BasePhase
+            Feed phase whose population mechanism, if it has one, publishes
+            the crystals the feed carries.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Feed population in this mechanism's flow state: a number density
+            [#/(um m3 of feed slurry)] or moments [um**k/m3 of feed slurry].
+            None for a feed without crystals, which has no population
+            mechanism or no population state.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If the feed carries its crystals in another population state,
+            such as moments into a vessel that resolves the size
+            distribution. Skipping that state would lose every crystal in
+            the feed without a word.
+
+        Notes
+        -----
+        The population is per m3 of slurry because MultiPhaseVessel.outputs
+        publishes it in that basis, which is how the legacy crystallizers
+        moved it between units.
         """
         name = self.flow_state_name
 
         for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
+            feed_state_name = getattr(mechanism, 'flow_state_name', None)
 
-            if getattr(mechanism, 'flow_state_name', None) != name:
+            if feed_state_name is None:
                 continue
+
+            if feed_state_name != name:
+                raise PharmaPySpecificationError(
+                    'A feed carrying its crystals as %s state %r cannot '
+                    'enter this vessel, whose %s carries them as %r. Moments '
+                    'do not determine a size distribution, and a distribution '
+                    'is not converted into moments, so those crystals would '
+                    'be lost. Give both units the same population balance '
+                    'and state name.'
+                    % (type(mechanism).__name__, feed_state_name,
+                       type(self).__name__, name))
 
             value = getattr(mechanism, name, None)
 
