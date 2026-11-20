@@ -1,4 +1,4 @@
-"""Reduction of the caffeine runs: its steps on fixtures, and the committed reduced tables.
+"""Reduction of described runs: its steps on fixtures, and the committed caffeine tables.
 
 The raw runs are not in the repository. The steps are exercised on the excerpts in
 ``tests/fixtures/pat``; the committed tables are checked against the run design in
@@ -11,15 +11,14 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.pat import block_package, ic_fbrm, ic_spectra, table_layout
-from examples.pat.caffeine import reduce_runs
+from examples.pat import block_package, dataset, ic_fbrm, ic_spectra, reduce_runs, table_layout
 from examples.pat.run_table import block_mean
 
 pytestmark = pytest.mark.unit
 
 FIXTURES = Path(__file__).parent / "fixtures" / "pat"
-CASE = reduce_runs.CASE
-DESCRIPTION = reduce_runs.load_description()
+CASE = Path(dataset.__file__).parent / "caffeine"
+DESCRIPTION = dataset.load_description(CASE)
 RUNS = {run["id"]: run for run in DESCRIPTION["runs"]}
 ZERO_CELSIUS = 273.15  # [K]
 SEEDING_NODE = 8460.0  # [s] node of the setpoint program inside the 37 C hold
@@ -91,13 +90,26 @@ def test_temperature_table_averages_blocks_of_the_log():
     description = copy.deepcopy(DESCRIPTION)
     description["temperature_log"]["block_samples"] = 3  # the excerpt has five rows
 
-    columns, units = reduce_runs.temperature_table(FIXTURES / "huber_log_excerpt.csv", description)
+    columns, units = reduce_runs.temperature_table(FIXTURES / "huber_log_excerpt.csv", description, CASE)
 
     # Rows 1 to 3 of the excerpt: 0.380, 2.380, 4.380 s and jacket 19.840, 19.830, 19.830 C.
     np.testing.assert_allclose(columns["time"], [2.380])
     np.testing.assert_allclose(columns["jacket_temperature"], [(19.840 + 19.830 + 19.830) / 3.0 + ZERO_CELSIUS])
     np.testing.assert_allclose(columns["external_temperature"], [20.150 + ZERO_CELSIUS])
     assert units["external_temperature"] == "K"
+
+
+def test_temperature_table_takes_the_layout_from_the_dataset_folder(tmp_path):
+    description = copy.deepcopy(DESCRIPTION)
+    description["temperature_log"].update(block_samples=5, layout="thermostat.layout.json")
+    (tmp_path / "thermostat.layout.json").write_text((CASE / "huber_log.layout.json").read_text(encoding="utf-8"), encoding="utf-8")
+
+    columns, _ = reduce_runs.temperature_table(FIXTURES / "huber_log_excerpt.csv", description, tmp_path)
+
+    # All five rows of the excerpt in one block: 0.380, 2.380, 4.380, 6.380 and 8.379 s.
+    np.testing.assert_allclose(columns["time"], [(0.380 + 2.380 + 4.380 + 6.380 + 8.379) / 5.0])
+    with pytest.raises(FileNotFoundError, match="thermostat.layout.json"):
+        reduce_runs.temperature_table(FIXTURES / "huber_log_excerpt.csv", description, CASE)
 
 
 def test_block_mean_drops_the_incomplete_last_block():

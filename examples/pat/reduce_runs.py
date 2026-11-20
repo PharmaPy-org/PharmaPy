@@ -1,12 +1,13 @@
-"""Reduce the raw caffeine runs to the tables in ``reduced/``.
+"""Reduce the raw runs of a described dataset to the tables in its ``reduced/`` folder.
 
 Usage, from the repository root::
 
-    python -m examples.pat.caffeine.reduce_runs "<folder that holds the four run folders>"
+    python -m examples.pat.reduce_runs "<dataset folder>" "<folder that holds the run folders>"
 
 Each run gives three tables on the clock of its temperature program: thermostat
 temperatures, FBRM band counts with the square-weighted mean chord, and the height
-of the caffeine IR band. ``runs.json`` holds every setting used here.
+of the IR band of the solute. ``runs.json`` of the dataset holds every setting used
+here.
 """
 from __future__ import annotations
 
@@ -16,28 +17,15 @@ from pathlib import Path
 
 import numpy as np
 
-from .. import dataset, fbrm_statistics, ic_fbrm, ic_spectra, table_layout
-from ..band_height import band_height
-from ..run_table import block_mean
+from . import dataset, fbrm_statistics, ic_fbrm, ic_spectra, table_layout
+from .band_height import band_height
+from .run_table import block_mean
 
-CASE = Path(__file__).parent
-REDUCED = CASE / "reduced"
 SECONDS_PER_HOUR = 3600.0  # [s/h]
 MEAN_CHORD = "mean_chord_square_weighted"
 # Decimals written per quantity: the thermostat log resolves 0.01 K, counts are
 # fractional after rebinning, and the IR band scatters by about 2e-4.
 TIME_DIGITS, TEMPERATURE_DIGITS, COUNT_DIGITS, CHORD_DIGITS, HEIGHT_DIGITS = 1, 3, 1, 2, 5
-
-
-def load_description() -> dict:
-    """Return the dataset description of the caffeine runs.
-
-    Returns
-    -------
-    dict
-        Contents of ``runs.json``.
-    """
-    return dataset.load_description(CASE)
 
 
 def run_clock_origin(first_fbrm_sample: datetime.datetime, run: dict, description: dict) -> datetime.datetime:
@@ -63,7 +51,7 @@ def run_clock_origin(first_fbrm_sample: datetime.datetime, run: dict, descriptio
     return first_fbrm_sample + datetime.timedelta(seconds=offset - interval)
 
 
-def temperature_table(log_path: Path, description: dict) -> tuple[dict, dict]:
+def temperature_table(log_path: Path, description: dict, case: Path) -> tuple[dict, dict]:
     """Reduce a thermostat log to block means.
 
     Parameters
@@ -72,6 +60,8 @@ def temperature_table(log_path: Path, description: dict) -> tuple[dict, dict]:
         Thermostat log; its time zero is the zero of the run clock.
     description : dict
         Dataset description; gives the layout file and the block size.
+    case : pathlib.Path
+        Dataset folder, which holds the layout file.
 
     Returns
     -------
@@ -80,7 +70,7 @@ def temperature_table(log_path: Path, description: dict) -> tuple[dict, dict]:
         setpoint temperatures [K], each the mean of one block, and ``{column: unit}``.
     """
     settings = description["temperature_log"]
-    values, units = table_layout.read_table(log_path, table_layout.load_layout(CASE / settings["layout"]))
+    values, units = table_layout.read_table(log_path, table_layout.load_layout(Path(case) / settings["layout"]))
     columns = {name: block_mean(series, settings["block_samples"]) for name, series in values.items()}
     return columns, units
 
@@ -217,11 +207,13 @@ def _single(folder: Path, pattern: str) -> Path:
     return matches[0]
 
 
-def reduce_run(raw_root: Path, run: dict, description: dict, out_dir: Path) -> dict[str, int]:
+def reduce_run(case: Path, raw_root: Path, run: dict, description: dict, out_dir: Path) -> dict[str, int]:
     """Write the three reduced tables of one run.
 
     Parameters
     ----------
+    case : pathlib.Path
+        Dataset folder.
     raw_root : pathlib.Path
         Folder that holds the run folders.
     run : dict
@@ -242,7 +234,7 @@ def reduce_run(raw_root: Path, run: dict, description: dict, out_dir: Path) -> d
     times, raw = ic_fbrm.read_samples(_single(folder, "*.icFbrm"))
     origin = run_clock_origin(times[0], run, description)
     tables = {
-        "temperature": temperature_table(folder / description["temperature_log"]["file"], description),
+        "temperature": temperature_table(folder / description["temperature_log"]["file"], description, case),
         "fbrm": fbrm_table(times, raw, origin, description),
         "ir": ir_table(*ic_spectra.load_spectra(_single(folder, "*.iCIR")), origin, run["fbrm_local_time_utc_offset_h"], description),
     }
@@ -256,18 +248,19 @@ def reduce_run(raw_root: Path, run: dict, description: dict, out_dir: Path) -> d
 
 
 def main(arguments: list[str]) -> None:
-    """Reduce every run listed in ``runs.json``.
+    """Reduce every run listed in the description of a dataset.
 
     Parameters
     ----------
     arguments : list of str
-        The folder that holds the run folders, then optionally the output folder
-        (default ``reduced/`` beside this file).
+        The dataset folder, the folder that holds the run folders, then optionally
+        the output folder (default ``reduced/`` in the dataset folder).
     """
-    description = load_description()
-    out_dir = Path(arguments[1]) if len(arguments) > 1 else REDUCED
+    case = Path(arguments[0])
+    description = dataset.load_description(case)
+    out_dir = Path(arguments[2]) if len(arguments) > 2 else case / "reduced"
     for run in description["runs"]:
-        print(run["id"], reduce_run(Path(arguments[0]), run, description, out_dir))
+        print(run["id"], reduce_run(case, Path(arguments[1]), run, description, out_dir))
 
 
 if __name__ == "__main__":

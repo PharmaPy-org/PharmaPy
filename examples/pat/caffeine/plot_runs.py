@@ -16,7 +16,9 @@ import numpy as np
 from matplotlib.figure import Figure
 
 from .. import dataset
-from .reduce_runs import CASE, MEAN_CHORD, load_description
+from ..reduce_runs import MEAN_CHORD
+
+CASE = Path(__file__).parent
 
 SECONDS_PER_HOUR = 3600.0  # [s/h]
 ZERO_CELSIUS = 273.15  # [K]
@@ -70,7 +72,7 @@ def plot_run(run_id: str) -> Figure:
     ValueError
         If ``run_id`` is not in ``runs.json``.
     """
-    description = load_description()
+    description = dataset.load_description(CASE)
     if run_id not in {run["id"] for run in description["runs"]}:
         raise ValueError("Unknown run %r; runs.json lists %s." % (run_id, [run["id"] for run in description["runs"]]))
     temperature, fbrm, ir = (read_reduced(run_id, kind) for kind in ("temperature", "fbrm", "ir"))
@@ -125,7 +127,7 @@ def main(arguments: list[str]) -> None:
     """
     out_dir = Path(arguments[0])
     out_dir.mkdir(parents=True, exist_ok=True)
-    for run in load_description()["runs"]:
+    for run in dataset.load_description(CASE)["runs"]:
         plot_run(run["id"]).savefig(out_dir / ("%s.png" % run["id"]), dpi=130)
         print("wrote", out_dir / ("%s.png" % run["id"]))
 
