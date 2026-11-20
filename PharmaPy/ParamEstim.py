@@ -4635,7 +4635,7 @@ class ParameterEstimation:
         return opt_par, extra_info
 
     def optimize_fn(self, optim_options: Optional[dict] = None,
-                    simulate: bool = False, verbose: int | bool = True,
+                    simulate: bool = False, verbose: Union[int, bool] = True,
                     store_iter: bool = True,
                     method: Union[str, Callable] = 'LM',
                     bounds: Optional[Sequence] = None
@@ -5218,7 +5218,7 @@ class ParameterEstimation:
 
     def estimate_parameters(
             self, optim_options: Optional[dict] = None,
-            simulate: bool = False, verbose: int | bool = True,
+            simulate: bool = False, verbose: Union[int, bool] = True,
             store_iter: bool = True,
             method: Union[str, Callable] = 'scipy',
             bounds: Optional[Sequence] = None, **solver_options

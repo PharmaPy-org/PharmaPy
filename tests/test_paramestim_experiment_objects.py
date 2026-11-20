@@ -466,8 +466,11 @@ def test_measurement_std_alias_returns_immutable_normalized_uncertainty(
     assert measurement.std is measurement.uncertainty
     assert measurement.std.shape == times.shape
     np.testing.assert_array_equal(measurement.std, expected)
-    with pytest.raises(AttributeError, match='has no setter'):
-        measurement.std = expected
+    # CPython 3.9 and 3.11 report the same read-only property differently.
+    message = r"^(can't set attribute|property 'std' of 'Measurement' object has no setter)$"
+    with pytest.raises(AttributeError, match=message):
+        measurement.std = 2 * expected  # [mol/L]; a distinct attempted replacement
+    np.testing.assert_array_equal(measurement.std, expected)
     with pytest.raises(ValueError, match='read-only'):
         measurement.std[0] = 0.0
     with pytest.raises(ValueError, match='cannot set WRITEABLE flag'):
