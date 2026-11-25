@@ -287,10 +287,11 @@ open-access KIT/AstraZeneca kinetic series (Andris et al., 2019; Weggen et al.,
 All liquid-phase species concentrations in PharmaPy's `RxnKinetics` and
 `LiquidPhase` are tracked on a **molar concentration basis** $[\text{mol/L}]$ in
 an aqueous buffer solvent (`buffer`, $20\text{ mM}$ $\text{NaH}_2\text{PO}_4$,
-$1\text{ mM}$ EDTA, $\text{pH } 7.0$, with $10\%\text{ v/v}$ DMSO cosolvent;
-mixture density $\rho_{\text{liq}} = 1010.5\text{ kg/m}^3$ and dynamic viscosity
-$\mu_{\text{liq}} = 1.06 \times 10^{-3}\text{ Pa}\cdot\text{s}$ at
-$T = 295.15\text{ K}$, Weggen et al., 2023, Sec. 2.2.2).
+$1\text{ mM}$ EDTA, $\text{pH } 7.0$, with $10\%\text{ v/v}$ DMSO cosolvent).
+The isothermal fixture runs at $T = 295.15\text{ K}$ and uses the bulk density
+$\rho_{\text{liq}} = 1010.5\text{ kg/m}^3$ and dynamic viscosity
+$\mu_{\text{liq}} = 1.06 \times 10^{-3}\text{ Pa}\cdot\text{s}$ assigned to the
+reference fluid in the CFD model. [Weggen et al. (2023), Sec. 2.2.2](https://doi.org/10.3389/fbioe.2023.1123842)
 
 | Symbol | PharmaPy species ID | Molar mass $M_i$ $[\text{g/mol}]$ | Physical meaning, analytical basis, and provenance | Typical initial concentration $c_{i,0}$ $[\text{mol/L}]$ |
 | --- | --- | --- | --- | --- |
@@ -305,19 +306,22 @@ $T = 295.15\text{ K}$, Weggen et al., 2023, Sec. 2.2.2).
 | $H_2^2$ | `H2_2` | $5.059462 \times 10^4$ | Heavy chain with 2 payloads bound and 0 remaining reactive cysteines ($M_H + 2\,M_{\text{Drug}}$) | $0.0$ |
 | $D$ | `Drug` | $2.9731 \times 10^2$ | Reactive maleimide-functionalized payload ($N$-(1-pyrenyl)maleimide, $\text{C}_{20}\text{H}_{11}\text{NO}_2$, $M_{\text{NPM}} = 297.31\text{ g/mol}$ in Model 1A; for vc-MMAE linker-payload, $M_D \approx 1316.6\text{ g/mol}$) | Batch: $3.0 \times 10^{-5}\text{–}3.3 \times 10^{-4}$; Fed-batch feed: $1.0 \times 10^{-3}\text{–}1.0 \times 10^{-2}$ |
 | $D_{\text{depl}}$ | `Drug_depl` | $2.9731 \times 10^2$ | Inactivated/depleted payload sink ($M_{\text{Drug\_depl}} = M_{\text{Drug}} = 297.31\text{ g/mol}$ so first-order payload inactivation $D \to D_{\text{depl}}$ in Andris et al., 2019 / Weggen et al., 2023 Eq. 5 & Weggen et al., 2024 Sec. 3.1 is strictly mass-conserving without solvent consumption) | $0.0$ |
-| $\text{Solv}$ | `buffer` | $1.967 \times 10^1$ | Aqueous phosphate/EDTA buffer with $10\%\text{ v/v}$ DMSO cosolvent (mole-fraction-weighted average molar mass of $90\%\text{ v/v}$ $\text{H}_2\text{O}$ at $18.015\text{ g/mol}$, $0.90 \times 55.5 = 49.95\text{ mol/L}$ and $10\%\text{ v/v}$ DMSO at $78.13\text{ g/mol}$, $0.10 \times 14.1 = 1.41\text{ mol/L}$: $M_{\text{solv}} = 1010.5\text{ g/L} / 51.36\text{ mol/L} = 19.67\text{ g/mol}$) | Completed by `LiquidPhase` volume closure ($\approx 51.3\text{ mol/L}$) |
+| $\text{Solv}$ | `buffer` | $1.967 \times 10^1$ | Aqueous phosphate/EDTA buffer with $10\%\text{ v/v}$ DMSO cosolvent (mole-fraction-weighted average molar mass of $90\%\text{ v/v}$ $\text{H}_2\text{O}$ at $18.015\text{ g/mol}$, $0.90 \times 55.5 = 49.95\text{ mol/L}$ and $10\%\text{ v/v}$ DMSO at $78.13\text{ g/mol}$, $0.10 \times 14.1 = 1.41\text{ mol/L}$: $M_{\text{solv}} = 1010.5\text{ g/L} / 51.36\text{ mol/L} = 19.67\text{ g/mol}$) | Completed by the bulk-density mass balance |
 
-*Note on schema-required physical properties in `BIOCONJUGATION_DATABASE`*:
-PharmaPy's `LiquidPhase` JSON schema requires liquid density `rho_liq`
-$[\text{kg/m}^3]$, molar heat capacity polynomial `cp_liq`
-$[\text{J}\cdot\text{mol}^{-1}\cdot\text{K}^{-1}]$, and critical temperature
-`t_crit` $[\text{K}]$ for every species. For isothermal ($T = 295.15\text{ K}$)
-dilute aqueous bioconjugation simulations ($\rho_{\text{mAb}} \le 10\text{ g/L}$,
-volume fraction $< 1\%$), all species are assigned the measured mixture density
-$\rho_{\text{liq}} = 1010.5\text{ kg/m}^3$ (Weggen et al., 2023, Sec. 2.2.2) so
-that constant-density dilution balances hold exactly, while `cp_liq` and
-`t_crit` are synthetic schema-required placeholders (`origin='synthetic'`) that
-do not enter the isothermal material balance.
+*Property inputs for the executable cases.* The batch and fed-batch charges
+supply `BulkLiquidDensity` from WP1.2 once per initial liquid state. The
+solvent mass concentration is the specified solution density minus the sum of
+the solute mass concentrations, all in $[\text{kg/m}^3]$. The completed
+concentration vector defines the stored liquid inventory. The synthetic
+fed-batch inlet uses the same reference density as a modeling assumption and
+passes its completed concentrations to `LiquidStream`. The separate WP4
+scheduling fixture uses its own neat-DMSO stock convention. [Bulk-density implementation, PR #571](https://github.com/PharmaPy-org/PharmaPy/pull/571)
+
+`BIOCONJUGATION_DATABASE` supplies species molar masses and synthetic
+`cp_liq` coefficients $[\text{J}\cdot\text{mol}^{-1}\cdot\text{K}^{-1}]$ for
+the existing isothermal heat diagnostics. These single-liquid verification
+paths need no species `rho_liq` or `t_crit` entries. The native tests check
+the initial charge and the outlet inventory, including the added feed mass.
 
 *Note on heavy-chain versus intact-mAb concentration and rate-constant bases*:
 Every intact IgG1 molecule comprises two heavy chains and two light chains, so
@@ -869,14 +873,14 @@ concentrations $[\text{mol/L}]$.
 
 ### 7.2 Demonstrated open blockers and workarounds for `#356`
 
-| Open Issue | Defect / Gap Summary | Impact on WP1.5 Bioconjugation Case (`#356`) | Disposition / Workaround on `master` |
+| Open Issue | Defect / Gap Summary | Impact on WP1.5 Bioconjugation Case (`#356`) | Disposition / Workaround |
 | --- | --- | --- | --- |
 | [#275](https://github.com/PharmaPy-org/PharmaPy/issues/275) | `RxnKinetics`: toggling `reformulate_kin=False` with a finite `temp_ref` switches to centered Arrhenius $k_i \exp(-(E_{a,i}/R)(1/T - 1/T_{\text{ref}}))$ instead of preserving standard Arrhenius | Affects multi-temperature Arrhenius fitting of Stage 1 TCEP disulfide reduction ($4\text{–}37\ ^\circ\text{C}$, $T_{\text{ref}} = 293.15\text{ K}$, Weggen et al., 2025) if comparing `reformulate_kin=True` vs. `False` at finite `temp_ref`; **does not affect isothermal Stage 2 conjugation** ($E_a = 0\text{ J/mol}$) | Keep `ea_params=[0.0, ...]` and `temp_ref=np.inf` for isothermal conjugation; resolve `#275` before multi-temperature Stage 1 TCEP Arrhenius comparison in `#356` |
 | [#339](https://github.com/PharmaPy-org/PharmaPy/issues/339) | `RxnKinetics`: align reaction specifications and parameters by reaction identifier (`rxns={'coupling': ..., 'iso': ...}`) | Needed for the dictionary-keyed reaction syntax tracked in [#337](https://github.com/PharmaPy-org/PharmaPy/issues/337) and [#339](https://github.com/PharmaPy-org/PharmaPy/issues/339) | Use positional `rxn_list=[...]` and `k_params=[...]` on `master` until `#339` lands |
 | [#338](https://github.com/PharmaPy-org/PharmaPy/issues/338), [#341](https://github.com/PharmaPy-org/PharmaPy/issues/341) | Named dictionary composition inputs on `LiquidPhase`/`LiquidStream` (`#338`) and dictionary indexing on `DynamicResult.retrieve_state` (`#341`) | Ergonomic API improvements tracked under the workflow epic [#337](https://github.com/PharmaPy-org/PharmaPy/issues/337) | Use database-ordered arrays and `output_names` tuple mapping on `master` until `#338`/`#341` land |
 | [#283](https://github.com/PharmaPy-org/PharmaPy/issues/283), [#287](https://github.com/PharmaPy-org/PharmaPy/issues/287), [#290](https://github.com/PharmaPy-org/PharmaPy/issues/290) | Custom reaction-order species indexing (`#283`), reversible negative-concentration flooring (`#287`), and repeated species in one reaction string (`#290`) | Selected bioconjugation reactions are irreversible elementary reactions with distinct reactant/product tokens, so `#283`, `#287`, and `#290` are not triggered by Models 1A/1B | Avoid writing buffer/catalyst on both sides of a reaction string (`#290`) unless `#290` is merged |
-| [#440](https://github.com/PharmaPy-org/PharmaPy/issues/440) | `Reactors`: result retrieval re-completes the solvent after a volume-changing reaction | In dilute aqueous bioconjugation ($c_{\text{mAb}} \le 10^{-4}\text{ mol/L}$, $c_{\text{Drug}} \le 10^{-3}\text{ mol/L}$), reaction volume change is $< 10^{-4}$, and `paramest_wrapper` reads integrated solute columns directly | Track `#440` for concentrated non-ideal liquid mixtures; negligible effect on dilute aqueous bioconjugation solute columns |
-| [#352](https://github.com/PharmaPy-org/PharmaPy/issues/352), [#353](https://github.com/PharmaPy-org/PharmaPy/issues/353), [#354](https://github.com/PharmaPy-org/PharmaPy/issues/354), [#355](https://github.com/PharmaPy-org/PharmaPy/issues/355) | `[WP1.3/WP1.4][M6] Validate shared calibration, sensitivities and uncertainty` (`#352`), `[WP1.2] Property and thermodynamics interface for the PAT cases` (`#353`), `[WP1.3] Flowsheet-aware calibration and identifiability demonstration` (`#354`), and `[WP1.3][M6] Shared model-based experiment-design interface` (`#355`) | Shared calibration/uncertainty (`#352`), property interfaces (`#353`), flowsheet identifiability (`#354`), and MBDoE (`D`/`A`/`E`-optimality ranking across candidate feed durations $t_{\text{add}}$ and initial payload excesses, `#355`) will be consumed by `#356` | Weighted sensitivity Jacobians $\mathbf{J}$ and Fisher Information Matrix $\mathbf{F} = \mathbf{J}\mathbf{J}^\top$ are already computable from `ParameterEstimation.get_gradient(params, out_array=True)` on `master`; adopt shared `#352`–`#355` interfaces in M7–M12 once merged |
+| [#440](https://github.com/PharmaPy-org/PharmaPy/issues/440) | `Reactors`: result retrieval re-completes the solvent after a volume-changing reaction | The bulk-density charge supplies complete concentrations, so this fixture carries the solvent inventory through result retrieval | Track `#440` for other cases that use ideal-volume solvent completion |
+| [#352](https://github.com/PharmaPy-org/PharmaPy/issues/352), [#353](https://github.com/PharmaPy-org/PharmaPy/issues/353), [#354](https://github.com/PharmaPy-org/PharmaPy/issues/354), [#355](https://github.com/PharmaPy-org/PharmaPy/issues/355) | `[WP1.3/WP1.4][M6] Validate shared calibration, sensitivities and uncertainty` (`#352`), `[WP1.2] Property and thermodynamics interface for the PAT cases` (`#353`), `[WP1.3] Flowsheet-aware calibration and identifiability demonstration` (`#354`), and `[WP1.3][M6] Shared model-based experiment-design interface` (`#355`) | Shared calibration/uncertainty (`#352`), property interfaces (`#353`), flowsheet identifiability (`#354`), and MBDoE (`D`/`A`/`E`-optimality ranking across candidate feed durations $t_{\text{add}}$ and initial payload excesses, `#355`) will be consumed by `#356` | Weighted sensitivity Jacobians $\mathbf{J}$ and Fisher Information Matrix $\mathbf{F} = \mathbf{J}\mathbf{J}^\top$ are already computable from `ParameterEstimation.get_gradient(params, out_array=True)` on `master`; the case now uses the initial bulk-density option from [#571](https://github.com/PharmaPy-org/PharmaPy/pull/571); adopt the remaining shared interfaces in M7–M12 once merged |
 | [#486](https://github.com/PharmaPy-org/PharmaPy/issues/486) (`SemibatchReactor` forward sensitivities `eval_sens=True`) | `BatchReactor.solve_unit(eval_sens=True)` supports forward CVode sensitivity integration (`#55`), whereas `SemibatchReactor.solve_unit(eval_sens=True)` raises `NotImplementedError` (`PharmaPy/Reactors.py:3064`, reproduced in `tests/test_bioconjugation_case_selection.py` and `tests/test_reactor_modes.py`) | Fed-batch parameter estimation (`Weggen et al., 2024`, $10\text{–}30\text{ min}$ syringe-pump feed runs) cannot use `eval_sens=True` on `SemibatchReactor` | Run `SemibatchReactor` with `eval_sens=False` so `ParameterEstimation` uses finite-difference sensitivities (`dx_finitediff`), or land `#486` during M7–M8 (`#356`) |
 | [#531](https://github.com/PharmaPy-org/PharmaPy/issues/531) (Micromolar CVode `atol` scaling on `BatchReactor` / `SemibatchReactor`) | Assimulo CVode's default absolute tolerance is `atol = 1e-6` $[\text{mol/L}]$, which is $3\%$ of a $3.33 \times 10^{-5}\text{ mol/L}$ ($5\text{ g/L}$) antibody concentration and produces $-1.25 \times 10^{-5}\text{ mol/L}$ ($38\%$ of $c_{\text{mAb},0}$) negative-concentration undershoot on $\text{mAb}_0/\text{mAb}_1$ and unphysical $\text{DAR}(300\text{ s}) = 2.57 > 2.0$ overshoot (reproduced in `tests/test_bioconjugation_case_selection.py` and tracked in [#531](https://github.com/PharmaPy-org/PharmaPy/issues/531)) | Directly affects all micromolar $[\text{mol/L}]$ bioconjugation reactor solves and parameter estimation wrappers | Always pass `sundials_opts={'rtol': 1e-8, 'atol': 1e-11}` (or `atol <= 1e-10` $[\text{mol/L}]$) to `solve_unit` and `run_args={'sundials_opts': {'rtol': 1e-8, 'atol': 1e-11}}` in `Experiment` / `SetParamEstimation` until `#531` is fixed |
 
@@ -889,9 +893,8 @@ concentrations $[\text{mol/L}]$.
 1. **Months 7–8 (M7–M8 — Mechanistic Reactor + Mixing + PAT Forward/Inverse
    Implementation)**:
    - Implement the complete `BatchReactor` and `SemibatchReactor` flowsheet
-     scripts for Models 1A and 1B using the pure-component bioconjugation
-     database (`mAb`, `mAb_1Drug`, `mAb_2Drug`, `H0_0`–`H2_2`, `Drug`,
-     `Drug_depl`, `buffer`).
+     scripts for Models 1A and 1B using the case molecular-weight and
+     heat-capacity inputs and the bulk-density closure in Section 3.1.
    - Couple reactor state trajectories $\mathbf{C}(t)$ $[\text{mol/L}]$ to the
      Beer–Lambert UV-Vis observation operator ($\lambda \in [240, 360]\text{ nm}$,
      including the $248/280\text{ nm}$ dual-wavelength channel and short-pathlength

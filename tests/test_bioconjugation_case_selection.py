@@ -13,9 +13,9 @@ in ``doc/review_notes/bioconjugation_case_selection.md``.
 
 Data provenance:
 - ``origin='literature'``: kinetic rate constants, standard deviations, 95%
-  confidence intervals, initial concentrations, stirred-tank mixing times, buffer
-  density and viscosity, and 248/280 nm molar extinction coefficients from
-  peer-reviewed literature (Andris et al., 2019,
+  confidence intervals, initial concentrations, stirred-tank mixing times,
+  assigned CFD bulk density and viscosity, and 248/280 nm molar extinction
+  coefficients from peer-reviewed literature (Andris et al., 2019,
   doi:10.1016/j.jbiotec.2019.09.013; Weggen et al., 2023,
   doi:10.3389/fbioe.2023.1123842; Weggen et al., 2024,
   doi:10.3389/fbioe.2024.1403644; Weggen et al., 2025,
@@ -29,11 +29,12 @@ Data provenance:
   measurement-weighting standard deviation, all 4-wavelength MCR/PCR
   verification absorptivities beyond the two literature ``cAC10`` / ``vc-MMAE``
   reference wavelengths (including the entire ``Drug_depl`` row and the
-  310/342 nm columns), schema placeholder thermal properties (``cp_liq``,
-  ``t_crit``), and WP4 scheduling task durations and hold-time design
-  parameters, the illustrative sub-second tube mixing scenario, and the use
-  of DAR 2 batch-derived parameters in a 4 mL fed-batch design. These verify
-  the model, PAT, and scheduling interfaces and are not an empirical dataset.
+  310/342 nm columns), liquid heat-capacity coefficients used by reactor
+  heat-result reconstruction (``cp_liq``), WP4 scheduling task durations and
+  hold-time design parameters, the illustrative sub-second tube mixing
+  scenario, and the use of DAR 2 batch-derived parameters in a 4 mL fed-batch
+  design. These verify the model, PAT, and scheduling interfaces and are not
+  an empirical dataset.
 
 Core unit tests run in under three seconds without Assimulo; the final
 integration test uses ``pytest.importorskip("assimulo")`` to exercise native
@@ -60,7 +61,7 @@ from PharmaPy.ParamEstim import (
     MultipleCurveResolution,
     ParameterEstimation,
 )
-from PharmaPy.Phases import LiquidPhase
+from PharmaPy.Phases import BulkLiquidDensity, LiquidPhase
 from PharmaPy.Reactors import BatchReactor, SemibatchReactor
 from PharmaPy.Records import (
     CalibrationRecord,
@@ -111,17 +112,13 @@ MODEL_1A_PARTICIPATING = (
     "Drug_depl",
 )
 
-# Representative pure-component property table for dilute aqueous ADC buffer
-# (10% v/v DMSO in 20 mM sodium phosphate buffer, rho_liq = 1010.5 kg/m**3,
-# mu = 1.06e-3 Pa*s, Weggen et al., 2023, Sec. 2.2.2) with surrogate maleimide
-# payload N-(1-pyrenyl)maleimide (NPM, C20H11NO2, M = 297.31 g/mol, Weggen et
-# al., 2023, Sec. 2.1.2). Molecular weights satisfy exact stoichiometric mass
-# conservation (stoich_matrix @ mw == 0) across R1, R2, and R3.
-# Note: cp_liq [J/(mol*K)] and t_crit [K] are synthetic schema-required
-# placeholders (origin='synthetic') that are not used by isothermal liquid
-# reactor integration (isothermal=True).
-BUFFER_DENSITY = 1010.5  # [kg/m**3], Weggen et al. (2023), Sec. 2.2.2
-DYNAMIC_VISC_BUFFER = 1.06e-3  # [Pa*s], 1.06 mPa*s, Weggen et al. (2023), Sec. 2.2.2
+# Reference bulk properties assigned for the CFD liquid in Weggen et al.
+# (2023), Sec. 2.2.2. The density is supplied once for the modeled charge
+# and synthetic feed. The component table supplies molar masses for mass
+# conservation and synthetic Cp coefficients for reactor heat diagnostics,
+# which are reconstructed even after an isothermal solve.
+BUFFER_DENSITY = 1010.5  # [kg/m**3], assigned bulk water/DMSO reference density
+DYNAMIC_VISC_BUFFER = 1.06e-3  # [Pa*s], assigned bulk reference viscosity
 KINEMATIC_VISC_BUFFER = (
     DYNAMIC_VISC_BUFFER / BUFFER_DENSITY
 )  # [m**2/s], 1.049e-6 m**2/s
@@ -130,44 +127,33 @@ DMSO_DENSITY = (
 )
 REACTION_TEMP = 295.15  # [K], 22 degC isothermal laboratory condition
 MAB_MW = 150000.0  # [g/mol], intact IgG1 molar mass, Weggen et al. (2023), Sec. 2.1.1
-NPM_MW = 297.31  # [g/mol], N-(1-pyrenyl)maleimide (C20H11NO2) molar mass
+# N-(1-pyrenyl)maleimide (C20H11NO2), Weggen et al. (2023), Sec. 2.1.2.
+NPM_MW = 297.31  # [g/mol]
 BUFFER_MW = 19.67  # [g/mol], mole-fraction-weighted 90% v/v H2O + 10% v/v DMSO
 BIOCONJUGATION_DATABASE = {
     "mAb": {
         "mw": MAB_MW,  # [g/mol]
-        "rho_liq": BUFFER_DENSITY,  # [kg/m**3]
         "cp_liq": [210000.0],  # [J/(mol*K)], synthetic placeholder
-        "t_crit": 800.0,  # [K], synthetic placeholder
     },
     "mAb_1Drug": {
         "mw": MAB_MW + NPM_MW,  # [g/mol], 150297.31 g/mol (exact R1 mass balance)
-        "rho_liq": BUFFER_DENSITY,  # [kg/m**3]
         "cp_liq": [210420.0],  # [J/(mol*K)], synthetic placeholder
-        "t_crit": 800.0,  # [K], synthetic placeholder
     },
     "mAb_2Drug": {
         "mw": MAB_MW + 2.0 * NPM_MW,  # [g/mol], 150594.62 g/mol (exact R2 mass balance)
-        "rho_liq": BUFFER_DENSITY,  # [kg/m**3]
         "cp_liq": [210840.0],  # [J/(mol*K)], synthetic placeholder
-        "t_crit": 800.0,  # [K], synthetic placeholder
     },
     "Drug": {
         "mw": NPM_MW,  # [g/mol], 297.31 g/mol
-        "rho_liq": BUFFER_DENSITY,  # [kg/m**3]
         "cp_liq": [420.0],  # [J/(mol*K)], synthetic placeholder
-        "t_crit": 750.0,  # [K], synthetic placeholder
     },
     "Drug_depl": {
         "mw": NPM_MW,  # [g/mol], 297.31 g/mol (effective payload-moiety basis for R3)
-        "rho_liq": BUFFER_DENSITY,  # [kg/m**3]
         "cp_liq": [420.0],  # [J/(mol*K)], synthetic placeholder
-        "t_crit": 750.0,  # [K], synthetic placeholder
     },
     "buffer": {
         "mw": BUFFER_MW,  # [g/mol], 19.67 g/mol
-        "rho_liq": BUFFER_DENSITY,  # [kg/m**3]
         "cp_liq": [78.0],  # [J/(mol*K)], synthetic placeholder
-        "t_crit": 650.0,  # [K], synthetic placeholder
     },
 }
 
@@ -238,7 +224,7 @@ REPLAY_RTOL = 4 * np.finfo(float).eps  # [-], deterministic rerun tolerance
 
 
 def _write_bioconjugation_db(tmp_path):
-    """Write the pure-component JSON database for the bioconjugation case.
+    """Write component masses and liquid heat capacities for the case.
 
     Parameters
     ----------
@@ -1745,7 +1731,7 @@ def test_wp4_four_step_sequence_mass_balance_and_storage_contract():
 @pytest.mark.assimulo
 @pytest.mark.integration
 def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
-    """Verify native reactor trajectories, sensitivities, and documented blockers.
+    """Verify bulk-density inventories, reactor results, and documented blockers.
 
     Parameters
     ----------
@@ -1754,11 +1740,19 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
 
     Notes
     -----
+    The charge and synthetic feed use one assigned reference bulk density.
     The default-tolerance and missing-semibatch-sensitivity assertions remain
     provisional while issues #531 and #486 are open, respectively.
     """
     pytest.importorskip("assimulo")
     db_path = _write_bioconjugation_db(tmp_path)
+    buffer_bulk_density = BulkLiquidDensity(
+        mass_density=BUFFER_DENSITY,
+        source=(
+            "Weggen et al. (2023), Sec. 2.2.2, "
+            "assigned CFD water/10% DMSO density"
+        ),
+    )
 
     # 1. BatchReactor native solve at 5 g/L mAb (3.333e-5 mol/L) and 5x payload
     # in GST-1 (0.300 L = 3.0e-4 m**3).
@@ -1795,6 +1789,7 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
         vol=gst1_vol_m3,
         mole_conc=batch_conc_init,
         name_solv="buffer",
+        bulk_density=buffer_bulk_density,
     )
     batch_default_atol.solve_unit(
         time_grid=time_grid,
@@ -1826,6 +1821,17 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
         vol=gst1_vol_m3,
         mole_conc=batch_conc_init,
         name_solv="buffer",
+        bulk_density=buffer_bulk_density,
+    )
+    assert batch_reactor.Liquid_1.concentration_basis
+    assert batch_reactor.Liquid_1.bulk_density == buffer_bulk_density
+    expected_charge_mass = BUFFER_DENSITY * gst1_vol_m3  # [kg]
+    assert batch_reactor.Liquid_1.mass == pytest.approx(
+        expected_charge_mass, rel=CLOSED_FORM_RTOL
+    )
+    np.testing.assert_allclose(
+        batch_reactor.Liquid_1.mole_conc[:-1], batch_conc_init[:-1],
+        rtol=CLOSED_FORM_RTOL, atol=0.0,
     )
     micromolar_sundials_opts = {
         "rtol": 1e-8,  # [-], relative CVode integration tolerance
@@ -1849,6 +1855,11 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
     np.testing.assert_allclose(drug_moiety_total, C_DRUG_BULK_STD, rtol=1e-6)
     assert np.all(prof[:, :5] >= -1e-11)
     assert 1.98 < dar_final <= 2.0 + 1e-6
+    assert batch_reactor.Outlet.concentration_basis
+    assert batch_reactor.Outlet.vol == pytest.approx(gst1_vol_m3, rel=CLOSED_FORM_RTOL)
+    assert batch_reactor.Outlet.mass == pytest.approx(
+        expected_charge_mass, rel=micromolar_sundials_opts["rtol"]
+    )
 
     # The returned/stored sensitivities use (parameter, time, species) axes:
     # k1/k2 rows [mol**2*s/L**2], k3 row [mol*s/L], and Ea rows [mol**2/(L*J)].
@@ -2004,6 +2015,18 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
     total_drug_moles = gst1_vol_l * C_DRUG_BULK_STD  # [mol]
     feed_drug_conc = total_drug_moles / feed_vol_l  # [mol/L], 10 mM stock
 
+    # The modeled synthetic feed uses the same constant bulk density as
+    # the charge. This assumption applies to the reactor test and is
+    # separate from the neat-DMSO stock in the WP4 scheduling fixture.
+    feed_reference = LiquidPhase(
+        db_path,
+        temp=REACTION_TEMP,
+        vol=feed_vol_m3,
+        mole_conc=[0.0, 0.0, 0.0, feed_drug_conc, 0.0, 0.0],
+        name_solv="buffer",
+        bulk_density=buffer_bulk_density,
+    )
+
     # 2a. Reproduce Section 7.2 blocker (tracked in #486): SemibatchReactor.solve_unit
     # raises NotImplementedError when eval_sens=True is requested. Provisional
     # assertion while #486 is open: once #486 implements fed-batch forward
@@ -2023,13 +2046,13 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
         vol=gst1_vol_m3,
         mole_conc=[C_MAB_STD, 0.0, 0.0, 0.0, 0.0, 0.0],
         name_solv="buffer",
+        bulk_density=buffer_bulk_density,
     )
     semibatch_sens_blocker.Inlet = LiquidStream(
         db_path,
         temp=REACTION_TEMP,
         vol_flow=feed_flow_m3_s,
-        mole_conc=[0.0, 0.0, 0.0, feed_drug_conc, 0.0, 0.0],
-        name_solv="buffer",
+        mole_conc=feed_reference.mole_conc,
     )
     with pytest.raises(NotImplementedError, match="sensitivity.*not supported"):
         semibatch_sens_blocker.solve_unit(
@@ -2054,13 +2077,27 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
         vol=gst1_vol_m3,
         mole_conc=[C_MAB_STD, 0.0, 0.0, 0.0, 0.0, 0.0],
         name_solv="buffer",
+        bulk_density=buffer_bulk_density,
     )
     semibatch.Inlet = LiquidStream(
         db_path,
         temp=REACTION_TEMP,
         vol_flow=feed_flow_m3_s,
-        mole_conc=[0.0, 0.0, 0.0, feed_drug_conc, 0.0, 0.0],
-        name_solv="buffer",
+        mole_conc=feed_reference.mole_conc,
+    )
+    assert semibatch.Liquid_1.concentration_basis
+    assert semibatch.Liquid_1.mass == pytest.approx(
+        expected_charge_mass, rel=CLOSED_FORM_RTOL
+    )
+    assert semibatch.Inlet.concentration_basis
+    assert semibatch.Inlet.name_species == list(BIOCONJUGATION_DATABASE)
+    np.testing.assert_allclose(
+        semibatch.Inlet.mole_conc, feed_reference.mole_conc,
+        rtol=CLOSED_FORM_RTOL, atol=0.0,
+    )
+    expected_feed_mass = BUFFER_DENSITY * feed_vol_m3  # [kg]
+    assert semibatch.Inlet.mass_flow * feed_time_s == pytest.approx(
+        expected_feed_mass, rel=CLOSED_FORM_RTOL
     )
     semibatch.solve_unit(
         runtime=feed_time_s,
@@ -2073,6 +2110,12 @@ def test_native_batch_and_semibatch_reactors_execute_dar2_conjugation(tmp_path):
     vol_final_l = vol_final_m3 * 1000.0  # [L]
     sb_conc_final = semibatch.result.mole_conc[-1]  # [mol/L]
     assert vol_final_m3 == pytest.approx(gst1_vol_m3 + feed_vol_m3, rel=1e-5)
+    assert semibatch.Outlet.concentration_basis
+    assert semibatch.Outlet.vol == pytest.approx(vol_final_m3, rel=CLOSED_FORM_RTOL)
+    assert semibatch.Outlet.mass == pytest.approx(
+        expected_charge_mass + expected_feed_mass,
+        rel=micromolar_sundials_opts["rtol"],
+    )
     assert (
         vol_final_l * (sb_conc_final[0] + sb_conc_final[1] + sb_conc_final[2])
     ) == pytest.approx(gst1_vol_l * C_MAB_STD, rel=1e-5)
