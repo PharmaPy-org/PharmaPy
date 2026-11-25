@@ -316,6 +316,171 @@ def test_bulk_charge_allows_exhaustion_at_binary_roundoff(thermo_path):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize('basis', ['mass_conc', 'mole_conc'])
+def test_bulk_charge_exhaustion_agrees_in_mass_and_mole_bases(thermo_path, basis):
+    """Preserve the same exhausted charge in either concentration basis.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic species database to update with decimal molar masses [g/mol].
+    basis : {'mass_conc', 'mole_conc'}
+        Whether the test supplies solutes in [kg/m**3] or [mol/L].
+    """
+    from PharmaPy.Phases import BulkLiquidDensity
+
+    path = Path(thermo_path)
+    data = json.loads(path.read_text(encoding='utf-8'))
+    # The decimal factors yield 79.94 and 713.36 kg/m**3 exactly. Their
+    # binary64 products and sum round above the given density.
+    data['A']['mw'] = 57.1  # [g/mol]
+    data['B']['mw'] = 96.4  # [g/mol]
+    path.write_text(json.dumps(data), encoding='utf-8')
+    mass_concs = {'A': 79.94, 'B': 713.36}  # [kg/m**3]
+    mole_concs = {'A': 1.4, 'B': 7.4}  # [mol/L]
+    bulk_density = BulkLiquidDensity(793.3, SOURCE)  # [kg/m**3], sum of decimal masses
+    supplied = mass_concs if basis == 'mass_conc' else mole_concs  # [kg/m**3] or [mol/L]
+
+    phase = LiquidPhase(thermo_path, vol=VOLUME, name_solv='carrier',
+                        bulk_density=bulk_density, **{basis: supplied})
+
+    np.testing.assert_allclose(phase.mass_conc, [0, 0, 79.94, 713.36],
+                               rtol=ROUNDING_RTOL, atol=0)
+    np.testing.assert_allclose(phase.mole_conc, [0, 0, 1.4, 7.4],
+                               rtol=ROUNDING_RTOL, atol=0)
+    assert phase.mass == pytest.approx(1.5866, rel=ROUNDING_RTOL, abs=0)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(('basis', 'excess_steps'), [
+    ('mass_conc', 4), ('mole_conc', 6),
+])
+def test_bulk_charge_rejects_excess_beyond_roundoff(thermo_path, basis, excess_steps):
+    """Reject excess just above the rounding bound using an exact binary conversion.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic species database with a selected molar mass [g/mol].
+    basis : {'mass_conc', 'mole_conc'}
+        Whether the test supplies solutes in [kg/m**3] or [mol/L].
+    excess_steps : int
+        Representable float64 spacing steps [-] past the supplied bulk density.
+    """
+    from PharmaPy.Phases import BulkLiquidDensity
+
+    path = Path(thermo_path)
+    data = json.loads(path.read_text(encoding='utf-8'))
+    molar_mass = 64.0  # [g/mol], power of two so conversion is exact in binary
+    data['A']['mw'] = molar_mass  # [g/mol]
+    path.write_text(json.dumps(data), encoding='utf-8')
+    bulk_density = BulkLiquidDensity(BULK_DENSITY, SOURCE)  # [kg/m**3]
+    # Four or six steps place the solute one step above the maximum
+    # three-stage mass or five-stage molar rounding allowance.
+    solute_mass_conc = BULK_DENSITY + excess_steps * np.spacing(BULK_DENSITY)  # [kg/m**3]
+    supplied = (solute_mass_conc if basis == 'mass_conc'
+                else solute_mass_conc / molar_mass)  # [kg/m**3] or [mol/L]
+
+    with pytest.raises(ValueError, match='exceed the bulk liquid mass density'):
+        LiquidPhase(thermo_path, vol=VOLUME, name_solv='carrier',
+                    bulk_density=bulk_density, **{basis: {'A': supplied}})
+
+
+@pytest.mark.unit
+def test_bulk_charge_rejects_masked_density():
+    """A masked density contains no measured value."""
+    from PharmaPy.Phases import BulkLiquidDensity
+
+    density = np.ma.array(BULK_DENSITY, mask=True)  # [kg/m**3]
+    with pytest.raises(ValueError, match='mass_density.*masked'):
+        BulkLiquidDensity(density, SOURCE)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('kind', ['array', 'mapping', 'masked-constant'])
+def test_bulk_charge_rejects_masked_solutes(thermo_path, kind):
+    """Reject a missing solute before its backing value becomes inventory.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic pure-species data in the default fixture order.
+    kind : {'array', 'mapping', 'masked-constant'}
+        Container of masked mass concentration data [kg/m**3].
+    """
+    from PharmaPy.Phases import BulkLiquidDensity
+
+    mass_conc = SOLUTES['A'] * MOLAR_MASS['A']  # [kg/m**3]
+    if kind == 'array':
+        supplied = np.ma.array([0, 0, mass_conc, 0],
+                               mask=[False, False, True, False])  # [kg/m**3]
+    elif kind == 'mapping':
+        supplied = {'A': np.ma.array(mass_conc, mask=True)}  # [kg/m**3]
+    else:
+        supplied = {'A': np.ma.masked}  # [kg/m**3]
+
+    with pytest.raises(ValueError, match='mass_conc.*masked solute'):
+        LiquidPhase(thermo_path, vol=VOLUME, name_solv='carrier',
+                    mass_conc=supplied,
+                    bulk_density=BulkLiquidDensity(BULK_DENSITY, SOURCE))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('kind', ['array', 'mapping'])
+def test_bulk_charge_replaces_a_masked_solvent_placeholder(thermo_path, kind):
+    """Complete a solvent entry whose original backing value is unavailable.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic pure-species data in the default fixture order.
+    kind : {'array', 'mapping'}
+        Container of measured molar concentrations [mol/L].
+    """
+    from PharmaPy.Phases import BulkLiquidDensity
+
+    if kind == 'array':
+        supplied = np.ma.array([SOLUTES['C'], 0, SOLUTES['A'], SOLUTES['B']],
+                               mask=[False, True, False, False])  # [mol/L]
+        solvent_key = SPECIES_ORDERS[0].index('carrier')
+    else:
+        supplied = {**SOLUTES, 'carrier': np.ma.masked}  # [mol/L]
+        solvent_key = 'carrier'
+    phase = LiquidPhase(thermo_path, vol=VOLUME, name_solv='carrier',
+                        mole_conc=supplied,
+                        bulk_density=BulkLiquidDensity(BULK_DENSITY, SOURCE))
+
+    np.testing.assert_allclose(
+        phase.mole_conc, [SOLUTES['C'], BULK_CARRIER, SOLUTES['A'], SOLUTES['B']],
+        rtol=ROUNDING_RTOL, atol=0,
+    )
+    assert np.ma.is_masked(supplied[solvent_key])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize('supplied', [
+    {'A': [SOLUTES['A']], 'B': [SOLUTES['B']]},
+    {'carrier': [BULK_CARRIER]},
+], ids=['solute-profiles', 'solvent-profile'])  # [mol/L], one-point profiles
+def test_bulk_charge_rejects_profile_mapping_entries(thermo_path, supplied):
+    """Reject profiles even when the named solvent will be overwritten.
+
+    Parameters
+    ----------
+    thermo_path : str
+        Synthetic pure-species data in the default fixture order.
+    supplied : dict[str, list[float]]
+        Species-keyed one-point concentration profiles [mol/L].
+    """
+    from PharmaPy.Phases import BulkLiquidDensity
+
+    with pytest.raises(ValueError, match='mole_conc mapping entries must be scalar'):
+        LiquidPhase(thermo_path, vol=VOLUME, name_solv='carrier',
+                    mole_conc=supplied,
+                    bulk_density=BulkLiquidDensity(BULK_DENSITY, SOURCE))
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize('as_mapping', [False, True])
 def test_bulk_density_rejects_complex_solute_concentrations(thermo_path, as_mapping):
     """Reject loss of the imaginary part in either composition format."""

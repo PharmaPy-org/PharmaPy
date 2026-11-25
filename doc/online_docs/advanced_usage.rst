@@ -744,13 +744,18 @@ one solvent concentration at construction from a supplied mass density of the
 justified model for the initial liquid composition, temperature and pressure.
 Provide :code:`name_solv` and either :code:`mole_conc` [mol/L] or
 :code:`mass_conc` [kg/m**3]. A species-keyed mapping can omit the solvent.
-An ordered vector covers all database species and the solvent entry is
-replaced. Solute molar masses come from the phase property database.
+A mapping accepts scalar entries. An ordered vector covers all database
+species and needs a numeric solvent placeholder such as zero. The solvent
+entry is replaced and may be masked. The density and solute data must be
+unmasked.
+Solute molar masses come from the phase property database.
 
 For each cubic metre of solution, the mass available to the solvent is the
 supplied density minus the sum of the solute mass concentrations. A negative
-remainder beyond roundoff is infeasible. The phase stores the completed concentrations on the
-authoritative concentration basis. Later updates and reactor results derive
+remainder beyond roundoff is infeasible. At solvent exhaustion, the
+rounding allowance covers input representation, any molar-to-mass conversion
+and summation in binary64. The phase stores the completed concentrations on
+the authoritative concentration basis. Later updates and reactor results derive
 their inventory from the concentrations, and :code:`getInventoryDensity()`
 reports that inventory density. The optional :code:`bulk_density` record
 retains the initial value and its source for traceability. The additive-volume

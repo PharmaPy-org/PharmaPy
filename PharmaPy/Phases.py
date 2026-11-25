@@ -325,8 +325,10 @@ class LiquidPhase(ThermoPhysicalManager):
             Sourced bulk solution density [kg/m**3] at the initial liquid
             reference state. Requires ``name_solv`` and exactly one of
             ``mole_conc`` or ``mass_conc`` as a species-ordered vector or a
-            mapping of species to scalars. Any entry for the solvent is
-            ignored when completing the phase's stored concentrations.
+            mapping of species to scalars. Use a numeric placeholder such as
+            zero in a vector's solvent position, or omit the solvent from a
+            mapping. The solvent entry is overwritten and may be masked.
+            Solute data must be unmasked.
             The supplied density applies at the construction state. The default
             uses the existing ideal-mixing or complete-concentration
             inventory rules.
@@ -569,7 +571,9 @@ class LiquidPhase(ThermoPhysicalManager):
         concentrations : array-like or mapping of str to float
             Species concentrations in [mol/L] or [kg/m**3] according to
             ``name``, shape ``(num_species,)`` in database order or keyed by
-            species. The solvent entry, if supplied, is ignored.
+            species. Ordered vectors require a numeric solvent placeholder
+            such as zero. A mapping may omit the solvent. Any supplied
+            solvent placeholder is overwritten. Solute data must be unmasked.
         name : {'mole_conc', 'mass_conc'}
             Concentration basis.
         name_solv : str
@@ -602,20 +606,28 @@ class LiquidPhase(ThermoPhysicalManager):
 
         if isinstance(concentrations, Mapping):
             concentrations = dict(concentrations)
+            if any(np.ndim(value) != 0 for value in concentrations.values()):
+                raise ValueError(f"{name} mapping entries must be scalar for bulk_density.")
             concentrations[name_solv] = 0  # [mol/L] or [kg/m**3], placeholder
+            if any(np.ma.is_masked(value) for value in concentrations.values()):
+                raise ValueError(f"{name} with bulk_density cannot contain masked solute values.")
             if any(np.asarray(value).dtype.kind not in 'fiu'
                    for value in concentrations.values()):
                 raise ValueError(f"{name} with bulk_density must contain real numbers.")
             concentrations = self._coerce_composition_mapping(concentrations, name)
-        supplied = np.asarray(concentrations)  # [mol/L] or [kg/m**3]
-        if supplied.dtype.kind not in 'fiu':
-            raise ValueError(f"{name} with bulk_density must contain real numbers.")
-        completed = supplied.astype(float, copy=True)  # [mol/L] or [kg/m**3]
-        if completed.shape != (self.num_species,):
+        supplied = np.asanyarray(concentrations)  # [mol/L] or [kg/m**3]
+        if supplied.shape != (self.num_species,):
             raise ValueError(
                 f"{name} with bulk_density must have shape ({self.num_species},) "
-                f"in database species order; got {completed.shape}."
+                f"in database species order; got {supplied.shape}."
             )
+        if supplied.dtype.kind not in 'fiu':
+            raise ValueError(f"{name} with bulk_density must contain real numbers.")
+        solute_mask = np.arange(self.num_species) != solvent_index
+        if np.ma.is_masked(supplied[solute_mask]):
+            raise ValueError(f"{name} with bulk_density cannot contain masked solute values.")
+        # Any remaining mask belongs to the discarded solvent placeholder.
+        completed = np.array(supplied, dtype=float, copy=True)  # [mol/L] or [kg/m**3]
 
         molar_masses = np.asarray(getattr(self, 'mw', None), dtype=float)  # [g/mol]
         if (molar_masses.shape != completed.shape
@@ -625,7 +637,6 @@ class LiquidPhase(ThermoPhysicalManager):
                 "bulk_density requires finite positive molecular weights [g/mol]."
             )
 
-        solute_mask = np.arange(self.num_species) != solvent_index
         with np.errstate(over='ignore'):
             if name == 'mole_conc':
                 # [mol/L] * [g/mol] = [kg/m**3].
@@ -633,7 +644,7 @@ class LiquidPhase(ThermoPhysicalManager):
                     completed[solute_mask] * molar_masses[solute_mask]
                 )  # [kg/m**3]
                 solvent_mass_conc = bulk_density._solvent_mass_concentration(
-                    solute_mass_conc
+                    solute_mass_conc, from_molar=True
                 )  # [kg/m**3]
                 completed[solvent_index] = (
                     solvent_mass_conc / molar_masses[solvent_index]
@@ -642,7 +653,7 @@ class LiquidPhase(ThermoPhysicalManager):
                 total_mass_conc = np.sum(completed * molar_masses)  # [kg/m**3]
             else:
                 completed[solvent_index] = bulk_density._solvent_mass_concentration(
-                    completed[solute_mask]
+                    completed[solute_mask], from_molar=False
                 )  # [kg/m**3]
                 total_mole_conc = np.sum(completed / molar_masses)  # [mol/L]
                 total_mass_conc = completed.sum()  # [kg/m**3]
