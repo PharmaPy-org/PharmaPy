@@ -21,8 +21,9 @@ if not (os.environ.get("PYTHON_JULIACALL_EXE")
     )
 
 
-# IAPWS R6-95(2018), Tables 1, 7 and 8.
-WATER_MOLAR_MASS = 0.018015268  # [kg/mol], molar mass in Table 1 converted from g/mol
+# IAPWS water and steam FAQ, VSMOW molar mass https://iapws.org/faqs/faq1
+WATER_MOLAR_MASS = 0.018015268  # [kg/mol], converted from g/mol
+# IAPWS R6-95(2018), Tables 7 and 8.
 WATER_PRESSURE = 99_241.8352  # [Pa], Table 7 first row converted from MPa
 WATER_TEMPERATURE = 300.0  # [K], Table 7 first row
 SATURATION_PRESSURE = 698.451167  # [Pa], Table 8 first column converted from MPa
