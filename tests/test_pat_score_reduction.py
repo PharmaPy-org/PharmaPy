@@ -12,7 +12,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.pat import block_package, dataset, ic_spectra, reduce_runs
+from examples.pat import dataset, reduce_runs
+from PharmaPy import PATReaders
 
 pytestmark = pytest.mark.unit
 
@@ -126,20 +127,21 @@ def test_run_clock_can_be_given_as_the_local_start_of_the_log():
 
 
 def test_declared_spectra_without_metadata_are_left_out():
-    infos = ic_spectra.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
-    stream = block_package.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
-    records = dict(ic_spectra.spectrum_records(stream))
+    infos = PATReaders.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
+    stream = PATReaders.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
+    records = dict(PATReaders.spectrum_records(stream))
     orphans = sum(identifier not in infos for identifier in records)
     origin = datetime.datetime(2026, 10, 24, 0, 49, 17)  # local time; the spectra carry UTC stamps four hours ahead
+    native = PATReaders.spectra_from_records(infos, records)
 
-    time, axis, spectra = reduce_runs.timed_spectra(infos, records, origin, -4.0, without_metadata=orphans)
+    time, axis, spectra = reduce_runs.timed_spectra(native, origin, -4.0, without_metadata=orphans)
 
     assert orphans > 0
     # The three spectra with metadata were taken at 04:29:10.257475, 04:30:11.952319 and 04:31:10.578463 UTC.
     np.testing.assert_allclose(time, [-1206.742525, -1145.047681, -1086.421537], atol=1e-6)
     assert spectra.shape == (3, axis.size) and axis[0] > axis[-1]
     with pytest.raises(ValueError, match="%d spectra without metadata were declared, but %d were found" % (orphans + 1, orphans)):
-        reduce_runs.timed_spectra(infos, records, origin, -4.0, without_metadata=orphans + 1)
+        reduce_runs.timed_spectra(native, origin, -4.0, without_metadata=orphans + 1)
 
 
 def test_a_description_needs_exactly_one_ir_block_and_a_boolean_fbrm_flag(tmp_path):

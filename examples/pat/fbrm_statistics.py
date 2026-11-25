@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from .ic_fbrm import rebin_matrix
+from PharmaPy.PATReaders import rebin_matrix
 
 
 def log_channel_edges(lower: float = 1.0, upper: float = 1000.0, count: int = 100) -> np.ndarray:

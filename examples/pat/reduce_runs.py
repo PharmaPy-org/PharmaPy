@@ -9,7 +9,8 @@ temperatures, FBRM band counts with the square-weighted mean chord, and an IR
 signal of the dissolved solute. The description names that signal in one of two
 blocks: ``ir_band``, the height of one band, or ``ir_score``, the whole-spectrum
 score of `spectral_score`, which needs the spectra of all runs together.
-``runs.json`` of the dataset holds every setting used here.
+``runs.json`` of the dataset holds every setting used here. A run is read from
+its native files, or from vendor CSV exports when its entry names them.
 """
 from __future__ import annotations
 
@@ -19,11 +20,12 @@ from pathlib import Path
 
 import numpy as np
 
-from . import dataset, fbrm_statistics, ic_fbrm, ic_spectra, spectral_score, table_layout
+from PharmaPy import PATReaders
+
+from . import dataset, fbrm_statistics, spectral_score, table_layout
 from .band_height import band_height
 from .run_table import block_mean
 
-SECONDS_PER_HOUR = 3600.0  # [s/h]
 MEAN_CHORD = "mean_chord_square_weighted"
 # Decimals written per quantity: the thermostat log resolves 0.01 K, counts are
 # fractional after rebinning, and the IR band scatters by about 2e-4.
@@ -32,6 +34,7 @@ DIGITS_BY_UNIT = {"s": TIME_DIGITS, "K": TEMPERATURE_DIGITS, "counts": COUNT_DIG
 IR_BLOCKS = ("ir_band", "ir_score")
 CLOCK_KEYS = ("temperature_log_start_local", "temperature_log_start_after_fbrm_start_s")
 SCORE_SUMMARY = "ir_score.json"
+FBRM_EXPORT, IR_EXPORT, IR_EXPORT_START = "fbrm_export", "ir_export", "ir_export_start_local"  # optional keys of a run
 
 
 def run_clock_origin(first_fbrm_sample: datetime.datetime | None, run: dict, description: dict) -> datetime.datetime:
@@ -97,15 +100,14 @@ def temperature_table(log_path: Path, description: dict, case: Path) -> tuple[di
     return columns, units
 
 
-def fbrm_table(times: list[datetime.datetime], raw: np.ndarray, origin: datetime.datetime, description: dict) -> tuple[dict, dict]:
-    """Reduce raw chord-length samples to band counts and a mean chord.
+def fbrm_table(samples: PATReaders.FBRMSamples, origin: datetime.datetime, description: dict) -> tuple[dict, dict]:
+    """Reduce chord-length samples to band counts and a mean chord.
 
     Parameters
     ----------
-    times : list of datetime.datetime
-        Sample time stamps (local time, naive).
-    raw : numpy.ndarray
-        Counts on the raw grid [counts], shape ``(n_samples, 1550)``.
+    samples : PharmaPy.PATReaders.FBRMSamples
+        Samples of a native file or of a CSV export, with sample times in local
+        time and counts [counts] on the channels of ``samples.channel_edges`` [um].
     origin : datetime.datetime
         Zero of the run clock in local time.
     description : dict
@@ -118,13 +120,27 @@ def fbrm_table(times: list[datetime.datetime], raw: np.ndarray, origin: datetime
         column per band [counts], and the square-weighted mean chord [um] on the
         100-channel logarithmic grid (NaN for a sample without counts), and
         ``{column: unit}``.
+
+    Raises
+    ------
+    ValueError
+        If the bands reach beyond the channels of the samples.
+
+    Notes
+    -----
+    A band edge inside a channel splits its counts in proportion to the channel
+    length. The raw grid of a native file has edges at 10 and 100 um; the 100
+    logarithmic channels of an export do not.
     """
-    raw_edges = ic_fbrm.raw_channel_edges()  # [um]
+    channel_edges = samples.channel_edges  # [um]
     band_edges = np.array(description["fbrm"]["band_edges_um"])  # [um]
+    if band_edges[0] < channel_edges[0] or band_edges[-1] > channel_edges[-1]:
+        raise ValueError("The bands, %g to %g um, reach beyond the channels of the samples, %g to %g um."
+                         % (band_edges[0], band_edges[-1], channel_edges[0], channel_edges[-1]))
     log_edges = fbrm_statistics.log_channel_edges(band_edges[0], band_edges[-1])  # [um]
-    bands = fbrm_statistics.band_counts(raw, raw_edges, band_edges)
-    log_counts = fbrm_statistics.band_counts(raw, raw_edges, log_edges)
-    columns = {"time": np.array([(time - origin).total_seconds() for time in times])}
+    bands = fbrm_statistics.band_counts(samples.counts, channel_edges, band_edges)
+    log_counts = fbrm_statistics.band_counts(samples.counts, channel_edges, log_edges)
+    columns = {"time": (samples.time - np.datetime64(origin, "us")) / np.timedelta64(1, "s")}
     units = {"time": "s"}
     for index in range(band_edges.size - 1):
         name = "counts_%g_to_%gum" % (band_edges[index], band_edges[index + 1])
@@ -134,33 +150,14 @@ def fbrm_table(times: list[datetime.datetime], raw: np.ndarray, origin: datetime
     return columns, units
 
 
-def _parse_utc(stamp: str) -> datetime.datetime:
-    """Parse an iC ``SampleTime`` such as ``2026-10-24T04:29:10.2574757Z``.
-
-    Parameters
-    ----------
-    stamp : str
-        ISO 8601 UTC time with up to seven fractional digits.
-
-    Returns
-    -------
-    datetime.datetime
-        Naive UTC time, truncated to microseconds.
-    """
-    head, _, fraction = stamp.rstrip("Z").partition(".")
-    return datetime.datetime.strptime(head + "." + (fraction[:6] or "0"), "%Y-%m-%dT%H:%M:%S.%f")
-
-
-def timed_spectra(infos: dict, records: dict, origin: datetime.datetime, utc_offset_h: float,
+def timed_spectra(spectra: PATReaders.ICSpectra, origin: datetime.datetime, utc_offset_h: float,
                   without_metadata: int = 0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Put the spectra of one file on the run clock.
 
     Parameters
     ----------
-    infos : dict
-        Spectrum metadata from `ic_spectra.spectrum_infos`.
-    records : dict
-        ``{spectrum identifier: absorbance}``, each of shape ``(n_points,)``.
+    spectra : PharmaPy.PATReaders.ICSpectra
+        Spectra of the file, with sample times in UTC.
     origin : datetime.datetime
         Zero of the run clock in local time.
     utc_offset_h : float
@@ -182,38 +179,24 @@ def timed_spectra(infos: dict, records: dict, origin: datetime.datetime, utc_off
     ------
     ValueError
         If the number of spectra without metadata differs from the declared one,
-        or the spectra do not share one axis.
+        or the file does not hold absorbance.
     """
-    orphans = [identifier for identifier in records if identifier not in infos]
+    orphans = spectra.without_time
     if len(orphans) != without_metadata:
         raise ValueError("%d spectra without metadata were declared, but %d were found%s."
                          % (without_metadata, len(orphans), "; %s has no metadata entry" % orphans[0] if orphans else ""))
-    rows, axes = [], set()
-    for identifier, absorbance in records.items():
-        if identifier not in infos:
-            continue
-        info = infos[identifier]
-        axes.add((float(info["StartWn"]), float(info["EndWn"]), int(info["NumberOfPoints"])))
-        local = _parse_utc(info["SampleTime"]) + datetime.timedelta(hours=utc_offset_h)
-        rows.append(((local - origin).total_seconds(), absorbance))
-    if len(axes) != 1:
-        raise ValueError("The spectra do not share one spectral axis: %s." % sorted(axes))
-    start, end, points = axes.pop()
-    axis = np.linspace(start, end, points)  # [cm-1]
-    rows.sort(key=lambda row: row[0])
-    return np.array([row[0] for row in rows]), axis, np.vstack([row[1] for row in rows])
+    local = spectra.time + np.timedelta64(datetime.timedelta(hours=utc_offset_h))
+    return (local - np.datetime64(origin, "us")) / np.timedelta64(1, "s"), spectra.wavenumber, spectra.absorbance
 
 
-def ir_table(infos: dict, records: dict, origin: datetime.datetime, utc_offset_h: float, description: dict,
+def ir_table(spectra: PATReaders.ICSpectra, origin: datetime.datetime, utc_offset_h: float, description: dict,
              without_metadata: int = 0) -> tuple[dict, dict]:
     """Reduce IR spectra to the height of the band named in the description.
 
     Parameters
     ----------
-    infos : dict
-        Spectrum metadata from `ic_spectra.spectrum_infos`.
-    records : dict
-        ``{spectrum identifier: absorbance}``, each of shape ``(n_points,)``.
+    spectra : PharmaPy.PATReaders.ICSpectra
+        Spectra of the file, with sample times in UTC.
     origin : datetime.datetime
         Zero of the run clock in local time.
     utc_offset_h : float
@@ -235,14 +218,14 @@ def ir_table(infos: dict, records: dict, origin: datetime.datetime, utc_offset_h
     ------
     ValueError
         If the spectra without metadata differ from the declared number, or the
-        spectra do not share one axis.
+        file does not hold absorbance.
     """
     band = description["ir_band"]
-    time, axis, spectra = timed_spectra(infos, records, origin, utc_offset_h, without_metadata)
+    time, axis, absorbance = timed_spectra(spectra, origin, utc_offset_h, without_metadata)
     columns = {
         "time": time,
-        "band_height": band_height(axis, spectra, band["peak_cm-1"], tuple(band["baseline_cm-1"])),
-        "solvent_absorbance": spectra[:, int(np.argmin(np.abs(axis - band["solvent_position_cm-1"])))],
+        "band_height": band_height(axis, absorbance, band["peak_cm-1"], tuple(band["baseline_cm-1"])),
+        "solvent_absorbance": absorbance[:, int(np.argmin(np.abs(axis - band["solvent_position_cm-1"])))],
     }
     return columns, {"time": "s", "band_height": "-", "solvent_absorbance": "-"}
 
@@ -430,6 +413,61 @@ def _single(folder: Path, pattern: str) -> Path:
     return matches[0]
 
 
+def _fbrm_samples(folder: Path, run: dict) -> PATReaders.FBRMSamples:
+    """Read the FBRM samples of a run from its export or its native file.
+
+    Parameters
+    ----------
+    folder : pathlib.Path
+        Run folder.
+    run : dict
+        Entry of the run in ``runs.json``. ``fbrm_export`` names a vendor CSV
+        export in the folder; without it the only ``.icFbrm`` file is read.
+
+    Returns
+    -------
+    PharmaPy.PATReaders.FBRMSamples
+        The samples, with sample times in local time.
+    """
+    if FBRM_EXPORT in run:
+        return PATReaders.read_ic_fbrm_export(folder / run[FBRM_EXPORT])
+    return PATReaders.read_ic_fbrm(_single(folder, "*.icFbrm"))
+
+
+def _ir_spectra(folder: Path, run: dict, utc_offset_h: float) -> PATReaders.ICSpectra:
+    """Read the IR spectra of a run from its export or its native file.
+
+    Parameters
+    ----------
+    folder : pathlib.Path
+        Run folder.
+    run : dict
+        Entry of the run in ``runs.json``. ``ir_export`` names a vendor CSV export
+        in the folder and comes with ``ir_export_start_local``, the local time at
+        which the iC IR experiment started (ISO 8601). Without them the only
+        ``.iCIR`` file is read.
+    utc_offset_h : float
+        Local time minus UTC on the day of the run [h].
+
+    Returns
+    -------
+    PharmaPy.PATReaders.ICSpectra
+        The spectra, with sample times in UTC.
+
+    Raises
+    ------
+    ValueError
+        If the run gives only one of ``ir_export`` and ``ir_export_start_local``.
+    """
+    if (IR_EXPORT in run) != (IR_EXPORT_START in run):
+        raise ValueError("Run %s must give %s and %s together." % (run["id"], IR_EXPORT, IR_EXPORT_START))
+    if IR_EXPORT not in run:
+        return PATReaders.read_ic_spectra(_single(folder, "*.iCIR"))
+    start_local = datetime.datetime.fromisoformat(run[IR_EXPORT_START])
+    start_utc = start_local - datetime.timedelta(hours=utc_offset_h)  # the offset is local time minus UTC
+    return PATReaders.read_ic_ir_export(folder / run[IR_EXPORT], start_utc)
+
+
 def reduce_run(case: Path, raw_root: Path, run: dict, description: dict, out_dir: Path) -> tuple[dict[str, int], tuple | None]:
     """Write the reduced tables of one run that need no other run.
 
@@ -458,14 +496,17 @@ def reduce_run(case: Path, raw_root: Path, run: dict, description: dict, out_dir
     Raises
     ------
     ValueError
-        If the description does not hold exactly one of the two IR blocks, or
-        ``has_fbrm_samples`` of the run is not a boolean.
+        If the description does not hold exactly one of the two IR blocks,
+        ``has_fbrm_samples`` of the run is not a boolean, or the run gives only one
+        of ``ir_export`` and ``ir_export_start_local``.
 
     Notes
     -----
     A run with ``"has_fbrm_samples": false`` gets no FBRM table and its FBRM file
     is not opened. ``ir_spectra_without_metadata`` of a run declares spectra that
-    the file holds without a sample time.
+    the file holds without a sample time. ``fbrm_export``, and ``ir_export`` with
+    ``ir_export_start_local``, make the run read vendor CSV exports instead of the
+    native files.
     """
     if sum(block in description for block in IR_BLOCKS) != 1:
         raise ValueError("The description must hold exactly one of the blocks %s." % (IR_BLOCKS,))
@@ -474,20 +515,20 @@ def reduce_run(case: Path, raw_root: Path, run: dict, description: dict, out_dir
         raise ValueError("has_fbrm_samples of run %s must be true or false, not %r." % (run["id"], has_fbrm))
     folder = raw_root / run["folder"]
     out_dir.mkdir(parents=True, exist_ok=True)
-    times, raw = ic_fbrm.read_samples(_single(folder, "*.icFbrm")) if has_fbrm else (None, None)
-    origin = run_clock_origin(times[0] if has_fbrm else None, run, description)
+    utc_offset_h, orphans = run["fbrm_local_time_utc_offset_h"], run.get("ir_spectra_without_metadata", 0)  # [h], [-]
+    fbrm = _fbrm_samples(folder, run) if has_fbrm else None
+    origin = run_clock_origin(fbrm.time[0].item() if has_fbrm else None, run, description)  # naive local time
     tables = {"temperature": temperature_table(folder / description["temperature_log"]["file"], description, case)}
     if has_fbrm:
-        tables["fbrm"] = fbrm_table(times, raw, origin, description)
-    infos, records = ic_spectra.load_spectra(_single(folder, "*.iCIR"))
-    utc_offset_h, orphans = run["fbrm_local_time_utc_offset_h"], run.get("ir_spectra_without_metadata", 0)
+        tables["fbrm"] = fbrm_table(fbrm, origin, description)
+    ir = _ir_spectra(folder, run, utc_offset_h)
     spectra = None
     if "ir_band" in description:
-        tables["ir"] = ir_table(infos, records, origin, utc_offset_h, description, orphans)
+        tables["ir"] = ir_table(ir, origin, utc_offset_h, description, orphans)
     else:
         settings = description["ir_score"]
         log = tables["temperature"][0]
-        spectra = spectra_with_temperature(*timed_spectra(infos, records, origin, utc_offset_h, orphans),
+        spectra = spectra_with_temperature(*timed_spectra(ir, origin, utc_offset_h, orphans),
                                            log["time"], log[settings["temperature_column"]])
     return _write_tables(out_dir, run["id"], tables), spectra
 

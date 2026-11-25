@@ -9,8 +9,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.pat import block_package, fbrm_statistics, ic_fbrm, ic_spectra, table_layout
+from examples.pat import fbrm_statistics, table_layout
 from examples.pat.band_height import band_height
+from PharmaPy import PATReaders
 
 pytestmark = pytest.mark.unit
 
@@ -26,8 +27,8 @@ MEAN_TOLERANCE = 5e-4  # [-]
 
 
 def test_band_counts_and_mean_chord_match_the_statistics_stored_by_the_vendor():
-    _, raw = ic_fbrm.read_samples(FIXTURES / "fbrm_three_samples.icFbrm")
-    raw_edges = ic_fbrm.raw_channel_edges()
+    raw = PATReaders.read_ic_fbrm(FIXTURES / "fbrm_three_samples.icFbrm").counts
+    raw_edges = PATReaders.raw_channel_edges()
     log_edges = fbrm_statistics.log_channel_edges()
 
     bands = fbrm_statistics.band_counts(raw, raw_edges, np.array([1.0, 10.0, 100.0, 1000.0]))
@@ -87,9 +88,9 @@ def test_band_height_removes_a_sloped_baseline_on_a_descending_axis():
 
 def test_band_height_of_native_spectra_matches_the_vendor_export():
     """Reader to band height: 1700 cm-1 above the line through 1760 and 1720 cm-1."""
-    infos = ic_spectra.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
-    stream = block_package.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
-    records = dict(ic_spectra.spectrum_records(stream))
+    infos = PATReaders.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
+    stream = PATReaders.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
+    records = dict(PATReaders.spectrum_records(stream))
     names = ["00:00:51", "00:01:53", "00:02:51"]
     by_name = {infos[identifier]["Name"]: records[identifier] for identifier in records if identifier in infos}
     attributes = next(a for a in infos.values() if a["Name"] == names[0])

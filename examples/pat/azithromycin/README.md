@@ -12,6 +12,7 @@ not in the repository; the reduced tables are.
 | `reduced/<run>_ir.csv` | Whole-spectrum IR score [-] with the probe-contact terms and the unexplained remainder, every spectrum taken while the temperature was logged. |
 | `reduced/ir_score.json` | Sizes of the score fit, and each run's dissolved spectrum against that of the first run. |
 | `reduced_*.layout.json` | Layouts of the three reduced tables, for `table_layout.read_table`. |
+| `read_native_files.ipynb` | Reads the native IR, Raman and FBRM files of one run with `PharmaPy.PATReaders` and plots what comes back. Needs the raw files. |
 
 Time in every reduced table is the run clock [s]: zero when the temperature program
 starts. Each run folder holds one `.iCIR` and one `.icFbrm` file and the thermostat

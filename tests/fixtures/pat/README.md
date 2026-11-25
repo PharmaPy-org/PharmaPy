@@ -1,7 +1,7 @@
 # PAT reader fixtures
 
 Excerpts of the caffeine-in-water run of 2026-10-23 (Nagy group, Purdue), used by
-`tests/test_pat_native_readers.py`.
+`tests/test_pat_native_readers.py` and `tests/test_pat_export_readers.py`.
 
 | File | Content |
 |---|---|

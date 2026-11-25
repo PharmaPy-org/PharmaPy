@@ -11,8 +11,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.pat import block_package, dataset, ic_fbrm, ic_spectra, reduce_runs, table_layout
+from examples.pat import dataset, reduce_runs, table_layout
 from examples.pat.run_table import block_mean
+from PharmaPy import PATReaders
 
 pytestmark = pytest.mark.unit
 
@@ -32,11 +33,11 @@ def _reduced(run_id: str, kind: str) -> dict:
 
 
 def test_fbrm_table_puts_samples_on_the_run_clock_with_vendor_statistics():
-    times, raw = ic_fbrm.read_samples(FIXTURES / "fbrm_three_samples.icFbrm")
+    fbrm = PATReaders.read_ic_fbrm(FIXTURES / "fbrm_three_samples.icFbrm")
     run = RUNS["high_seed_slow_cool"]  # temperature log started 170 s after the FBRM
 
-    origin = reduce_runs.run_clock_origin(times[0], run, DESCRIPTION)
-    columns, units = reduce_runs.fbrm_table(times, raw, origin, DESCRIPTION)
+    origin = reduce_runs.run_clock_origin(fbrm.time[0].item(), run, DESCRIPTION)
+    columns, units = reduce_runs.fbrm_table(fbrm, origin, DESCRIPTION)
 
     assert list(columns) == ["time", "counts_1_to_10um", "counts_10_to_100um", "counts_100_to_1000um", "mean_chord_square_weighted"]
     assert units == {"time": "s", "counts_1_to_10um": "counts", "counts_10_to_100um": "counts",
@@ -50,15 +51,16 @@ def test_fbrm_table_puts_samples_on_the_run_clock_with_vendor_statistics():
 
 
 def test_ir_table_sorts_by_time_and_reports_band_height_and_solvent_absorbance():
-    infos = ic_spectra.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
-    stream = block_package.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
-    records = dict(ic_spectra.spectrum_records(stream))
+    infos = PATReaders.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
+    stream = PATReaders.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
+    records = dict(PATReaders.spectrum_records(stream))
     with_metadata = [identifier for identifier in records if identifier in infos]
     shuffled = {identifier: records[identifier] for identifier in reversed(with_metadata)}
     first_fbrm_sample = datetime.datetime(2026, 10, 24, 0, 46, 37)  # local time, as in the FBRM export
     origin = reduce_runs.run_clock_origin(first_fbrm_sample, RUNS["high_seed_slow_cool"], DESCRIPTION)
 
-    columns, units = reduce_runs.ir_table(infos, shuffled, origin, utc_offset_h=-4.0, description=DESCRIPTION)
+    columns, units = reduce_runs.ir_table(PATReaders.spectra_from_records(infos, shuffled), origin, utc_offset_h=-4.0,
+                                           description=DESCRIPTION)
 
     # Run clock zero is 00:46:37 - 10 s + 170 s = 00:49:17 local. The spectra were taken
     # at 04:29:10.257475, 04:30:11.952319 and 04:31:10.578463 UTC, four hours ahead.
@@ -74,16 +76,12 @@ def test_ir_table_sorts_by_time_and_reports_band_height_and_solvent_absorbance()
 
 
 def test_ir_table_refuses_a_spectrum_without_metadata():
-    infos = ic_spectra.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
-    stream = block_package.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
+    infos = PATReaders.spectrum_infos((FIXTURES / "spectrum_info_tags.xml").read_text(encoding="utf-8"))
+    stream = PATReaders.read_package((FIXTURES / "ir_head_blocks.iCIR").read_bytes())["/ReactionSpectras.vector"][1]
 
     with pytest.raises(ValueError, match="has no metadata entry"):
-        reduce_runs.ir_table(infos, dict(ic_spectra.spectrum_records(stream)), datetime.datetime(2026, 10, 24), -4.0, DESCRIPTION)
-
-
-def test_sample_time_without_fraction_is_parsed():
-    assert reduce_runs._parse_utc("2026-10-24T04:29:10Z") == datetime.datetime(2026, 10, 24, 4, 29, 10)
-    assert reduce_runs._parse_utc("2026-10-24T04:29:10.2574757Z") == datetime.datetime(2026, 10, 24, 4, 29, 10, 257475)
+        reduce_runs.ir_table(PATReaders.spectra_from_records(infos, dict(PATReaders.spectrum_records(stream))),
+                             datetime.datetime(2026, 10, 24), -4.0, DESCRIPTION)
 
 
 def test_temperature_table_averages_blocks_of_the_log():
