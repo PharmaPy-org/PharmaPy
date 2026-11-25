@@ -1,4 +1,5 @@
 from __future__ import annotations
+import inspect
 import warnings
 import numpy as np
 import copy
@@ -39,6 +40,39 @@ def growth_size_factor(sizes, growth_params):
     """
     alpha, beta = np.asarray(growth_params, dtype=float)[3:5]  # [-], [1/um]
     return (1 + beta * np.asarray(sizes, dtype=float)) ** alpha
+
+
+def _user_stacklevel() -> int:
+    """Return the ``warnings.warn`` stacklevel of the nearest user frame.
+
+    A population balance warns from its constructor and from its kinetics
+    setter, which a user reaches directly, through a subclass constructor or
+    through the vessel's ``CrystKinetics`` property. Those chains differ in
+    depth, so a fixed ``stacklevel`` points at the user's line for only one
+    of them.
+
+    Returns
+    -------
+    int
+        Stacklevel [-] of the first frame, counted from the caller of this
+        helper (stacklevel 1), whose module is not ``PharmaPy`` or one of
+        its submodules. Falls back to 1 when every frame belongs to
+        PharmaPy.
+    """
+    frame = inspect.currentframe()
+    if frame is None:  # pragma: no cover - no frame support on this runtime
+        return 1
+
+    frame = frame.f_back  # caller of this helper, i.e. stacklevel 1
+    level = 1  # [-]
+    while frame is not None:
+        module = frame.f_globals.get('__name__', '')
+        if module != 'PharmaPy' and not module.startswith('PharmaPy.'):
+            return level
+        frame = frame.f_back
+        level += 1
+
+    return 1
 
 class Mechanism:
     """
@@ -2187,7 +2221,9 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
         Nuclei of finite size made CVode fail outright at larger step caps
         instead, which is not silent, so they do not warn. Secondary
         nucleation counts as inactive with a zero prefactor or the default
-        parameters, as in ``CrystKinetics.get_kinetics``.
+        parameters, as in ``CrystKinetics.get_kinetics``. The warning is
+        attributed to the first line outside PharmaPy, whichever way the
+        kinetics arrive (``_user_stacklevel``).
         """
         if self.rad != 0 or 'nucl_sec' in getattr(kinetics, 'custom_mechanisms', {}):
             return
@@ -2218,7 +2254,7 @@ class MomentsPopulationBalance(PopulationBalanceMechanism):
                    self.SWITCH_LIKE_SECONDARY_ORDER,
                    getattr(kinetics, 'mu_sec_nucl', 3)),
                 RuntimeWarning,
-                stacklevel=3,
+                stacklevel=_user_stacklevel(),
             )
 
     # ---------------- legacy conversion ----------------
@@ -2597,6 +2633,10 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
     # a distribution, without this vessel's model; Connection refuses them.
     refuses_legacy_crystals = True
 
+    # A charge of crystals would replace the solid while the phase connections
+    # stay on this mechanism (#559); the crystallizer refuses it.
+    refuses_crystal_charge = True
+
     def __init__(
         self,
         owning_phase,
@@ -2672,7 +2712,9 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
         -----
         RuntimeWarning
             As ``MomentsPopulationBalance``, if ``kinetics`` can make the
-            crystal count follow the integrator's step pattern (#529).
+            crystal count follow the integrator's step pattern (#529). Also
+            if ``breakage`` has a ``minimum_size``; see
+            ``_warn_if_breakage_follows_steps`` (#564).
         """
         num_mom = np.size(moments_init)
 
@@ -2726,6 +2768,7 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
         self.kernel_sources = (
             QMOMKernelSources(self, agglomeration, breakage, fragments)
             if agglomeration is not None or breakage is not None else None)
+        self._warn_if_breakage_follows_steps(breakage)
 
         num_nodes = self.num_mom // 2
         node_index = list(range(num_nodes))
@@ -2768,6 +2811,58 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
             self.kernel_sources.attached = False
 
         super().add_solver_state_variables(collection, overwrite, phase_ref)
+
+    @staticmethod
+    def _warn_if_breakage_follows_steps(breakage):
+        """Warn when breakage can make a solve follow the integrator's steps.
+
+        Parameters
+        ----------
+        breakage : callable or None
+            Selection function being attached.
+
+        Warns
+        -----
+        RuntimeWarning
+            If ``breakage`` has a ``minimum_size`` [um] that is not None, as
+            the selection functions of ``PharmaPy.CrystallizationKernels``
+            do when given one.
+
+        Notes
+        -----
+        The breakage frequency then jumps to zero at ``minimum_size``, and
+        the quadrature nodes move with the state, so the right-hand side is
+        discontinuous in the state. When a node rests on the threshold,
+        breakage switches on and off between steps and the solve does not
+        settle. On case 1 of Table 4 of Marchisio et al. (2003, J. Colloid
+        Interface Sci. 258:322-334; constant kernel, constant selection,
+        symmetric fragments, three nodes, published m_0 = 0.0376), the count
+        still swung between 0.0337 and 0.0386 after 14 breakage time
+        constants on the default CVode backend, which ended on 0.0338, and on
+        0.0389 with a 1 s step cap; no run raised or warned. Without
+        ``minimum_size`` the same case gave the exact balance 0.0400 on CVode
+        and on SciPy BDF (24 Nov 2026, #564). Nothing in a solve detects
+        this yet, so the warning fires for every ``minimum_size``, including
+        runs it does not affect, such as breakage alone into fragments below
+        the threshold. A user-written selection function with a jump is not
+        detected. The warning is attributed to the first line outside
+        PharmaPy (``_user_stacklevel``).
+        """
+        minimum_size = getattr(breakage, 'minimum_size', None)  # [um]
+        if minimum_size is None:
+            return
+
+        warnings.warn(
+            'The breakage selection function has minimum_size = %g um, where '
+            'its frequency jumps to zero. If a quadrature node settles on that '
+            'size, breakage switches on and off between steps and the solve can '
+            'end on a value set by the integrator\'s step pattern, without an '
+            'error (PharmaPy issue #564). Check the result against a solve with '
+            'another step cap or tolerance, and look for a node at minimum_size '
+            'in result.quadrature_nodes.' % minimum_size,
+            RuntimeWarning,
+            stacklevel=_user_stacklevel(),
+        )
 
     @staticmethod
     def _reject_size_dependent_growth(kinetics):

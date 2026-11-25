@@ -184,7 +184,7 @@ class _BaseCrystallizer(MultiPhaseVessel):
         self.integrator.set_linear_solver("dense")
         self.integrator.request_max_step(self.NUCLEATION_STEP_CAP)
     def _merge_by_family(self, arrivals):
-        """Merge a transfer, refusing crystals into a QMOM vessel.
+        """Merge a transfer, refusing crystals a mechanism cannot be charged with.
 
         Parameters
         ----------
@@ -199,20 +199,32 @@ class _BaseCrystallizer(MultiPhaseVessel):
         Raises
         ------
         PharmaPySpecificationError
-            If a solid arrives at a vessel whose solid carries a
-            ``QMOMPopulationBalance``. It would replace that solid while the
-            phase connections stay on the mechanism it held, which fails at
-            the first evaluation with an obscure message.
+            If a phase arrives for a configured phase of the same family, one
+            of whose mechanisms sets ``refuses_crystal_charge``, as
+            ``QMOMPopulationBalance`` does. It would replace that phase while
+            the phase connections stay on the mechanism it held, which fails
+            at the first evaluation with an obscure message.
+
+        Notes
+        -----
+        The mechanism is asked, as ``Connection._refuse_legacy_crystals``
+        asks for ``refuses_legacy_crystals``, so this class does not need to
+        know which population balances exist.
         """
         for phase in self._Phases.Phases:
-            if phase.get_mechanism(QMOMPopulationBalance) is not None and any(
-                    arriving.phase_family == phase.phase_family
-                    for arriving in arrivals):
-                raise PharmaPySpecificationError(
-                    f'{type(self).__name__} carries its crystals with '
-                    'QMOMPopulationBalance and cannot take a charge of '
-                    'crystals. Hand over the liquid only, or feed the crystals '
-                    'through the Inlet of a semibatch or continuous unit.')
+            if not any(arriving.phase_family == phase.phase_family
+                       for arriving in arrivals):
+                continue
+
+            for mechanism in getattr(phase, 'mechanisms', ()) or ():
+
+                if getattr(mechanism, 'refuses_crystal_charge', False):
+                    raise PharmaPySpecificationError(
+                        f'{type(self).__name__} carries its crystals with '
+                        f'{type(mechanism).__name__} and cannot take a charge '
+                        'of crystals. Hand over the liquid only, or feed the '
+                        'crystals through the Inlet of a semibatch or '
+                        'continuous unit.')
 
         return super()._merge_by_family(arrivals)
 
