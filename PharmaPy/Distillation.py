@@ -1604,8 +1604,8 @@ class DynamicDistillation(_BaseDistillation):
             during the publication of the results, if a species present in a
             row lacks the data of its vapor composition or of the outlets'
             density. A species first fed later in the run without data is
-            reported by IDA instead, whose error does not name it (issue
-            #435). Absent species need no property data other than ``mw``
+            reported by the original named error, chained from IDA's
+            diagnostic. Absent species need no property data other than ``mw``
             (issue #425).
 
         Notes

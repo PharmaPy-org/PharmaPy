@@ -883,3 +883,114 @@ def _real_float_array(values, message: str) -> np.ndarray:
     if raw.dtype.kind not in 'iuf':  # signed, unsigned, floating point
         raise ValueError(message)
     return raw.astype(float)
+
+
+def _requested_rows(time_profile, requested_times,
+                    unit_label: str) -> np.ndarray:
+    """Select the solver output rows of the requested sample times.
+
+    CVode also reports the initial state, and repeated requested times at
+    the initial time collapse into one output row, so the solver profile
+    need not have one row per requested time.
+
+    Parameters
+    ----------
+    time_profile : array_like
+        Reported times [s] on the zero-based clock of ``paramest_wrapper``,
+        shape ``(num_reported,)``, non-decreasing.
+    requested_times : array_like
+        Requested sample times [s], shape ``(num_times,)``, possibly with
+        replicates.
+    unit_label : str
+        Kind of unit whose solution is searched, such as ``'reactor'`` or
+        ``'crystallizer'``; it names the solution in the error message.
+
+    Returns
+    -------
+    numpy.ndarray
+        Integer row indices into ``time_profile``, shape ``(num_times,)``,
+        in ``requested_times`` order. The k-th replicate of a time maps to
+        the k-th reported row with exactly that time, or to the last such
+        row if fewer were reported (initial replicates share the single
+        initial row); reported grids that equal the request therefore map
+        to the identity.
+
+    Raises
+    ------
+    ValueError
+        If a requested time is not among the reported times. The message
+        names ``unit_label`` and gives the number of reported times and
+        the first and last of them.
+
+    Notes
+    -----
+    Times are matched by exact equality, without tolerance. Because
+    ``paramest_wrapper`` resets the elapsed time to 0 s, ``solve_unit``
+    passes the requested times with unchanged values (the reactors add
+    the 0 s elapsed time) as CVode output points, and CVode reports each
+    output point it reaches as that same float. Any tolerance would
+    instead have to be relative to some time scale and could merge
+    distinct samples of multiscale grids, for example 1e-12 s and
+    2e-12 s within a 3600 s run.
+    """
+    reported = np.asarray(time_profile, dtype=float)  # [s]
+    requested = np.asarray(requested_times, dtype=float).ravel()  # [s]
+    rows = np.empty(requested.size, dtype=int)
+    replicates = {}  # first matching row -> requests already mapped to it
+    for index, time in enumerate(requested):
+        matches = np.flatnonzero(reported == time)
+        if matches.size == 0:
+            # Python float reprs: NumPy 2 scalars would print np.float64(...).
+            span = (f"{reported.size} times from {float(reported[0])!r} s "
+                    f"to {float(reported[-1])!r} s" if reported.size
+                    else "no times")
+            raise ValueError(
+                f"Requested time {float(time)!r} s is absent from the "
+                f"{unit_label} solution, which reports {span}. CVode's "
+                "default (non-continuous) output can omit requested points "
+                "inside its last internal step before the end time; pass "
+                "run_args={'sundials_opts': {'report_continuously': True}} "
+                "(wrapper_kwargs in SimulationExec), or a maxh below the "
+                "sample spacing. Otherwise the integration ended early (a "
+                "terminating state event or stop), or the time grid "
+                "decreases")
+        count = replicates.get(matches[0], 0)
+        rows[index] = matches[min(count, matches.size - 1)]
+        replicates[matches[0]] = count + 1
+    return rows
+
+
+def _charge_time_only(time_grid, start_time) -> bool:
+    """Tell whether every requested output time is the integration start.
+
+    Parameters
+    ----------
+    time_grid : array_like or None
+        Absolute output times [s] that ``solve_unit`` passes to CVode,
+        shape ``(num_times,)``, or None when it integrates a ``runtime``.
+    start_time : float
+        Absolute start time [s] of the integration, CVode's ``t0``: the
+        charge time of a reset unit.
+
+    Returns
+    -------
+    bool
+        True if ``time_grid`` is given, not empty, and every entry equals
+        ``start_time``.
+
+    Notes
+    -----
+    Times are compared by exact equality, on the same absolute floats
+    (offsets plus elapsed time) that CVode receives, so the rule agrees
+    with the solver's own start time and with the exact matching of
+    ``_requested_rows``. Such a grid has zero integration duration, and
+    every requested row is the charged state. A time that differs from
+    the start by even one unit in the last place is a genuine output
+    point after the charge: CVode integrates to it or reports its own
+    error, and any tolerance would instead replace a requested state
+    after the charge by the charged state.
+    """
+    if time_grid is None:
+        return False
+    grid = np.asarray(time_grid, dtype=float)  # [s]
+    return bool(grid.size) and bool(np.all(grid == start_time))

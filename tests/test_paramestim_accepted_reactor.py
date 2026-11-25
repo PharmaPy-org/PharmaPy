@@ -3,6 +3,8 @@
 The synthetic first-order A -> B case uses shipped properties and fixed zero
 activation energy. The zero-trial case exposes the last finite-difference
 perturbation left in the reactor; the full solve checks normal fit reporting.
+A one-trial fit checks that the #352 non-convergence warning of
+``optimize_fn`` points at the caller of ``SimulationExec.EstimateParams``.
 """
 
 from pathlib import Path
@@ -36,8 +38,17 @@ PROFILE_ATOL = 1.0e-9  # [mol/L], includes nearly zero product concentration
 PARAMETER_ATOL = 64 * np.finfo(float).eps  # [1/s], only arithmetic roundoff
 
 
-@pytest.mark.parametrize("trial_budget", [0, 100])
-def test_simexec_restores_reactor_and_reports_accepted_rate(trial_budget):
+def reactor_estimation():
+    """Build the synthetic isothermal A -> B estimation through SimExec.
+
+    Returns
+    -------
+    tuple
+        ``(simulation, reactor, time_s, observations)``: the
+        ``SimulationExec`` with its estimator set up, the ``BatchReactor``
+        it fits, the sample times [s], shape (5,), and the observed
+        concentrations of A [mol/L], shape (5,).
+    """
     reactor = BatchReactor(isothermal=True, return_sens=False,
                            mask_params=[True, False])
     reactor.Phases = LiquidPhase(THERMO_PATH, temp=TEMPERATURE, vol=VOLUME,
@@ -56,6 +67,12 @@ def test_simexec_restores_reactor_and_reports_accepted_rate(trial_budget):
         time_s, observations, measured_ind=[0], optimize_flags=[True, False],
         name_params=["rate"], wrapper_kwargs={
             "sundials_opts": {"rtol": SOLVER_RTOL, "atol": SOLVER_ATOL}})
+    return simulation, reactor, time_s, observations
+
+
+@pytest.mark.parametrize("trial_budget", [0, 100])
+def test_simexec_restores_reactor_and_reports_accepted_rate(trial_budget):
+    simulation, reactor, time_s, observations = reactor_estimation()
     accepted, _, info = simulation.EstimateParams(
         optim_options={"max_fun_eval": trial_budget}, verbose=False)
     estimator = simulation.ParamInst
@@ -80,3 +97,25 @@ def test_simexec_restores_reactor_and_reports_accepted_rate(trial_budget):
                                    rtol=0.0, atol=PARAMETER_ATOL)
     else:
         assert info["num_iter"] > 0
+
+
+def test_unconverged_simexec_fit_warning_points_at_caller():
+    """The #352 warning through SimulationExec.EstimateParams.
+
+    One LM trial cannot fit the rate from half its true value, so the fit
+    stops at max_fun_eval; the warning must name that budget and point at
+    this file, not at SimExec.py or ParamEstim.py.
+    """
+    simulation, _, _, _ = reactor_estimation()
+
+    with pytest.warns(RuntimeWarning,
+                      match="stopped without converging") as record:
+        _, _, info = simulation.EstimateParams(
+            optim_options={"max_fun_eval": 1}, verbose=False)
+
+    unconverged = [item for item in record
+                   if "stopped without converging" in str(item.message)]
+    assert len(unconverged) == 1
+    assert "bounded by max_fun_eval=1;" in str(unconverged[0].message)
+    assert unconverged[0].filename == __file__
+    assert info["success"] is False

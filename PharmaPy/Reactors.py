@@ -8,7 +8,8 @@ from PharmaPy.Commons import (reorder_sens, plot_sens, trapezoidal_rule,
                               eval_state_events, handle_events,
                               unpack_states, unpack_discretized,
                               complete_dict_states, flatten_states,
-                              retrieve_pde_result)
+                              retrieve_pde_result, _requested_rows,
+                              _charge_time_only)
 
 from PharmaPy.Streams import LiquidStream
 from PharmaPy.Connections import get_inputs_new
@@ -18,8 +19,8 @@ from PharmaPy.Results import DynamicResult
 from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 from PharmaPy.CheckModule import check_modeling_objects
 from PharmaPy.Errors import PharmaPyNonImplementedError
-from PharmaPy.jac_module import numerical_jac_central
-from PharmaPy.ThermoModule import MissingPropertyError
+from PharmaPy.jac_module import (numerical_jac_central,
+                                 CENTRAL_DIFFERENCE_REL_STEP)
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -28,7 +29,6 @@ from matplotlib.animation import FuncAnimation
 from matplotlib.animation import FFMpegWriter
 
 import copy
-import functools
 from typing import Optional, Union
 from functools import partial
 from itertools import cycle
@@ -38,110 +38,6 @@ linestyles = cycle(['-', '--', '-.', ':'])
 
 gas_ct = 8.314  # J/mol/K
 eps = np.finfo(float).eps
-_CENTRAL_DIFFERENCE_REL_STEP = np.cbrt(eps)  # [-], optimal for O(h**2) error
-
-
-def _requested_rows(time_profile, requested_times) -> np.ndarray:
-    """Select the solver output rows of the requested sample times.
-
-    CVode also reports the initial state, and repeated requested times at
-    the initial time collapse into one output row, so the solver profile
-    need not have one row per requested time.
-
-    Parameters
-    ----------
-    time_profile : array_like
-        Reported times [s] on the zero-based clock of ``paramest_wrapper``,
-        shape ``(num_reported,)``, non-decreasing.
-    requested_times : array_like
-        Requested sample times [s], shape ``(num_times,)``, possibly with
-        replicates.
-
-    Returns
-    -------
-    numpy.ndarray
-        Integer row indices into ``time_profile``, shape ``(num_times,)``,
-        in ``requested_times`` order. The k-th replicate of a time maps to
-        the k-th reported row with exactly that time, or to the last such
-        row if fewer were reported (initial replicates share the single
-        initial row); reported grids that equal the request therefore map
-        to the identity.
-
-    Raises
-    ------
-    ValueError
-        If a requested time is not among the reported times. The message
-        gives the number of reported times and the first and last of them.
-
-    Notes
-    -----
-    Times are matched by exact equality, without tolerance. Because
-    ``paramest_wrapper`` resets the elapsed time to 0 s, ``solve_unit``
-    passes the requested times unchanged (``t_vals + 0.0``) as CVode output
-    points, and CVode reports each output point it reaches as that same
-    float. Any tolerance would instead have to be relative to some time
-    scale and could merge distinct samples of multiscale grids, for example
-    1e-12 s and 2e-12 s within a 3600 s run.
-    """
-    reported = np.asarray(time_profile, dtype=float)  # [s]
-    requested = np.asarray(requested_times, dtype=float).ravel()  # [s]
-    rows = np.empty(requested.size, dtype=int)
-    replicates = {}  # first matching row -> requests already mapped to it
-    for index, time in enumerate(requested):
-        matches = np.flatnonzero(reported == time)
-        if matches.size == 0:
-            span = (f"{reported.size} times from {reported[0]!r} s to "
-                    f"{reported[-1]!r} s" if reported.size else "no times")
-            raise ValueError(
-                f"Requested time {time!r} s is absent from the reactor "
-                f"solution, which reports {span}. CVode's default "
-                "(non-continuous) output can omit requested points inside "
-                "its last internal step before the end time; pass "
-                "run_args={'sundials_opts': {'report_continuously': True}} "
-                "(wrapper_kwargs in SimulationExec), or a maxh below the "
-                "sample spacing. Otherwise the integration ended early (a "
-                "terminating state event or stop), or the time grid "
-                "decreases")
-        count = replicates.get(matches[0], 0)
-        rows[index] = matches[min(count, matches.size - 1)]
-        replicates[matches[0]] = count + 1
-    return rows
-
-
-def _charge_time_only(time_grid, start_time) -> bool:
-    """Tell whether every requested output time is the integration start.
-
-    Parameters
-    ----------
-    time_grid : array_like or None
-        Absolute output times [s] that ``solve_unit`` passes to CVode,
-        shape ``(num_times,)``, or None when it integrates a ``runtime``.
-    start_time : float
-        Absolute start time [s] of the integration, CVode's ``t0``: the
-        charge time of a reset reactor.
-
-    Returns
-    -------
-    bool
-        True if ``time_grid`` is given, not empty, and every entry equals
-        ``start_time``.
-
-    Notes
-    -----
-    Times are compared by exact equality, on the same absolute floats
-    (offsets plus elapsed time) that CVode receives, so the rule agrees
-    with the solver's own start time and with the exact matching of
-    ``_requested_rows``. Such a grid has zero integration duration, and
-    every requested row is the charged state. A time that differs from
-    the start by even one unit in the last place is a genuine output
-    point after the charge: CVode integrates to it or reports its own
-    error, and any tolerance would instead replace a requested state
-    after the charge by the charged state.
-    """
-    if time_grid is None:
-        return False
-    grid = np.asarray(time_grid, dtype=float)  # [s]
-    return bool(grid.size) and bool(np.all(grid == start_time))
 
 
 def _reject_params_control(params_control) -> None:
@@ -216,72 +112,6 @@ def _ordered_state_layout(metadata: dict) -> tuple[list[str], list[int]]:
     return names, dimensions
 
 
-def _records_missing_data(method):
-    """Record missing-property errors raised by a solver callback.
-
-    Parameters
-    ----------
-    method : callable
-        Reactor right-hand-side method, called as ``method(self, ...)``.
-
-    Returns
-    -------
-    callable
-        Wrapper that, while ``_simulate`` runs, stores a
-        ``MissingPropertyError`` in ``self._missing_data_error`` before
-        re-raising it, so that
-        ``_BaseReactor._simulate`` can re-raise it after the solver, which
-        reports only its own error, fails.
-
-    Notes
-    -----
-    Assimulo treats a right-hand-side exception as recoverable, so CVode
-    may retry with other steps and states. The presence latches of the
-    energy balances already make a missing-data failure persist (a species
-    stays required once present). Inside ``_simulate`` the record is also
-    sticky, as defense in depth for any failure that is not latched: once an
-    error is recorded, every later call re-raises it before evaluating
-    anything, so the solve ends instead of stepping around it. The re-raise
-    reuses the traceback stored with the first failure, so repeated
-    attempts do not stack solver frames.
-    """
-    @functools.wraps(method)
-    def wrapper(self, *args, **kwargs):
-        """Call ``method``, recording a missing-property error.
-
-        Parameters
-        ----------
-        *args, **kwargs
-            Arguments of the wrapped right-hand side.
-
-        Returns
-        -------
-        numpy.ndarray
-            The wrapped method's derivatives.
-
-        Raises
-        ------
-        MissingPropertyError
-            Raised by the wrapped method, or re-raised from an earlier call
-            of the same ``_simulate``.
-        """
-        if self._simulating and self._missing_data_error is not None:
-            raise self._missing_data_error.with_traceback(
-                self._missing_data_traceback)
-
-        try:
-            return method(self, *args, **kwargs)
-        except MissingPropertyError as error:
-            if self._simulating:
-                # Only a running solve needs it; outside, the error
-                # propagates directly and nothing is kept on the unit.
-                self._missing_data_error = error
-                self._missing_data_traceback = error.__traceback__
-            raise
-
-    return wrapper
-
-
 def get_sundials_callable(events, eval_sens, param_vals, unit_model, get_jac):
     flag_events = len(events) > 0
 
@@ -332,8 +162,10 @@ class _BaseReactor:
         correspond to species names in the physical properties
         .json file.
     :mask_params : list of bool (optional)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     :base_units : TODO: [deprecated? or unused?]
     :temp_ref : float (optional) TODO: [only active on CSTRs?]
         Reference temperature for enthalpy calculations.
@@ -468,10 +300,7 @@ class _BaseReactor:
         self.reset_states = reset_states
         self.elapsed_time = 0
 
-        # Missing-data bookkeeping for the energy balances (#414)
-        self._missing_data_error = None
-        self._missing_data_traceback = None
-        self._simulating = False
+        # Species presence for the energy balances (#414)
         self._reset_species_presence()
 
         self.reset_states = reset_states
@@ -539,7 +368,22 @@ class _BaseReactor:
         return self._Kinetics
 
     @Kinetics.setter
-    def Kinetics(self, instance):
+    def Kinetics(self, instance) -> None:
+        """Attach kinetics and expose names selected for estimation.
+
+        Parameters
+        ----------
+        instance : RxnKinetics
+            Reaction kinetics with native parameter units and transformations
+            defined by ``concat_params()``. All parameters remain in the
+            physical model; ``mask_params`` selects estimation coordinates.
+
+        Notes
+        -----
+        ``name_params`` on the reactor contains only selected names. The
+        complete name vector remains on ``Kinetics.name_params``. Fixed seed
+        reconstruction belongs to ``ParameterEstimation``, not the reactor.
+        """
         self._Kinetics = instance
         self.partic_species = instance.partic_species
 
@@ -553,13 +397,6 @@ class _BaseReactor:
                                 if self.mask_params[ind]]
 
         self.mask_params = np.array(self.mask_params)
-
-        ind_true = np.where(self.mask_params)[0]
-        ind_false = np.where(~self.mask_params)[0]
-
-        self.params_fixed = self.Kinetics.concat_params()[ind_false]
-
-        self.ind_maskpar = np.argsort(np.concatenate((ind_true, ind_false)))
 
     def _get_rate_basis_heat_of_reaction(
             self, heat_of_reaction: np.ndarray) -> np.ndarray:
@@ -603,58 +440,6 @@ class _BaseReactor:
         """
         self._present_latch = None
         self._present_fed = None
-
-    def _simulate(self, solver: object, *args, **kwargs) -> tuple:
-        """Run ``solver.simulate`` and expose missing property data.
-
-        Parameters
-        ----------
-        solver : assimulo.solvers.CVode
-            Configured solver.
-        *args, **kwargs
-            Passed to ``solver.simulate``.
-
-        Returns
-        -------
-        tuple
-            Whatever ``solver.simulate`` returns: times or volumes and the
-            state profile.
-
-        Raises
-        ------
-        MissingPropertyError
-            A subclass of ``AttributeError``. If a right-hand-side
-            evaluation of this call raised one, it is re-raised chained from
-            the solver's own error, which does not name the species or the
-            property.
-        Exception
-            Any other solver failure, unchanged.
-
-        Notes
-        -----
-        The record and its traceback are cleared at the start and at the
-        end of every call, so a later, unrelated failure is never relabeled.
-        While the solver runs, the record is sticky (see
-        ``_records_missing_data``): every later right-hand side fails the
-        same way, so the failure persists until CVode gives up. The chaining
-        relies on that persistence; any solver error after a recorded
-        missing-data error is attributed to it, whatever its flag
-        (right-hand-side or convergence failure).
-        """
-        self._missing_data_error = None
-        self._missing_data_traceback = None
-        self._simulating = True
-        try:
-            return solver.simulate(*args, **kwargs)
-        except Exception as solver_error:
-            if self._missing_data_error is not None:
-                raise self._missing_data_error.with_traceback(
-                    self._missing_data_traceback) from solver_error
-            raise
-        finally:
-            self._simulating = False
-            self._missing_data_error = None
-            self._missing_data_traceback = None
 
     def _charge_state_profile(self, states_init: np.ndarray,
                               eval_sens: bool) -> tuple:
@@ -1253,7 +1038,6 @@ class _BaseReactor:
 
         return inputs
 
-    @_records_missing_data
     def unit_model(self, time: float, states: np.ndarray,
                    sw: Optional[list] = None,
                    params: Optional[np.ndarray] = None) -> np.ndarray:
@@ -1292,8 +1076,8 @@ class _BaseReactor:
         MissingPropertyError
             A subclass of ``AttributeError``. If a present species lacks
             ``cp_liq`` data where the energy balance needs it (see
-            ``_present_species``). Inside ``_simulate`` a recorded error is
-            re-raised by every later call (see ``_records_missing_data``).
+            ``_present_species``). During integration the shared solver guard
+            preserves this error and prevents retries from bypassing it.
         """
         # Calculate inlets
         u_values = self.get_inputs(time)
@@ -1429,7 +1213,7 @@ class _BaseReactor:
             state_args = (
                 time, parameter_values, sw, False
             )  # [s; parameter-dependent units; -; -]
-            state_steps = _CENTRAL_DIFFERENCE_REL_STEP * np.maximum(
+            state_steps = CENTRAL_DIFFERENCE_REL_STEP * np.maximum(
                 1.0, np.abs(state_values)
             )  # [mol/L for species; K for temperatures]
             jac_states = numerical_jac_central(
@@ -1445,7 +1229,7 @@ class _BaseReactor:
                     time, state_values, sw, True
                 )  # [s; mol/L and K; -; -]
                 parameter_steps = (
-                    _CENTRAL_DIFFERENCE_REL_STEP
+                    CENTRAL_DIFFERENCE_REL_STEP
                     * np.maximum(1.0, np.abs(parameter_values))
                 )  # [parameter-dependent units]
                 jac_params = numerical_jac_central(
@@ -1715,7 +1499,7 @@ class _BaseReactor:
                                                        eval_sens=True,
                                                        _charge_state_rows=True,
                                                        **run_args)
-                rows = _requested_rows(t_prof, t_vals)
+                rows = _requested_rows(t_prof, t_vals, 'reactor')
                 species_columns = self._participating_state_columns()
                 c_prof = states[rows][:, species_columns]  # [mol/L]
                 # Per kinetic parameter, the sensitivities of the returned
@@ -1736,7 +1520,7 @@ class _BaseReactor:
                                                  eval_sens=False,
                                                  _charge_state_rows=True,
                                                  **run_args)
-                states = states[_requested_rows(t_prof, t_vals)]
+                states = states[_requested_rows(t_prof, t_vals, 'reactor')]
 
                 species_columns = self._participating_state_columns()
                 c_prof = states[:, species_columns]  # [mol/L]
@@ -1832,8 +1616,10 @@ class BatchReactor(_BaseReactor):
         correspond to species names in the physical properties
         .json file.
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)
@@ -2212,8 +1998,8 @@ class BatchReactor(_BaseReactor):
             solver.verbosity = 50
 
         # Solve model
-        time, states = self._simulate(solver, final_time,
-                                      ncp_list=time_grid)
+        time, states = solver.simulate(final_time,
+                                       ncp_list=time_grid)
 
         # Store results
         self.retrieve_results(time, states)
@@ -2307,8 +2093,10 @@ class CSTR(_BaseReactor):
         correspond to species names in the physical properties
         .json file.
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)
@@ -2755,8 +2543,8 @@ class CSTR(_BaseReactor):
             solver.verbosity = 50
 
         # Solve model
-        time, states = self._simulate(solver, final_time,
-                                      ncp_list=time_grid)
+        time, states = solver.simulate(final_time,
+                                       ncp_list=time_grid)
 
         # Store results
         self.statesProf = states
@@ -2892,8 +2680,10 @@ class SemibatchReactor(CSTR):
         Volume of the vessel in m**3. Required to ensure that the
         vessel does not overflow
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Estimation selection in ``Kinetics.concat_params()`` order: True
+        selects a parameter, False fixes it at its seed through
+        ``SimulationExec.SetParamEstimation``. None selects every parameter.
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)
@@ -3140,8 +2930,8 @@ class SemibatchReactor(CSTR):
             solver.verbosity = 50
 
         # Solve model
-        time, states = self._simulate(solver, final_time,
-                                      ncp_list=time_grid)
+        time, states = solver.simulate(final_time,
+                                       ncp_list=time_grid)
 
         # Store results
         self.time_runs.append(time)
@@ -3165,8 +2955,9 @@ class PlugFlowReactor(_BaseReactor):
     num_discr : int
         number of finite volumes to use to discretize the volume coordinate
     mask_params : list of bool (optional, default = None)
-        Binary list of which parameters to exclude from the kinetics
-        computations.
+        Reserved estimation selection in ``Kinetics.concat_params()`` order.
+        Parameter estimation for this reactor is unsupported (issue #401).
+        The physical rate equations always use every kinetic parameter.
     base_units : str (optional, default = 'concentration')
         Basis used for material units in the reactor.
     temp_ref : float (optional, default = 298.15)
@@ -3422,7 +3213,6 @@ class PlugFlowReactor(_BaseReactor):
 
         return dtemp_dv
 
-    @_records_missing_data
     def unit_steady(self, time: float, states: np.ndarray,
                     params: Optional[np.ndarray] = None) -> np.ndarray:
         """Evaluate participating-species and temperature balances along volume.
@@ -3452,9 +3242,8 @@ class PlugFlowReactor(_BaseReactor):
         MissingPropertyError
             A subclass of ``AttributeError``. If a species of the steady
             inlet or the reactions lacks ``cp_liq`` data (see
-            ``_steady_present_species``). Inside ``_simulate`` a recorded
-            error is re-raised by every later call (see
-            ``_records_missing_data``).
+            ``_steady_present_species``). During integration the shared solver
+            guard preserves this error and prevents retries from bypassing it.
         """
         conc = states[:self.num_species_steady]  # [mol/L]
 
@@ -3556,7 +3345,7 @@ class PlugFlowReactor(_BaseReactor):
             problem = Explicit_Problem(self.unit_steady, states_init, t0=0)
             solver = CVode(problem)
 
-            volPosition, states_solver = self._simulate(solver, vol_rxn)
+            volPosition, states_solver = solver.simulate(vol_rxn)
 
             num_x = len(volPosition)
 
@@ -3675,7 +3464,6 @@ class PlugFlowReactor(_BaseReactor):
 
             return dtemp_dt
 
-    @_records_missing_data
     def unit_model(self, time: float, states: np.ndarray,
                    sw: Optional[list] = None,
                    params: Optional[np.ndarray] = None,
@@ -3712,8 +3500,8 @@ class PlugFlowReactor(_BaseReactor):
         MissingPropertyError
             A subclass of ``AttributeError``. If a present species lacks
             ``cp_liq`` data where the energy balance needs it (see
-            ``_present_species``). Inside ``_simulate`` a recorded error is
-            re-raised by every later call (see ``_records_missing_data``).
+            ``_present_species``). During integration the shared solver guard
+            preserves this error and prevents retries from bypassing it.
         """
         di_states = unpack_discretized(states, self.len_states,
                                        self.name_states)
@@ -3891,7 +3679,7 @@ class PlugFlowReactor(_BaseReactor):
         MissingPropertyError
             If the energy balance needs ``cp_liq`` for a present species
             without data, re-raised chained from the CVode error when it
-            occurs during integration (see ``_simulate``).
+            occurs during integration, through the shared solver guard.
 
         Notes
         -----
@@ -3967,8 +3755,8 @@ class PlugFlowReactor(_BaseReactor):
         if not verbose:
             solver.verbosity = 50
 
-        time, states_solver = self._simulate(solver, final_time,
-                                             ncp_list=time_grid)
+        time, states_solver = solver.simulate(final_time,
+                                              ncp_list=time_grid)
 
         self.retrieve_results(time, states_solver)
 

@@ -419,11 +419,19 @@ def test_uncertainty_scales_mixed_units_to_dimensionless_residuals():
     assert not np.allclose(unscaled, scaled)
 
 
-def test_per_sample_uncertainty_ignores_missing_samples():
+@pytest.mark.parametrize('keyword', ['uncertainty', 'std'])
+def test_per_sample_uncertainty_ignores_missing_samples(keyword):
+    """Both spellings ignore invalid sigma entries at missing observations.
+
+    Parameters
+    ----------
+    keyword : str
+        Canonical or alias keyword for the per-sample uncertainty [mol/L].
+    """
     times = [0.0, 1.0, 2.0]  # [s]
     values = [2.0, np.nan, 0.8]  # [mol/L], middle sample missing
     std = [0.1, -1.0, 0.4]  # [mol/L]; the negative entry is unobserved
-    experiment = Experiment([Measurement(0, times, values, uncertainty=std)],
+    experiment = Experiment([Measurement(0, times, values, **{keyword: std})],
                             args=(2.0,))
     estimator = ParameterEstimation(decay_model, [SEED_RATE], experiment)
     # [mol/L]
@@ -433,6 +441,113 @@ def test_per_sample_uncertainty_ignores_missing_samples():
         estimator.get_objective([SEED_RATE], out_array=True), expected,
         rtol=ROUNDOFF_RTOL, atol=ROUNDOFF_ATOL)
     assert estimator.num_data_total == 2
+
+
+@pytest.mark.parametrize('keyword', ['std', 'uncertainty'])
+@pytest.mark.parametrize('per_sample', [False, True])
+def test_measurement_std_alias_returns_immutable_normalized_uncertainty(
+        keyword, per_sample):
+    """Both spellings expose the same isolated standard-deviation array.
+
+    Parameters
+    ----------
+    keyword : str
+        Canonical or alias keyword used to declare uncertainty.
+    per_sample : bool
+        Whether the synthetic assay has varying uncertainty [mol/L].
+    """
+    times = np.array([0.0, 1.0, 3.0])  # [s], unequal sample spacing
+    values = np.array([1.0, 4.0, 3.0])  # [mol/L], synthetic assay observations
+    expected = np.array([0.5, 1.0, 2.0] if per_sample else [0.5] * 3)  # [mol/L]
+    supplied = expected.copy() if per_sample else 0.5  # [mol/L]
+    measurement = Measurement(0, times, values, **{keyword: supplied})
+    if per_sample:
+        supplied[:] = 0.0  # [mol/L], caller mutation must not affect storage
+    assert measurement.std is measurement.uncertainty
+    assert measurement.std.shape == times.shape
+    np.testing.assert_array_equal(measurement.std, expected)
+    with pytest.raises(AttributeError, match='has no setter'):
+        measurement.std = expected
+    with pytest.raises(ValueError, match='read-only'):
+        measurement.std[0] = 0.0
+    with pytest.raises(ValueError, match='cannot set WRITEABLE flag'):
+        measurement.std.flags.writeable = True
+
+
+@pytest.mark.parametrize('options', [{}, {'std': None}, {'uncertainty': None}])
+def test_measurement_std_alias_is_none_when_uncertainty_is_undeclared(options):
+    """Omitted and explicit None uncertainties retain the unweighted contract.
+
+    Parameters
+    ----------
+    options : dict
+        Keyword spelling of an undeclared standard deviation.
+    """
+    measurement = Measurement(0, [0.0], [1.0], **options)  # [s], [mol/L]
+    assert measurement.std is None
+    assert measurement.uncertainty is None
+
+
+@pytest.mark.parametrize('per_sample', [False, True])
+def test_std_alias_preserves_weighted_residuals_and_objective(per_sample):
+    """The linear assay yields hand-derived residuals for both spellings.
+
+    Parameters
+    ----------
+    per_sample : bool
+        Whether standard deviations vary between samples [mol/L].
+    """
+    times = np.array([0.0, 1.0, 3.0])  # [s]
+    values = np.array([1.0, 4.0, 3.0])  # [mol/L]
+    initial = 2.0  # [mol/L], synthetic zero-time model concentration
+    rate = 1.0  # [mol/L/s], chosen to give model values [2, 3, 5] mol/L
+    sigma = [0.5, 1.0, 2.0] if per_sample else 0.5  # [mol/L]
+    # Raw residuals are [1, -1, 2] mol/L; division by the declared sigma
+    # gives these dimensionless values and half the squared norm below.
+    expected = np.array(
+        [2.0, -1.0, 1.0] if per_sample else [2.0, -2.0, 4.0])  # [-]
+    expected_objective = 3.0 if per_sample else 12.0  # [-]
+    estimators = []
+    for keyword in ('std', 'uncertainty'):
+        measurement = Measurement(x=times, y=values, unit_y='mol/L',
+                                  **{keyword: sigma})
+        experiment = Experiment({'concentration': measurement}, args=(initial,))
+        normalized = experiment.measurements['concentration']
+        assert measurement.field is None
+        assert normalized.field == 'concentration'
+        assert normalized.std is measurement.uncertainty
+        estimator = ParameterEstimation(
+            linear_model, [rate], experiments=experiment,
+            output_names=['concentration', 'other'])
+        residuals = estimator.get_objective([rate], out_array=True)  # [-]
+        np.testing.assert_allclose(residuals, expected,
+                                   rtol=ROUNDOFF_RTOL, atol=ROUNDOFF_ATOL)
+        assert estimator.get_objective([rate]) == pytest.approx(
+            expected_objective, rel=ROUNDOFF_RTOL)
+        estimators.append(estimator)
+    np.testing.assert_array_equal(
+        estimators[0].get_objective([rate], out_array=True),
+        estimators[1].get_objective([rate], out_array=True))
+    assert estimators[0].get_objective([rate]) == pytest.approx(
+        estimators[1].get_objective([rate]), rel=ROUNDOFF_RTOL)
+
+
+@pytest.mark.parametrize('uncertainty, std', [
+    (None, None), (None, 0.5), (0.5, None), (0.5, 0.5),
+])  # [mol/L], including explicit None to distinguish omission from declaration
+def test_measurement_rejects_simultaneous_uncertainty_and_std(uncertainty, std):
+    """Duplicate spellings are rejected even for matching or None values.
+
+    Parameters
+    ----------
+    uncertainty, std : float or None
+        Simultaneously supplied standard-deviation declarations [mol/L].
+    """
+    with pytest.raises(
+            ValueError,
+            match="Measurement received both 'uncertainty' and alias 'std'; "
+                  "pass only one"):
+        Measurement(0, [0.0], [1.0], uncertainty=uncertainty, std=std)
 
 
 def test_replicates_map_to_multiset_union_grid():

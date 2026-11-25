@@ -896,7 +896,7 @@ class SimulationExec:
                            fit_spectra=False,
                            wrapper_kwargs=None,
                            phase_modifiers=None, control_modifiers=None,
-                           pick_unit=None, **inputs_paramest):
+                           pick_unit=None, **inputs_paramest) -> None:
         """Set up parameter estimation for the flowsheet's unit operation.
 
         The unit's ``paramest_wrapper`` is the model callback. Each
@@ -994,8 +994,14 @@ class SimulationExec:
             Further keyword arguments of ``ParameterEstimation`` (or
             ``MultipleCurveResolution``), for example ``measured_ind``,
             ``optimize_flags``, ``weight_matrix``, ``name_params`` or
-            ``output_names``. ``param_seed``, if given, takes precedence
-            over the unit's default seed; see the Notes. For legacy input
+            ``output_names``. Omitted or None ``optimize_flags`` uses the
+            selected unit's ``mask_params``, if declared. Explicit flags may
+            select a subset of an all-True unit mask; with a partial unit
+            mask they must match it exactly. Default names cover every seed
+            coordinate, including fixed parameters. Both explicit
+            ``name_params`` forms of ``ParameterEstimation`` are supported.
+            ``param_seed``, if given, takes precedence over the unit's
+            default seed; see the Notes. For legacy input
             ``name_states`` is replaced by the unit's ``states_uo``; for
             ``Experiment`` input a supplied ``name_states`` is passed
             through, and otherwise the estimator names the states after
@@ -1037,6 +1043,10 @@ class SimulationExec:
             (``phase_modifiers``, ``control_modifiers`` or
             ``wrapper_kwargs``) is given, and for the input errors of
             ``ParameterEstimation``.
+
+            Also if explicit ``optimize_flags`` disagrees with a unit mask
+            that already fixes parameters. Aligning both masks preserves the
+            crystallizer's active sensitivity-column contract.
 
             Also if ``param_seed`` is given for a unit without ``Kinetics``
             and is not a finite one-dimensional array of real numbers (a
@@ -1119,10 +1129,12 @@ class SimulationExec:
         ``[0.0]`` or ``[0.0, 0.0]``, is not integrated: its rows are the
         charged state, with exactly zero sensitivities, since the charged
         state does not depend on the kinetic parameters (issue #418).
-        Crystallizer callbacks still return the solver rows, which
-        include the charge time, until issue #328 is fixed: their grids
-        must start at the charge time (0 s) without replicates there; add
-        0 s to one measurement with a NaN value as a workaround.
+        The default crystallizer callbacks (moments and finite-volume
+        methods, without a custom ``param_wrapper``) also return one row
+        per requested sample time, with sensitivities on the same rows, so
+        their experiments need not sample the charge time either (issue
+        #328). A crystallizer experiment sampled only at the charge time
+        raises ``NotImplementedError`` (not supported yet, issue #537).
 
         In a multi-unit flowsheet only the ``pick_unit`` unit is fitted, in
         isolation from its neighbours: its callback starts from the unit's
@@ -1216,17 +1228,24 @@ class SimulationExec:
         else:
             param_seed = getattr(target_unit, 'param_seed', target_unit.params)
 
-        name_params = inputs_paramest.get('name_params')
+        unit_mask = getattr(target_unit, 'mask_params', None)
+        optimize_flags = inputs_paramest.get('optimize_flags')
+        if unit_mask is not None:
+            if optimize_flags is None:
+                inputs_paramest['optimize_flags'] = np.array(unit_mask, copy=True)
+            elif (not np.all(unit_mask)
+                  and not np.array_equal(optimize_flags, unit_mask)):
+                raise ValueError(
+                    "optimize_flags conflicts with the selected unit's "
+                    "mask_params; use matching flags or configure an "
+                    "all-True unit mask before selecting parameters explicitly")
 
+        name_params = inputs_paramest.get('name_params')
         if name_params is None:
-            name_params = []
-            for ind, logic in enumerate(target_unit.mask_params):
-                if logic:
-                    if hasattr(target_unit, 'Kinetics'):
-                        name_params.append(
-                            target_unit.Kinetics.name_params[ind])
-                    else:
-                        name_params.append(target_unit.name_params[ind])
+            if hasattr(target_unit, 'Kinetics'):
+                name_params = list(target_unit.Kinetics.name_params)
+            else:
+                name_params = getattr(target_unit, 'name_params', None)
 
         if experiments is None:
             inputs_paramest['name_states'] = target_unit.states_uo
@@ -1280,6 +1299,13 @@ class SimulationExec:
         AttributeError
             If ``SetParamEstimation`` has not been called, so that
             ``ParamInst`` does not exist.
+
+        Warns
+        -----
+        RuntimeWarning
+            From ``ParameterEstimation.optimize_fn``, pointing at the
+            caller of ``EstimateParams``, if the optimizer stops without
+            converging or the covariance is undefined.
 
         Notes
         -----

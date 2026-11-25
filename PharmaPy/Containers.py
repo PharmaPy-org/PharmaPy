@@ -318,8 +318,8 @@ class ContinuousHoldup(StructuralPresenceMixin):
             before the integration: if a species in the liquid at the start,
             or fed with a nonzero mass flow at the start, lacks ``cp_liq``.
             Absent species need none (issue #425). A species first fed
-            later in the run without data is reported by CVode instead,
-            whose error does not name it (issue #435).
+            later in the run without data raises the original named error,
+            chained from CVode's diagnostic by the shared solver guard.
 
         Notes
         -----

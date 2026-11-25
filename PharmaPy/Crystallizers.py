@@ -11,12 +11,15 @@ from PharmaPy.Commons import (reorder_sens, plot_sens, trapezoidal_rule,
                               upwind_fvm, high_resolution_fvm,
                               eval_state_events, handle_events,
                               unpack_states, complete_dict_states,
-                              flatten_states)
+                              flatten_states, _requested_rows,
+                              _charge_time_only)
+from PharmaPy.Errors import PharmaPyNonImplementedError
 
 from PharmaPy.ProcessControl import apply_control_modifier, normalize_controls
 
 from PharmaPy.jac_module import numerical_jac, numerical_jac_central, dx_jac_x
 from PharmaPy.Connections import get_inputs, get_inputs_new
+from PharmaPy.Errors import PharmaPyNonImplementedError
 
 from PharmaPy.Results import DynamicResult
 from PharmaPy.Plotting import plot_function, plot_distrib
@@ -46,6 +49,13 @@ gas_ct = 8.314  # J/mol/K
 # reference volumes are documented under "Crystallizer jacket volume" in
 # doc/online_docs/advanced_usage.rst.
 DEFAULT_JACKET_VOLUME_RATIO = 0.14  # [-]
+
+# The legacy crystallizers evaluate the size-independent growth rate
+# k_g * exp(-E_g/RT) * S**g, and CrystKinetics.deriv_cryst returns one
+# partial per entry of that law, so their estimation paths carry exactly
+# these three growth parameters. Entries past them are the size factor
+# (1 + beta*L)**alpha that only the refactored OneDFVMMechanism applies.
+NUM_LEGACY_GROWTH_PARAMS = 3  # [-]: k_g, E_g, g
 
 
 def _caller_stacklevel() -> int:
@@ -545,8 +555,8 @@ class _BaseCryst(StructuralPresenceMixin):
         The derivatives evaluated before CVode starts check only the species
         with a nonzero concentration at the initial state, so a present
         species at zero concentration (a dissolving target, a species fed
-        from the start) would first need its data inside CVode, whose error
-        does not name it (issue #435). Every crystallizer evaluates the
+        from the start) can first need its data inside CVode. The shared
+        solver guard preserves the named error. Every crystallizer evaluates the
         liquid heat capacity or enthalpy: in its energy balance when the
         temperature is integrated, in the heat-duty retrieval of
         ``BatchCryst`` and ``MSMPR``, and in the slurry that every retrieval
@@ -568,6 +578,38 @@ class _BaseCryst(StructuralPresenceMixin):
 
     @Kinetics.setter
     def Kinetics(self, instance):
+        """Attach crystallization kinetics and derive the estimation mask.
+
+        Parameters
+        ----------
+        instance : CrystKinetics
+            Kinetics whose ``name_params`` and ``num_params`` define the
+            estimable parameters; ``mask_params`` selects among them.
+
+        Raises
+        ------
+        PharmaPyNonImplementedError
+            If the growth law has more than ``NUM_LEGACY_GROWTH_PARAMS``
+            entries. These units evaluate the size-independent rate
+            ``k_g * exp(-E_g/RT) * S**g``; the entries past ``k_g, E_g, g``
+            are the size factor that only the refactored
+            ``OneDFVMMechanism`` applies, and since ``deriv_cryst`` returns
+            three growth partials, a longer law would list alpha and beta as
+            estimable in ``name_params`` and ``mask_params`` while the
+            analytic ``jac_params`` builds no column for them.
+        """
+        num_growth_params = len(instance.params['growth'])  # [-]
+
+        if num_growth_params > NUM_LEGACY_GROWTH_PARAMS:
+            raise PharmaPyNonImplementedError(
+                '%s takes a growth law of %d entries (k_g, E_g, g), got %d: '
+                'the legacy crystallizers evaluate a size-independent growth '
+                'rate and estimate only those three growth parameters. Use '
+                'the refactored OneDFVMMechanism for size-dependent growth '
+                '(alpha, beta), or give growth only its first three entries.'
+                % (type(self).__name__, NUM_LEGACY_GROWTH_PARAMS,
+                   num_growth_params))
+
         self._Kinetics = instance
 
         name_params = self._Kinetics.name_params
@@ -1759,7 +1801,8 @@ class _BaseCryst(StructuralPresenceMixin):
             liquid, the target, the named solvent, or fed with a nonzero
             flow) lacks the liquid data the balances need, whatever its
             concentration. Absent species need none. A species first fed
-            later without data is reported by CVode instead (issue #435).
+            later without data raises the original named error, chained
+            from CVode's diagnostic by the shared solver guard.
         """
 
         # A failed solve keeps no results: the unit, its presence record and
@@ -1868,7 +1911,8 @@ class _BaseCryst(StructuralPresenceMixin):
             Kinetic parameters in the attached kinetics model's order and
             units, including any configured parameter transformations.
         t_vals : array-like
-            Evaluation times [s], shape ``(num_times,)``.
+            Requested sample times [s] after the charge, which is at 0 s,
+            shape ``(num_times,)``, non-decreasing, replicates allowed.
         modify_phase : dict, optional
             Phase-update dictionaries keyed by ``Liquid`` and/or ``Solid``.
             Liquid fractions are dimensionless, concentrations use [mol/L] or
@@ -1896,10 +1940,18 @@ class _BaseCryst(StructuralPresenceMixin):
         Returns
         -------
         result : numpy.ndarray, tuple, or object
-            With no custom wrapper, return the time-by-state array, plus
-            sensitivities for the moments method. State units and ordering
-            follow ``solve_unit``; sensitivity units are state units per kinetic
-            parameter unit. With a custom moments wrapper, return its result.
+            With no custom wrapper, the states, shape
+            ``(num_times, num_states)``, one row per requested time in
+            ``t_vals`` order with replicates repeated; for the moments
+            method, the tuple of these states and their sensitivities.
+            State units and column order follow ``solve_unit``; sensitivity
+            units are state units per kinetic parameter unit. Sensitivities
+            hold the same rows as the states, in the layout of
+            ``reorder_sens`` (shape ``(num_states * num_times,
+            num_params)``, state-major) if ``reord_sens`` is True, otherwise
+            shape ``(num_params, num_times, num_states)``; ``num_params``
+            counts the parameters selected by ``mask_params``. With a custom
+            moments wrapper, return its result.
 
         Raises
         ------
@@ -1913,7 +1965,20 @@ class _BaseCryst(StructuralPresenceMixin):
             an entry has keys other than ``fun``, ``args`` and ``kwargs``;
             raised before the crystallizer is reset or integrated.
             Also if a nonempty phase modifier names neither ``Liquid`` nor
-            ``Solid``.
+            ``Solid``. With no custom wrapper, also if a requested time is
+            absent from the solver output: the integration ended early (a
+            terminating state event), the grid decreases, or, in CVode's
+            default (non-continuous) output mode of the finite-volume
+            method, a requested point fell inside the last internal step
+            (pass ``run_args={'sundials_opts': {'report_continuously':
+            True}}`` or a ``maxh`` below the sample spacing).
+        PharmaPyNonImplementedError
+            A subclass of ``NotImplementedError``: if every requested time
+            is the charge time (0 s), for example ``[0.0]`` or
+            ``[0.0, 0.0]``, for every method and also with a custom
+            ``param_wrapper``. Such a grid has zero integration duration
+            and is not supported yet (issue #537). Raised before the
+            crystallizer is reset or integrated.
 
         Notes
         -----
@@ -1935,6 +2000,20 @@ class _BaseCryst(StructuralPresenceMixin):
         This wrapper owns the estimation reset: solve_unit's reset_states flag
         is temporarily disabled so it preserves these modifiers, then restored
         even if the solve raises an exception.
+        CVode also reports the charged state at 0 s and merges replicates of
+        the initial time, so the solver rows need not be the requested
+        times. With no custom wrapper, the states and every parameter
+        sensitivity block are reduced to one row per requested time,
+        matched exactly (``Commons._requested_rows``), before sensitivity
+        reordering (issue #328). Only the returned arrays are reduced: the
+        stored ``result``, heat duty and solve history keep every solver
+        row, including the charge. Earlier releases returned all solver
+        rows, so a grid starting after 0 s gained an extra charge row.
+        With the moments method, a custom ``param_wrapper`` receives the
+        complete ``result`` and the sensitivities of every solver row,
+        including the charge row at 0 s; selecting the rows of ``t_vals``
+        is its responsibility. A custom ``param_wrapper`` with the
+        finite-volume method is not supported yet (issue #494).
         A custom moments callback receives SI ``DynamicResult`` moments
         [m**n] or [m**n/m**3], while its sensitivity dictionary retains raw
         solver moments [um**n] or [um**n/m**3] per parameter unit. The callback
@@ -1945,6 +2024,17 @@ class _BaseCryst(StructuralPresenceMixin):
         # Validate and build this call's controls before changing any state.
         experiment_controls = apply_control_modifier(
             self.controls, modify_controls, 'crystallizer')
+
+        # The wrapper's charge is at 0 s; a grid of charge times only would
+        # make CVode integrate over zero duration.
+        if _charge_time_only(t_vals, 0.0):
+            raise PharmaPyNonImplementedError(
+                "Every requested time is the charge time (0 s), so the "
+                "crystallizer experiment has zero integration duration, which "
+                "paramest_wrapper does not support yet (issue #537). Add a "
+                "sample time after 0 s; the charged state does not depend on "
+                "the kinetic parameters, so charge-only samples carry no "
+                "kinetic information")
 
         self.reset()
 
@@ -1981,6 +2071,12 @@ class _BaseCryst(StructuralPresenceMixin):
                                                            verbose=False,
                                                            **run_args)
 
+                    # One row per requested time, the same in every
+                    # parameter block (issue #328).
+                    rows = _requested_rows(t_prof, t_vals, 'crystallizer')
+                    states = states[rows]  # mixed units of solve_unit
+                    sens = [block[rows] for block in sens]  # [state unit/param unit]
+
                     if reord_sens:
                         sens = reorder_sens(sens, separate_sens=False)
                     else:
@@ -1993,7 +2089,9 @@ class _BaseCryst(StructuralPresenceMixin):
                                                          verbose=False,
                                                          **run_args)
 
-                    result = states_out
+                    # One row per requested time (issue #328).
+                    result = states_out[_requested_rows(
+                        t_prof, t_vals, 'crystallizer')]  # mixed units of solve_unit
 
             elif callable(self.param_wrapper):
                 if self.method == 'moments':
@@ -2439,7 +2537,8 @@ class BatchCryst(_BaseCryst):
                 size_exponent = self.Kinetics.params['dissolution'][-1]  # [-]
             else:
                 size_rate = self.Kinetics.growth  # [um/s], nonnegative growth
-                size_exponent = self.Kinetics.params['growth'][-1]  # [-]
+                # Index 2 is the growth exponent g in both formulations.
+                size_exponent = self.Kinetics.params['growth'][2]  # [-]
             bp_exp = self.Kinetics.params['nucl_prim'][-1]
             k_s, _, bs_exp, bs2_exp = self.Kinetics.params['nucl_sec']
 

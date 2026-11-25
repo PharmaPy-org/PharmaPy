@@ -26,6 +26,29 @@ eps = np.sqrt(np.finfo(float).eps)
 #: including at zero. Pass explicit steps for parameters of smaller scale.
 PARAMETER_MAGNITUDE_FLOOR = 1e-6
 
+#: Relative accuracy assumed for model outputs by the default
+#: finite-difference step of ``ParameterEstimation`` [-]: the default rtol
+#: of Assimulo's CVode (1e-6 in Assimulo 3.4), the integrator of PharmaPy's
+#: ODE unit models unless sundials options override it. The default
+#: relative step is its square root, 1e-3, as in the CVODES parameter
+#: increment (``dx_jac_p`` Notes). ``IdentifiabilityReport`` uses it as the
+#: default ``output_rtol`` of finite-difference Jacobians.
+DEFAULT_OUTPUT_RTOL = 1e-6
+
+#: Cube root of the float64 machine epsilon ``u = np.finfo(float).eps``
+#: [-], about 6.06e-6 (not the module's ``eps``, which is ``sqrt(u)``): the
+#: relative step of a second-order (central or one-sided three-point)
+#: difference of a function evaluated to machine precision. Its truncation
+#: error is proportional to ``h**2`` and its rounding error to ``u / h``;
+#: the sum is smallest for ``h`` proportional to ``u**(1/3)`` (Nocedal and
+#: Wright, Numerical Optimization, 2nd ed., Springer, 2006, Sec. 8.1). For
+#: an output of relative accuracy ``r`` the same balance gives
+#: ``r**(1/3)``, e.g. ``DEFAULT_OUTPUT_RTOL**(1/3)`` = 1e-2 for an ODE
+#: solved at CVode's default rtol. Used by ``Reactors`` for its Jacobians
+#: and as the default ``rel_step`` of
+#: ``ParameterEstimation.check_derivatives``.
+CENTRAL_DIFFERENCE_REL_STEP = np.cbrt(np.finfo(float).eps)
+
 
 def dx_jac_x(x, abstol, reltol, eps):
     sigma_zero = 1
