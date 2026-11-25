@@ -25,6 +25,9 @@ WATER_PRESSURE = 99_241.8352  # [Pa]
         ("PR", ("ethane", "ethane"), "vapor", "PR requires"),
         ("PR", ("methane", "propane"), "vapor", "PR requires"),
         ("IAPWS95", ("water",), "stable", "phase must"),
+        (np.array(["IAPWS95"]), ("water",), "liquid", "model must"),
+        ("IAPWS95", np.array([["water"]]), "liquid", "components must"),
+        ("IAPWS95", ("water",), np.array(["liquid"]), "phase must"),
     ],
 )
 def test_model_component_and_phase_choices(model, components, phase, error):
@@ -62,6 +65,19 @@ def test_state_requires_finite_positive_scalars(quantity, invalid):
     state[quantity] = invalid  # Same units as the input under test.
     with pytest.raises(ValueError, match=rf"{quantity} .*finite, positive real scalar"):
         single_phase_density("IAPWS95", ("water",), mole_fractions=[1.0], phase="liquid", **state)
+
+
+@pytest.mark.parametrize("quantity", ["temperature", "pressure"])
+@pytest.mark.parametrize("time_unit", ["s", "ns"])
+def test_state_rejects_time_interval_scalars(quantity, time_unit):
+    """Reject a duration even when its magnitude resembles an absolute state."""
+    state = {"temperature": WATER_TEMPERATURE, "pressure": WATER_PRESSURE}  # [K], [Pa]
+    duration = np.timedelta64(int(state[quantity]), time_unit)  # [s] or [ns]
+    state[quantity] = duration  # [s] or [ns], deliberately incompatible
+    with pytest.raises(ValueError, match=rf"{quantity} .*finite, positive real scalar"):
+        single_phase_density(
+            "IAPWS95", ("water",), mole_fractions=[1.0], phase="liquid", **state,
+        )
 
 
 @pytest.mark.parametrize(

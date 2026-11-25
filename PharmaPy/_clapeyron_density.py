@@ -46,7 +46,8 @@ def _positive_scalar(value: float, name: str) -> float:
         If the value is non-scalar, non-real, non-finite, or non-positive.
     """
     error_message = f"{name} must be a finite, positive real scalar."
-    if isinstance(value, bool) or not isinstance(value, Real):
+    # NumPy duration scalars can satisfy Real but carry time units.
+    if isinstance(value, (bool, np.timedelta64)) or not isinstance(value, Real):
         raise ValueError(error_message)
     try:
         scalar = float(value)  # [K] or [Pa], same as value
@@ -97,7 +98,8 @@ def single_phase_density(
     Raises
     ------
     ValueError
-        If the model, components, phase, or scalar state is invalid.
+        If the model, components, phase, scalar state, or mole fractions
+        are invalid.
     ImportError
         If the optional Python wrapper is absent.
     RuntimeError
@@ -110,7 +112,7 @@ def single_phase_density(
     phase stability or the composition of a phase in a multiphase system.
     Julia initialization and backend errors propagate to the caller.
     """
-    if model not in ("IAPWS95", "PR"):
+    if not isinstance(model, str) or model not in ("IAPWS95", "PR"):
         raise ValueError("model must be 'IAPWS95' or 'PR'.")
     component_error = "components must be an ordered sequence of species names."
     if isinstance(components, (str, bytes, Mapping, Set)):
@@ -119,13 +121,15 @@ def single_phase_density(
         component_order = tuple(components)
     except TypeError as error:
         raise ValueError(component_error) from error
+    if not all(isinstance(component, str) for component in component_order):
+        raise ValueError(component_error)
     if model == "IAPWS95" and component_order != ("water",):
         raise ValueError("IAPWS95 requires components ('water',).")
     if model == "PR" and component_order not in (
         ("methane", "ethane"), ("ethane", "methane"),
     ):
         raise ValueError("PR requires methane and ethane in either order.")
-    if phase not in ("liquid", "vapor"):
+    if not isinstance(phase, str) or phase not in ("liquid", "vapor"):
         raise ValueError("phase must be 'liquid' or 'vapor'.")
 
     temperature_kelvin = _positive_scalar(temperature, "temperature [K]")  # [K]
@@ -158,8 +162,8 @@ def single_phase_density(
     if model == "IAPWS95":
         equation = pyclapeyron.IAPWS95()
     else:
-        equation = pyclapeyron.PR(list(component_order))
-    root = pyclapeyron.jl.Symbol(phase)
+        equation = pyclapeyron.PR([str(component) for component in component_order])
+    root = pyclapeyron.jl.Symbol(str(phase))
     state = (equation, pressure_pascal, temperature_kelvin, fractions_float64)
     mass_density = float(pyclapeyron.mass_density(*state, phase=root))  # [kg/m³]
     molar_density = float(pyclapeyron.molar_density(*state, phase=root))  # [mol/m³]

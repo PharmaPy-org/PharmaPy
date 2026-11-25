@@ -1,6 +1,6 @@
 # Experimental single-phase density with Clapeyron
 
-This example accompanies the property-interface work in [#353](https://github.com/PharmaPy-org/PharmaPy/issues/353). The provisional helper evaluates one homogeneous state at a time and returns two Python floats. `mass_density` is in kg/m³ and `molar_density` is in mol/m³. Supply absolute pressure in Pa, temperature in K and a one-dimensional mole-fraction vector in the supplied component order.
+This example accompanies the property-interface work in [#353](https://github.com/PharmaPy-org/PharmaPy/issues/353). The provisional helper evaluates one homogeneous state at a time and returns two Python floats. `mass_density` is in kg/m³ and `molar_density` is in mol/m³. Supply temperature in K, absolute pressure in Pa, and a one-dimensional mole-fraction vector in the supplied component order.
 
 The helper supports `IAPWS95` for pure water and the default Peng–Robinson `PR` model for methane/ethane, in either order. Supply `phase="liquid"` or `phase="vapor"` to request a Clapeyron volume root. The requested phase guides root selection. The caller supplies the homogeneous phase composition and checks that the state lies in the model's physical domain. A volume root alone cannot establish phase stability or determine an equilibrium split. Unsupported model/component combinations and invalid inputs raise `ValueError`. A non-finite or non-positive backend result raises `RuntimeError`, and underlying Julia errors surface to the caller. [Clapeyron bulk properties](https://clapeyronthermo.github.io/Clapeyron.jl/v0.6/properties/bulk/) · [Peng and Robinson (1976)](https://doi.org/10.1021/i160057a011)
 
@@ -44,7 +44,8 @@ temperature = 300.0           # [K]
 pressure = 99_241.8352         # [Pa], converted from 0.0992418352 MPa
 water_mole_fractions = [1.0]  # [-], pure water
 density = single_phase_density(
-    "IAPWS95", ("water",), temperature, pressure, water_mole_fractions,
+    "IAPWS95", ("water",), temperature=temperature, pressure=pressure,
+    mole_fractions=water_mole_fractions,
     phase="liquid",
 )
 
@@ -61,4 +62,4 @@ The molar conversion matches the unit convention of PharmaPy's `getDensity(basis
 
 The Python test compares the wrapper's mass and molar densities with direct Julia evaluations from `smoke.jl`. It checks water against IAPWS R6-95(2018) Table 7 at 300 K, then checks the distinct homogeneous liquid and vapor roots against the first column of Table 8 at 275 K. The water checks verify the implementation against the published formulation's reference calculations. [IAPWS R6-95(2018), Tables 7 and 8](https://iapws.org/public/documents/k3PSK/IAPWS95-2018.pdf#page=15) · [IAPWS VSMOW molar mass](https://iapws.org/faqs/faq1)
 
-For the 300 K, 100 kPa Peng–Robinson vapor example, methane/ethane mole fractions of 0.2/0.8 give about 1.100459929 kg/m³ and 40.36311360 mol/m³, or 0.04036311360 mol/L. The test reverses components and fractions together to preserve the state and reverses fractions alone to change it. Each mass-to-molar density ratio is compared with the mole-fraction-weighted NIST molar mass, allowing for the rounding used in Clapeyron's model data. This checks species order, units and cross-language handoff for the selected vapor state. [NIST methane](https://webbook.nist.gov/cgi/cbook.cgi?ID=C74828) · [NIST ethane](https://webbook.nist.gov/cgi/cbook.cgi?ID=C74840)
+For the 300 K, 100 kPa Peng–Robinson vapor example, methane/ethane mole fractions of 0.2/0.8 give about 1.100459929 kg/m³ and 40.36311360 mol/m³, or 0.04036311360 mol/L. A separate evaluation of the published Peng–Robinson cubic gives the reference molar-density magnitude. The test reverses components and fractions together to preserve the state and reverses fractions alone to change it. Each mass-to-molar density ratio is compared with the mole-fraction-weighted NIST molar mass, allowing for the rounding used in Clapeyron's model data. This checks species order, units and cross-language handoff for the selected vapor state. The live suite also checks the same mixture supplied with float32 fractions and the diagnostic for a missing JuliaCall dependency. [NIST methane](https://webbook.nist.gov/cgi/cbook.cgi?ID=C74828) · [NIST ethane](https://webbook.nist.gov/cgi/cbook.cgi?ID=C74840)
