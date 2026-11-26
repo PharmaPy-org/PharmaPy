@@ -318,6 +318,81 @@ def test_gain_survives_rounded_determinants(baseline_sensitivity,
     assert no_gain.log_information_gain == pytest.approx(0, abs=0)
 
 
+def test_rank_repair_retains_directions_resolved_by_a_weaker_full_rank_plan():
+    """Pool the same two sources in either order without losing a direction."""
+    large = 1e8  # [1 / p_i], large enough to hide I under the pooled rank cutoff
+    repeated = [[large, large]]  # [1 / p_i], one observed linear combination
+    independent = np.eye(2)  # [1 / p_i], one observation per coordinate
+    expected = np.log1p(2 * large**2)  # [-], log determinant of I + h h.T
+    for baseline, prospective in ((repeated, independent),
+                                  (independent, repeated)):
+        # Pad to three observed rows with zero sensitivities at insensitive
+        # sample points, giving a positive residual degrees of freedom.
+        rows = np.asarray(baseline)  # [1 / p_i]
+        jacobian = np.pad(rows.T, ((0, 0), (0, 3 - len(rows))))  # [1 / p_i]
+        fit = IdentifiabilityReport.from_fit(
+            jacobian, np.zeros(3), [1.0, 1.0], ('rise', 'k'), 3,
+            noise_model='declared_uncertainty', measurement_units={'y': '[-]'},
+            jacobian_source='jac_fun', jacobian_rtol=np.finfo(float).eps,
+            include_mse=False, convergence={'success': True})
+        prospective_rows = np.asarray(prospective)  # [1 / p_i]
+
+        def sensitivities(point):
+            """Return the standardized sensitivity columns [1 / p_i]."""
+            return dict(zip(point, prospective_rows.T))
+
+        candidate = CandidateExperiment('next', sensitivities,
+                                        np.eye(len(prospective_rows)))  # noise [-]
+        result, = rank_experiments(fit, [candidate],
+                                   parameter_units=UNITS).candidates
+        assert result.status == 'ranked'
+        assert result.combined_rank == 2
+        assert result.score == pytest.approx(expected, rel=RTOL)
+
+        if len(rows) == 1:
+            # More samples in the already informed direction do not repair
+            # rank. Use a large value to reveal spurious projection leakage.
+            same_direction = 1e16  # [1 / p_i]
+
+            def collinear(point):
+                """Return another derivative [1 / p_i] along the prior row."""
+                return {name: [same_direction] for name in point}
+
+            redundant = CandidateExperiment('redundant', collinear, [[1.0]])
+            unresolved, = rank_experiments(
+                fit, [redundant], parameter_units=UNITS).candidates
+            assert unresolved.status == 'rank_deficient'
+            assert unresolved.combined_rank == 1
+
+
+def test_roundoff_in_repeated_observations_does_not_inflate_gain():
+    """Use the exact rank-one determinants to disambiguate two forecasts."""
+    fit = orthogonal_fit()
+    large = 1e16  # [1 / p_i], null singular-value roundoff is comparable to I
+    competing_norm_squared = 5  # [-], between two repeats' factor 4 and a false gain
+
+    def repeated(point):
+        """Return identical sensitivity rows [1 / p_i] for both observations."""
+        return {name: [large, large] for name in point}
+
+    def single(point):
+        """Return one larger sensitivity [1 / p_i] on the rise coordinate."""
+        return {'rise': [np.sqrt(competing_norm_squared) * large], 'k': [0.0]}
+
+    candidates = [
+        CandidateExperiment('repeated', repeated, np.eye(2)),
+        CandidateExperiment('single', single, [[1.0]]),
+    ]  # Unit noise variances [-]
+    best, other = rank_experiments(fit, candidates, parameter_units=UNITS).candidates
+    assert (best.name, other.name) == ('single', 'repeated')
+    assert best.candidate_rank == other.candidate_rank == 1
+    assert best.log_information_gain == pytest.approx(
+        np.log1p(competing_norm_squared * large**2), rel=RTOL)
+    # Two independent repeats along (1, 1) give an eigenvalue 4*large**2.
+    assert other.log_information_gain == pytest.approx(
+        np.log1p(4 * large**2), rel=RTOL)
+
+
 def test_pooled_ranking_prefers_the_weaker_direction_independently_of_units():
     # Information diag(16, 1). A larger candidate sensitivity in the
     # better-known direction has smaller gain than the weaker direction.

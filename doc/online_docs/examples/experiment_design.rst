@@ -24,7 +24,10 @@ determinant ratio, and :math:`\exp(-\mathrm{gain}/2)` is the predicted
 joint uncertainty volume relative to the baseline. A plan can also
 restore numerical rank to a deficient baseline. In that case the pool
 uses the numerically resolved directions from the baseline and the
-candidate's whitened sensitivities. A determinant ratio is undefined
+candidate's whitened sensitivities. The candidate is evaluated on the
+unresolved directions independently of the strength of the retained
+directions. Numerical null modes of the candidate are excluded from the
+gain calculation. A determinant ratio is undefined
 when the baseline is singular. Unrankable and failed plans carry an
 explicit status and diagnostic. A report with no ranked entry has no
 recommendation.

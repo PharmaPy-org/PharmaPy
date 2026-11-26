@@ -153,6 +153,88 @@ def _rank_and_score(rows: np.ndarray,
     return rank, float(score)
 
 
+def _log_gain(relative: np.ndarray, rank: int) -> float:
+    """Compute the determinant-ratio gain from resolved sensitivity modes.
+
+    Parameters
+    ----------
+    relative : numpy.ndarray
+        Candidate sensitivity rows in baseline-whitened coordinates [-].
+    rank : int
+        Numerical rank bound [-] from the prospective sensitivities before
+        whitening by the baseline. Whitening cannot create new modes.
+
+    Returns
+    -------
+    float
+        Log determinant gain [-] of the independently resolved modes.
+    """
+    if rank == 0:
+        return 0.0
+    singular = np.linalg.svd(relative, compute_uv=False)[:rank]  # [-]
+    with np.errstate(divide='ignore'):
+        # log1p(s**2), without squaring very large values.
+        return float(np.logaddexp(0, 2 * np.log(singular)).sum())
+
+
+def _rank_repair(
+        normalized: np.ndarray, basis: np.ndarray, roots: np.ndarray,
+        null_basis: np.ndarray, candidate_rank: int,
+        rank_rtol: float) -> tuple[int, Optional[float]]:
+    """Resolve directions in a singular baseline and score their information.
+
+    Parameters
+    ----------
+    normalized : numpy.ndarray
+        Prospective whitened sensitivity rows in Jacobi-scaled parameter
+        coordinates [-].
+    basis : numpy.ndarray
+        Orthonormal eigenvectors [-] of retained baseline directions.
+    roots : numpy.ndarray
+        Square roots [-] of the corresponding eigenvalues.
+    null_basis : numpy.ndarray
+        Orthonormal eigenvectors [-] of discarded baseline directions.
+    candidate_rank : int
+        Numerical rank [-] of the prospective sensitivities.
+    rank_rtol : float
+        Relative singular-value cutoff [-] of the candidate.
+
+    Returns
+    -------
+    int
+        Pooled numerical rank [-].
+    float or None
+        Log determinant contribution [-] beyond the retained baseline
+        eigenvalues in the scaled coordinates. None if pooled rank is
+        deficient.
+    """
+    new_rows = normalized @ null_basis  # [-]
+    # A length-n dot product has roundoff on the scale of n*eps times
+    # the sum of the magnitudes of its individual products. Suppress
+    # projection leakage before normalizing the projected columns.
+    projection_error = rank_rtol * (np.abs(normalized) @ np.abs(null_basis))  # [-]
+    new_rows[np.abs(new_rows) <= projection_error] = 0  # [-]
+    new_rank, new_score = _rank_and_score(new_rows, rank_rtol)  # [-], log det
+    new_rank = min(new_rank, candidate_rank)  # [-]
+    combined_rank = len(roots) + new_rank  # [-]
+    if new_score is None or new_rank < null_basis.shape[1]:
+        return combined_rank, None
+
+    if candidate_rank == new_rank:
+        # All candidate information is already used on the null space.
+        return combined_rank, new_score
+
+    # Schur complement: the part of the retained-direction sensitivities
+    # orthogonal to the new columns supplies their conditional information.
+    # Column scaling preserves the projection and conditioning of the QR.
+    projection_columns = new_rows / np.max(np.abs(new_rows), axis=0)  # [-]
+    orthogonal, _ = np.linalg.qr(projection_columns, mode='reduced')  # [-], [-]
+    known_rows = normalized @ basis  # [-]
+    conditional = known_rows - orthogonal @ (orthogonal.T @ known_rows)  # [-]
+    known_gain = _log_gain(conditional / roots, candidate_rank - new_rank)  # [-]
+    return combined_rank, new_score + known_gain
+
+
 def _whiten_sensitivities(
         candidate: CandidateExperiment, derivatives: Mapping[str, ArrayLike],
         fit: IdentifiabilityReport) -> np.ndarray:
@@ -353,13 +435,15 @@ def rank_experiments(
     commensurate calibration outputs with one shared residual variance.
     Absolute identity weighting assumes unit variance in the recorded units.
 
-    Numerical rank uses unit-norm parameter columns and a relative
-    singular-value cutoff of sqrt(machine epsilon times the calibration
-    observation count). The squared cutoff accommodates roundoff in the
-    calibration Gram matrix. For a singular baseline, stack its resolved
-    information factor with the whitened prospective sensitivities. For a
-    full-rank baseline the determinant lemma gives the gain directly from
-    the prospective sensitivities in baseline-whitened coordinates.
+    Baseline rank uses a relative singular-value cutoff of sqrt(machine
+    epsilon times the calibration observation count) on unit-norm parameter
+    columns. The squared cutoff accommodates roundoff in its Gram matrix.
+    Prospective rank uses the SVD cutoff of machine epsilon times the
+    larger dimension of the scaled sensitivity matrix. For a singular
+    baseline, test the candidate projection onto the unresolved subspace
+    independently of the strength of the retained calibration directions.
+    For a full-rank baseline, use the determinant lemma on resolved
+    candidate modes in baseline-whitened coordinates.
 
     The score is a local forecast of information. Numerical rank alone
     cannot establish practical identifiability. Consult the fit's
@@ -392,7 +476,7 @@ def rank_experiments(
     retained = eigenvalues > rank_rtol**2 * eigenvalues[-1]
     roots = np.sqrt(eigenvalues[retained])  # [-]
     basis = vectors[:, retained]  # [-]
-    baseline_rows = (roots[:, None] * basis.T) * scale  # [1 / p_i]
+    null_basis = vectors[:, ~retained]  # [-]
     baseline_rank = len(roots)  # [-]
     baseline_score = 2 * (np.log(roots).sum() + np.log(scale).sum())  # log det
     estimates = MappingProxyType(dict(zip(names, map(float, fit.estimates))))  # [p_i]
@@ -412,19 +496,19 @@ def rank_experiments(
             whitened = _whiten_sensitivities(candidate, derivatives, fit)  # [1 / p_i]
             with np.errstate(over='raise', invalid='raise'):
                 added = whitened.T @ whitened  # [1 / (p_i * p_j)]
-                candidate_rank, _ = _rank_and_score(whitened, rank_rtol)  # [-]
+                candidate_rtol = np.finfo(float).eps * max(whitened.shape)  # [-]
+                candidate_rank, _ = _rank_and_score(whitened, candidate_rtol)  # [-]
+                normalized = whitened / scale  # [-]
                 gain = None  # [-], undefined if the baseline is singular
                 if baseline_rank == len(names):
                     combined_rank = baseline_rank  # [-], adding PSD preserves rank
-                    relative = ((whitened / scale) @ basis) / roots  # [-]
-                    singular = np.linalg.svd(relative, compute_uv=False)  # [-]
-                    with np.errstate(divide='ignore'):
-                        # log1p(s**2), without squaring very large values.
-                        gain = float(np.logaddexp(0, 2 * np.log(singular)).sum())  # [-]
+                    gain = _log_gain((normalized @ basis) / roots, candidate_rank)  # [-]
                     score = float(baseline_score + gain)  # log det
                 else:
-                    combined_rank, score = _rank_and_score(
-                        np.vstack((baseline_rows, whitened)), rank_rtol)  # [-], log det
+                    combined_rank, addition = _rank_repair(
+                        normalized, basis, roots, null_basis,
+                        candidate_rank, candidate_rtol)  # [-], log det
+                    score = None if addition is None else float(baseline_score + addition)
         except (TypeError, ValueError, np.linalg.LinAlgError,
                 FloatingPointError, OverflowError) as error:
             results.append(CandidateEvaluation(
