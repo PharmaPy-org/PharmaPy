@@ -10,4 +10,5 @@ Documentation
    records.rst
    slurry_measurements.rst
    pat_readers.rst
+   pat_signals.rst
 

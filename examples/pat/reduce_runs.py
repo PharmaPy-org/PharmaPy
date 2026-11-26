@@ -8,7 +8,7 @@ Each run gives tables on the clock of its temperature program: thermostat
 temperatures, FBRM band counts with the square-weighted mean chord, and an IR
 signal of the dissolved solute. The description names that signal in one of two
 blocks: ``ir_band``, the height of one band, or ``ir_score``, the whole-spectrum
-score of `spectral_score`, which needs the spectra of all runs together.
+score of `PharmaPy.PATSignals.SpectralScore`, which needs the spectra of all runs together.
 ``runs.json`` of the dataset holds every setting used here. A run is read from
 its native files, or from vendor CSV exports when its entry names them.
 """
@@ -20,10 +20,9 @@ from pathlib import Path
 
 import numpy as np
 
-from PharmaPy import PATReaders
+from PharmaPy import PATReaders, PATSignals
 
-from . import dataset, fbrm_statistics, spectral_score, table_layout
-from .band_height import band_height
+from . import dataset, fbrm_statistics, table_layout
 from .run_table import block_mean
 
 MEAN_CHORD = "mean_chord_square_weighted"
@@ -224,7 +223,7 @@ def ir_table(spectra: PATReaders.ICSpectra, origin: datetime.datetime, utc_offse
     time, axis, absorbance = timed_spectra(spectra, origin, utc_offset_h, without_metadata)
     columns = {
         "time": time,
-        "band_height": band_height(axis, absorbance, band["peak_cm-1"], tuple(band["baseline_cm-1"])),
+        "band_height": PATSignals.band_height(axis, absorbance, band["peak_cm-1"], tuple(band["baseline_cm-1"])),
         "solvent_absorbance": absorbance[:, int(np.argmin(np.abs(axis - band["solvent_position_cm-1"])))],
     }
     return columns, {"time": "s", "band_height": "-", "solvent_absorbance": "-"}
@@ -283,7 +282,7 @@ def score_tables(spectra_by_run: dict, description: dict) -> tuple[dict, dict]:
     tables : dict
         ``{run id: ({column: values}, {column: unit})}`` with ``time`` [s] and,
         all [-], ``score``, ``scale``, ``offset``, ``tilt`` and ``residual`` of
-        `spectral_score.score`. The score is zero for the run's own dissolved
+        `PharmaPy.PATSignals.score_terms`. The score is zero for the run's own dissolved
         charge and minus one for a drop of dissolved solute equal to the one
         between the dissolved charge and the slurry of the reference run.
     summary : dict
@@ -297,38 +296,36 @@ def score_tables(spectra_by_run: dict, description: dict) -> tuple[dict, dict]:
     """
     settings = description["ir_score"]
     reference_run, comparison_run = settings["reference_run"], settings["comparison_run"]
-    reference_temperature = settings["reference_temperature_K"]  # [K]
     time, temperature, axis, spectra = spectra_by_run[reference_run]
     for run_id, item in spectra_by_run.items():
         if item[2].shape != axis.shape or not np.array_equal(item[2], axis):
             raise ValueError("Run %s does not share the spectral axis of run %s." % (run_id, reference_run))
     clear = _in_window(time, settings["clear_solution_window_s"], "clear-solution", reference_run)
-    level, per_kelvin, effect_residual = spectral_score.temperature_effect(spectra[clear], temperature[clear], reference_temperature)
-    lower, upper = settings["wavenumber_window_cm-1"]
-    keep = spectral_score.usable_points(axis, level, lower, upper, settings["maximum_absorbance"])
-    moved, dissolved, counts = {}, {}, {}
-    for run_id, (run_time, run_temperature, _, run_spectra) in spectra_by_run.items():
-        moved[run_id] = spectral_score.at_reference_temperature(run_spectra, run_temperature, per_kelvin, reference_temperature)[:, keep]
-        inside = _in_window(run_time, settings["dissolved_window_s"], "dissolved", run_id)
-        dissolved[run_id], counts[run_id] = moved[run_id][inside].mean(axis=0), int(inside.sum())
+    in_dissolved = {run_id: _in_window(item[0], settings["dissolved_window_s"], "dissolved", run_id) for run_id, item in spectra_by_run.items()}
     slurry = _in_window(time, settings["slurry_window_s"], "slurry", reference_run)
-    direction = dissolved[reference_run] - moved[reference_run][slurry].mean(axis=0)  # [-]
+    fitted = PATSignals.SpectralScore.fit(
+        axis, spectra, temperature, clear_solution=clear, dissolved=in_dissolved[reference_run], slurry=slurry,
+        reference_temperature=settings["reference_temperature_K"], window=tuple(settings["wavenumber_window_cm-1"]),
+        maximum_absorbance=settings["maximum_absorbance"])
+    # Dissolved charge of every run at the reference temperature [-], to compare the charges of the runs.
+    dissolved = {run_id: fitted.at_reference(axis, item[3], item[1])[in_dissolved[run_id]].mean(axis=0) for run_id, item in spectra_by_run.items()}
     units = {name: "-" for name in ("score", "scale", "offset", "tilt", "residual")}
     units = {"time": "s", **units}
     tables, against, condition = {}, {}, None
-    for run_id, item in spectra_by_run.items():
-        terms = spectral_score.score(axis[keep], moved[run_id], dissolved[run_id], direction)
-        tables[run_id] = ({"time": item[0], "score": terms.score, "scale": terms.scale, "offset": terms.offset,
+    for run_id, (run_time, run_temperature, _, run_spectra) in spectra_by_run.items():
+        terms = fitted.score(axis, run_spectra, run_temperature, in_dissolved[run_id])
+        tables[run_id] = ({"time": run_time, "score": terms.score, "scale": terms.scale, "offset": terms.offset,
                            "tilt": terms.tilt, "residual": terms.residual}, dict(units))
-        compared = spectral_score.score(axis[keep], dissolved[run_id][None, :], dissolved[comparison_run], direction)
+        compared = PATSignals.score_terms(axis[fitted.usable], dissolved[run_id][None, :], dissolved[comparison_run], fitted.direction)
         against[run_id] = {"score": float(compared.score[0]), "scale": float(compared.scale[0]), "offset": float(compared.offset[0]),
-                           "tilt": float(compared.tilt[0]), "residual": float(compared.residual[0]), "dissolved_spectra": counts[run_id]}
+                           "tilt": float(compared.tilt[0]), "residual": float(compared.residual[0]),
+                           "dissolved_spectra": int(in_dissolved[run_id].sum())}
         condition = terms.condition if run_id == reference_run else condition
     summary = {
         "reference_run": reference_run, "comparison_run": comparison_run,
-        "spectral_points": int(keep.sum()), "clear_solution_spectra": int(clear.sum()), "slurry_spectra": int(slurry.sum()),
-        "clear_solution_temperature_min_K": float(temperature[clear].min()), "clear_solution_temperature_max_K": float(temperature[clear].max()),
-        "temperature_effect_residual": effect_residual, "condition": condition,
+        "spectral_points": int(fitted.usable.sum()), "clear_solution_spectra": int(clear.sum()), "slurry_spectra": int(slurry.sum()),
+        "clear_solution_temperature_min_K": fitted.temperature_range[0], "clear_solution_temperature_max_K": fitted.temperature_range[1],
+        "temperature_effect_residual": fitted.temperature_residual, "condition": condition,
         "dissolved_spectrum_against_comparison_run": against,
     }
     return tables, summary

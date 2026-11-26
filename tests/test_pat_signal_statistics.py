@@ -1,4 +1,4 @@
-"""FBRM statistics, IR band height and the table writer of ``examples/pat``.
+"""FBRM statistics and the table writer of ``examples/pat``, and the IR band height of ``PharmaPy.PATSignals``.
 
 Vendor expectations are the statistics iC FBRM stored for samples 401, 2001 and
 4001 of run 2026-10-23, and absorbances printed in the iC IR export of that run.
@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 
 from examples.pat import fbrm_statistics, table_layout
-from examples.pat.band_height import band_height
 from PharmaPy import PATReaders
+from PharmaPy.PATSignals import band_height
 
 pytestmark = pytest.mark.unit
 

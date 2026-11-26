@@ -1,9 +1,9 @@
 # PAT data readers
 
 Workflow for process-analytical-technology data, started for the work package 2
-demonstrator (#153, #358). The readers of the instruments' native files are in the
-package (`PharmaPy.PATReaders`); the modules here are not part of the PharmaPy
-package API. Nothing in them is specific to a compound; case inputs live in a
+demonstrator (#153, #358). The readers of the instruments' files and the IR signals
+of the dissolved solute are in the package (`PharmaPy.PATReaders`,
+`PharmaPy.PATSignals`); the modules here are not part of the PharmaPy package API. Nothing in them is specific to a compound; case inputs live in a
 subdirectory per case.
 
 ## Text tables and the run table
@@ -21,8 +21,6 @@ tables are read back through a layout like any other file.
 | Module | Purpose |
 |---|---|
 | `fbrm_statistics.py` | Counts per chord-length band and the weighted mean chord, defined as iC FBRM reports them. Against the statistics stored by the vendor software for the four caffeine runs: 10 to 100 um band within 0.6 %, 100 to 1000 um band within 3 %, square-weighted mean within 0.02 %. The band below 10 um was compared on three samples only (within 0.05 %). |
-| `band_height.py` | Height of a spectral band above a straight line through two anchor points. Band and anchors are inputs; they belong to the compound and solvent. |
-| `spectral_score.py` | Dissolved-solute score of whole spectra against a reference spectrum, for a solute without a band clear of the solvent. Spectra are moved to a reference temperature with a linear temperature effect per spectral point. Their difference from the reference is then split into the score along a known direction and three terms for a change of probe contact: scale, offset and tilt. The spectra that define the temperature effect, the reference and the direction are inputs. |
 | `band_calibration.py` | Band height against dissolved solute per solvent, linear with a temperature-dependent slope. The constants are solved from plateaus of known composition. |
 | `calibrate_band.py` | Applies that calibration to a described dataset: `python -m examples.pat.calibrate_band "<dataset folder>"`. The `band_calibration` block of the description names the table and columns, the runs, the reference run with solvent-only spectra, and the time windows of known composition. Its `solute_ratio` returns the dissolved solute per solvent [kg/kg] of a run over time. |
 | `solubility.py` | Solubility against temperature in van't Hoff form, `ln(ratio) = intercept + slope / T`, with its fit and its inverse. |
@@ -30,6 +28,22 @@ tables are read back through a layout like any other file.
 | `reduce_runs.py` | Turns the raw run folders of a described dataset into its reduced tables: `python -m examples.pat.reduce_runs "<dataset folder>" "<folder that holds the run folders>"`. Each run folder holds one `.iCIR` and one `.icFbrm` file, or their vendor CSV exports (see below), and the thermostat log; the description names the log, its layout, the FBRM bands and the IR signal. That signal is the height of one band (`ir_band`) or the whole-spectrum score (`ir_score`), which needs all runs and is written last. |
 | `batch_cooling.py` | Simulates the seeded batch cooling crystallization of a described dataset on the legacy `BatchCryst` or the refactored `BatchCrystallizer`, and returns the slurry state at the requested measurement times: `python -m examples.pat.batch_cooling "<dataset folder>" <run id> <legacy or refactored>`. The description supplies the charge, the seed, the solid, the property database and starting values of the kinetics. Needs the Assimulo solver stack. |
 | `dataset.py` | Reads a dataset description and its reduced tables. A dataset folder holds `runs.json`, one `reduced_<kind>.layout.json` per kind of table, and `reduced/<run>_<kind>.csv`. The description names the solute and the solvent and gives their charged masses. |
+
+The two IR signals of the dissolved solute are in the package, `PharmaPy.PATSignals`:
+
+- `band_height`, the height of a spectral band above a straight line through two
+  anchor points. Band and anchors are inputs; they belong to the compound and solvent.
+- `SpectralScore`, the dissolved-solute score of whole spectra, for a solute without a
+  band clear of the solvent. It is fitted on a reference run: spectra are moved to a
+  reference temperature with a linear temperature effect per spectral point, and their
+  difference from the dissolved charge is split into the score along the
+  dissolved-minus-slurry direction and three terms for a change of probe contact:
+  scale, offset and tilt. The fitted score is then applied to any run.
+
+`spectrum_to_signal.ipynb` shows, figure by figure, how a spectrum becomes the band
+height (caffeine) and the whole-spectrum score (azithromycin).
+`oaba/ir_signals.ipynb` goes from the files of one OABA run to both signals with the
+package alone and checks them against each other.
 
 The model side of these signals is in the package: `PharmaPy.SlurryMeasurements`
 predicts the dissolved solute per solvent, the solute in the solid and a

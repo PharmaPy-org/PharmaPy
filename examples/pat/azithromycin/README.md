@@ -23,7 +23,7 @@ log `expttsd1.csv`. To rebuild the tables, run from the repository root:
 ## The IR score
 
 Ethyl acetate absorbs wherever the solute does, so the dissolved solute is read from
-the whole spectrum between 900 and 1800 cm-1 (`examples/pat/spectral_score.py`), not
+the whole spectrum between 900 and 1800 cm-1 (`PharmaPy.PATSignals.SpectralScore`), not
 from one band. In every run the score is zero for the run's own charge, fully
 dissolved in the hold at 37 C before seeding. A score of minus one is a drop of
 dissolved solute equal to the one between the dissolved charge and the slurry at
