@@ -41,7 +41,8 @@ variances. Set ``relative_noise=True`` for a candidate only if its
 covariance should be multiplied by the same estimated calibration scale.
 The report must already have a finite, positive estimate of that scale.
 Declare an uncertainty or covariance for each measurement basis when the
-outputs have different units.
+outputs have different units. With identity weighting, check the fitted
+report's noise assumption before interpreting pooled Fisher information.
 
 Executable decay example
 ------------------------
@@ -214,7 +215,7 @@ constraints for the application.
    designer.simulate = simulate
    designer.model_parameters = nominal
    designer.model_parameter_names = list(fit.parameter_names)
-   grid = np.unique(list(schedules.values()))  # [s]
+   grid = np.unique(np.concatenate(tuple(schedules.values())))  # [s]
    designer.ti_controls_candidates = np.array([[initial]])  # [mol/L]
    designer.sampling_times_candidates = grid[None, :]  # [s]
    designer.error_cov = np.array([[hot_std**2]])  # [(mol/L)**2]
@@ -224,9 +225,11 @@ constraints for the application.
    native = {candidate.name: candidate for candidate in design.candidates}
    pydex_scores = {}
    for name, times in schedules.items():
-       efforts = np.isin(grid, times).astype(float)[None, :]  # [-], sample counts
+       positions = np.searchsorted(grid, times)
+       efforts = np.bincount(positions, minlength=grid.size)[None, :]  # [-], sample counts
        pooled = designer.eval_fim(efforts)  # [-], PyDex coordinates
-       expected = prior + native[name].added_information * nominal[0]**2  # [-]
+       added = native[name].added_information  # [1 / (p_i * p_j)]
+       expected = prior + (added * nominal[:, None]) * nominal  # [-]
        # PyDex uses extrapolated differences at small relative steps.
        # Allow finite-difference and roundoff error against analytic decay.
        np.testing.assert_allclose(pooled, expected, rtol=1e-7, atol=0)

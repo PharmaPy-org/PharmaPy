@@ -32,6 +32,8 @@ class CandidateExperiment:
         (n_observations, n_observations). Entry (i, j) has units
         [observation_i unit * observation_j unit] for absolute noise. For
         independent observations use a diagonal matrix of variances.
+        Mirrored entries may differ by floating-point roundoff. Cholesky
+        uses the lower triangle, as for the calibration weight matrix.
     relative_noise : bool, optional
         If True, multiply the supplied covariance by the calibration
         residual mean square. This requires a fit with estimated variance
@@ -179,8 +181,8 @@ def _log_gain(relative: np.ndarray, rank: int) -> float:
 
 def _rank_repair(
         normalized: np.ndarray, basis: np.ndarray, roots: np.ndarray,
-        null_basis: np.ndarray, candidate_rank: int,
-        rank_rtol: float) -> tuple[int, Optional[float]]:
+        null_basis: np.ndarray, informed: np.ndarray, subspace_rtol: float,
+        candidate_rank: int, rank_rtol: float) -> tuple[int, Optional[float]]:
     """Resolve directions in a singular baseline and score their information.
 
     Parameters
@@ -194,6 +196,11 @@ def _rank_repair(
         Square roots [-] of the corresponding eigenvalues.
     null_basis : numpy.ndarray
         Orthonormal eigenvectors [-] of discarded baseline directions.
+    informed : numpy.ndarray
+        Boolean mask of baseline parameter columns with nonzero information.
+    subspace_rtol : float
+        Estimated angular uncertainty [-] of the baseline subspace due
+        to roundoff in the Gram matrix.
     candidate_rank : int
         Numerical rank [-] of the prospective sensitivities.
     rank_rtol : float
@@ -213,6 +220,13 @@ def _rank_repair(
     # the sum of the magnitudes of its individual products. Suppress
     # projection leakage before normalizing the projected columns.
     projection_error = rank_rtol * (np.abs(normalized) @ np.abs(null_basis))  # [-]
+    # Gram-matrix roundoff rotates a correlated null direction. Bound the
+    # resulting projection change by the angle times the sensitivity norm
+    # in the affected coordinates. Exact zero-information columns have no
+    # such uncertainty. The one-norm bounds the Euclidean norm.
+    correlated_null = np.any(null_basis[informed] != 0, axis=0)
+    angular_error = (np.abs(normalized[:, informed]) * subspace_rtol).sum(axis=1)  # [-]
+    projection_error += angular_error[:, None] * correlated_null  # [-]
     new_rows[np.abs(new_rows) <= projection_error] = 0  # [-]
     new_rank, new_score = _rank_and_score(new_rows, rank_rtol)  # [-], log det
     new_rank = min(new_rank, candidate_rank)  # [-]
@@ -283,9 +297,16 @@ def _whiten_sensitivities(
     if noise.dtype.kind not in 'iuf' or noise.shape != shape:
         raise ValueError(f"Noise covariance must be real with shape {shape}")
     noise = noise.astype(float)  # [observation_i * observation_j], divided by s2 if relative
-    if not np.isfinite(noise).all() or not np.array_equal(noise, noise.T):
+    if not np.isfinite(noise).all():
         raise ValueError("Noise covariance must be finite and symmetric")
-    if not isinstance(candidate.relative_noise, bool):
+    # D R D contributes up to two multiplication errors in each triangle.
+    symmetry_rtol = 4 * np.finfo(float).eps  # [-]
+    noise_scale = np.maximum(np.abs(noise), np.abs(noise.T))  # [observation_i * observation_j]
+    with np.errstate(over='ignore'):
+        asymmetry = np.abs(noise - noise.T)  # [observation_i * observation_j]
+    if np.any(asymmetry > symmetry_rtol * noise_scale):
+        raise ValueError("Noise covariance must be finite and symmetric")
+    if not isinstance(candidate.relative_noise, (bool, np.bool_)):
         raise ValueError("relative_noise must be a bool")
     if candidate.relative_noise and not fit.variance_scale_estimated:
         raise ValueError("Relative candidate noise requires an estimated "
@@ -326,7 +347,7 @@ def _fitted_fisher_information(fit: IdentifiabilityReport) -> np.ndarray:
     """
     if not isinstance(fit, IdentifiabilityReport):
         raise ValueError("fit must be an IdentifiabilityReport from the fitted model")
-    success = None if fit.convergence is None else fit.convergence['success']
+    success = None if fit.convergence is None else fit.convergence.get('success')
     if not isinstance(success, (bool, np.bool_)) or not success:
         raise ValueError("Experiment design requires a fit with reported convergence")
     fisher = fit.fisher_information  # [1 / (p_i * p_j)]
@@ -442,6 +463,8 @@ def rank_experiments(
     larger dimension of the scaled sensitivity matrix. For a singular
     baseline, test the candidate projection onto the unresolved subspace
     independently of the strength of the retained calibration directions.
+    Projections within the rounding uncertainty of the subspace are
+    treated as unresolved.
     For a full-rank baseline, use the determinant lemma on resolved
     candidate modes in baseline-whitened coordinates.
 
@@ -466,18 +489,27 @@ def rank_experiments(
            for name in candidate_names) or len(set(candidate_names)) != len(candidates):
         raise ValueError("Candidates must have unique, nonempty names")
 
+    if fit.degrees_of_freedom <= 0:
+        raise ValueError("Calibration requires more observed entries than fitted parameters")
     baseline_count = fit.degrees_of_freedom + len(names)  # [-]
-    rank_rtol = np.sqrt(np.finfo(float).eps * baseline_count)  # [-]
     diagonal = np.diag(baseline)  # [1 / p_i**2]
+    informed = diagonal > 0
     # For a zero-information parameter, use one reciprocal fitted unit.
-    scale = np.sqrt(np.where(diagonal > 0, diagonal, 1.0))  # [1 / p_i]
+    scale = np.sqrt(np.where(informed, diagonal, 1.0))  # [1 / p_i]
     scaled = baseline / scale[:, None] / scale  # [-]
     eigenvalues, vectors = np.linalg.eigh((scaled + scaled.T) / 2)  # [-], [-]
-    retained = eigenvalues > rank_rtol**2 * eigenvalues[-1]
+    eigenvalue_cutoff = np.finfo(float).eps * baseline_count * eigenvalues[-1]  # [-]
+    retained = eigenvalues > eigenvalue_cutoff
     roots = np.sqrt(eigenvalues[retained])  # [-]
     basis = vectors[:, retained]  # [-]
     null_basis = vectors[:, ~retained]  # [-]
     baseline_rank = len(roots)  # [-]
+    subspace_rtol = 0.0  # [-]
+    if 0 < baseline_rank < len(names):
+        # First-order eigenvector perturbation couples the two subspaces
+        # through the Gram error divided by their eigenvalue separation.
+        gap = eigenvalues[retained][0] - eigenvalues[~retained][-1]  # [-]
+        subspace_rtol = min(1.0, eigenvalue_cutoff / gap)  # [-]
     baseline_score = 2 * (np.log(roots).sum() + np.log(scale).sum())  # log det
     estimates = MappingProxyType(dict(zip(names, map(float, fit.estimates))))  # [p_i]
 
@@ -506,7 +538,7 @@ def rank_experiments(
                     score = float(baseline_score + gain)  # log det
                 else:
                     combined_rank, addition = _rank_repair(
-                        normalized, basis, roots, null_basis,
+                        normalized, basis, roots, null_basis, informed, subspace_rtol,
                         candidate_rank, candidate_rtol)  # [-], log det
                     score = None if addition is None else float(baseline_score + addition)
         except (TypeError, ValueError, np.linalg.LinAlgError,

@@ -6,6 +6,8 @@ errors. Small numerical boundary cases use the public report constructor.
 All tests run in the core lane without an external design or ODE solver.
 """
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -137,6 +139,7 @@ def test_ranking_uses_pooled_information_and_preserves_parameter_coordinates(
             (increment, increment, increment / 4, increment)):
         assert result.status == 'ranked'
         assert result.candidate_rank == result.combined_rank == 2
+        assert not result.added_information.flags.writeable
         np.testing.assert_allclose(result.added_information, expected,
                                    rtol=RTOL, atol=0)
         # The determinant of a 2x2 matrix is the product of its diagonal
@@ -155,7 +158,7 @@ def test_relative_candidate_uses_calibration_scale_without_rescaling_absolute():
     candidates = [
         CandidateExperiment('absolute', mixed_sensitivities, CORRELATED_NOISE),
         CandidateExperiment('relative', mixed_sensitivities, CORRELATED_NOISE,
-                            relative_noise=True),
+                            relative_noise=np.bool_(True)),
     ]
     design = rank_experiments(fit, candidates, parameter_units=UNITS)
     relative, absolute = design.candidates
@@ -393,6 +396,105 @@ def test_roundoff_in_repeated_observations_does_not_inflate_gain():
         np.log1p(4 * large**2), rel=RTOL)
 
 
+def test_baseline_subspace_roundoff_does_not_make_a_repeat_rank_repair():
+    """Repeat an existing row beside a genuinely orthogonal new direction."""
+    names = ('a', 'b', 'c')
+    # The two rows annihilate (1,-2,1). The second is weaker so the
+    # Gram eigensolve's null direction is sensitive to rounding.
+    weak = 0.1  # [1 / p_i], one tenth of the first standardized derivative
+    repeat_row = [0.0, weak, 2 * weak]  # [1 / p_i]
+    rows = np.array([[1.0, 1.0, 1.0], repeat_row,
+                     [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]])  # [1 / p_i]
+    fit = IdentifiabilityReport.from_fit(
+        rows.T, np.zeros(len(rows)), np.ones(len(names)), names, len(rows),
+        noise_model='declared_uncertainty', measurement_units={'y': '[-]'},
+        jacobian_source='jac_fun', jacobian_rtol=np.finfo(float).eps,
+        include_mse=False, convergence={'success': True})
+
+    def repeated(point):
+        """Return a calibration row [1 / p_i] as a prospective observation."""
+        return {name: [entry] for name, entry in zip(point, repeat_row)}
+
+    def orthogonal(point):
+        """Return the missing direction [1 / p_i] as one observation."""
+        return {name: [entry] for name, entry in zip(point, (1., -2., 1.))}
+
+    def weaker(point):
+        """Return half the sensitivity [1 / p_i] in the missing direction."""
+        return {name: [entries[0] / 2] for name, entries in orthogonal(point).items()}
+
+    def missing(_point):
+        """Return no derivative columns."""
+        return {}
+
+    candidates = [CandidateExperiment('redundant', repeated, [[1.0]]),
+                  CandidateExperiment('orthogonal', orthogonal, [[1.0]]),
+                  CandidateExperiment('missing', missing, [[1.0]]),
+                  CandidateExperiment('weaker', weaker, [[1.0]])]
+    result = rank_experiments(fit, candidates, parameter_units=dict.fromkeys(names, '[-]'))
+    assert result.baseline_rank == 2
+    repair, weaker_repair, repeat, failed = result.candidates
+    assert [plan.name for plan in result.candidates] == [
+        'orthogonal', 'weaker', 'redundant', 'missing']
+    assert repair.combined_rank == 3 and repair.status == 'ranked'
+    # The three-row sensitivity determinant is 6*weak, so the Gram
+    # determinant is its square. Added rows of zeros contribute nothing.
+    assert repair.score == pytest.approx(2 * np.log(6 * weak), rel=RTOL)
+    assert weaker_repair.score == pytest.approx(2 * np.log(3 * weak), rel=RTOL)
+    assert repeat.status == 'rank_deficient'
+    assert repeat.combined_rank == 2 and repeat.score is None
+    assert failed.status == 'failed'
+
+
+def test_zero_baseline_reports_rank_repair_and_no_determinant_ratio():
+    """A fit with no sensitivity obtains all its information from the plan."""
+    fit = orthogonal_fit(sensitivity=0.0)
+
+    def sensitivities(point):
+        """Return independent sensitivity rows [1 / p_i] of norms 1 and 2."""
+        return {'rise': [1.0, 0.0], 'k': [0.0, 2.0]}
+
+    candidate = CandidateExperiment('next', sensitivities, np.eye(2))  # noise [-]
+    design = rank_experiments(fit, [candidate], parameter_units=UNITS)
+    result, = design.candidates
+    assert design.baseline_rank == 0
+    assert result.candidate_rank == result.combined_rank == 2
+    assert result.status == 'ranked'
+    assert result.log_information_gain is None
+    assert result.score == pytest.approx(np.log(4), rel=RTOL)  # det diag(1,4)
+
+
+def test_covariance_symmetry_accepts_roundoff_and_detects_actual_asymmetry():
+    """Compose an error covariance from unequal measurement deviations."""
+    fit = orthogonal_fit()
+    # These deviations and a correlation of 0.3 expose rounding
+    # differences when scaling the elements in opposite orders.
+    deviation = np.array([0.1, 0.7])  # [-], standardized observation deviations
+    correlation = 0.3  # [-], nonzero coupling with a well-conditioned correlation
+    rounded = (deviation[:, None] * [[1, correlation], [correlation, 1]]
+               ) * deviation  # [observation_i * observation_j]
+    assert rounded[0, 1] != rounded[1, 0]
+    asymmetric = rounded.copy()  # [observation_i * observation_j]
+    asymmetric[0, 1] = 0  # Dropping one off-diagonal loses a physical coupling.
+
+    def sensitivities(point):
+        """Return one independent sensitivity [1 / p_i] per observation."""
+        return dict(zip(point, np.eye(2)))
+
+    candidates = [CandidateExperiment('roundoff', sensitivities, rounded),
+                  CandidateExperiment('asymmetric', sensitivities, asymmetric)]
+    ranked, failed = rank_experiments(fit, candidates, parameter_units=UNITS).candidates
+    assert (ranked.status, failed.status) == ('ranked', 'failed')
+    assert 'must be finite and symmetric' in failed.diagnostic
+    # Analytic inverse of the two-variable correlation matrix with unit
+    # derivative rows, rescaled by the two observation deviations.
+    inverse_correlation = np.array([[1, -correlation], [-correlation, 1]]
+                                   ) / (1 - correlation**2)  # [-]
+    np.testing.assert_allclose(
+        ranked.added_information,
+        inverse_correlation / np.outer(deviation, deviation), rtol=RTOL, atol=0)
+
+
 def test_pooled_ranking_prefers_the_weaker_direction_independently_of_units():
     # Information diag(16, 1). A larger candidate sensitivity in the
     # better-known direction has smaller gain than the weaker direction.
@@ -465,5 +567,11 @@ def test_missing_fisher_information_and_nonconvergence_are_distinct():
     with pytest.raises(ValueError, match='requires a fit with reported convergence'):
         rank_experiments(orthogonal_fit(success=False), [candidate],
                          parameter_units=UNITS)
+    with pytest.raises(ValueError, match='requires a fit with reported convergence'):
+        rank_experiments(replace(orthogonal_fit(), convergence={}), [candidate],
+                         parameter_units=UNITS)
+    with pytest.raises(ValueError, match='more observed entries than fitted parameters'):
+        rank_experiments(replace(orthogonal_fit(), degrees_of_freedom=0),
+                         [candidate], parameter_units=UNITS)
     with pytest.raises(ValueError, match='requires nonzero estimates'):
         pydex_prior(orthogonal_fit(estimate=0.0))
