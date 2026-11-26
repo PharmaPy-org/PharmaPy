@@ -369,6 +369,21 @@ def test_rank_repair_retains_directions_resolved_by_a_weaker_full_rank_plan():
             assert unresolved.combined_rank == 1
 
 
+@pytest.mark.parametrize('derivatives', [(1e9, 1e9), (1e16, 1.0)])
+def test_rank_one_plan_can_complete_rank_with_a_large_calibrated_component(derivatives):
+    """Check det(diag(1, 0) + h h.T) = h_k**2 for disparate strengths."""
+    fit = orthogonal_fit([1.0, 0.0])  # [1 / p_i], no baseline response to k
+
+    def off_axis(point):
+        """Return one sensitivity [1 / p_i] combining both directions."""
+        return {name: [value] for name, value in zip(point, derivatives)}
+
+    candidate = CandidateExperiment('next', off_axis, [[1.0]])  # noise [-]
+    result, = rank_experiments(fit, [candidate], parameter_units=UNITS).candidates
+    assert result.status == 'ranked' and result.combined_rank == 2
+    assert result.score == pytest.approx(2 * np.log(derivatives[1]), abs=RTOL)
+
+
 def test_roundoff_in_repeated_observations_does_not_inflate_gain():
     """Use the exact rank-one determinants to disambiguate two forecasts."""
     fit = orthogonal_fit()
@@ -501,6 +516,52 @@ def test_structural_and_correlated_null_directions_survive_reordering():
         assert result.score == pytest.approx(expected, rel=0, abs=score_atol)
 
 
+def test_projected_singular_value_requires_resolution_above_baseline_roundoff():
+    """Reject a roundoff-only mode within a two-dimensional null space."""
+    names = ('a', 'b', 'c', 'd')
+    # Two independent calibration rows and three observations insensitive
+    # to these coordinates. Their exact null direction has a vector
+    # (2, -1, -4, 3), which the partial candidate also annihilates.
+    weak = 0.01  # [1 / p_i], a smaller but resolved calibration direction
+    baseline_rows = np.array([
+        [1, 1, 1, 1], [0, weak, 2 * weak, 3 * weak],
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+    ])  # [1 / p_i]
+    first_new = np.array([1, -2, 1, 0])  # [1 / p_i], first of two new directions
+    second_new = [2, -1, -4, 3]  # [1 / p_i], orthogonal to all prior rows
+    # The large retained-direction component leaks through the computed
+    # null basis enough to upset the SVD test on normalized columns.
+    multiple = 1e4  # [-], amplifies the calibrated component alone
+    partial = np.array([first_new + multiple * baseline_rows[1], first_new])  # [1 / p_i]
+    all_directions = np.vstack((partial, second_new))  # [1 / p_i]
+    fit = IdentifiabilityReport.from_fit(
+        baseline_rows.T, np.zeros(len(baseline_rows)), np.ones(len(names)),
+        names, len(baseline_rows), noise_model='declared_uncertainty',
+        measurement_units={'y': '[-]'}, jacobian_source='jac_fun',
+        jacobian_rtol=np.finfo(float).eps, include_mse=False,
+        convergence={'success': True})
+
+    def partially_informative(_point):
+        """Return prospective sensitivities [1 / p_i] for two samples."""
+        return dict(zip(names, partial.T))
+
+    def fully_informative(_point):
+        """Return prospective sensitivities [1 / p_i] for three samples."""
+        return dict(zip(names, all_directions.T))
+
+    candidates = [
+        CandidateExperiment('one new direction', partially_informative, np.eye(2)),
+        CandidateExperiment('both new directions', fully_informative, np.eye(3)),
+    ]  # Unit noise variances [-]
+    design = rank_experiments(fit, candidates, parameter_units=dict.fromkeys(names, '[-]'))
+    complete_result, partial_result = design.candidates
+    assert design.baseline_rank == 2
+    assert complete_result.name == 'both new directions'
+    assert complete_result.combined_rank == 4 and complete_result.status == 'ranked'
+    assert partial_result.combined_rank == 3 and partial_result.status == 'rank_deficient'
+    assert partial_result.score is None
+
+
 def test_covariance_symmetry_accepts_roundoff_and_detects_actual_asymmetry():
     """Compose an error covariance from unequal measurement deviations."""
     fit = orthogonal_fit()
@@ -582,9 +643,15 @@ def test_complex_object_values_do_not_silently_become_real():
     assert 'must be a real observation vector' in result.diagnostic
 
 
-def test_pydex_prior_preserves_parameter_order_and_absolute_fisher_basis():
+@pytest.mark.parametrize('rise_sign', [1, -1])
+def test_pydex_prior_preserves_parameter_order_and_absolute_fisher_basis(rise_sign):
     fit = deriv.fitted_estimator().get_identifiability(include_mse=True)
     baseline, _, mse = independent_information(fit)  # [1/(p_i*p_j)], [-]
+    # Give the coordinate normalization an off-diagonal entry and a
+    # signed nominal value. The same unscaled information provides the
+    # reference for either sign.
+    estimates = fit.estimates * [rise_sign, 1]  # [K*L/mol], [1/s]
+    fit = replace(fit, estimates=estimates)
     normalized, theta = pydex_prior(fit)  # [-], [K*L/mol], [1/s]
     rise, rate = fit.estimates  # [K*L/mol], [1/s]
     expected = np.array([
@@ -592,6 +659,7 @@ def test_pydex_prior_preserves_parameter_order_and_absolute_fisher_basis():
         [baseline[1, 0] * rate * rise, baseline[1, 1] * rate**2],
     ]) / mse  # [-]
     np.testing.assert_allclose(normalized, expected, rtol=RTOL, atol=0)
+    np.testing.assert_array_equal(normalized, normalized.T)
     np.testing.assert_array_equal(theta, fit.estimates)
     assert not np.shares_memory(theta, fit.estimates)
 
@@ -612,3 +680,9 @@ def test_missing_fisher_information_and_nonconvergence_are_distinct():
                          [candidate], parameter_units=UNITS)
     with pytest.raises(ValueError, match='requires nonzero estimates'):
         pydex_prior(orthogonal_fit(estimate=0.0))
+    # The squared nominal value reaches the float64 range and the
+    # baseline information in each direction is 4, so their product
+    # cannot be represented.
+    large_estimate = np.sqrt(np.finfo(float).max)  # [p_i]
+    with pytest.raises(ValueError, match='normalized Fisher information must be finite'):
+        pydex_prior(orthogonal_fit(sensitivity=2.0, estimate=large_estimate))

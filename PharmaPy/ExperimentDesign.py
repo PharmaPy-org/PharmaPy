@@ -122,7 +122,9 @@ class ExperimentDesignReport:
 
 
 def _rank_and_score(rows: np.ndarray,
-                    rank_rtol: float) -> tuple[int, Optional[float]]:
+                    rank_rtol: float,
+                    error_bound: Optional[np.ndarray] = None
+                    ) -> tuple[int, Optional[float]]:
     """Find numerical rank and, at full rank, the D-optimal score.
 
     Parameters
@@ -131,6 +133,9 @@ def _rank_and_score(rows: np.ndarray,
         Whitened sensitivity rows with parameter columns [1 / p_i].
     rank_rtol : float
         Relative cutoff [-] for singular values on unit-norm columns.
+    error_bound : numpy.ndarray or None, optional
+        Nonnegative entrywise error bounds, in the same units and shape as
+        rows. The default leaves only the SVD roundoff cutoff.
 
     Returns
     -------
@@ -146,8 +151,23 @@ def _rank_and_score(rows: np.ndarray,
         return 0, None
     scaled = rows[:, observed] / maxima[observed]  # [-], avoid overflow in norms
     norms = np.linalg.norm(scaled, axis=0)  # [-]
+    resolution_floor = 0.0  # [-]
+    if error_bound is not None:
+        with np.errstate(over='ignore'):
+            scaled_error = (error_bound[:, observed] / maxima[observed]
+                            / norms)  # [-]
+            # An error of norm one can cancel a whole unit-norm column.
+            resolved = np.linalg.norm(scaled_error, axis=0) < 1
+        if not resolved.any():
+            return 0, None
+        scaled = scaled[:, resolved]  # [-]
+        norms = norms[resolved]  # [-]
+        # A singular value changes by at most the spectral norm of the
+        # perturbation, bounded by the Frobenius norm of its error bounds.
+        resolution_floor = np.linalg.norm(scaled_error[:, resolved])  # [-]
     singular = np.linalg.svd(scaled / norms, compute_uv=False)  # [-]
-    rank = int(np.count_nonzero(singular > rank_rtol * singular[0]))  # [-]
+    cutoff = max(resolution_floor, rank_rtol * singular[0])  # [-]
+    rank = int(np.count_nonzero(singular > cutoff))  # [-]
     if rank < rows.shape[1]:
         return rank, None
     score = 2 * (np.log(singular).sum() + np.log(norms).sum()
@@ -227,8 +247,11 @@ def _rank_repair(
     correlated_null = np.any(null_basis[informed] != 0, axis=0)
     angular_error = (np.abs(normalized[:, informed]) * subspace_rtol).sum(axis=1)  # [-]
     projection_error += angular_error[:, None] * correlated_null  # [-]
-    new_rows[np.abs(new_rows) <= projection_error] = 0  # [-]
-    new_rank, new_score = _rank_and_score(new_rows, rank_rtol)  # [-], log det
+    unresolved = np.abs(new_rows) <= projection_error
+    projection_error[unresolved] += np.abs(new_rows[unresolved])  # [-]
+    new_rows[unresolved] = 0  # [-]
+    new_rank, new_score = _rank_and_score(
+        new_rows, rank_rtol, error_bound=projection_error)  # [-], log det
     new_rank = min(new_rank, candidate_rank)  # [-]
     combined_rank = len(roots) + new_rank  # [-]
     if new_score is None or new_rank < null_basis.shape[1]:
@@ -464,8 +487,9 @@ def rank_experiments(
     baseline, test the candidate projection onto the unresolved subspace
     independently of the strength of the retained calibration directions.
     Projections within the rounding uncertainty of the subspace are
-    treated as unresolved. Parameters with zero baseline information keep
-    their own coordinate directions in this test.
+    treated as unresolved, and the remaining projected singular values
+    must exceed the error bound after column scaling. Parameters with
+    zero baseline information keep their own coordinate directions.
     For a full-rank baseline, use the determinant lemma on resolved
     candidate modes in baseline-whitened coordinates.
 
