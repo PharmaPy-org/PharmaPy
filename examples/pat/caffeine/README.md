@@ -55,6 +55,10 @@ starting kinetics of `runs.json` (they are not fitted values):
 ## Assumptions to carry into any use of these runs
 
 - The charge and seed masses are recipe targets. Weighed masses were not reported.
+- The lab reuses the batch from one run to the next and adjusts it in between. The
+  IR calibration and the simulation take the recipe charge for every run; part of
+  the difference between the dissolved plateaus of the runs may be a real
+  difference in charge.
 - "External T" is taken as the temperature of the liquid in the vessel. The lab has
   not yet confirmed where that sensor sits.
 - The seed slurry is made with supersaturated liquid that cools outside the vessel,
