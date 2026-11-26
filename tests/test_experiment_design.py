@@ -7,6 +7,7 @@ All tests run in the core lane without an external design or ODE solver.
 """
 
 from dataclasses import replace
+from itertools import permutations
 
 import numpy as np
 import pytest
@@ -462,6 +463,42 @@ def test_zero_baseline_reports_rank_repair_and_no_determinant_ratio():
     assert result.status == 'ranked'
     assert result.log_information_gain is None
     assert result.score == pytest.approx(np.log(4), rel=RTOL)  # det diag(1,4)
+
+
+def test_structural_and_correlated_null_directions_survive_reordering():
+    """Resolve two different null directions under every parameter order."""
+    names = ('a', 'b', 'c', 'd')
+    weak = 1e-4  # [1 / p_i], weaker calibration row coupled to a, b, c
+    new_direction = 1e-7  # [1 / p_d], sole response to d in the pooled rows
+    rows = np.array([
+        [1, 1, 1, 0], [0, weak, 2 * weak, 0],
+        [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0],
+    ])  # [1 / p_i]
+    next_rows = np.array([[1, -2, 1, 0], [1, 1, 1, new_direction]])  # [1 / p_i]
+    expected = 2 * np.log(6 * weak * new_direction)  # log det in fitted units
+    # Computing the pooled determinant from the baseline Gram matrix
+    # amplifies roundoff by the inverse weak eigenvalue (of order weak**2).
+    score_atol = np.finfo(float).eps * len(rows) / weak**2  # [-], log rounding
+    for order in permutations(range(len(names))):
+        ordered_names = tuple(names[index] for index in order)
+        fit = IdentifiabilityReport.from_fit(
+            rows[:, order].T, np.zeros(len(rows)), np.ones(len(names)),
+            ordered_names, len(rows), noise_model='declared_uncertainty',
+            measurement_units={'y': '[-]'}, jacobian_source='jac_fun',
+            jacobian_rtol=np.finfo(float).eps, include_mse=False,
+            convergence={'success': True})
+
+        def sensitivities(_point):
+            """Return the same two sensitivity rows [1 / p_i] by name."""
+            return dict(zip(names, next_rows.T))
+
+        candidate = CandidateExperiment('next', sensitivities, np.eye(2))  # noise [-]
+        design = rank_experiments(fit, [candidate],
+                                  parameter_units=dict.fromkeys(names, '[-]'))
+        result, = design.candidates
+        assert design.baseline_rank == 2
+        assert result.combined_rank == len(names), order
+        assert result.score == pytest.approx(expected, rel=0, abs=score_atol)
 
 
 def test_covariance_symmetry_accepts_roundoff_and_detects_actual_asymmetry():

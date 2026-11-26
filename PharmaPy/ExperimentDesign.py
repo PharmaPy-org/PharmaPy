@@ -464,7 +464,8 @@ def rank_experiments(
     baseline, test the candidate projection onto the unresolved subspace
     independently of the strength of the retained calibration directions.
     Projections within the rounding uncertainty of the subspace are
-    treated as unresolved.
+    treated as unresolved. Parameters with zero baseline information keep
+    their own coordinate directions in this test.
     For a full-rank baseline, use the determinant lemma on resolved
     candidate modes in baseline-whitened coordinates.
 
@@ -496,9 +497,17 @@ def rank_experiments(
     informed = diagonal > 0
     # For a zero-information parameter, use one reciprocal fitted unit.
     scale = np.sqrt(np.where(informed, diagonal, 1.0))  # [1 / p_i]
-    scaled = baseline / scale[:, None] / scale  # [-]
-    eigenvalues, vectors = np.linalg.eigh((scaled + scaled.T) / 2)  # [-], [-]
-    eigenvalue_cutoff = np.finfo(float).eps * baseline_count * eigenvalues[-1]  # [-]
+    informed_block = np.ix_(informed, informed)
+    informed_scale = scale[informed]  # [1 / p_i]
+    scaled = baseline[informed_block] / informed_scale[:, None] / informed_scale  # [-]
+    block_values, block_vectors = np.linalg.eigh((scaled + scaled.T) / 2)  # [-], [-]
+    # Keep unobserved coordinates separate from correlated null directions
+    # even when their eigenvalues coincide. Their directions are exact.
+    eigenvalues = np.zeros(len(names))  # [-]
+    eigenvalues[informed] = block_values
+    vectors = np.eye(len(names))  # [-]
+    vectors[informed_block] = block_vectors
+    eigenvalue_cutoff = np.finfo(float).eps * baseline_count * eigenvalues.max()  # [-]
     retained = eigenvalues > eigenvalue_cutoff
     roots = np.sqrt(eigenvalues[retained])  # [-]
     basis = vectors[:, retained]  # [-]
@@ -508,7 +517,7 @@ def rank_experiments(
     if 0 < baseline_rank < len(names):
         # First-order eigenvector perturbation couples the two subspaces
         # through the Gram error divided by their eigenvalue separation.
-        gap = eigenvalues[retained][0] - eigenvalues[~retained][-1]  # [-]
+        gap = eigenvalues[retained].min() - eigenvalues[~retained].max()  # [-]
         subspace_rtol = min(1.0, eigenvalue_cutoff / gap)  # [-]
     baseline_score = 2 * (np.log(roots).sum() + np.log(scale).sum())  # log det
     estimates = MappingProxyType(dict(zip(names, map(float, fit.estimates))))  # [p_i]
