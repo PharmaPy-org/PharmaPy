@@ -3,7 +3,7 @@
 A continuous crystallizer (U01) feeds an unseeded semibatch one (U02). Every
 rate law is off, so seeds only move: what leaves U01 must arrive in U02, or
 the feed must be refused when the two units carry the crystals in different
-forms.
+forms or under different state names.
 
 Units: x_grid [um], distrib [#/(um m**3)], moments [um**k/m**3], both per
 m**3 of slurry; feed [kg/s]; time [s].
@@ -68,9 +68,15 @@ DISTRIBUTION_INTO_MOMENTS = (r"OneDFVMMechanism state 'distrib' .* "
                              r"MomentsPopulationBalance carries them as 'mu_n'")
 MOMENTS_INTO_DISTRIBUTION = (r"MomentsPopulationBalance state 'mu_n' .* "
                              r"OneDFVMMechanism carries them as 'distrib'")
+# Two distributions on one grid, where only U02's state name differs. The
+# message has to give the name as the reason, not the form.
+RENAMED_DISTRIBUTION = "csd"
+DISTRIBUTION_UNDER_ANOTHER_NAME = (
+    r"OneDFVMMechanism state 'distrib' .* OneDFVMMechanism carries them as "
+    r"'csd'\. The vessel reads the feed population by state name")
 
 
-def _solid(form, seeded):
+def _solid(form, seeded, state_name=None):
     """Crystal phase carrying its seeds as a distribution or as moments.
 
     Parameters
@@ -80,6 +86,9 @@ def _solid(form, seeded):
     seeded : bool
         Whether the phase starts with ``SEED_COUNT`` seeds per m**3 of
         slurry, or with none.
+    state_name : str, optional
+        Name of the population state. None keeps the mechanism's default,
+        ``'mu_n'`` for moments and ``'distrib'`` for a distribution.
 
     Returns
     -------
@@ -91,24 +100,28 @@ def _solid(form, seeded):
     count = SEED_COUNT if seeded else 0.0  # [#/m**3 of slurry]
 
     if form == "moments":
+        named = {} if state_name is None else {"moments_state_name": state_name}
         # Seeds of one size: mu_k = N L**k.
         moments = count * SEED_SIZE ** np.arange(4)  # [um**k/m**3]
         solid.mechanisms = MomentsPopulationBalance(
             solid, target_components="C", solvent_name="solvent",
-            moments_init=moments, density=CRYSTAL_DENSITY, kv=SHAPE_FACTOR)
+            moments_init=moments, density=CRYSTAL_DENSITY, kv=SHAPE_FACTOR,
+            **named)
     else:
+        named = ({} if state_name is None
+                 else {"distribution_state_name": state_name})
         peak = np.exp(-0.5 * ((SIZE_GRID - SEED_SIZE) / SEED_WIDTH) ** 2)  # [-]
         distrib = (count / (SEED_WIDTH * np.sqrt(2 * np.pi))
                    * peak)  # [#/(um m**3)]
         solid.mechanisms = OneDFVMMechanism(
             solid, target_components="C", solvent_name="solvent",
             x_grid=SIZE_GRID, distrib_init=distrib, density=CRYSTAL_DENSITY,
-            kv=SHAPE_FACTOR)
+            kv=SHAPE_FACTOR, **named)
 
     return solid
 
 
-def _unit(vessel_cls, form, seeded):
+def _unit(vessel_cls, form, seeded, state_name=None):
     """Liquid-fed crystallizer in which nothing forms, grows or dissolves.
 
     Parameters
@@ -119,6 +132,8 @@ def _unit(vessel_cls, form, seeded):
         Population form of its crystals.
     seeded : bool
         Whether it starts with seeds.
+    state_name : str, optional
+        Name of its population state; None keeps the mechanism's default.
 
     Returns
     -------
@@ -132,7 +147,7 @@ def _unit(vessel_cls, form, seeded):
     vessel.Phases = [LiquidPhase(DATA_PATH, mass=CHARGE_MASS,
                                  mass_frac=LIQUID_MASS_FRAC, temp=TEMP,
                                  name_solv="solvent"),
-                     _solid(form, seeded)]
+                     _solid(form, seeded, state_name)]
     vessel.CrystKinetics = CrystKinetics(
         coeff_solub=SOLUBILITY_COEFFS, nucl_prim=NO_PRIMARY_NUCLEATION,
         nucl_sec=NO_SECONDARY_NUCLEATION, growth=NO_GROWTH,
@@ -143,7 +158,8 @@ def _unit(vessel_cls, form, seeded):
     return vessel
 
 
-def _solve(upstream_form, downstream_form, seeded=True):
+def _solve(upstream_form, downstream_form, seeded=True,
+           downstream_state_name=None):
     """Run U01 (continuous) into U02 (unseeded semibatch).
 
     Parameters
@@ -152,6 +168,9 @@ def _solve(upstream_form, downstream_form, seeded=True):
         Population forms of U01 and U02.
     seeded : bool, optional
         Whether U01 starts with seeds.
+    downstream_state_name : str, optional
+        Name of U02's population state; None keeps the mechanism's default,
+        which U01 always uses.
 
     Returns
     -------
@@ -160,7 +179,8 @@ def _solve(upstream_form, downstream_form, seeded=True):
     """
     flowsheet = SimulationExec(DATA_PATH, flowsheet="U01 --> U02")
     flowsheet.U01 = _unit(ContinuousCrystallizer, upstream_form, seeded)
-    flowsheet.U02 = _unit(SemiBatchCrystallizer, downstream_form, False)
+    flowsheet.U02 = _unit(SemiBatchCrystallizer, downstream_form, False,
+                          downstream_state_name)
     run = {"runtime": RUNTIME, "verbose": False}
     flowsheet.SolveFlowsheet(kwargs_run={"U01": run, "U02": run},
                              verbose=False)
@@ -222,3 +242,11 @@ def test_an_empty_feed_in_another_form_is_refused_too():
     with pytest.raises(PharmaPySpecificationError,
                        match=DISTRIBUTION_INTO_MOMENTS):
         _solve("fvm", "moments", seeded=False)
+
+
+def test_a_feed_under_another_state_name_is_refused():
+    # The feed is read by state name, so two distributions on one grid
+    # would still lose the crystals between them.
+    with pytest.raises(PharmaPySpecificationError,
+                       match=DISTRIBUTION_UNDER_ANOTHER_NAME):
+        _solve("fvm", "fvm", downstream_state_name=RENAMED_DISTRIBUTION)

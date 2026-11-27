@@ -1251,10 +1251,11 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         Raises
         ------
         PharmaPySpecificationError
-            If the feed carries its crystals in another population state,
-            such as moments into a vessel that resolves the size
-            distribution. Skipping that state would lose every crystal in
-            the feed without a word.
+            If the feed carries its crystals in a population state with
+            another name: moments into a vessel that resolves the size
+            distribution, or the same form under another state name. The
+            feed is read by state name, so skipping that state would lose
+            every crystal in the feed without a word.
 
         Notes
         -----
@@ -1273,10 +1274,12 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
             if feed_state_name != name:
                 raise PharmaPySpecificationError(
                     'A feed carrying its crystals as %s state %r cannot '
-                    'enter this vessel, whose %s carries them as %r. Moments '
-                    'do not determine a size distribution, and a distribution '
-                    'is not converted into moments, so those crystals would '
-                    'be lost. Give both units the same population balance '
+                    'enter this vessel, whose %s carries them as %r. The '
+                    'vessel reads the feed population by state name, so '
+                    'those crystals would be lost. A size distribution and '
+                    'moments cannot share a name: moments do not determine a '
+                    'size distribution, and a distribution is not converted '
+                    'into moments. Give both units the same population form '
                     'and state name.'
                     % (type(mechanism).__name__, feed_state_name,
                        type(self).__name__, name))
