@@ -1117,6 +1117,12 @@ class Connection:
         BasePhase or MixedPhase
             A single converted phase, or the converted members together.
 
+        Raises
+        ------
+        PharmaPySpecificationError
+            If the material carries crystals and the destination's population
+            balance refuses them; see ``_refuse_legacy_crystals``.
+
         Notes
         -----
         A mechanism needs things the old phase never carried -- which
@@ -1132,12 +1138,47 @@ class Connection:
 
         phases = getattr(matter, 'Phases', None)
         members = phases if isinstance(phases, (list, tuple)) else [matter]
+        self._refuse_legacy_crystals(members)
         kwargs.setdefault('vol_slurry', MixedPhase.legacy_slurry_volume(members))
 
         converted = [MixedPhase.phase_from_legacy(member, **kwargs)
                      for member in members]
 
         return converted[0] if len(converted) == 1 else MixedPhase(converted)
+
+    def _refuse_legacy_crystals(self, members):
+        """Stop legacy crystals from reaching a vessel that refuses them.
+
+        Parameters
+        ----------
+        members : sequence
+            Pre-refactor phases or streams handed over.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If a member is a solid and a population balance of the destination
+            sets ``refuses_legacy_crystals``. The conversion would bring the
+            crystals in as a plain moment form or a distribution, without the
+            model the vessel was configured with. A liquid passes.
+        """
+        if not any(type(member).__name__ in ('SolidPhase', 'SolidStream')
+                   for member in members):
+            return
+
+        destination_phases = getattr(self.destination_uo, 'Phases', None)
+
+        for phase in getattr(destination_phases, 'Phases', ()) or ():
+
+            for mechanism in getattr(phase, 'mechanisms', ()) or ():
+
+                if getattr(mechanism, 'refuses_legacy_crystals', False):
+                    raise PharmaPySpecificationError(
+                        f'{type(self.destination_uo).__name__} carries its '
+                        f'crystals with {type(mechanism).__name__}, which '
+                        'cannot take crystals from a legacy unit. Hand over '
+                        'the liquid only, or keep both units on the '
+                        'refactored stack.')
 
     def _destination_mechanism_kwargs(self):
         """Mechanism configuration to reuse from the destination vessel."""

@@ -1017,8 +1017,8 @@ class DynamicExtractor(StructuralPresenceMixin):
             ``rho_liq`` or ``cp_liq`` of the stages or, with the default
             UNIQUAC ``k_fun``, its activity parameters. Absent species need
             no property data other than ``mw`` (issue #425). A species first
-            fed later without data is reported by IDA instead, whose error
-            does not name it (issue #435).
+            fed later without data raises the original named error, chained
+            from IDA's diagnostic by the shared solver guard.
 
         Notes
         -----

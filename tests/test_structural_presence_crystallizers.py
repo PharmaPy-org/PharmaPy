@@ -689,7 +689,6 @@ def test_failed_solve_keeps_no_results(paths):
     in the liquid and api stayed latched.
     """
     pytest.importorskip("assimulo")
-    from assimulo.solvers.sundials import CVodeError
 
     units = []
     for _ in range(2):
@@ -736,9 +735,8 @@ def test_failed_solve_keeps_no_results(paths):
     before = fingerprint(unit)
     presence_before = unit._presence.mask
 
-    # CVode reports the right-hand side's missing-data error as repeated
-    # recoverable failures, without naming api (issue #435).
-    with pytest.raises(CVodeError, match="repeated recoverable errors"):
+    with pytest.raises(MissingPropertyError,
+                       match=r"\['api'\].*'cp_liq'"):
         unit.solve_unit(RUN_TIME, verbose=False)
 
     assert unit.elapsed_time == 0 and unit.profiles_runs == []
