@@ -459,10 +459,13 @@ distribution itself.
   that method; one with only ``moments`` is refused when the population balance is
   built.
 
-Kumar et al. (2009) compare these schemes. On 35 to 100 geometric cells, the cell
-average placed agglomerates two to six times as accurately as the fixed pivot, at the
-same cost. Breakage keeps the fixed pivot, whose split is linear in the counts and so
-is built once. In crystallization, the discretized balance of Hounslow et al. (1988)
+Kumar et al. (2009) compare these schemes. In a comparison made here on 27 Nov 2026,
+against a fixed pivot for agglomeration that PharmaPy does not ship, the error of the
+cell average on 35 to 100 geometric cells from 1 to 1000 um was 1.8 to 5.2 times
+smaller in Scott's (1968) constant-kernel case and 2 to 11 times smaller with the sum
+kernel, for about 15 % more time per evaluation. That comparison is not in the test
+suite. Breakage keeps the fixed pivot, whose split is linear in the counts and so is
+built once. In crystallization, the discretized balance of Hounslow et al. (1988)
 set agglomeration on a grid whose node volumes double; both schemes here work on any
 grid, uniform or geometric.
 
@@ -542,12 +545,14 @@ crystal volume of the cells exactly, apart from the grid's two edges:
    density, left the count of the constant-kernel case 8.4e-5 from exact under LSODA;
    ``atol`` of 1e-2, as above, left 4.5e-11.
 
-   On a 100-cell batch with growing seeds, agglomeration made the solve faster on
-   CVode, the default backend (0.68 times the growth-only time), but 2.1 to 2.3 times
-   slower on SciPy LSODA. LSODA took 53 % more right-hand-side evaluations with the
-   cell average, against 22 % more with a fixed pivot: the cell average switches each
-   cell's agglomerates between neighbours as their mean volume crosses the node, and
-   LSODA pays for those switches.
+   Agglomeration changes the solver's work, and in which direction depends on the
+   case, the backend and the tolerances, so time your own case. Two 100-cell batches
+   with growing seeds were timed, neither with a script in the repository. On 10 Nov
+   2026, agglomeration made the solve faster on CVode, the default backend (0.68
+   times the growth-only time), and 2.1 to 2.3 times slower on SciPy LSODA. On 27 Nov
+   2026, with the seeds above growing at 0.1 um/s under a constant kernel, it took 1.4
+   times the growth-only time on CVode and 0.8 to 1.3 times on LSODA, depending on
+   the tolerances.
 
 Semibatch, continuous and flowsheets
 ------------------------------------
@@ -619,13 +624,16 @@ Assumptions and limits
 - **Refactored crystallizers only.** The legacy ``BatchCryst``, ``MSMPR`` and
   ``SemibatchCryst`` have neither QMOM nor the kernels on a size grid.
 - **Temperature.** Agglomeration and breakage add no heat term. One test cools a
-  batch and checks that the kernels see the liquid's temperature. Every other solve
-  in the tests is isothermal, so the energy balance of a QMOM vessel is not
-  otherwise exercised.
-- **Minimum breakage size.** With ``minimum_size``, a solve can follow the
+  QMOM batch and checks that the kernels see the liquid's temperature. Every other
+  solve in the tests is isothermal, with QMOM and on a size grid, so the energy
+  balance of a vessel with kernels is not otherwise exercised.
+- **Minimum breakage size.** With ``minimum_size``, a QMOM solve can follow the
   integrator's steps and finish without an error: issue
-  `#564 <https://github.com/PharmaPy-org/PharmaPy/issues/564>`__. The constructor
-  warns whenever a selection function has one.
+  `#564 <https://github.com/PharmaPy-org/PharmaPy/issues/564>`__. The
+  ``QMOMPopulationBalance`` constructor warns whenever a selection function has one.
+  A size grid is not exposed to this: its nodes do not move, so the breakage
+  frequency of each cell does not jump as the state changes, and
+  ``OneDFVMMechanism`` does not warn.
 - **Dissolution** is size independent, and crystals do not disappear at
   :math:`L = 0`, as in the moment form.
 - **Nuclei** are born at size ``rad``, which defaults to 0. Kernels and selection
