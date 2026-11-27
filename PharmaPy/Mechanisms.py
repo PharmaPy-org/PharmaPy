@@ -3831,7 +3831,8 @@ class FVMKernelSources(KernelSources):
         RuntimeWarning
             If at any reported time the last cell held more than
             ``TOP_CELL_VOLUME_SHARE`` of the crystal volume, naming the
-            largest share and when it occurred.
+            largest share and when it occurred. The warning is attributed
+            to the first line outside PharmaPy (``_user_stacklevel``).
         """
         balance = self.population_balance
         key = StateKey(balance.distribution_state_name, process.phaseref)
@@ -3850,7 +3851,7 @@ class FVMKernelSources(KernelSources):
                 'extend x_grid to larger sizes.'
                 % (100 * share[worst], np.asarray(solver_history['time'])[worst],
                    100 * self.TOP_CELL_VOLUME_SHARE, balance.x_grid[-1]),
-                RuntimeWarning, stacklevel=2)
+                RuntimeWarning, stacklevel=_user_stacklevel())
 
     def _agglomeration_count_rates(self, counts, kernel_values):
         """Cell-count rates of cell-average agglomeration.

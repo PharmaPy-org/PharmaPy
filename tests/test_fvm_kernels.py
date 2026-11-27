@@ -948,11 +948,13 @@ def test_agglomerates_crowding_the_last_size_class_are_reported(top, crowded):
         warnings.simplefilter("always")
         vessel.solve_unit(runtime=RUNTIME, verbose=False)
 
-    reports = [str(warning.message) for warning in caught
+    reports = [warning for warning in caught
                if "last size class held" in str(warning.message)]
     assert len(reports) == (1 if crowded else 0)
     if crowded:
-        assert "%.6g um" % sizes[-1] in reports[0]
+        assert "%.6g um" % sizes[-1] in str(reports[0].message)
+        # Attributed to the line that asked for the solve, not to PharmaPy.
+        assert os.path.samefile(reports[0].filename, __file__)
 
 
 def test_the_largest_share_over_the_solve_is_reported():
@@ -974,6 +976,7 @@ def test_the_largest_share_over_the_solve_is_reported():
 
     assert len(caught) == 1
     assert "0.5 %" in str(caught[0].message) and "t = 300 s" in str(caught[0].message)
+    assert os.path.samefile(caught[0].filename, __file__)
 
 
 # Patil and Andrews (1998) and Lage (2002): with a constant kernel beta_0,
