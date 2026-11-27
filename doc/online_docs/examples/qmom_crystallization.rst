@@ -486,8 +486,7 @@ with a message that says what to do.
      - The missing moments cannot be recovered
    * - Feed carrying a size distribution (FVM)
      - Refused
-     - In other units such a feed is lost silently: issue
-       `#560 <https://github.com/PharmaPy-org/PharmaPy/issues/560>`__
+     - Every population balance refuses a feed in another form
    * - Charge of crystals
      - Refused
      - Use the ``Inlet``. See issue

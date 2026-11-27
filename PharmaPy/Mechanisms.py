@@ -2973,42 +2973,6 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
         return np.sum(rule.weights[:, None] * size_factor[:, None]
                       * rule.nodes[:, None] ** orders, axis=0)
 
-    def _inlet_population_density(self, stream_phase):
-        """Feed moments per m3 of slurry, refusing any other feed population.
-
-        Parameters
-        ----------
-        stream_phase : BasePhase
-            Feed phase, whose population mechanism publishes the feed.
-
-        Returns
-        -------
-        numpy.ndarray or None
-            Feed moments [um**k/m3 of feed slurry], shape ``(2N,)``; None for
-            a feed without crystals.
-
-        Raises
-        ------
-        PharmaPySpecificationError
-            If the feed carries its crystals as another state, such as a
-            resolved distribution, which the base class would skip, losing
-            those crystals without a word.
-        """
-        density = super()._inlet_population_density(stream_phase)
-
-        if density is None:
-            for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
-                state_name = getattr(mechanism, 'flow_state_name', None)
-
-                if state_name not in (None, self.flow_state_name):
-                    raise PharmaPySpecificationError(
-                        'A feed carrying its crystals as %r cannot enter this '
-                        'QMOMPopulationBalance, which takes moments as %r. '
-                        'Use a QMOM or moment-form unit upstream.'
-                        % (state_name, self.flow_state_name))
-
-        return density
-
     def _moments_from(self, completed_state):
         """Read the moments from a replay state.
 
