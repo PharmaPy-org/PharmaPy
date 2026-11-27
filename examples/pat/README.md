@@ -1,9 +1,10 @@
 # PAT data readers
 
 Workflow for process-analytical-technology data, started for the work package 2
-demonstrator (#153, #358). The readers of the instruments' files and the IR signals
-of the dissolved solute are in the package (`PharmaPy.PATReaders`,
-`PharmaPy.PATSignals`); the modules here are not part of the PharmaPy package API. Nothing in them is specific to a compound; case inputs live in a
+demonstrator (#153, #358). The readers of the instruments' files, the IR signals of
+the dissolved solute and their calibration are in the package (`PharmaPy.PATReaders`,
+`PharmaPy.PATSignals`, `PharmaPy.PATCalibration`); the modules here are not part of
+the PharmaPy package API. Nothing in them is specific to a compound; case inputs live in a
 subdirectory per case.
 
 ## Text tables and the run table
@@ -21,8 +22,7 @@ tables are read back through a layout like any other file.
 | Module | Purpose |
 |---|---|
 | `fbrm_statistics.py` | Counts per chord-length band and the weighted mean chord, defined as iC FBRM reports them. Against the statistics stored by the vendor software for the four caffeine runs: 10 to 100 um band within 0.6 %, 100 to 1000 um band within 3 %, square-weighted mean within 0.02 %. The band below 10 um was compared on three samples only (within 0.05 %). |
-| `band_calibration.py` | Band height against dissolved solute per solvent, linear with a temperature-dependent slope. The constants are solved from plateaus of known composition. |
-| `calibrate_band.py` | Applies that calibration to a described dataset: `python -m examples.pat.calibrate_band "<dataset folder>"`. The `band_calibration` block of the description names the table and columns, the runs, the reference run with solvent-only spectra, and the time windows of known composition. Its `solute_ratio` returns the dissolved solute per solvent [kg/kg] of a run over time. |
+| `calibrate_band.py` | Applies the band-height calibration of `PharmaPy.PATCalibration` to a described dataset: `python -m examples.pat.calibrate_band "<dataset folder>"`. The `band_calibration` block of the description names the table and columns, the runs, the reference run with solvent-only spectra, and the time windows of known composition. Its `solute_ratio` returns the dissolved solute per solvent [kg/kg] of a run over time. |
 | `solubility.py` | Solubility against temperature in van't Hoff form, `ln(ratio) = intercept + slope / T`, with its fit and its inverse. |
 | `fit_solubility.py` | Fits that curve to a described dataset: `python -m examples.pat.fit_solubility "<dataset folder>"`. Each spectrum taken on a heating ramp while solid is still present gives one point. The `solubility` block of the description gives the time window and the solid signal with its threshold. Run it after `calibrate_band.py`. The points are a lower bound of the solubility, because dissolution lags the heating. |
 | `reduce_runs.py` | Turns the raw run folders of a described dataset into its reduced tables: `python -m examples.pat.reduce_runs "<dataset folder>" "<folder that holds the run folders>"`. Each run folder holds one `.iCIR` and one `.icFbrm` file, or their vendor CSV exports (see below), and the thermostat log; the description names the log, its layout, the FBRM bands and the IR signal. That signal is the height of one band (`ir_band`) or the whole-spectrum score (`ir_score`), which needs all runs and is written last. |
@@ -44,6 +44,13 @@ The two IR signals of the dissolved solute are in the package, `PharmaPy.PATSign
 height (caffeine) and the whole-spectrum score (azithromycin).
 `oaba/ir_signals.ipynb` goes from the files of one OABA run to both signals with the
 package alone and checks them against each other.
+Their calibration to dissolved solute per solvent [kg/kg] is in
+`PharmaPy.PATCalibration`: a band height is linear in the solute with a
+temperature-dependent slope, and a score is counted from the charge of its run with
+one sensitivity. The constants are solved from states of known composition.
+`signal_to_concentration.ipynb` does both from the reduced tables, the band height of
+caffeine and the score of azithromycin, and tests how far each can be trusted. It
+needs no raw files.
 
 The model side of these signals is in the package: `PharmaPy.SlurryMeasurements`
 predicts the dissolved solute per solvent, the solute in the solid and a

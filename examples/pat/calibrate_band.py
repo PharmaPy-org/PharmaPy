@@ -25,7 +25,9 @@ from pathlib import Path
 
 import numpy as np
 
-from . import band_calibration, dataset
+from PharmaPy import PATCalibration
+
+from . import dataset
 
 TREATMENTS = ("common_baseline", "common_slope")
 RESULT_NAME = "band_calibration.json"
@@ -89,7 +91,7 @@ def solvent_baseline(case: Path, settings: dict) -> dict:
     spectra = dataset.read_reduced(case, settings["reference_run"], settings["table"])
     height = spectra[settings["height_column"]]
     start, stop = settings["solvent_window_s"]  # [s]
-    median, _, count = band_calibration.window_statistics(spectra["time"], height, start, stop)
+    median, _, count = PATCalibration.window_statistics(spectra["time"], height, start, stop)
     inside = height[(spectra["time"] >= start) & (spectra["time"] <= stop)]
     return {"band_height": median, "minimum": float(inside.min()), "maximum": float(inside.max()), "count": count}
 
@@ -121,7 +123,7 @@ def plateaus(case: Path, run_id: str, settings: dict) -> dict:
     windows["slurry_end"] = [time[-1] - settings["slurry_end_duration_s"], time[-1]]
     result = {}
     for name, (start, stop) in windows.items():
-        median, scatter, count = band_calibration.window_statistics(time, height, start, stop)
+        median, scatter, count = PATCalibration.window_statistics(time, height, start, stop)
         inside = (time >= start) & (time <= stop)
         result[name] = {"band_height": median, "scatter": scatter, "count": count,
                         "temperature_K": float(temperature[inside].mean())}
@@ -162,15 +164,15 @@ def calibrate(case: Path) -> dict:
         pair = [windows[run_id][name] for name in DISSOLVED]
         return [entry["band_height"] for entry in pair], [entry["temperature_K"] for entry in pair]
 
-    reference_slope = band_calibration.fit_slope(*dissolved(settings["reference_run"]), ratio, solvent["band_height"],
+    reference_slope = PATCalibration.fit_band_slope(*dissolved(settings["reference_run"]), ratio, solvent["band_height"],
                                                  reference_temperature)
     runs = {}
     for run_id in settings["runs"]:
         heights, temperatures = dissolved(run_id)
         constants = {
-            "common_baseline": (solvent["band_height"],) + band_calibration.fit_slope(
+            "common_baseline": (solvent["band_height"],) + PATCalibration.fit_band_slope(
                 heights, temperatures, ratio, solvent["band_height"], reference_temperature),
-            "common_slope": (band_calibration.fit_baseline(heights, temperatures, ratio, *reference_slope,
+            "common_slope": (PATCalibration.fit_band_baseline(heights, temperatures, ratio, *reference_slope,
                                                            reference_temperature),) + reference_slope,
         }
         runs[run_id] = {"plateaus": windows[run_id]}
@@ -178,7 +180,7 @@ def calibrate(case: Path) -> dict:
             entry = {"baseline": baseline, "slope": slope, "slope_per_kelvin": slope_per_kelvin}
             for name in ("slurry_start", "slurry_end"):
                 window = windows[run_id][name]
-                entry[name + "_ratio"] = float(band_calibration.ratio_from_band_height(
+                entry[name + "_ratio"] = float(PATCalibration.ratio_from_band_height(
                     window["band_height"], window["temperature_K"], baseline, slope, slope_per_kelvin,
                     reference_temperature))
             runs[run_id][treatment] = entry
@@ -226,7 +228,7 @@ def solute_ratio(case: Path, run_id: str, treatment: str, calibration: dict) -> 
     constants = calibration["runs"][run_id][treatment]
     settings = dataset.load_description(case)["band_calibration"]
     time, height, temperature = spectra_with_temperature(case, run_id, settings)
-    return time, band_calibration.ratio_from_band_height(
+    return time, PATCalibration.ratio_from_band_height(
         height, temperature, constants["baseline"], constants["slope"], constants["slope_per_kelvin"],
         calibration["reference_temperature_K"])
 

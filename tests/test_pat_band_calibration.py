@@ -1,4 +1,4 @@
-"""Band-height calibration: the relation, the dataset workflow, and the caffeine runs.
+"""Band-height calibration of ``PharmaPy.PATCalibration``: the relation, the dataset workflow, and the caffeine runs.
 
 The workflow is exercised on a small dataset written by the test, with another
 solute, solvent, table and column names than the caffeine case, built from known
@@ -11,7 +11,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.pat import band_calibration, calibrate_band, dataset, table_layout
+from examples.pat import calibrate_band, dataset, table_layout
+from PharmaPy import PATCalibration
 
 pytestmark = pytest.mark.unit
 
@@ -31,16 +32,16 @@ def test_window_statistics_uses_the_samples_inside_the_window_limits_included():
     time = np.array([0.0, 10.0, 20.0, 30.0, 40.0])  # [s]
     values = np.array([5.0, 1.0, 2.0, 9.0, 7.0])
 
-    median, scatter, count = band_calibration.window_statistics(time, values, 10.0, 30.0)
+    median, scatter, count = PATCalibration.window_statistics(time, values, 10.0, 30.0)
 
     assert (median, count) == (2.0, 3)
     assert scatter == pytest.approx(np.sqrt(38.0 / 3.0))  # deviations -3, -2, 5 from the mean 4
     with pytest.raises(ValueError, match="No sample between 41 and 50 s"):
-        band_calibration.window_statistics(time, values, 41.0, 50.0)
+        PATCalibration.window_statistics(time, values, 41.0, 50.0)
 
 
 def test_slope_and_its_temperature_coefficient_follow_from_two_plateaus():
-    slope, slope_per_kelvin = band_calibration.fit_slope(PLATEAU_HEIGHTS, PLATEAU_TEMPERATURES, RATIO, BASELINE, REFERENCE)
+    slope, slope_per_kelvin = PATCalibration.fit_band_slope(PLATEAU_HEIGHTS, PLATEAU_TEMPERATURES, RATIO, BASELINE, REFERENCE)
 
     assert slope == pytest.approx(SLOPE)
     assert slope_per_kelvin == pytest.approx(SLOPE_PER_KELVIN)
@@ -50,32 +51,32 @@ def test_band_height_and_ratio_convert_into_each_other_at_each_temperature():
     ratios = np.array([0.01, 0.03])  # [kg/kg]
     temperatures = np.array([290.0, 310.0])  # [K]; slopes 2.1 and 1.9
 
-    heights = band_calibration.band_height_from_ratio(ratios, temperatures, BASELINE, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
+    heights = PATCalibration.band_height_from_ratio(ratios, temperatures, BASELINE, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
 
     np.testing.assert_allclose(heights, [0.071, 0.107])
-    np.testing.assert_allclose(band_calibration.ratio_from_band_height(
+    np.testing.assert_allclose(PATCalibration.ratio_from_band_height(
         heights, temperatures, BASELINE, SLOPE, SLOPE_PER_KELVIN, REFERENCE), ratios)
 
 
 def test_baseline_absorbs_an_offset_of_plateaus_with_a_known_slope():
     shifted = [height + 0.003 for height in PLATEAU_HEIGHTS]
 
-    baseline = band_calibration.fit_baseline(shifted, PLATEAU_TEMPERATURES, RATIO, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
+    baseline = PATCalibration.fit_band_baseline(shifted, PLATEAU_TEMPERATURES, RATIO, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
 
     assert baseline == pytest.approx(0.053)
 
 
 def test_calibration_refuses_inputs_it_cannot_solve():
     with pytest.raises(ValueError, match="same temperature"):
-        band_calibration.fit_slope(PLATEAU_HEIGHTS, [310.0, 310.0], RATIO, BASELINE, REFERENCE)
+        PATCalibration.fit_band_slope(PLATEAU_HEIGHTS, [310.0, 310.0], RATIO, BASELINE, REFERENCE)
     with pytest.raises(ValueError, match="Exactly two plateaus"):
-        band_calibration.fit_slope([0.1, 0.2, 0.3], [300.0, 310.0, 320.0], RATIO, BASELINE, REFERENCE)
+        PATCalibration.fit_band_slope([0.1, 0.2, 0.3], [300.0, 310.0, 320.0], RATIO, BASELINE, REFERENCE)
     with pytest.raises(ValueError, match="must be positive"):
-        band_calibration.fit_slope(PLATEAU_HEIGHTS, PLATEAU_TEMPERATURES, 0.0, BASELINE, REFERENCE)
+        PATCalibration.fit_band_slope(PLATEAU_HEIGHTS, PLATEAU_TEMPERATURES, 0.0, BASELINE, REFERENCE)
     with pytest.raises(ValueError, match="not positive at 500 K"):  # the slope reaches zero 200 K above the reference
-        band_calibration.ratio_from_band_height(0.1, 500.0, BASELINE, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
+        PATCalibration.ratio_from_band_height(0.1, 500.0, BASELINE, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
     with pytest.raises(ValueError, match="one-dimensional"):
-        band_calibration.fit_baseline(PLATEAU_HEIGHTS, [310.0], RATIO, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
+        PATCalibration.fit_band_baseline(PLATEAU_HEIGHTS, [310.0], RATIO, SLOPE, SLOPE_PER_KELVIN, REFERENCE)
     with pytest.raises(ValueError, match="must be positive"):
         dataset.charge_ratio({"charge": {"solute_mass_g": 10.0, "solvent_mass_g": 0.0}})
 

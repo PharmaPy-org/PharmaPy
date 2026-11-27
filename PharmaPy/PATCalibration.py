@@ -1,9 +1,18 @@
-"""Band height against dissolved solute, linear with a temperature-dependent slope.
+"""Calibration of a process-analytical-technology signal to dissolved solute per solvent.
+
+Two relations, each with a few constants solved from moments of known composition.
+``ratio`` is the dissolved solute per solvent [kg/kg].
+
+Band height, linear in the solute with a slope that depends on temperature::
 
     height = baseline + (slope + slope_per_kelvin * (T - T_ref)) * ratio
 
-``ratio`` is the dissolved solute per solvent [kg/kg]. The constants come from
-plateaus of known composition; nothing here is specific to one compound.
+Whole-spectrum score of `PharmaPy.PATSignals.SpectralScore`, already at one
+temperature and counted from the dissolved charge of its run::
+
+    ratio = charge + sensitivity * score
+
+Nothing here is specific to one compound.
 """
 from __future__ import annotations
 
@@ -43,7 +52,7 @@ def window_statistics(time: np.ndarray, values: np.ndarray, start: float, stop: 
     return float(np.median(inside)), float(np.std(inside)), int(inside.size)
 
 
-def _sensitivity(temperature, slope: float, slope_per_kelvin: float, reference_temperature: float):
+def _band_sensitivity(temperature, slope: float, slope_per_kelvin: float, reference_temperature: float):
     """Return the band height per unit solute ratio at a temperature.
 
     Parameters
@@ -89,7 +98,7 @@ def band_height_from_ratio(ratio, temperature, baseline: float, slope: float, sl
     numpy.ndarray
         Band height [-], broadcast shape of ``ratio`` and ``temperature``.
     """
-    return baseline + _sensitivity(temperature, slope, slope_per_kelvin, reference_temperature) * np.asarray(ratio, dtype=float)
+    return baseline + _band_sensitivity(temperature, slope, slope_per_kelvin, reference_temperature) * np.asarray(ratio, dtype=float)
 
 
 def ratio_from_band_height(height, temperature, baseline: float, slope: float, slope_per_kelvin: float,
@@ -116,14 +125,14 @@ def ratio_from_band_height(height, temperature, baseline: float, slope: float, s
         If the band height per solute ratio is not positive at some temperature,
         where the calibration cannot be inverted.
     """
-    sensitivity = _sensitivity(temperature, slope, slope_per_kelvin, reference_temperature)
+    sensitivity = _band_sensitivity(temperature, slope, slope_per_kelvin, reference_temperature)
     if np.any(sensitivity <= 0.0):
         raise ValueError("The calibration slope is not positive at %g K; it cannot be inverted there."
                          % np.asarray(temperature, dtype=float)[np.asarray(sensitivity) <= 0.0].flat[0])
     return (np.asarray(height, dtype=float) - baseline) / sensitivity
 
 
-def fit_slope(heights, temperatures, ratio: float, baseline: float, reference_temperature: float) -> tuple[float, float]:
+def fit_band_slope(heights, temperatures, ratio: float, baseline: float, reference_temperature: float) -> tuple[float, float]:
     """Solve the slope and its temperature coefficient from two plateaus of one composition.
 
     Parameters
@@ -166,7 +175,7 @@ def fit_slope(heights, temperatures, ratio: float, baseline: float, reference_te
     return float(slope), float(slope_per_kelvin)
 
 
-def fit_baseline(heights, temperatures, ratio: float, slope: float, slope_per_kelvin: float,
+def fit_band_baseline(heights, temperatures, ratio: float, slope: float, slope_per_kelvin: float,
                  reference_temperature: float) -> float:
     """Return the baseline that makes a known slope reproduce plateaus of one composition.
 
@@ -196,4 +205,146 @@ def fit_baseline(heights, temperatures, ratio: float, slope: float, slope_per_ke
     if heights.ndim != 1 or heights.shape != temperatures.shape or heights.size == 0:
         raise ValueError("Heights %s and temperatures %s must be equal, non-empty one-dimensional shapes."
                          % (heights.shape, temperatures.shape))
-    return float(np.mean(heights - _sensitivity(temperatures, slope, slope_per_kelvin, reference_temperature) * ratio))
+    return float(np.mean(heights - _band_sensitivity(temperatures, slope, slope_per_kelvin, reference_temperature) * ratio))
+
+
+def _checked_sensitivity(sensitivity: float) -> float:
+    """Return the score sensitivity after checking that it is positive.
+
+    Parameters
+    ----------
+    sensitivity : float
+        Dissolved solute per solvent per unit of score [kg/kg].
+
+    Returns
+    -------
+    float
+        The sensitivity [kg/kg].
+
+    Raises
+    ------
+    ValueError
+        If the sensitivity is not a positive number.
+    """
+    if not sensitivity > 0.0:
+        raise ValueError("The score sensitivity must be positive; got %g kg/kg per score unit." % sensitivity)
+    return float(sensitivity)
+
+
+def fit_score_sensitivity(ratios, scores) -> float:
+    """Solve the score sensitivity from two states of known composition.
+
+    Parameters
+    ----------
+    ratios : sequence of 2 floats
+        Dissolved solute per solvent of the two states [kg/kg].
+    scores : sequence of 2 floats
+        Their scores [-], counted from one common zero; they must differ. States
+        of different runs are put on one zero by adding the score of each run's
+        dissolved charge against that zero.
+
+    Returns
+    -------
+    float
+        Dissolved solute per solvent per unit of score [kg/kg].
+
+    Raises
+    ------
+    ValueError
+        If there are not exactly two states, their scores coincide, or the state
+        with more dissolved solute does not have the higher score.
+
+    Notes
+    -----
+    The score rises with the dissolved solute by its definition (zero for the
+    dissolved charge, minus one for the reference slurry), so two states that
+    give a sensitivity that is not positive are inconsistent.
+    """
+    ratios, scores = np.asarray(ratios, dtype=float), np.asarray(scores, dtype=float)
+    if ratios.shape != (2,) or scores.shape != (2,):
+        raise ValueError("Exactly two states are needed; got %d ratios and %d scores." % (ratios.size, scores.size))
+    if scores[0] == scores[1]:
+        raise ValueError("The two states have the same score (%g)." % scores[0])
+    sensitivity = float((ratios[1] - ratios[0]) / (scores[1] - scores[0]))  # [kg/kg]
+    if not sensitivity > 0.0:
+        raise ValueError("The two states give a sensitivity of %g kg/kg per score unit; the state with more "
+                         "dissolved solute must have the higher score." % sensitivity)
+    return sensitivity
+
+
+def ratio_from_score(score, charge: float, sensitivity: float):
+    """Convert a score to dissolved solute per solvent.
+
+    Parameters
+    ----------
+    score : float or numpy.ndarray
+        Score of the spectra of one run [-]; zero for its dissolved charge.
+    charge : float
+        Dissolved solute per solvent of that run with its whole charge dissolved
+        [kg/kg].
+    sensitivity : float
+        Dissolved solute per solvent per unit of score [kg/kg]; positive.
+
+    Returns
+    -------
+    numpy.ndarray
+        Dissolved solute per solvent [kg/kg], shape of ``score``.
+
+    Raises
+    ------
+    ValueError
+        If the sensitivity is not positive.
+    """
+    return charge + _checked_sensitivity(sensitivity) * np.asarray(score, dtype=float)
+
+
+def score_from_ratio(ratio, charge: float, sensitivity: float):
+    """Predict the score of a solution.
+
+    Parameters
+    ----------
+    ratio : float or numpy.ndarray
+        Dissolved solute per solvent [kg/kg].
+    charge : float
+        Dissolved solute per solvent of the run with its whole charge dissolved
+        [kg/kg].
+    sensitivity : float
+        Dissolved solute per solvent per unit of score [kg/kg]; positive.
+
+    Returns
+    -------
+    numpy.ndarray
+        Score [-], shape of ``ratio``.
+
+    Raises
+    ------
+    ValueError
+        If the sensitivity is not positive.
+    """
+    return (np.asarray(ratio, dtype=float) - charge) / _checked_sensitivity(sensitivity)
+
+
+def charge_from_score(ratio: float, score: float, sensitivity: float) -> float:
+    """Return the charge of a run from one state of known composition.
+
+    Parameters
+    ----------
+    ratio : float
+        Dissolved solute per solvent of the known state [kg/kg].
+    score : float
+        Score of that state [-], counted from the dissolved charge of the run.
+    sensitivity : float
+        Dissolved solute per solvent per unit of score [kg/kg]; positive.
+
+    Returns
+    -------
+    float
+        Dissolved solute per solvent of the run with its whole charge dissolved
+        [kg/kg].
+
+    Raises
+    ------
+    ValueError
+        If the sensitivity is not positive.
+    """
+    return float(ratio - _checked_sensitivity(sensitivity) * score)
