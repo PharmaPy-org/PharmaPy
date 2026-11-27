@@ -17,6 +17,8 @@ slurry], rates per second. The solves use SciPy LSODA, about 30 s in all.
 """
 
 import os
+import warnings
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -25,7 +27,8 @@ from scipy.integrate import quad, solve_ivp
 from PharmaPy.Connections import Connection
 from PharmaPy.CrystallizationKernels import (BinaryFragmentation, BrownianKernel, ConstantKernel,
                                              ConstantSelection, DifferentialSedimentationKernel,
-                                             ErosionFragmentation, KernelConditions,
+                                             ErosionFragmentation, ExponentialSelection,
+                                             KernelConditions,
                                              ParabolicFragmentation, PowerLawSelection,
                                              ProductKernel, ShearKernel, SumKernel,
                                              UniformFragmentation)
@@ -42,6 +45,7 @@ from PharmaPy.MixedPhases import Slurry as OldSlurry
 from PharmaPy.Phases import LiquidPhase as OldLiquidPhase
 from PharmaPy.Phases import SolidPhase as OldSolidPhase
 from PharmaPy.Phases_Refactored import LiquidPhase, SolidPhase
+from PharmaPy.ProcessControl_Refactored import SimpleTemperatureController
 from PharmaPy.SimExec import SimulationExec
 from PharmaPy.Streams import SolidStream as OldSolidStream
 from PharmaPy.Streams_Refactored import LiquidStream
@@ -139,7 +143,7 @@ def constant_rate(sup_sat, conc_sat, moments, temp, temp_ref, params):
 
 
 def _kinetics(alpha, solubility=SOLUBILITY, growth_rate=GROWTH_RATE,
-              nucleation_rate=NUCLEATION_RATE):
+              nucleation_rate=NUCLEATION_RATE, alpha_fn=None):
     """Constant-rate nucleation, growth and dissolution.
 
     Parameters
@@ -154,6 +158,9 @@ def _kinetics(alpha, solubility=SOLUBILITY, growth_rate=GROWTH_RATE,
         G0 [um/s]. Defaults to ``GROWTH_RATE``.
     nucleation_rate : float, optional
         B [#/(m**3 s)]. Defaults to ``NUCLEATION_RATE``.
+    alpha_fn : callable, optional
+        Growth inhibition ``alpha_fn(conc)`` [-], a factor on the growth
+        rate. None, the default, for none.
 
     Returns
     -------
@@ -172,6 +179,7 @@ def _kinetics(alpha, solubility=SOLUBILITY, growth_rate=GROWTH_RATE,
         dissolution=(DISSOLUTION_RATE, 0.0, 1.0),
         custom_mechanisms={"nucl_prim": constant_rate, "growth": constant_rate,
                            "dissolution": constant_rate},
+        alpha_fn=alpha_fn,
     )
 
 
@@ -180,7 +188,7 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
            solubility=SOLUBILITY, shape_factor=SHAPE_FACTOR, agglomeration=None,
            growth_rate=GROWTH_RATE, nucleation_rate=NUCLEATION_RATE, rad=0.0,
            breakage=None, fragments=None, vessel_cls=BatchCrystallizer,
-           feed_mass_flow=None):
+           feed_mass_flow=None, kinetics=None, controller=None):
     """Build the closed batch crystallizer.
 
     Parameters
@@ -213,6 +221,11 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
     feed_mass_flow : float, optional
         Mass flow of a crystal-free feed of the charge's own liquid [kg/s];
         None for no feed.
+    kinetics : CrystKinetics, optional
+        Kinetics to attach in place of the constant rates of ``_kinetics``.
+    controller : Controller, optional
+        Controller that owns the temperature [K]. None, the default, for an
+        isothermal vessel.
 
     Returns
     -------
@@ -233,9 +246,14 @@ def _build(moments, alpha, mechanism_cls=QMOMPopulationBalance,
         **kernel_kwargs)
     solid.mechanisms = mechanism
 
-    vessel = vessel_cls(integrator=integrator, isothermal=True)
+    if controller is None:
+        vessel = vessel_cls(integrator=integrator, isothermal=True)
+    else:
+        vessel = vessel_cls(integrator=integrator, controller=controller)
     vessel.Phases = [liquid, solid]
-    vessel.CrystKinetics = _kinetics(alpha, solubility, growth_rate, nucleation_rate)
+    if kinetics is None:
+        kinetics = _kinetics(alpha, solubility, growth_rate, nucleation_rate)
+    vessel.CrystKinetics = kinetics
     if feed_mass_flow is not None:
         vessel.Inlet = LiquidStream(DATA_PATH, mass_flow=feed_mass_flow,
                                     mass_frac=CHARGE_MASS_FRAC, temp=TEMP,
@@ -474,6 +492,54 @@ def test_qmom_keeps_the_onset_warning_of_the_moment_form():
                               kinetics=kinetics)
 
 
+def _warning_files(caught, issue):
+    """Files the warnings naming one issue were attributed to.
+
+    Parameters
+    ----------
+    caught : iterable of warnings.WarningMessage
+        Recorded warnings.
+    issue : str
+        Issue reference in the message, such as ``'#529'``.
+
+    Returns
+    -------
+    list of pathlib.Path
+        Resolved file of each ``RuntimeWarning`` whose message names the issue.
+    """
+    return [Path(warning.filename).resolve() for warning in caught
+            if issubclass(warning.category, RuntimeWarning) and issue in str(warning.message)]
+
+
+@pytest.mark.parametrize("through_vessel", [False, True], ids=["constructor", "vessel"])
+@pytest.mark.parametrize("mechanism_cls", [MomentsPopulationBalance, QMOMPopulationBalance],
+                         ids=["moments", "qmom"])
+def test_the_onset_warning_points_at_the_line_that_attached_the_kinetics(mechanism_cls,
+                                                                         through_vessel):
+    # The constructor of each form and the vessel's CrystKinetics reach the
+    # warning through call chains of different depth.
+    kinetics = CrystKinetics(coeff_solub=[SOLUBILITY],
+                             nucl_sec=(4.46e10, 0.0, 2.0, 1e-5),
+                             growth=(GROWTH_RATE, 0.0, 1.0))
+    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+    arguments = dict(owning_phase=solid, target_components=TARGET, solvent_name="solvent",
+                     moments_init=np.zeros(NUM_MOM))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        if through_vessel:
+            solid.mechanisms = mechanism_cls(**arguments)
+            vessel = BatchCrystallizer(integrator=None, isothermal=True)
+            vessel.Phases = [LiquidPhase(DATA_PATH, mass=CHARGE_MASS,
+                                         mass_frac=CHARGE_MASS_FRAC, temp=TEMP,
+                                         name_solv="solvent"), solid]
+            vessel.CrystKinetics = kinetics
+        else:
+            mechanism_cls(kinetics=kinetics, **arguments)
+
+    assert _warning_files(caught, "#529") == [Path(__file__).resolve()]
+
+
 @pytest.mark.parametrize("num_mom", [2, 3, 5])
 def test_moment_counts_without_a_quadrature_are_refused(num_mom):
     solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
@@ -541,6 +607,10 @@ THINNING_FLOOR = 1e-3  # [-]
 # About a nanometre, the order of a critical nucleus; finite, as the Brownian
 # kernel needs, and far below every crystal of the agglomeration fixtures.
 NUCLEUS_SIZE = 1e-3  # [um]
+# A nucleus between the two sizes of FEW_SIZES, so the smaller node sits below
+# it: the rate laws see that node at the nucleus size, while the crystals it
+# gains and loses keep their own size.
+COARSE_NUCLEUS_SIZE = 40.0  # [um]
 
 
 @pytest.mark.parametrize("name", AGGLOMERATION_KERNELS)
@@ -727,6 +797,79 @@ def test_a_user_kernel_sees_the_state_it_acts_on():
         NUCLEATION_RATE - 1e-13 * GROWTH_RATE * state[0] ** 2 / 2, rel=ALGEBRAIC_RTOL)
 
 
+# An impurity slowing growth to a quarter; unequal to one, so a lost factor shows.
+GROWTH_INHIBITION = 0.25  # [-]
+
+
+def test_a_kernel_sees_the_growth_rate_an_impurity_slows():
+    kernel = GrowthPacedKernel(1e-13)
+    vessel, _, _ = _build(_population_moments(*THREE_SIZES), None, agglomeration=kernel,
+                          kinetics=_kinetics(None, alpha_fn=lambda conc: GROWTH_INHIBITION))
+
+    _state_and_rates(vessel)
+
+    assert kernel.seen[-1].growth_rate == pytest.approx(GROWTH_INHIBITION * GROWTH_RATE,
+                                                        rel=ALGEBRAIC_RTOL)
+
+
+COLD_TEMP = 278.15  # [K], where the cooling ramp ends
+
+
+@pytest.mark.integration
+def test_a_kernel_sees_the_liquid_cool_over_a_solve():
+    # The controller owns the temperature and cools the batch linearly. The
+    # constant rate laws ignore it, so only the kernel's conditions tell
+    # whether they follow the liquid; the Brownian kernel is proportional to T.
+    kernel = GrowthPacedKernel(1e-13)
+    controller = SimpleTemperatureController(
+        temp_func=lambda time: TEMP + (COLD_TEMP - TEMP) * time / RUNTIME)
+    moments = SEED_COUNT * SEED_SIZE ** np.arange(NUM_MOM)  # [um**k/m**3]
+    vessel, _, _ = _build(moments, None, agglomeration=kernel, nucleation_rate=0.0,
+                          controller=controller, integrator=_lsoda())
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    seen = np.array([conditions.temp for conditions in kernel.seen])  # [K]
+    assert seen.max() == pytest.approx(TEMP, rel=ALGEBRAIC_RTOL)
+    assert seen.min() == pytest.approx(COLD_TEMP, rel=ALGEBRAIC_RTOL)
+
+
+# Built-in growth G = k_g * s**g [um/s] on the relative supersaturation s.
+POWER_LAW_GROWTH = (0.3, 0.0, 1.0)  # k_g [um/s], E [J/mol], g [-]
+
+
+@pytest.mark.integration
+def test_a_kernel_sees_the_supersaturation_fall_as_the_batch_crystallizes():
+    # Seeds grow on the built-in power law and take the solute out of the
+    # liquid. The reference is the solved liquid itself: kg of C per m**3 of
+    # liquid against the constant solubility.
+    kernel = GrowthPacedKernel(1e-15)
+    moments = SEED_COUNT * SEED_SIZE ** np.arange(NUM_MOM)  # [um**k/m**3]
+    vessel, _, _ = _build(
+        moments, None, agglomeration=kernel, integrator=_lsoda(),
+        kinetics=CrystKinetics(coeff_solub=[SOLUBILITY], growth=POWER_LAW_GROWTH))
+
+    vessel.solve_unit(runtime=RUNTIME, verbose=False)
+
+    result = vessel.result
+    trajectory = np.asarray(result.mu_n_solid0)  # [um**k/m**3]
+    solid_fraction = SHAPE_FACTOR * trajectory[:, 3] * METRE_PER_MICRON ** 3  # [-]
+    liquid_volume = np.ravel(result.vessel_vol) * (1 - solid_fraction)  # [m**3]
+    concentration = np.asarray(result.mass_j_liquid0)[:, TARGET_INDEX] / liquid_volume  # [kg/m**3]
+    supersaturation = concentration / SOLUBILITY - 1  # [-]
+    # Guard against a vacuous pass: the batch lost most of its driving force
+    # (2.75 to 0.98, 24 Nov 2026).
+    assert supersaturation[-1] < 0.5 * supersaturation[0]
+
+    # The lowest value seen was 1e-13 from the final one, a margin of a thousand.
+    seen = np.array([conditions.supersaturation for conditions in kernel.seen])  # [-]
+    assert seen.max() == pytest.approx(supersaturation[0], rel=ALGEBRAIC_RTOL)
+    assert seen.min() == pytest.approx(supersaturation[-1], rel=ALGEBRAIC_RTOL)
+    slowest = kernel.seen[int(np.argmin(seen))]
+    assert slowest.growth_rate == pytest.approx(POWER_LAW_GROWTH[0] * seen.min(),
+                                                rel=ALGEBRAIC_RTOL)
+
+
 @pytest.mark.parametrize("kernel", [
     lambda size_i, size_j, conditions: np.full(np.broadcast(size_i, size_j).shape, -1e-14),
     lambda size_i, size_j, conditions: np.full(np.broadcast(size_i, size_j).shape, np.nan),
@@ -784,6 +927,35 @@ def test_kernels_see_no_crystal_smaller_than_a_nucleus():
     _state_and_rates(vessel)
 
     assert kernel.smallest == NUCLEUS_SIZE
+
+
+def test_a_node_below_the_nucleus_size_agglomerates_at_its_own_size():
+    # The shear kernel grows with size, so it tells the nucleus size from the
+    # node's. Each collision still removes its pair at their own sizes and
+    # leaves one crystal of their summed volume.
+    kernel = ShearKernel(20.0, 0.4)
+    (small, large), (n_small, n_large) = FEW_SIZES  # [um], [#/m**3]
+    vessel, _, _ = _agglomeration_only(_population_moments(*FEW_SIZES), kernel,
+                                       rad=COARSE_NUCLEUS_SIZE)
+
+    _, _, rates = _state_and_rates(vessel)
+
+    conditions = KernelConditions(temp=TEMP, supersaturation=0.0, growth_rate=0.0,
+                                  shape_factor=SHAPE_FACTOR)
+    seen = {small: COARSE_NUCLEUS_SIZE, large: large}  # [um], size the kernel is shown
+    beta = {pair: float(kernel(np.array(seen[pair[0]]), np.array(seen[pair[1]]), conditions))
+            for pair in ((small, small), (large, large), (small, large))}  # [m**3/s]
+    collisions = [  # (collisions per m**3 of slurry per second, sizes removed [um])
+        (beta[small, small] * n_small ** 2 / 2, (small, small)),
+        (beta[large, large] * n_large ** 2 / 2, (large, large)),
+        (beta[small, large] * n_small * n_large, (small, large)),
+    ]
+    orders = np.arange(NUM_MOM)
+    gained = sum(frequency * np.cbrt(sum(size ** 3 for size in pair)) ** orders
+                 for frequency, pair in collisions)
+    lost = sum(frequency * sum(size ** orders for size in pair)
+               for frequency, pair in collisions)
+    _assert_rates_match(rates, gained - lost, gained + lost)
 
 
 def test_an_agglomeration_kernel_must_be_callable():
@@ -1071,6 +1243,61 @@ def test_breakage_sees_no_crystal_smaller_than_a_nucleus():
     _state_and_rates(vessel)
 
     assert selection.smallest == NUCLEUS_SIZE
+
+
+def test_a_node_below_the_nucleus_size_breaks_into_its_own_fragments():
+    # Every parent breaks at S_0 into fragments whose k-th moment is c_k L**k,
+    # so dmu_k/dt = S_0 (c_k - 1) mu_k whatever the nucleus size. Fragments of
+    # the nucleus size in place of the node's would make crystal volume.
+    fragments, share = SELF_SIMILAR_FRAGMENTS["symmetric"]
+    vessel, _, _ = _breakage_only(_population_moments(*FEW_SIZES),
+                                  ConstantSelection(BREAKAGE_RATE), fragments,
+                                  rad=COARSE_NUCLEUS_SIZE)
+
+    _, state, rates = _state_and_rates(vessel)
+
+    expected = BREAKAGE_RATE * (share - 1) * state
+    _assert_rates_match(rates, expected, BREAKAGE_RATE * (share + 1) * state)
+
+
+@pytest.mark.parametrize("selection", [
+    ConstantSelection(BREAKAGE_RATE, minimum_size=80.0),
+    PowerLawSelection(BREAKAGE_RATE, 3.0, minimum_size=80.0),
+    ExponentialSelection(BREAKAGE_RATE, 1e-7, minimum_size=80.0),
+    ConstantSelection(BREAKAGE_RATE, minimum_size=0.0),
+], ids=["constant", "power_law", "exponential", "zero_minimum_size"])
+def test_a_minimum_breakage_size_warns_that_a_solve_can_follow_the_steps(selection):
+    # The frequency jumps at the minimum size, so a node resting there switches
+    # breakage on and off between steps, and nothing in a solve reports it (#564).
+    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+
+    with pytest.warns(RuntimeWarning,
+                      match="minimum_size = %g um" % selection.minimum_size) as caught:
+        QMOMPopulationBalance(owning_phase=solid, target_components=TARGET,
+                              solvent_name="solvent", moments_init=np.zeros(NUM_MOM),
+                              breakage=selection, fragments=BinaryFragmentation())
+
+    assert _warning_files(caught, "#564") == [Path(__file__).resolve()]
+
+
+@pytest.mark.parametrize("kernels", [
+    {},
+    {"agglomeration": ConstantKernel(1e-14)},
+    {"breakage": ConstantSelection(BREAKAGE_RATE), "fragments": BinaryFragmentation()},
+    {"breakage": lambda size, conditions: np.full(np.shape(size), BREAKAGE_RATE),
+     "fragments": BinaryFragmentation()},
+], ids=["no_kernels", "agglomeration_only", "no_minimum_size", "user_selection"])
+def test_qmom_stays_quiet_about_breakage_without_a_minimum_size(kernels):
+    solid = SolidPhase(DATA_PATH, mass=0.0, mass_frac=CRYSTAL_MASS_FRAC, temp=TEMP)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        mechanism = QMOMPopulationBalance(
+            owning_phase=solid, target_components=TARGET, solvent_name="solvent",
+            moments_init=np.zeros(NUM_MOM), **kernels)
+
+    assert (mechanism.kernel_sources is not None) == bool(kernels)
+    assert not _warning_files(caught, "#564")
 
 
 @pytest.mark.parametrize("kernels, error, message", [
@@ -1425,6 +1652,25 @@ def test_a_charge_of_crystals_into_a_qmom_vessel_is_refused():
                               integrator=_lsoda())
 
     with pytest.raises(PharmaPySpecificationError, match="charge of\\s+crystals"):
+        _flowsheet(upstream, downstream)
+
+
+class ChargeRefusingMoments(MomentsPopulationBalance):
+    """Moment form that declares it cannot be charged with crystals."""
+
+    refuses_crystal_charge = True
+
+
+@pytest.mark.integration
+def test_a_charge_of_crystals_is_refused_by_any_mechanism_that_says_so():
+    # The crystallizer asks the mechanism, so a form other than QMOM can opt in.
+    upstream, _, _ = _build(SEED_COUNT * SEED_SIZE ** np.arange(NUM_MOM), None,
+                            growth_rate=0.0, nucleation_rate=0.0, integrator=_lsoda())
+    downstream, _, _ = _build(np.zeros(NUM_MOM), None, mechanism_cls=ChargeRefusingMoments,
+                              growth_rate=0.0, nucleation_rate=0.0, integrator=_lsoda())
+
+    with pytest.raises(PharmaPySpecificationError,
+                       match="ChargeRefusingMoments and cannot take a charge of crystals"):
         _flowsheet(upstream, downstream)
 
 

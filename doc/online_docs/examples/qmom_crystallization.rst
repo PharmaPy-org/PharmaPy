@@ -310,16 +310,25 @@ itself stays whole. That one size is the only difference.
 .. warning::
 
    The frequency jumps to zero at ``minimum_size``. If a node settles there, breakage
-   switches on and off from step to step and adaptive solvers can stall or go wrong.
-   Of the 30 runs under `Comparison with the published results`_, LSODA did not finish
-   10 in a minute, and 7 of those finished once the threshold was removed.
-   **Loosening the tolerance is not a safe way out.** On case 1, BDF at
-   ``rtol=1e-4`` finished in under a second with L43 at 2271 instead of 4.2, and raised
-   no error; at ``rtol=1e-6`` it gave 4.39. See issue
-   `#564 <https://github.com/PharmaPy-org/PharmaPy/issues/564>`__.
+   switches on and off from step to step, and adaptive solvers can stall or end on a
+   wrong value without an error. Nothing in a solve detects this yet, so
+   ``QMOMPopulationBalance`` issues a ``RuntimeWarning`` whenever its selection
+   function has a ``minimum_size``, including for runs that are fine, such as the one
+   above. See issue `#564 <https://github.com/PharmaPy-org/PharmaPy/issues/564>`__.
 
-   When you use a minimum size, compare two tolerances, and look for a node on the
-   threshold in ``result.quadrature_nodes``.
+   Case 1 of the paper's Table 4 shows it through ``solve_unit``: constant kernel,
+   constant selection with the primary particle unbreakable, symmetric fragments,
+   three nodes. The paper gives :math:`m_0 = 0.0376` and :math:`d_{43} = 4.198`. On
+   the default CVode backend the count still swung between 0.0337 and 0.0386 after 14
+   breakage time constants, and the run ended on 0.0338; with a 1 s step cap it ended
+   on 0.0389. **Loosening the tolerance is not a safe way out.** SciPy BDF at
+   ``rtol=1e-4`` finished in under a second with L43 at 2271 instead of 4.2, and raised
+   no error; at ``rtol=1e-6`` it gave 4.39. Without ``minimum_size`` the same case
+   settles on the exact balance :math:`m_0 = 2 S_0 / \beta_0 = 0.0400` on CVode and on
+   BDF.
+
+   When you use a minimum size, compare two tolerances or step caps, and look for a
+   node on the threshold in ``result.quadrature_nodes``.
 
 A batch with everything on
 --------------------------
@@ -387,8 +396,14 @@ A solve adds these to ``vessel.result``, with one row or value per time.
      - :math:`\mu_4 / \mu_3`, the volume-weighted mean size. Only from three
        nodes up, since two nodes do not carry :math:`\mu_4`
 
-Nodes and weights read NaN where the moments hold fewer than N distinct sizes,
-such as a monodisperse seed. Mean sizes read NaN when there are no crystals.
+Nodes and weights read NaN where the moments hold fewer than N nodes. That happens
+with fewer than N distinct sizes, such as a monodisperse seed, and also with a
+narrow population, because each further node needs a wider spread. With CV the
+coefficient of variation of the sizes, the second node is kept from a CV of about
+1e-5, the third from about 3e-3 and the fourth from about 2e-2. A seed with a 1 %
+spread therefore reports three nodes and NaN for a fourth. The nodes that are
+reported still reproduce the moments, to better than 1e-8 in the cases measured.
+Mean sizes read NaN when there are no crystals.
 
 The nodes are a quadrature rule, not a size distribution. They reproduce the
 moments, but they do not say how many crystals are at a given size, and a plot of
@@ -582,8 +597,7 @@ with a message that says what to do.
      - The missing moments cannot be recovered
    * - Feed carrying a size distribution (FVM)
      - Refused
-     - In other units such a feed is lost silently: issue
-       `#560 <https://github.com/PharmaPy-org/PharmaPy/issues/560>`__
+     - Every population balance refuses a feed in another form
    * - Charge of crystals
      - Refused
      - Use the ``Inlet``. See issue
@@ -604,8 +618,14 @@ Assumptions and limits
 
 - **Refactored crystallizers only.** The legacy ``BatchCryst``, ``MSMPR`` and
   ``SemibatchCryst`` have neither QMOM nor the kernels on a size grid.
-- **Isothermal so far.** The tests run isothermal vessels, and agglomeration and
-  breakage add no heat term.
+- **Temperature.** Agglomeration and breakage add no heat term. One test cools a
+  batch and checks that the kernels see the liquid's temperature. Every other solve
+  in the tests is isothermal, so the energy balance of a QMOM vessel is not
+  otherwise exercised.
+- **Minimum breakage size.** With ``minimum_size``, a solve can follow the
+  integrator's steps and finish without an error: issue
+  `#564 <https://github.com/PharmaPy-org/PharmaPy/issues/564>`__. The constructor
+  warns whenever a selection function has one.
 - **Dissolution** is size independent, and crystals do not disappear at
   :math:`L = 0`, as in the moment form.
 - **Nuclei** are born at size ``rad``, which defaults to 0. Kernels and selection
@@ -650,9 +670,15 @@ Verification
        a continuous crystallizer
    * - Minimum breakage size
      - The exact moments of seeds that break once and whose fragments stay whole
+   * - Conditions a kernel sees
+     - The temperature of a cooled batch and the supersaturation of a crystallizing
+       one, as the solved liquid gives them
    * - Published numbers
      - Cases 2, 4, 7 and 8 of Marchisio et al. (2003) with three nodes, through
-       ``BatchCrystallizer`` (``tests/test_qmom_marchisio_benchmark.py``)
+       ``BatchCrystallizer`` (``tests/test_qmom_marchisio_benchmark.py``), and all ten
+       cases with two nodes on the rate functions
+       (``tests/test_qmom_marchisio_table.py``, which as a script also runs three and
+       four nodes)
    * - Mass and crystal balances
      - Total mass in a semibatch with every mechanism on, and crystals leaving one
        unit against those arriving in the next
@@ -672,10 +698,10 @@ Comparison with the published results
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Eq. 16 and Tables 1 to 3 of Marchisio et al. (2003) agree with the code. The ten
-cases of their Table 4 were also rerun with two, three and four nodes, and the
+cases of their Table 4 were also run with two, three and four nodes, and the
 asymptotes compared with their Tables 5 and 6. A run counts as matching when
-:math:`m_0` and :math:`d_{43}` are both within one unit of the last printed digit.
-**17 of the 30 runs match and 13 do not.**
+:math:`m_0` and :math:`d_{43}`, rounded to the digits the paper prints, are both within
+one unit of the last digit. **17 of the 30 runs match and 13 do not.**
 
 .. list-table::
    :header-rows: 1
@@ -759,19 +785,33 @@ asymptotes compared with their Tables 5 and 6. A run counts as matching when
      - **No**
      - **No**
 
+A "Yes" says that the rate functions reproduce the paper, not that ``solve_unit``
+does. ``tests/test_qmom_marchisio_table.py`` rebuilds this table by integrating the
+rate functions with a fixed-step Runge-Kutta scheme, which PharmaPy does not ship as
+an integrator, because adaptive solvers stall or go wrong where a node rests on a
+minimum breakage size. Case 1 with three nodes is a "Yes" here, and through
+``BatchCrystallizer`` on the default backend it ends on 0.0338; see `Crystals that do
+not break`_. The test suite runs the two-node column. Run the module as a script,
+about a minute, to rebuild all three columns and print the 60 numbers. The four runs
+the test suite also makes through ``BatchCrystallizer`` are listed under
+`Verification`_.
+
 **The cause of the 13 mismatches is not known.** They range from 0.4 % to more than a
-factor of five, the largest on case 10. These checks did not explain them:
+factor of four, the largest on case 10 with two nodes.
 
-- Halving the time step changed none of the 30 results.
-- A separate evaluation of Eq. 16, solved for its steady states, gave the code's values
-  for cases 2, 5 and 8 with two and three nodes, case 4 with three, and case 10 with
-  three and four. It found no physical root for the other runs, which may be a limit
-  of the search.
-- Seven of the mismatching runs, started on the paper's numbers, left them and went
-  toward the code's values. Case 10 with two nodes was still moving at the end of the
-  run, so its value is not final.
+- The 17 matching runs keep their printed digits when the time step changes. Case 9
+  with two and three nodes, where a node rests on the minimum size, moves in its
+  third digit with the step, and case 10 with two nodes is still moving at the end of
+  the run, so those three values are not final. They are far from the paper either
+  way.
+- Two further checks were made once, on 6 Nov 2026, with scripts that were not kept.
+  A separate evaluation of Eq. 16, solved for its steady states, gave the code's
+  values for cases 2, 5 and 8 with two and three nodes, case 4 with three, and case
+  10 with three and four; it found no physical root for the other runs, which may be
+  a limit of the search. And seven of the mismatching runs, started on the paper's
+  numbers, left them and went toward the code's values.
 
-For case 7 with three nodes only :math:`d_{43}` was compared. Table 5 prints
+For case 7 with three nodes only :math:`d_{43}` is compared. Table 5 prints
 :math:`m_0 = 0.0178`, out of line with the 0.0058 and 0.0053 it gives for two and four
 nodes; the run gives 0.0054.
 
@@ -784,10 +824,6 @@ conservation checks above:
 - ``ProductKernel``: not in the paper.
 
 ``ErosionFragmentation`` matches only in case 8 with three nodes.
-
-The table comes from one run on 6 Nov 2026, using fixed-step Runge-Kutta on the
-production rate functions, and it is not in the test suite. The test suite holds only
-the four cases listed under `Verification`_.
 
 References
 ----------

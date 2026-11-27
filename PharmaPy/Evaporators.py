@@ -2197,11 +2197,10 @@ class Evaporator(_StructuralPresenceMixin):
             the results (the heat-duty replay with its bubble points and
             enthalpies, and the published phases) if a species present in a
             row lacks data that they need; absent species need none.
+            Also raised during integration if a species first needs data
+            after the start, chained from IDA's diagnostic.
         IDAError
-            From Assimulo, if the balances fail during the integration, for
-            example because a species fed only after the start lacks data.
-            The missing-data error is not chained to it and the species is
-            not named (issue #435).
+            Native integration failure without a recorded model error.
 
         Notes
         -----
@@ -2272,9 +2271,9 @@ class Evaporator(_StructuralPresenceMixin):
         MissingPropertyError
             From the initialization, if a present species (structural
             presence) lacks data that it needs.
+            Also raised during integration, chained from IDA's diagnostic.
         IDAError
-            From Assimulo, if the balances fail during the integration; a
-            missing-data error there is not chained to it (issue #435).
+            Native integration failure without a recorded model error.
 
         Notes
         -----
@@ -3469,11 +3468,10 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
             heat-duty replay with its bubble points of the vapor
             composition, and the published phases) if a species present in
             a row lacks data that they need; absent species need none.
+            Also raised during dynamic integration if a species first needs
+            data after the start, chained from IDA's diagnostic.
         IDAError
-            From Assimulo, in dynamic mode, if the balances fail during the
-            integration, for example because a species fed only after the
-            start lacks data. The missing-data error is not chained to it
-            and the species is not named (issue #435).
+            Native integration failure without a recorded model error.
 
         Notes
         -----
@@ -3532,10 +3530,10 @@ class ContinuousEvaporator(_StructuralPresenceMixin):
         MissingPropertyError
             From the initialization, if a present species (structural
             presence) lacks data that it needs.
+            Also raised during dynamic integration, chained from IDA's
+            diagnostic.
         IDAError
-            From Assimulo, if the dynamic balances fail during the
-            integration; a missing-data error there is not chained to it
-            (issue #435).
+            Native integration failure without a recorded model error.
 
         Notes
         -----

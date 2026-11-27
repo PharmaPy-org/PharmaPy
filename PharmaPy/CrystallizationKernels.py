@@ -437,12 +437,12 @@ class DifferentialSedimentationKernel:
         numpy.ndarray
             e (pi g drho / 72 mu) (L_i + L_j)**2 |L_i**2 - L_j**2| [m**3/s].
         """
-        size_i = np.asarray(size_i, dtype=float) * METRE_PER_MICRON  # [m]
-        size_j = np.asarray(size_j, dtype=float) * METRE_PER_MICRON  # [m]
+        size_i_m = np.asarray(size_i, dtype=float) * METRE_PER_MICRON  # [m]
+        size_j_m = np.asarray(size_j, dtype=float) * METRE_PER_MICRON  # [m]
         settling_rate = (np.pi * STANDARD_GRAVITY * self.density_difference
                          / (72 * self.viscosity))  # [1/(m s)]
-        return (self.efficiency * settling_rate * (size_i + size_j) ** 2
-                * np.abs(size_i ** 2 - size_j ** 2))
+        return (self.efficiency * settling_rate * (size_i_m + size_j_m) ** 2
+                * np.abs(size_i_m ** 2 - size_j_m ** 2))
 
 
 # ---------------------------------------------------------------------------
@@ -488,6 +488,13 @@ def _unbroken_up_to(rates, size, minimum_size):
     -------
     numpy.ndarray
         The frequencies [1/s], zero at and below ``minimum_size``.
+
+    Notes
+    -----
+    The frequency jumps at ``minimum_size``. Quadrature nodes move with the
+    state, so in a QMOM solve this jump makes the right-hand side
+    discontinuous, and a node resting on it can make the result follow the
+    integrator's steps; ``QMOMPopulationBalance`` warns about it (#564).
     """
     if minimum_size is None:
         return rates

@@ -4,7 +4,9 @@ Scope: the three-node asymptotes of cases 2, 4, 7 and 8 against the paper's Tabl
 5 and 6. Crystals of 1 um at 1 #/m**3 stand in for its scaled L_0 = 1 and m_k = 1,
 and the kernels' constants are set to give its bare forms. Nothing grows. SciPy BDF,
 about 10 s. These cases match the paper and solve quickly; the guide records the
-other runs (``doc/online_docs/examples/qmom_crystallization.rst``).
+other runs (``doc/online_docs/examples/qmom_crystallization.rst``), which
+``tests/test_qmom_marchisio_table.py`` rebuilds on the rate functions. Each case sets
+a ``minimum_size``, so each warns of #564.
 """
 
 from pathlib import Path

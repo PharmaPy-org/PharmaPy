@@ -122,10 +122,6 @@ DRYING_RUNTIME = 1.0e-3  # [s]
 SWITCH_TIME = 5.0e-4  # [s]
 BEFORE_SWITCH = 2.0e-4  # [s]
 AFTER_SWITCH = 8.0e-4  # [s]
-# CVode internal-step limit [-] of a solve that stalls where api, without
-# data, enters (issue #435): it fails within about a second (probed: 500
-# steps take about 5 s, all at the switch time).
-STALL_STEPS = 100  # [-]
 
 SEPARATION_SPECIES = ("A", "B", "C", "D", "solvent")
 API_SEPARATION_INDEX = 5  # [-], appended last, so the solvent stays 4
@@ -955,20 +951,12 @@ def test_failed_drying_solve_keeps_no_results(tmp_path):
     """A solve that fails inside CVode restores the unit and its records.
 
     The second solve's inlet carries api, without data, from SWITCH_TIME
-    on. CVode cannot step past it and stalls there (issue #435), so
-    ``STALL_STEPS`` bounds the attempt, which then fails. The first solve's
-    result, elapsed time and presence records remain, and api, latched
-    only by the failed attempt, is not present. Earlier the attempt left
-    ``elapsed_time`` at the first entry of its time grid.
-
-    The ``CVodeError`` expectation is provisional, pending issue #435: once
-    a species first fed during an integration raises its named
-    ``MissingPropertyError`` or no longer stalls the integration, update
-    the expected exception (and drop ``STALL_STEPS``); the rollback
-    assertions stay.
+    on. The shared solver guard exposes the named missing-property error.
+    The first solve's result, elapsed time and presence records remain,
+    and api, latched only by the failed attempt, is not present. Earlier
+    the attempt left elapsed_time at the first entry of its time grid.
     """
     pytest.importorskip("assimulo")
-    from assimulo.solvers.sundials import CVodeError
 
     path = _drying_database(tmp_path, API_BARE)
     dryer = _dryer(path)
@@ -978,11 +966,10 @@ def test_failed_drying_solve_keeps_no_results(tmp_path):
     gas_mask = dryer._presence.mask
     _switching_inlet(dryer, path)
 
-    with pytest.raises(CVodeError):
+    with pytest.raises(MissingPropertyError, match=r"\['api'\].*'visc_gas'"):
         dryer.solve_unit(DRYING_PRESSURE_DROP,
                          time_grid=np.array([BEFORE_SWITCH, AFTER_SWITCH]),
-                         verbose=False,
-                         sundials_opts={"maxsteps": STALL_STEPS})
+                         verbose=False)
 
     assert dryer.result is result
     assert dryer.elapsed_time == elapsed

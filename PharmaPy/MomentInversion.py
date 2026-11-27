@@ -13,8 +13,19 @@ from PharmaPy.Errors import PharmaPyValueError
 # most 5.4e-12 over 150,000 random 1- to 3-point sets (sizes 0.1 to 1585
 # um, weights 1e6 to 1e14 #/m3, 29 Oct 2026), and with no cut-off 8.8 % of
 # them gained a spurious node. This keeps a margin of about twenty. Design
-# assumption. It merges a population into one node only when its sizes
-# spread by less than a coefficient of variation of 1e-5.
+# assumption.
+#
+# Each further node needs a wider population. For sizes spread about their
+# mean with a coefficient of variation CV, sigma_kk / m_2k is close to
+# c_k * CV**(2k), with c_k the squared norm of the k-th monic orthogonal
+# polynomial of the standardized shape: c_1 = 1, and c_k = k! for a normal
+# shape. Node k + 1 is thus kept from a CV of about
+# (DEGENERACY_RTOL / c_k)**(1/(2k)): 1e-5 for the second node, and, measured
+# on evenly spaced, skewed and normal populations around 100 um (24 Nov
+# 2026), 2.7e-3 to 3.5e-3 for the third, 1.6e-2 to 2.8e-2 for the fourth and
+# 3.8e-2 to 9.9e-2 for the fifth. A narrower population comes back with
+# fewer nodes. Those k nodes miss m_2k by at most DEGENERACY_RTOL and the
+# higher moments asked for by more, up to 7e-9 in the same runs.
 DEGENERACY_RTOL = 1e-10  # [-]
 
 
