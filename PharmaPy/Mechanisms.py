@@ -1232,18 +1232,57 @@ class PopulationBalanceMechanism(CrossPhaseTransferMechanism):
         raise NotImplementedError
 
     def _inlet_population_density(self, stream_phase):
-        """Feed population per m3 of slurry.
+        """Feed population per m3 of feed slurry.
 
-        Published in that basis by MultiPhaseVessel.outputs, which is what
-        old PharmaPy moved between units -- the old crystallizer
-        multiplied by vol_slurry again on the way back into a phase.
+        Parameters
+        ----------
+        stream_phase : BasePhase
+            Feed phase whose population mechanism, if it has one, publishes
+            the crystals the feed carries.
+
+        Returns
+        -------
+        numpy.ndarray or None
+            Feed population in this mechanism's flow state: a number density
+            [#/(um m3 of feed slurry)] or moments [um**k/m3 of feed slurry].
+            None for a feed without crystals, which has no population
+            mechanism or no population state.
+
+        Raises
+        ------
+        PharmaPySpecificationError
+            If the feed carries its crystals in a population state with
+            another name: moments into a vessel that resolves the size
+            distribution, or the same form under another state name. The
+            feed is read by state name, so skipping that state would lose
+            every crystal in the feed without a word.
+
+        Notes
+        -----
+        The population is per m3 of slurry because MultiPhaseVessel.outputs
+        publishes it in that basis, which is how the legacy crystallizers
+        moved it between units.
         """
         name = self.flow_state_name
 
         for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
+            feed_state_name = getattr(mechanism, 'flow_state_name', None)
 
-            if getattr(mechanism, 'flow_state_name', None) != name:
+            if feed_state_name is None:
                 continue
+
+            if feed_state_name != name:
+                raise PharmaPySpecificationError(
+                    'A feed carrying its crystals as %s state %r cannot '
+                    'enter this vessel, whose %s carries them as %r. The '
+                    'vessel reads the feed population by state name, so '
+                    'those crystals would be lost. A size distribution and '
+                    'moments cannot share a name: moments do not determine a '
+                    'size distribution, and a distribution is not converted '
+                    'into moments. Give both units the same population form '
+                    'and state name.'
+                    % (type(mechanism).__name__, feed_state_name,
+                       type(self).__name__, name))
 
             value = getattr(mechanism, name, None)
 
@@ -2936,42 +2975,6 @@ class QMOMPopulationBalance(MomentsPopulationBalance):
 
         return np.sum(rule.weights[:, None] * size_factor[:, None]
                       * rule.nodes[:, None] ** orders, axis=0)
-
-    def _inlet_population_density(self, stream_phase):
-        """Feed moments per m3 of slurry, refusing any other feed population.
-
-        Parameters
-        ----------
-        stream_phase : BasePhase
-            Feed phase, whose population mechanism publishes the feed.
-
-        Returns
-        -------
-        numpy.ndarray or None
-            Feed moments [um**k/m3 of feed slurry], shape ``(2N,)``; None for
-            a feed without crystals.
-
-        Raises
-        ------
-        PharmaPySpecificationError
-            If the feed carries its crystals as another state, such as a
-            resolved distribution, which the base class would skip, losing
-            those crystals without a word.
-        """
-        density = super()._inlet_population_density(stream_phase)
-
-        if density is None:
-            for mechanism in getattr(stream_phase, 'mechanisms', None) or ():
-                state_name = getattr(mechanism, 'flow_state_name', None)
-
-                if state_name not in (None, self.flow_state_name):
-                    raise PharmaPySpecificationError(
-                        'A feed carrying its crystals as %r cannot enter this '
-                        'QMOMPopulationBalance, which takes moments as %r. '
-                        'Use a QMOM or moment-form unit upstream.'
-                        % (state_name, self.flow_state_name))
-
-        return density
 
     def _moments_from(self, completed_state):
         """Read the moments from a replay state.
