@@ -19,14 +19,18 @@ pytestmark = pytest.mark.integration
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "doc/online_docs/examples/qmom_crystallization.rst"
 INDEX = ROOT / "doc/online_docs/examples/index.rst"
-# Directives of the page: setup, minimum size, batch, custom kernel, flowsheet.
-NUM_BLOCKS = 5  # [-]
+# Directives of the page: setup, minimum size, batch, custom kernel, size grid,
+# flowsheet.
+NUM_BLOCKS = 6  # [-]
 # The page's solves use rtol and atol 1e-10. The worst miss was 1.5e-8, on the
 # flowsheet's crystal balance (6 Nov 2026); a margin of about seven.
 SOLVE_RTOL = 1e-7  # [-]
 # Rebuilding the moments from their own rule is algebra on the solved state,
 # so only roundoff separates them; the worst miss was 2.2e-15 (6 Nov 2026).
 ALGEBRAIC_RTOL = 1e-12  # [-]
+# Agglomeration and breakage on the size grid keep its crystal volume to
+# rounding; it moved by 8.9e-16 over the page's solve (10 Nov 2026).
+VOLUME_CONSERVATION_RTOL = 1e-12  # [-]
 METRE_PER_MICRON = 1e-6  # [m/um], exact
 SHAPE_FACTOR = 0.5  # [-], the kv of the page's helper
 
@@ -95,6 +99,20 @@ def test_batch_count_follows_the_logistic_balance(page_run):
     expected = capacity / (1 + (capacity / start - 1)
                            * np.exp(-selection * namespace["RUNTIME"]))
     assert namespace["moments"][-1, 0] == pytest.approx(expected, rel=SOLVE_RTOL)
+
+
+def test_grid_count_follows_the_logistic_balance_at_constant_volume(page_run):
+    # The same balance as the batch above, on the size grid: both schemes keep
+    # the count exact while no crystal reaches either end of the grid.
+    namespace, _ = page_run
+    selection, kernel = namespace["SELECTION"], namespace["KERNEL"]
+    count = namespace["fvm_count"]  # [#/m**3]
+    capacity = 2 * selection / kernel  # [#/m**3]
+    expected = capacity / (1 + (capacity / count[0] - 1)
+                           * np.exp(-selection * namespace["RUNTIME"]))
+    assert count[-1] == pytest.approx(expected, rel=SOLVE_RTOL)
+    volume = namespace["cell_counts"] @ namespace["grid"] ** 3  # [um**3/m**3]
+    np.testing.assert_allclose(volume, volume[0], rtol=VOLUME_CONSERVATION_RTOL)
 
 
 def test_reported_rule_reproduces_the_moments(page_run):

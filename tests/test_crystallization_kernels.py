@@ -5,7 +5,10 @@ the shear and Brownian kernels from Smoluchowski's radius forms and the
 settling kernel from Stokes velocities, so none repeats the kernels' own
 expressions; the degrees of homogeneity are those of Table 1 of Marchisio,
 Vigil and Fox (2003). Fragment moments come from the fragments' sizes, or
-from integrating the densities b(L|lambda) of that paper's Table 3. Sizes
+from integrating the densities b(L|lambda) of that paper's Table 3. The
+fragments placed on a grid (``grid_counts``) are checked against each
+class's own b_0 and b_3, against placements derived by hand, and against
+the densities integrated over each node's hat function. Sizes
 are in um, agglomeration rates in m**3/s and breakage frequencies in 1/s.
 The size arrays have different lengths, so a broadcast that drops or swaps
 an axis changes the shape.
@@ -422,6 +425,157 @@ def test_fragments_are_counted_and_hold_their_parents_volume(fragments, fragment
 
     np.testing.assert_allclose(moments[:, 0], fragment_counts, rtol=ALGEBRAIC_RTOL)
     np.testing.assert_allclose(moments[:, 3], PARENT_SIZES ** 3, rtol=ALGEBRAIC_RTOL)
+
+
+# Unequal spacing with a first node above zero size, and a grid from zero
+# size, below whose first node no fragment can fall.
+GEOMETRIC_GRID = np.geomspace(2.0, 400.0, 23)  # [um]
+GRID_FROM_ZERO = np.linspace(0.0, 300.0, 16)  # [um]
+GRID_FRAGMENTS = {
+    "symmetric": BinaryFragmentation(0.5),
+    "mass_ratio_1_4": BinaryFragmentation(0.2),
+    "erosion": ErosionFragmentation(7.3),  # [um], between nodes of both grids
+    # A node of GRID_FROM_ZERO: that parent stays whole, with no empty
+    # remainder left at the zero-size node.
+    "erosion_at_a_node": ErosionFragmentation(20.0),  # [um]
+    "parabolic_low_c": ParabolicFragmentation(0.5),
+    "parabolic_high_c": ParabolicFragmentation(2.8),
+    "uniform": UniformFragmentation(),
+}
+SPREAD_DENSITIES = {
+    "parabolic_low_c": lambda size, parent: _parabolic_density(size, parent, 0.5),
+    "parabolic_high_c": lambda size, parent: _parabolic_density(size, parent, 2.8),
+    "uniform": _uniform_density,
+}
+
+
+@pytest.mark.parametrize("grid", [GEOMETRIC_GRID, GRID_FROM_ZERO], ids=["geometric", "from_zero"])
+@pytest.mark.parametrize("name", GRID_FRAGMENTS)
+def test_fragments_placed_on_a_grid_hold_their_parents_volume(name, grid):
+    fragments = GRID_FRAGMENTS[name]
+
+    counts = fragments.grid_counts(grid)
+
+    placed_volume = grid ** 3 @ counts  # [um**3], per parent
+    np.testing.assert_allclose(placed_volume, fragments.moments(grid, [3])[:, 0],
+                               rtol=ALGEBRAIC_RTOL)
+    assert np.all(counts >= 0)
+
+
+@pytest.mark.parametrize("name", GRID_FRAGMENTS)
+def test_every_fragment_is_counted_when_none_falls_below_the_first_node(name):
+    fragments = GRID_FRAGMENTS[name]
+
+    counts = fragments.grid_counts(GRID_FROM_ZERO)
+
+    np.testing.assert_allclose(counts.sum(axis=0), fragments.moments(GRID_FROM_ZERO, [0])[:, 0],
+                               rtol=ALGEBRAIC_RTOL)
+
+
+@pytest.mark.parametrize("name", SPREAD_DENSITIES)
+def test_fragments_below_the_first_node_keep_their_volume_there(name):
+    # A fragment of volume w below the first node's v_0 counts as w / v_0
+    # crystals there, so each parent's fragments fall short of b_0 by the
+    # integral of b(L|lambda) (1 - L**3 / L_0**3) up to the first node L_0.
+    density = SPREAD_DENSITIES[name]
+    first_node = GEOMETRIC_GRID[0]  # [um]
+
+    counts = GRID_FRAGMENTS[name].grid_counts(GEOMETRIC_GRID)
+
+    shortfall = np.array([quad(lambda size: density(size, parent) * (1 - (size / first_node) ** 3),
+                               0.0, first_node, epsabs=0.0, epsrel=1e-12)[0]
+                          for parent in GEOMETRIC_GRID])  # [-]
+    np.testing.assert_allclose(counts.sum(axis=0), 2 - shortfall, rtol=ALGEBRAIC_RTOL)
+
+
+@pytest.mark.parametrize("name", GRID_FRAGMENTS)
+def test_breaking_the_first_nodes_crystals_leaves_them_as_they_are(name):
+    # Every fragment of a parent at the first node falls below it, and keeps
+    # its volume there: one crystal of the parent's volume.
+    counts = GRID_FRAGMENTS[name].grid_counts(GEOMETRIC_GRID)
+
+    expected = np.zeros(len(GEOMETRIC_GRID))
+    expected[0] = 1.0
+    np.testing.assert_allclose(counts[:, 0], expected, rtol=0, atol=ALGEBRAIC_RTOL)
+
+
+# Each node holds twice the volume of the one below, so fragments of half a
+# parent's volume land on a node.
+DOUBLING_GRID = 10.0 * 2.0 ** (np.arange(6) / 3)  # [um]
+
+
+def test_halves_of_a_parent_land_on_the_node_below_it():
+    counts = BinaryFragmentation(0.5).grid_counts(DOUBLING_GRID)
+
+    expected = 2 * np.eye(len(DOUBLING_GRID), k=1)
+    expected[0, 0] = 1.0  # both halves below the first node keep its volume
+    np.testing.assert_allclose(counts, expected, rtol=0, atol=ALGEBRAIC_RTOL)
+
+
+def test_eroded_parents_are_split_between_the_nodes_around_them():
+    # The fragment has node 2's volume v_2. Parents up to node 2 stay whole;
+    # node 3's (2 v_2) leaves v_2, on node 2; node 4's (4 v_2) leaves 3 v_2,
+    # midway between nodes 3 and 4 in volume; node 5's (8 v_2) leaves 7 v_2,
+    # three quarters of the way from node 4 to node 5.
+    counts = ErosionFragmentation(DOUBLING_GRID[2]).grid_counts(DOUBLING_GRID)
+
+    expected = np.zeros((6, 6))
+    expected[[0, 1, 2], [0, 1, 2]] = 1.0
+    expected[2, 3] = 2.0
+    expected[[2, 3, 4], [4, 4, 4]] = 1.0, 0.5, 0.5
+    expected[[2, 4, 5], [5, 5, 5]] = 1.0, 0.25, 0.75
+    np.testing.assert_allclose(counts, expected, rtol=0, atol=ALGEBRAIC_RTOL)
+
+
+def _hat(node, volume, node_volumes):
+    """Share of node ``node`` of a fragment of the given volume, by fixed pivot.
+
+    Parameters
+    ----------
+    node : int
+        Node index.
+    volume : float
+        Fragment volume L**3 [um**3].
+    node_volumes : numpy.ndarray
+        Node volumes [um**3], shape ``(n,)``.
+
+    Returns
+    -------
+    float
+        The hat function, linear in volume between neighbouring nodes, one at
+        the node and zero at its neighbours; below the first node it falls
+        to zero at zero volume.
+    """
+    unit = np.zeros(len(node_volumes) + 1)
+    unit[node + 1] = 1.0
+    return np.interp(volume, np.concatenate(([0.0], node_volumes)), unit)
+
+
+@pytest.mark.parametrize("name", SPREAD_DENSITIES)
+def test_spread_fragments_are_their_density_integrated_over_each_nodes_hat(name):
+    density = SPREAD_DENSITIES[name]
+    grid = np.array([3.0, 7.0, 12.0, 20.0, 33.0])  # [um], neither uniform nor geometric
+
+    counts = GRID_FRAGMENTS[name].grid_counts(grid)
+
+    expected = np.zeros((len(grid), len(grid)))
+    for parent, parent_size in enumerate(grid):
+        for node in range(parent + 1):
+            expected[node, parent] = quad(
+                lambda size: density(size, parent_size) * _hat(node, size ** 3, grid ** 3),
+                0.0, parent_size, points=grid[:parent] if parent else None,
+                epsabs=0.0, epsrel=1e-12)[0]
+    np.testing.assert_allclose(counts, expected, rtol=INTEGRATION_RTOL)
+
+
+@pytest.mark.parametrize("grid", [
+    [5.0], [5.0, 3.0, 8.0], [-1.0, 4.0], [1.0, np.nan], [[1.0, 2.0]],
+], ids=["one_node", "not_increasing", "negative", "nan", "two_dimensional"])
+@pytest.mark.parametrize("fragments", [BinaryFragmentation(), UniformFragmentation()],
+                         ids=["placed", "spread"])
+def test_grids_that_are_not_size_grids_are_refused(fragments, grid):
+    with pytest.raises(PharmaPyValueError, match="grid_sizes must be"):
+        fragments.grid_counts(grid)
 
 
 @pytest.mark.parametrize("make_law, message", [

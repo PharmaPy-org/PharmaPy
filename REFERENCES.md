@@ -15,12 +15,37 @@ This file gathers literature cited by PharmaPy source, tests, and documentation.
 - Golub, G. H.; Welsch, J. H. (1969). Calculation of Gauss quadrature rules.
   Mathematics of Computation, 23, 221-230.
   DOI: https://doi.org/10.1090/S0025-5718-69-99647-1.
+- Hounslow, M. J.; Ryall, R. L.; Marshall, V. R. (1988). A discretized population
+  balance for nucleation, growth, and aggregation. AIChE Journal, 34(11),
+  1821-1832. DOI: https://doi.org/10.1002/aic.690341108.
+- Kumar, J.; Peglow, M.; Warnecke, G.; Heinrich, S.; Mörl, L. (2006). Improved
+  accuracy and convergence of discretized population balance for aggregation:
+  The cell average technique. Chemical Engineering Science, 61(10), 3327-3342.
+  DOI: https://doi.org/10.1016/j.ces.2005.12.014. Agglomeration of
+  `FVMKernelSources`.
+- Kumar, J.; Warnecke, G.; Peglow, M.; Heinrich, S. (2009). Comparison of
+  numerical methods for solving population balance equations incorporating
+  aggregation and breakage. Powder Technology, 189(2), 218-229.
+  DOI: https://doi.org/10.1016/j.powtec.2008.04.014.
+- Kumar, S.; Ramkrishna, D. (1996). On the solution of population balance
+  equations by discretization - I. A fixed pivot technique. Chemical Engineering
+  Science, 51(8), 1311-1332. DOI: https://doi.org/10.1016/0009-2509(96)88489-2.
+  Breakage of `FVMKernelSources` and the fragment `grid_counts`.
+- Lage, P. L. C. (2002). Comments on the "An analytical solution to the
+  population balance equation with coalescence and breakage - the special case
+  with constant number of particles" by D.P. Patil and J.R.G. Andrews. Chemical
+  Engineering Science, 57(19), 4253-4254.
+  DOI: https://doi.org/10.1016/S0009-2509(02)00369-X.
 - Marchisio, D. L.; Vigil, R. D.; Fox, R. O. (2003). Quadrature method of moments
   for aggregation-breakage processes. Journal of Colloid and Interface Science,
   258, 322-334. DOI: https://doi.org/10.1016/S0021-9797(02)00054-1.
 - McGraw, R. (1997). Description of aerosol dynamics by the quadrature method of
   moments. Aerosol Science and Technology, 27, 255-265.
   DOI: https://doi.org/10.1080/02786829708965471.
+- Patil, D. P.; Andrews, J. R. G. (1998). An analytical solution to continuous
+  population balance model describing floc coalescence and breakage - a special
+  case. Chemical Engineering Science, 53(3), 599-601.
+  DOI: https://doi.org/10.1016/S0009-2509(97)00314-X.
 - Scott, W. T. (1968). Analytic studies of cloud droplet coalescence I. Journal of
   the Atmospheric Sciences, 25, 54-65.
   DOI: https://doi.org/10.1175/1520-0469(1968)025<0054:ASOCDC>2.0.CO;2.
