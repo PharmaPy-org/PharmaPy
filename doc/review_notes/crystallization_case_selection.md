@@ -5,9 +5,9 @@ demonstrator ([#358](https://github.com/PharmaPy-org/PharmaPy/issues/358),
 parent [#153](https://github.com/PharmaPy-org/PharmaPy/issues/153)): the
 process, the data, the property sources, the model path and its assumptions, the
 parameters to estimate, and one measurement equation per PAT channel. It was
-written against `master` at `7fe3045`. It fixes the equations before they are
-coded. **It does not claim a calibration: no model has been fitted to these
-data yet.**
+written against `master` at `7fe3045` to specify the full model and
+measurement equations. The [December IR-only fit and replay](../../examples/pat/caffeine/README.md#december-calibration-and-experiment-design)
+estimate the growth prefactor and order and record the remaining validation work.
 
 The selection stands for now. It may be replaced or joined by data from other
 compounds if those prove more useful; the readers and the measurement
@@ -257,10 +257,16 @@ and the dissolved state to state which solid form is present.
 
 ## 8. PharmaPy path and linked defects
 
-Estimation runs through `BatchCryst.paramest_wrapper` and
+The full IR/FBRM estimation is planned through `BatchCryst.paramest_wrapper` and
 `ParameterEstimation` with `Experiment` and `Measurement` objects, one
 experiment per run, and is recorded with `CalibrationRecord`. The measurement
 equations wrap `paramest_wrapper` from outside.
+
+The initial IR-only workflow calls `batch_cooling.simulate` at each parameter
+evaluation and creates a fresh legacy `BatchCryst` for every run. Its external
+callback varies only the two free growth coordinates, so it does not request
+the native sensitivity solve affected by #222. It reports the independent
+finite-difference comparison and CVode observable refinement at the fitted point.
 
 | Issue | Effect on this case | Handling |
 | --- | --- | --- |

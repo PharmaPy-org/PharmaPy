@@ -67,3 +67,73 @@ starting kinetics of `runs.json` (they are not fitted values):
   minute. The timing of the seeding spike is consistent with them.
 - The assignment of the 1700 cm-1 band to caffeine rests on its growth when the
   caffeine dissolves. It was not checked against a reference spectrum.
+
+## December calibration and experiment design
+
+Run the recorded case through the shared WP1 estimation and design interfaces
+from a checkout with the caffeine dataset and the experiment-design API.
+Use the locked Assimulo environment and a clean source revision. The first
+command writes the fit record outside the checkout. The second checks the
+recorded Git revision and inputs and reproduces the accepted parameters.
+December refers to the checkpoint. The acquisition dates are in `runs.json`.
+
+```bash
+pixi run -e assimulo python -m examples.pat.caffeine_m6 \
+    --revision "$(git rev-parse HEAD)" --record /tmp/caffeine-fit.json
+pixi run -e assimulo python -m examples.pat.caffeine_m6 \
+    --revision "$(git rev-parse HEAD)" --replay /tmp/caffeine-fit.json
+```
+
+The fit uses the measured 1700 cm⁻¹ IR band heights and temperature logs for
+the high-seed slow-cooling and low-seed fast-cooling runs. It takes spectra
+after the seeding time in `runs.json` through the first logged temperature
+at or below the final 20 °C cooling target. This can include the transition
+into the hold because the window follows the recorded temperature rather
+than a setpoint clock. The approximate alignment of the instruments limits
+the interpretation of the earliest samples. The nine post-seeding spectra
+of the low-seed slow-cooling run are held out of growth fitting. Its earlier
+spectra still contribute to band calibration and pooled solubility, so this
+is a limited check on the growth fit. The high-seed fast-cooling IR trace
+is excluded because of its documented probe issue.
+
+The legacy moment model predicts liquid caffeine mass per solvent mass
+[kg/kg]. The band equation in the
+[case-selection note](../../../doc/review_notes/crystallization_case_selection.md#7-measurement-equations)
+maps that ratio to absorbance. The fit estimates the growth prefactor
+[µm/s] and supersaturation order [dimensionless], holding the secondary
+nucleation rates and activation energies at the case starting values.
+Both predicted mass inventories are checked at every requested time.
+`--treatment common_baseline` repeats the study with the other documented
+band and solubility calibration.
+
+The two pre-seeding dissolved-plateau scatters define relative weights for
+each run. The fit estimates a common residual variance scale and records
+per-run RMSE relative to plateau scatter, bias and adjacent-observation
+residual correlation. These diagnostics matter here. The fitted residuals
+are much larger than the plateau scatter and strongly correlated across
+adjacent observations. The local linearized covariance assumes independent
+Gaussian errors and fixes the band calibration, solubility curve, seed
+geometry, seeding times, other kinetics and prescribed temperature histories.
+Use it as a conditional diagnostic. The growth prefactor remains weakly
+determined.
+
+The workflow compares the optimizer's derivatives with a second-order
+finite-difference stencil at the fitted point. It reruns the two observation
+grids at that stencil and the fitted point with both CVode tolerances divided
+by 100. The observed change in the band is used as an empirical error scale
+for the local sensitivity-rank calculation. The comparison and numerical
+environment are stored in the record.
+
+The sampling example compares two retained IR spectra at the first and last
+recorded times of each third of the fitted spectrum sequence, on a hypothetical
+repeat of the high-seed slow-cooling recipe. The log determinant gains describe
+a model calculation under independent errors. They illustrate how the reported
+information changes with the subset of spectra, with the same recipe and
+number of spectra throughout. Selecting a physical experiment requires
+independent repeats or a residual model that accounts for the observed
+serial structure.
+
+This IR-only workflow contributes to #351, #352, #355, #359 and #360.
+The full crystallization case still needs secondary-nucleation and FBRM
+analysis, seed-size and independent solubility sensitivity, and a domain
+review. Adoption by the bioreactor demonstrator is tracked separately.
