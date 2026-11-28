@@ -60,6 +60,7 @@ def test_rejects_unsolved_and_instantaneous_tasks(batch_case):
 
 
 def test_rejects_unrecognized_flowsheet_task(batch_case):
+    """Require the declared task name to exist in the flowsheet."""
     simulation, tasks, scenario = batch_case
     with pytest.raises(ValueError, match='not flowsheet units.*Unknown'):
         export_batch_stn(simulation, {'Unknown': tasks['Mix']}, **scenario)
@@ -68,10 +69,11 @@ def test_rejects_unrecognized_flowsheet_task(batch_case):
 @pytest.mark.parametrize(('field', 'value', 'message'), [
     ('period_seconds', float('inf'), 'period_seconds.*finite'),  # [s]
     ('horizon_periods', 1.5, 'horizon_periods.*positive integer'),  # [-]
+    ('initial_inventory_kg', [], 'initial_inventory_kg.*mapping'),
     ('storage_capacities_kg', {'Feed': -1.0}, 'Capacity for .*nonnegative'),  # [kg]
 ])
 def test_rejects_invalid_scenario_quantities(batch_case, field, value, message):
-    """Reject an infinite grid, fractional horizon, or negative storage."""
+    """Reject invalid grid, mass, and scenario-mapping inputs."""
     simulation, tasks, scenario = batch_case
     scenario[field] = value
     with pytest.raises(ValueError, match=message):

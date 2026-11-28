@@ -12,26 +12,23 @@ from PharmaPy.SimExec import SimulationExec
 from PharmaPy.Utilities import CoolingWater
 
 
-def build_stn() -> dict:
-    """Solve a reference batch and export its scheduling instance.
+def solve_reference_sequence(first_duration: float, second_duration: float
+                             ) -> tuple[SimulationExec, float]:
+    """Solve the two isothermal reactors with the synthetic charge.
+
+    Parameters
+    ----------
+    first_duration, second_duration : float
+        Reactor processing times [s], in flowsheet order.
 
     Returns
     -------
-    dict
-        Fixed-ratio STN data using bulk liquid material states [kg], physical
-        processing and grid width [s], and discrete scheduling periods [-].
-
-    Notes
-    -----
-    The reaction rate, charge and operation times define a synthetic
-    scheduling demonstration. The two reactors advance the same
-    mass-conserving reaction at fixed temperature and liquid volume.
-    Each STN start represents one replay of a complete reference batch.
-    Feed, intermediate and product refer to whole mixtures, including
-    solvent and any unreacted species. Transfer and turnaround times are
-    assumed zero, and storage holds at most one reference batch in each state.
+    tuple of (SimulationExec, float)
+        Solved flowsheet and total mass of the initial liquid charge [kg].
     """
     checkout = Path(__file__).resolve().parents[3]
+    # The CLI integration test and this example share the tracked reactor
+    # property fixture. Keep this path aligned if the fixture moves.
     properties = str(checkout / "tests/integration/data/pfr_test_pure_comp.json")
 
     temperature = 298.15  # [K], isothermal operation at the kinetics reference
@@ -42,10 +39,6 @@ def build_stn() -> dict:
     rate_constant = 0.04
     activation_energy = 0.0  # [J/mol], no thermal variation in this example
     utility_flow = 0.1  # [kg/s], completes the unchanged isothermal unit setup
-    # [s], unequal durations chosen to round up to two and three grid periods.
-    first_duration, second_duration = 25.0, 43.0
-    period_seconds = 20.0  # [s], scheduling grid chosen for the rounding example
-    horizon_periods = 5  # [-], exactly two plus three grid periods
     first_task, second_task = "R01", "R02"
 
     simulation = SimulationExec(
@@ -72,6 +65,34 @@ def build_stn() -> dict:
         verbose=False,
     )
 
+    return simulation, feed_kg
+
+
+def build_stn() -> dict:
+    """Solve a reference batch and export its scheduling instance.
+
+    Returns
+    -------
+    dict
+        Fixed-ratio STN data using bulk liquid material states [kg], physical
+        processing and grid width [s], and discrete scheduling periods [-].
+
+    Notes
+    -----
+    The reaction rate, charge and operation times define a synthetic
+    scheduling demonstration. The two reactors advance the same
+    mass-conserving reaction at fixed temperature and liquid volume.
+    Each STN start represents one replay of a complete reference batch.
+    Feed, intermediate and product refer to whole mixtures, including
+    solvent and any unreacted species. Transfer and turnaround times are
+    assumed zero, and storage holds at most one reference batch in each state.
+    """
+    # [s], unequal durations chosen to occupy two and three grid periods.
+    first_duration, second_duration = 25.0, 43.0
+    period_seconds = 20.0  # [s], scheduling grid chosen for the rounding example
+    horizon_periods = 5  # [-], exactly two plus three grid periods
+    first_task, second_task = "R01", "R02"
+    simulation, feed_kg = solve_reference_sequence(first_duration, second_duration)  # [kg]
     intermediate_kg = simulation.R01.Outlet.mass  # [kg], first liquid batch
     product_kg = simulation.R02.Outlet.mass  # [kg], second liquid batch
     tasks = {

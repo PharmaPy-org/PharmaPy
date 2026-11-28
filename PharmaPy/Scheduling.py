@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from math import ceil, fsum, isfinite
+from math import floor, fsum, isfinite, ulp
 from numbers import Integral, Real
 from typing import TYPE_CHECKING, Any, Union
 
@@ -28,9 +28,10 @@ class BatchTask:
 
     Notes
     -----
-    These amounts are a case-level declaration. The exporter does not infer
-    state identity from phase names, match species, or estimate amounts for
-    a different recipe or batch size.
+    These amounts are a case-level declaration. Declare all material inputs
+    and the outputs tracked by the scheduler. An output excluded from the
+    scheduling inventory leaves a yield below one. A different recipe or
+    batch size requires a separate simulation and declaration.
     """
 
     resource: str
@@ -88,7 +89,7 @@ def _quantity(value: float, field: str, *, positive: bool = False) -> float:
     if not isfinite(value) or value < 0 or (positive and value == 0):
         constraint = 'positive' if positive else 'nonnegative'
         raise ValueError(f'{field} must be finite and {constraint}.')
-    return value
+    return 0.0 if value == 0 else value
 
 
 def _record(index: Union[str, tuple[str, str], tuple[str, int]],
@@ -123,13 +124,17 @@ def export_batch_stn(
     Parameters
     ----------
     simulation : SimulationExec
-        Solved flowsheet. Task duration comes from ``time_processing`` [s]
-        recorded by the most recent ``SolveFlowsheet`` call.
+        Solved flowsheet. Task duration is the full result span [s] published
+        in ``time_processing`` after a successful solve. Export before another
+        solve attempt changes the case. A continued solve can retain earlier
+        segments, so declare masses for its entire retained reference batch.
+        A partial solve publishes durations only for units it solves.
     tasks : mapping of str to BatchTask
         Reference batches keyed by solved unit name. One task and one
         compatible resource per selected unit. Input and output masses [kg]
         are supplied by the case. For edges between selected units, a
         predecessor's output and its successor's input must share a state.
+        The caller accounts for handoffs across unselected intermediate units.
     period_seconds : float
         Positive duration [s] of a discrete scheduling period.
     horizon_periods : int
@@ -163,13 +168,20 @@ def export_batch_stn(
     -----
     The batch-size coordinate is the total input mass. Both bounds are set to
     the simulated reference size because scaling duration and yield away from
-    that case is unverified. ``tau = ceil(tau_p / delta)`` reserves a whole
-    number of periods and never intentionally shortens the simulated task.
+    that case is unverified. The duration is rounded up to the first positive
+    grid endpoint at or beyond the recorded physical time. For a duration
+    already equal to an endpoint, the task occupies exactly that many periods.
     The STN consumes material at task start and releases it at completion.
     This is an approximation for a model with time-distributed transfers. It
     leaves composition, operating conditions, equipment sizing, cleaning and
     economics to the caller's documented case assumptions.
     """
+    for field, mapping in (
+        ('tasks', tasks), ('storage_capacities_kg', storage_capacities_kg),
+        ('initial_inventory_kg', initial_inventory_kg), ('demand_kg', demand_kg),
+    ):
+        if not isinstance(mapping, Mapping):
+            raise ValueError(f'{field} must be a mapping.')
     if not tasks:
         raise ValueError('Select at least one solved unit for STN export.')
     if (isinstance(horizon_periods, bool)
@@ -180,6 +192,8 @@ def export_batch_stn(
     period_seconds = _quantity(period_seconds, 'period_seconds [s]',
                                positive=True)  # [s]
     durations = getattr(simulation, 'time_processing', {})  # [s], by unit
+    if not isinstance(durations, Mapping):
+        raise ValueError('STN export requires completed unit processing times [s].')
     task_names = [name for name in simulation.execution_names if name in tasks]
     unknown = [name for name in tasks if name not in simulation.execution_names]
     if unknown:
@@ -224,18 +238,29 @@ def export_batch_stn(
         duration = _quantity(durations[name], f'Duration for {name!r} [s]',
                              positive=True)  # [s]
         duration_in_periods = duration / period_seconds  # [-]
-        if not isfinite(duration_in_periods) or duration_in_periods > horizon_periods:
+        if not isfinite(duration_in_periods):
             raise ValueError(f'Task {name!r} exceeds the scheduling horizon.')
-        # A positive duration must occupy at least one period, even if the
-        # ratio underflows because the chosen period is much larger.
-        periods = max(1, ceil(duration_in_periods))  # [periods]
+        periods = max(1, floor(duration_in_periods))  # [periods]
+        # The quotient can be slightly above an integer even when the
+        # represented grid endpoint equals the simulated duration.
+        if periods * period_seconds < duration:
+            periods += 1  # [periods], advance to the first covering endpoint
+        if periods > horizon_periods:
+            raise ValueError(f'Task {name!r} exceeds the scheduling horizon.')
         inputs = _material_amounts(name, task.inputs_kg, capacities)  # [kg]
         outputs = _material_amounts(name, task.outputs_kg, capacities)  # [kg]
         try:
             batch_size = fsum(inputs.values())  # [kg], total reference input
+            tracked_output = fsum(outputs.values())  # [kg], tracked products
         except OverflowError as error:
             raise ValueError(f'Task {name!r} exceeds the representable '
                              'reference batch mass [kg].') from error
+        # Allow one representable mass increment at the batch scale for
+        # arithmetic roundoff when totaling the declared masses. Retain the
+        # declared yields in the export, including smaller tracked totals.
+        if tracked_output - batch_size > ulp(batch_size):
+            raise ValueError(f'Task {name!r} outputs more mass [kg] than its '
+                             'declared inputs supply.')
         for direction, amounts in (('minus', inputs), ('plus', outputs)):
             for state, amount in amounts.items():
                 index = (name, state)
@@ -252,8 +277,10 @@ def export_batch_stn(
         data['tau'].append(_record(index, periods))
         data['beta_min'].append(_record(index, batch_size))
         data['beta_max'].append(_record(index, batch_size))
+    for name in task_names:
         for successor in simulation.graph.get(name, ()):
-            if successor in tasks and outputs.keys().isdisjoint(tasks[successor].inputs_kg):
+            if (successor in tasks and set(tasks[name].outputs_kg)
+                    .isdisjoint(tasks[successor].inputs_kg)):
                 raise ValueError(f'Tasks {name!r} and {successor!r} must share '
                                  'a material state for their flowsheet edge.')
     data['J'] = list(resources)

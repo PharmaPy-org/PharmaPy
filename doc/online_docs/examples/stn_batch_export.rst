@@ -31,11 +31,16 @@ Data available to the scheduler
 and a mapping from selected unit names to ``BatchTask`` declarations. A
 ``BatchTask`` names one resource and the amounts consumed and produced per
 reference batch [kg], by material state. Use the same state on either side
-of a selected flowsheet edge to represent a handoff. Physical durations come
-from the most recent solve. Equipment identifiers can be shared by tasks if
-the same equipment must serve them. Storage limits, initial inventory, and
-product demand are scenario inputs. Document how you obtained quantities and
-which streams or materials the scheduling boundary includes.
+of a direct edge between selected units to represent a handoff. If you omit
+an intermediate unit, specify how its transfers and timing enter the scheduling
+model. Export immediately after a successful solve. The physical durations
+span the full retained result. For a reactor continued across solves, declare
+the masses for that entire span or start from a fresh batch.
+
+Give tasks the same equipment identifier if they compete for the same unit.
+Supply finite physical storage limits, initial inventory, and product demand
+for the scenario. Document how you obtained these quantities and which material
+streams the scheduling boundary covers.
 
 The output uses ``I`` for tasks, ``J`` for equipment, and ``K`` for material
 states. It records ``delta`` and ``tau_p`` in seconds, ``lastT`` as the final
@@ -46,7 +51,9 @@ Storage and initial inventory have a single string state index.
 
 ``rho_minus`` and ``rho_plus`` are kilograms per kilogram of reference input
 batch. ``beta_min`` and ``beta_max`` are both equal to the reference batch
-mass [kg]. ``gamma``, ``S0``, and ``demand`` are storage limits, initial
+mass [kg]. Include every material input. If you omit a discharge or loss from
+the scheduling inventory, the sum of the tracked output coefficients is less
+than one. ``gamma``, ``S0``, and ``demand`` are storage limits, initial
 inventory, and scheduled withdrawals [kg]. Holding the batch size fixed keeps
 the scheduling instance within the simulated operating point. The scheduler
 accounts for consumption at start and production at completion. Use this
@@ -55,7 +62,7 @@ of the transfers. A model with continuous releases needs a different task
 representation.
 
 Interface decisions for the next prototype
------------------------------------------
+------------------------------------------
 
 * `Declarative flowsheets <https://github.com/PharmaPy-org/PharmaPy/issues/348>`_
   can supply the executed graph and use the same unit names in the scheduling
@@ -69,7 +76,10 @@ Interface decisions for the next prototype
 * For the `full scheduling export <https://github.com/PharmaPy-org/PharmaPy/issues/367>`_,
   retain the declared material amounts and physical durations for RTN and add
   explicit equipment acquisition and release as resource changes. For the
-  bioconjugation sequence, use the selected case's process steps to document
-  each occupancy, handoff, and storage limit before choosing a time grid.
+  `bioconjugation sequence <https://github.com/PharmaPy-org/PharmaPy/pull/530>`_,
+  connect reduction, conjugation, desalting, and purification through distinct
+  intermediate states. Use the case's total solution masses [kg] to derive
+  coefficients, and record each occupancy and storage limit before choosing
+  the grid.
   Different equipment-dependent recipes, distributed transfers, and changeovers
   require their own case data and verification.
