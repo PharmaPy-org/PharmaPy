@@ -13,6 +13,7 @@ from PharmaPy.ThermoModule import (MissingPropertyError,
                                   validate_activity_model)
 from PharmaPy.Commons import trapezoidal_rule
 from PharmaPy.Errors import PharmaPyValueError
+from PharmaPy._liquid_properties import BulkLiquidDensity
 from scipy.optimize import newton
 
 import warnings
@@ -234,7 +235,8 @@ class LiquidPhase(ThermoPhysicalManager):
 
     * Fractions carry no absolute packing, so the ideal-mixing density
       relates mass, volume and moles.
-    * Concentrations with ``name_solv``: the solvent concentration is
+    * Concentrations with ``name_solv`` and no ``bulk_density``: the solvent
+      concentration is
       completed so that ``sum_i c_i v_i = 1``, with ``v_i = MW_i / rho_i``
       the pure molar volume [L/mol]. The concentrations then close ideal
       mixing, and the ideal-mixing density applies as for fractions.
@@ -244,6 +246,12 @@ class LiquidPhase(ThermoPhysicalManager):
       ``sum_i mass_conc_i`` [kg/m**3] and the ideal-mixing model is not
       used for the amounts. The supplied concentrations need not close
       ideal mixing; when they do, both rules agree to rounding.
+
+    An explicit ``bulk_density`` with solute concentrations and a single
+    named solvent completes the solvent concentration by mass balance at
+    the initial reference state. The resulting complete concentrations
+    are authoritative and the density is retained as provenance. Later
+    concentration updates use the complete concentrations provided to them.
 
     In every case the stored state satisfies
     ``mole_conc * vol * 1000 == mole_frac * moles`` and
@@ -264,7 +272,8 @@ class LiquidPhase(ThermoPhysicalManager):
                  mole_frac: Optional[ArrayLike] = None,
                  mass_conc: Optional[ArrayLike] = None,
                  mole_conc: Optional[ArrayLike] = None,
-                 name_solv=None, verbose=True, check_input=True) -> None:
+                 name_solv=None, verbose=True, check_input=True, *,
+                 bulk_density: Optional[BulkLiquidDensity] = None) -> None:
 
         """Initialize liquid composition and reconcile its supplied amount.
 
@@ -304,18 +313,36 @@ class LiquidPhase(ThermoPhysicalManager):
             authoritative: fractions are normalized from them and the amounts
             follow ``sum(mole_conc) * vol * 1000`` [mol] and
             ``sum(mass_conc) * vol`` [kg] (see the class Notes). Ignored for
-            full-mixture fraction inputs.
+            full-mixture fraction inputs. With ``bulk_density``, names the
+            sole solvent for the initial bulk mass balance.
         verbose : bool, optional
             Print diagnostics for fractions summing below the legacy 0.99
             threshold [-]. Defaults to True.
         check_input : bool, optional
             Warn if all amounts are zero, subject to the caller's warning
             filters. Defaults to True.
+        bulk_density : BulkLiquidDensity, optional
+            Sourced bulk solution density [kg/m**3] at the initial liquid
+            reference state. Requires ``name_solv`` and exactly one of
+            ``mole_conc`` or ``mass_conc`` as a species-ordered vector or a
+            mapping of species to scalars. Use a numeric placeholder such as
+            zero in a vector's solvent position, or omit the solvent from a
+            mapping. The solvent entry is overwritten and may be masked.
+            Solute data must be unmasked.
+            The supplied density applies at the construction state. The default
+            uses the existing ideal-mixing or complete-concentration
+            inventory rules.
 
         Raises
         ------
         ValueError
-            If no composition measure is supplied.
+            If no composition measure is supplied. With ``bulk_density``,
+            if the solvent, concentration input, or molecular weights are
+            invalid, if the solute mass exceeds the bulk mass per volume,
+            or if the resulting concentration totals are nonfinite or zero.
+        TypeError
+            If ``bulk_density`` is supplied as something other than a
+            ``BulkLiquidDensity``.
         PharmaPyValueError
             A subclass of ``ValueError``. If a positive ``mass``, ``vol``
             or ``moles`` is supplied with authoritative concentrations (no
@@ -324,9 +351,8 @@ class LiquidPhase(ThermoPhysicalManager):
         MissingPropertyError
             A subclass of ``AttributeError`` and ``ValueError``. If a species
             with a nonzero fraction or concentration has no ``rho_liq``
-            [kg/m**3], which the ideal-mixing volume and concentrations
-            need; with ``name_solv``, the solvent always needs it. Absent
-            species need none.
+            [kg/m**3] when ideal mixing applies. The ideal-mixing solvent
+            closure also requires a solvent density.
         RuntimeWarning
             If more than one composition measure is supplied.
 
@@ -348,8 +374,8 @@ class LiquidPhase(ThermoPhysicalManager):
         before conversion. Derived concentrations retain the liquid volume
         basis. No physical basis changes during coercion.
         Amounts are reconciled on the concentration basis when ``mole_conc``
-        or ``mass_conc`` is supplied without ``name_solv`` or a solvent-blend
-        ``mass_frac`` mapping, and on the ideal-mixing basis otherwise;
+        or ``mass_conc`` is complete or completed using ``bulk_density``, and
+        on the ideal-mixing basis otherwise;
         :attr:`concentration_basis` records the choice. Earlier releases
         always used ideal mixing, so for concentrations that do not close
         ``sum_i c_i v_i = 1`` the mass, moles and fractions-times-amount now
@@ -357,6 +383,28 @@ class LiquidPhase(ThermoPhysicalManager):
         """
 
         super().__init__(path_thermo)
+
+        self._bulk_density = bulk_density
+        if bulk_density is not None:
+            if not isinstance(bulk_density, BulkLiquidDensity):
+                raise TypeError("bulk_density must be a BulkLiquidDensity.")
+            if (mass_frac is not None or mole_frac is not None
+                    or (mole_conc is None) == (mass_conc is None)):
+                raise ValueError(
+                    "bulk_density requires exactly one of mole_conc or mass_conc "
+                    "without fraction inputs."
+                )
+            if mole_conc is not None:
+                mole_conc = self._complete_bulk_density_concentrations(
+                    mole_conc, 'mole_conc', name_solv, bulk_density
+                )  # [mol/L]
+            else:
+                mass_conc = self._complete_bulk_density_concentrations(
+                    mass_conc, 'mass_conc', name_solv, bulk_density
+                )  # [kg/m**3]
+            # The completed vector fixes the inventory at construction.
+            # Subsequent concentration updates supply the full composition.
+            name_solv = None
 
         if name_solv is None:
             ind_solv = name_solv
@@ -501,6 +549,121 @@ class LiquidPhase(ThermoPhysicalManager):
         self._name = name
 
     @property
+    def bulk_density(self) -> Optional[BulkLiquidDensity]:
+        """Return the source of the initial bulk-density closure, if used.
+
+        Returns
+        -------
+        BulkLiquidDensity or None
+            The initial reference density [kg/m**3] and its provenance, or
+            None if the phase was constructed without it. Use
+            :meth:`getInventoryDensity` for the current inventory density.
+        """
+        return getattr(self, '_bulk_density', None)
+
+    def _complete_bulk_density_concentrations(
+            self, concentrations: ArrayLike, name: str, name_solv: Optional[str],
+            bulk_density: BulkLiquidDensity) -> np.ndarray:
+        """Complete same-basis concentrations using the reference mass balance.
+
+        Parameters
+        ----------
+        concentrations : array-like or mapping of str to float
+            Species concentrations in [mol/L] or [kg/m**3] according to
+            ``name``, shape ``(num_species,)`` in database order or keyed by
+            species. Ordered vectors require a numeric solvent placeholder
+            such as zero. A mapping may omit the solvent. Any supplied
+            solvent placeholder is overwritten. Solute data must be unmasked.
+        name : {'mole_conc', 'mass_conc'}
+            Concentration basis.
+        name_solv : str
+            Sole solvent species in the property database.
+        bulk_density : BulkLiquidDensity
+            Solution mass density [kg/m**3] at the initial reference state.
+
+        Returns
+        -------
+        numpy.ndarray
+            Complete concentrations in input units and database order,
+            shape ``(num_species,)``. Solute entries retain their values.
+
+        Raises
+        ------
+        ValueError
+            If the solvent, concentration input, or molecular weights are
+            invalid, if the solute mass exceeds the bulk mass per volume,
+            or if the resulting concentration totals are nonfinite or zero.
+        """
+        if not isinstance(name_solv, str) or not name_solv:
+            raise ValueError(
+                "bulk_density requires one named solvent (name_solv)."
+            )
+        if name_solv not in self.name_species:
+            raise ValueError(
+                f"Unknown solvent species {name_solv!r} for bulk_density."
+            )
+        solvent_index = self.name_species.index(name_solv)
+
+        if isinstance(concentrations, Mapping):
+            concentrations = dict(concentrations)
+            if any(np.ndim(value) != 0 for value in concentrations.values()):
+                raise ValueError(f"{name} mapping entries must be scalar for bulk_density.")
+            concentrations[name_solv] = 0  # [mol/L] or [kg/m**3], placeholder
+            if any(np.ma.is_masked(value) for value in concentrations.values()):
+                raise ValueError(f"{name} with bulk_density cannot contain masked solute values.")
+            if any(np.asarray(value).dtype.kind not in 'fiu'
+                   for value in concentrations.values()):
+                raise ValueError(f"{name} with bulk_density must contain real numbers.")
+            concentrations = self._coerce_composition_mapping(concentrations, name)
+        supplied = np.asanyarray(concentrations)  # [mol/L] or [kg/m**3]
+        if supplied.shape != (self.num_species,):
+            raise ValueError(
+                f"{name} with bulk_density must have shape ({self.num_species},) "
+                f"in database species order; got {supplied.shape}."
+            )
+        if supplied.dtype.kind not in 'fiu':
+            raise ValueError(f"{name} with bulk_density must contain real numbers.")
+        solute_mask = np.arange(self.num_species) != solvent_index
+        if np.ma.is_masked(supplied[solute_mask]):
+            raise ValueError(f"{name} with bulk_density cannot contain masked solute values.")
+        # Any remaining mask belongs to the discarded solvent placeholder.
+        completed = np.array(supplied, dtype=float, copy=True)  # [mol/L] or [kg/m**3]
+
+        molar_masses = np.asarray(getattr(self, 'mw', None), dtype=float)  # [g/mol]
+        if (molar_masses.shape != completed.shape
+                or not np.all(np.isfinite(molar_masses))
+                or np.any(molar_masses <= 0)):
+            raise ValueError(
+                "bulk_density requires finite positive molecular weights [g/mol]."
+            )
+
+        with np.errstate(over='ignore'):
+            if name == 'mole_conc':
+                # [mol/L] * [g/mol] = [kg/m**3].
+                solute_mass_conc = (
+                    completed[solute_mask] * molar_masses[solute_mask]
+                )  # [kg/m**3]
+                solvent_mass_conc = bulk_density._solvent_mass_concentration(
+                    solute_mass_conc, from_molar=True
+                )  # [kg/m**3]
+                completed[solvent_index] = (
+                    solvent_mass_conc / molar_masses[solvent_index]
+                )  # [mol/L]
+                total_mole_conc = completed.sum()  # [mol/L]
+                total_mass_conc = np.sum(completed * molar_masses)  # [kg/m**3]
+            else:
+                completed[solvent_index] = bulk_density._solvent_mass_concentration(
+                    completed[solute_mask], from_molar=False
+                )  # [kg/m**3]
+                total_mole_conc = np.sum(completed / molar_masses)  # [mol/L]
+                total_mass_conc = completed.sum()  # [kg/m**3]
+        if not (0 < total_mole_conc < np.inf and 0 < total_mass_conc < np.inf):
+            raise ValueError(
+                "bulk_density requires finite positive total mass and molar concentrations."
+            )
+        return completed
+
+    @property
     def concentration_basis(self) -> bool:
         """Whether the amounts follow the stored concentrations (read-only).
 
@@ -508,18 +671,19 @@ class LiquidPhase(ThermoPhysicalManager):
         -------
         bool
             True when the current composition was supplied as ``mole_conc``
-            [mol/L] or ``mass_conc`` [kg/m**3] without a solvent
-            (``name_solv`` None). Mass [kg], volume [m**3] and moles [mol]
+            [mol/L] or ``mass_conc`` [kg/m**3] as complete concentrations
+            or with the initial solvent entry completed from ``bulk_density``.
+            Mass [kg], volume [m**3] and moles [mol]
             are then related by the inventory density
             ``sum(mass_conc)`` [kg/m**3] and ``sum(mole_conc)`` [mol/L]
             instead of ideal mixing (issue #439). False for fraction inputs
-            and for every ``name_solv`` input.
+            and for the ideal-mixing solvent closure.
 
         Notes
         -----
         The flag is set by the constructor and by :meth:`updatePhase`
-        composition updates: concentrations without a solvent switch it on,
-        fractions or a declared solvent switch it off, and amount-only or
+        composition updates: complete concentrations switch it on, fractions
+        or ideal-mixing solvent closure switch it off, and amount-only or
         intensive-state updates keep it. It is read-only so that it cannot
         disagree with the stored state; consumers that convert this phase's
         own amount to a volume use :meth:`getInventoryDensity`.
