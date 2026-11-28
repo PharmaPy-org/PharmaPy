@@ -1908,7 +1908,9 @@ def run_with_foreign_distribution(tmp_path, editable_directory):
                             env=environment, capture_output=True, text=True,
                             check=False)
     assert result.returncode == 0, result.stderr
-    return tuple(result.stdout.split())
+    # Split on lines, not on whitespace: the last printed value is a
+    # directory path that may contain spaces (e.g. a OneDrive checkout).
+    return tuple(result.stdout.splitlines())
 
 
 @pytest.mark.parametrize('editable, expected', [
