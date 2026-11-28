@@ -398,7 +398,8 @@ def fit_caffeine(
         name_params=list(PARAMETER_UNITS),
     )
     _, _, status = estimator.estimate_parameters(
-        method="scipy", bounds=GROWTH_BOUNDS, x_scale="jac", verbose=False
+        method="scipy", bounds=(GROWTH_BOUNDS.lb, GROWTH_BOUNDS.ub),
+        x_scale="jac", verbose=False,
     )
     if not status["success"]:
         raise RuntimeError(f"Calibration did not converge: {status['message']}")
