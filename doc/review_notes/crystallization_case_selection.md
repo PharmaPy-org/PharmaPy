@@ -257,15 +257,16 @@ and the dissolved state to state which solid form is present.
 
 ## 8. PharmaPy path and linked defects
 
-Estimation runs through `BatchCryst.paramest_wrapper` and
+The full IR/FBRM estimation is planned through `BatchCryst.paramest_wrapper` and
 `ParameterEstimation` with `Experiment` and `Measurement` objects, one
 experiment per run, and is recorded with `CalibrationRecord`. The measurement
 equations wrap `paramest_wrapper` from outside.
 
-The initial IR-only workflow calls the existing `batch_cooling.simulate`
-example at each parameter evaluation. It creates a fresh legacy
-`BatchCryst` for every run and verifies the optimizer's finite-difference
-sensitivities at the accepted estimates.
+The initial IR-only workflow calls `batch_cooling.simulate` at each parameter
+evaluation and creates a fresh legacy `BatchCryst` for every run. Its external
+callback varies only the two free growth coordinates, so it does not request
+the native sensitivity solve affected by #222. It reports the independent
+finite-difference comparison and CVode observable refinement at the fitted point.
 
 | Issue | Effect on this case | Handling |
 | --- | --- | --- |

@@ -73,8 +73,9 @@ starting kinetics of `runs.json` (they are not fitted values):
 Run the recorded case through the shared WP1 estimation and design interfaces
 from a checkout with the caffeine dataset and the experiment-design API.
 Use the locked Assimulo environment and a clean source revision. The first
-command writes the fit record outside the checkout. The second reloads it,
-checks the pinned source files and reproduces the accepted parameters.
+command writes the fit record outside the checkout. The second checks the
+recorded Git revision and inputs and reproduces the accepted parameters.
+December refers to the checkpoint. The acquisition dates are in `runs.json`.
 
 ```bash
 pixi run -e assimulo python -m examples.pat.caffeine_m6 \
@@ -85,11 +86,15 @@ pixi run -e assimulo python -m examples.pat.caffeine_m6 \
 
 The fit uses the measured 1700 cm⁻¹ IR band heights and temperature logs for
 the high-seed slow-cooling and low-seed fast-cooling runs. It takes spectra
-after the recorded seeding time through the first logged temperature at or
-below the final 20 °C cooling target. That window excludes the long hold
-where aggregation or changes in probe contact can alter the spectra. The
-low-seed slow-cooling IR trace is retained for validation. The high-seed
-fast-cooling IR trace is excluded because of its documented probe issue.
+after the seeding time in `runs.json` through the first logged temperature
+at or below the final 20 °C cooling target. This can include the transition
+into the hold because the window follows the recorded temperature rather
+than a setpoint clock. The approximate alignment of the instruments limits
+the interpretation of the earliest samples. The nine post-seeding spectra
+of the low-seed slow-cooling run are held out of growth fitting. Its earlier
+spectra still contribute to band calibration and pooled solubility, so this
+is a limited check on the growth fit. The high-seed fast-cooling IR trace
+is excluded because of its documented probe issue.
 
 The legacy moment model predicts liquid caffeine mass per solvent mass
 [kg/kg]. The band equation in the
@@ -102,22 +107,33 @@ Both predicted mass inventories are checked at every requested time.
 band and solubility calibration.
 
 The two pre-seeding dissolved-plateau scatters define relative weights for
-each run. The analysis estimates a common residual variance scale. The
-reported covariance is conditional on this model, the fixed kinetics, the
-prescribed temperature histories and independent Gaussian residuals.
-Neither the known probe drift nor correlated model discrepancies are
-represented by that covariance. Review the printed residual errors,
-derivative comparison and parameter correlation before using the estimates.
+each run. The fit estimates a common residual variance scale and records
+per-run RMSE relative to plateau scatter, bias and adjacent-observation
+residual correlation. These diagnostics matter here. The fitted residuals
+are much larger than the plateau scatter and strongly correlated across
+adjacent observations. The local linearized covariance assumes independent
+Gaussian errors and fixes the band calibration, solubility curve, seed
+geometry, seeding times, other kinetics and prescribed temperature histories.
+Use it as a conditional diagnostic. The growth prefactor remains weakly
+determined.
 
-The design uses one repeat of the high-seed, slow-cooling recipe and two
-IR spectra. It compares the first and last recorded times of each third of
-the fitted spectrum sequence. The reported log determinant gains are local
-forecasts at the fitted parameters under the same relative noise model.
-The command produces a ranking when the sensitivity check supports
-practical identifiability and there are no active parameter bounds. No
-additional run was performed to verify the forecast.
+The workflow compares the optimizer's derivatives with a second-order
+finite-difference stencil at the fitted point. It reruns the two observation
+grids at that stencil and the fitted point with both CVode tolerances divided
+by 100. The observed change in the band is used as an empirical error scale
+for the local sensitivity-rank calculation. The comparison and numerical
+environment are stored in the record.
 
-This initial IR-only result contributes to #351, #352, #355, #359 and #360.
+The sampling example compares two retained IR spectra at the first and last
+recorded times of each third of the fitted spectrum sequence, on a hypothetical
+repeat of the high-seed slow-cooling recipe. The log determinant gains describe
+a model calculation under independent errors. They illustrate how the reported
+information changes with the subset of spectra, with the same recipe and
+number of spectra throughout. Selecting a physical experiment requires
+independent repeats or a residual model that accounts for the observed
+serial structure.
+
+This IR-only workflow contributes to #351, #352, #355, #359 and #360.
 The full crystallization case still needs secondary-nucleation and FBRM
 analysis, seed-size and independent solubility sensitivity, and a domain
 review. Adoption by the bioreactor demonstrator is tracked separately.

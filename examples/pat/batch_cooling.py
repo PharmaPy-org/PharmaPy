@@ -264,8 +264,8 @@ def simulate(inputs: CoolingCase, kinetics: dict, times, model: str, *,
         ``BatchCrystallizer``; both with the method of moments and CVode.
     solver_options : mapping, optional
         Assimulo CVode options, such as relative tolerance [-] or
-        absolute tolerances in solver state units. Continuous reporting
-        is required on the legacy path to retrieve requested rows.
+        absolute tolerances in solver state units. The legacy path defaults
+        to continuous reporting to retrieve requested rows.
 
     Returns
     -------
@@ -275,7 +275,8 @@ def simulate(inputs: CoolingCase, kinetics: dict, times, model: str, *,
     Raises
     ------
     ValueError
-        If the model is unknown or the times are not positive and increasing.
+        If the model is unknown, the times are not positive and increasing,
+        or the legacy path is asked to disable continuous reporting.
     RuntimeError
         If the solver does not return a requested time.
 
@@ -289,6 +290,9 @@ def simulate(inputs: CoolingCase, kinetics: dict, times, model: str, *,
 
     if model not in MODELS:
         raise ValueError("Unknown model %r; choose one of %s." % (model, list(MODELS)))
+    options = dict(solver_options or {})
+    if model == "legacy" and not options.setdefault("report_continuously", True):
+        raise ValueError("Legacy batch cooling requires continuous reporting for requested rows.")
     times = np.asarray(times, dtype=float)
     if times.ndim != 1 or times.size == 0 or times[0] <= 0.0 or np.any(np.diff(times) <= 0.0):
         raise ValueError("Output times must be positive and strictly increasing.")
@@ -314,7 +318,6 @@ def simulate(inputs: CoolingCase, kinetics: dict, times, model: str, *,
             SolidPhase(inputs.database, temp=start_temperature, moments=moments, kv=inputs.shape_factor,
                        mass_frac=solid_fractions, num_mom=MOMENT_COUNT))
         unit.Kinetics = CrystKinetics(solub_fn=saturated_fraction, **rates)
-        options = dict(solver_options or {}, report_continuously=True)
         reported, states = unit.solve_unit(time_grid=grid, verbose=False, sundials_opts=options)[:2]
         rows = _rows_of(np.asarray(reported, dtype=float), times)
         return SlurryMeasurements.state_from_total_moments(
@@ -335,7 +338,7 @@ def simulate(inputs: CoolingCase, kinetics: dict, times, model: str, *,
         moments_init=moments * MICROMETERS_PER_METER ** np.arange(MOMENT_COUNT) / slurry_volume,  # [um**k/m**3]
         kv=inputs.shape_factor, density=inputs.solute_density)
     unit = BatchCrystallizer(
-        integrator=AssimuloBackend(options=solver_options),
+        integrator=AssimuloBackend(options=options),
         controller=SimpleTemperatureController(
             temp_func=lambda time: float(inputs.temperature(time))
         ),
