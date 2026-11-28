@@ -1,0 +1,13 @@
+filelock==4.3.1
+iniconfig==2.3.1
+juliacall==0.9.37
+juliapkg==0.1.28
+numpy==2.2.6
+packaging==26.4
+pluggy==1.7.0
+pyclapeyron==0.1.1
+pygments==2.21.0
+pytest==8.4.2
+semver==3.1.2
+tomli==2.5.0
+tomlkit==0.15.3
