@@ -53,7 +53,10 @@ Storage and initial inventory have a single string state index.
 batch. ``beta_min`` and ``beta_max`` are both equal to the reference batch
 mass [kg]. Include every material input. If you omit a discharge or loss from
 the scheduling inventory, the sum of the tracked output coefficients is less
-than one. ``gamma``, ``S0``, and ``demand`` are storage limits, initial
+than one. If numerical or measurement uncertainty exceeds arithmetic roundoff,
+pass a justified absolute allowance [kg] as ``mass_balance_tolerance_kg``.
+The export keeps the declared material yields. ``gamma``, ``S0``, and ``demand``
+are storage limits, initial
 inventory, and scheduled withdrawals [kg]. Holding the batch size fixed keeps
 the scheduling instance within the simulated operating point. The scheduler
 accounts for consumption at start and production at completion. Use this

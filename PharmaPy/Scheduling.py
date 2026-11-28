@@ -118,7 +118,8 @@ def export_batch_stn(
         period_seconds: float, horizon_periods: int,
         storage_capacities_kg: Mapping[str, float],
         initial_inventory_kg: Mapping[str, float],
-        demand_kg: Mapping[tuple[str, int], float]) -> dict[str, Any]:
+        demand_kg: Mapping[tuple[str, int], float],
+        mass_balance_tolerance_kg: float = 0.0) -> dict[str, Any]:
     """Build a fixed-batch State-Task Network from selected solved units.
 
     Parameters
@@ -145,6 +146,11 @@ def export_batch_stn(
         Initial charge in each state [kg]. Omitted states start empty.
     demand_kg : mapping of (str, int) to float
         Withdrawals [kg] by material state and period index in the horizon.
+    mass_balance_tolerance_kg : float, optional
+        Absolute numerical or measurement allowance [kg] for a tracked
+        output total above the input total. Defaults to arithmetic roundoff
+        only. Supply a documented estimate of mass uncertainty to allow more.
+        Exported material amounts retain the declared values.
 
     Returns
     -------
@@ -191,6 +197,8 @@ def export_batch_stn(
     horizon_periods = int(horizon_periods)  # [-], final grid index
     period_seconds = _quantity(period_seconds, 'period_seconds [s]',
                                positive=True)  # [s]
+    mass_balance_tolerance_kg = _quantity(
+        mass_balance_tolerance_kg, 'mass_balance_tolerance_kg [kg]')  # [kg]
     durations = getattr(simulation, 'time_processing', {})  # [s], by unit
     if not isinstance(durations, Mapping):
         raise ValueError('STN export requires completed unit processing times [s].')
@@ -255,10 +263,12 @@ def export_batch_stn(
         except OverflowError as error:
             raise ValueError(f'Task {name!r} exceeds the representable '
                              'reference batch mass [kg].') from error
-        # Allow one representable mass increment at the batch scale for
-        # arithmetic roundoff when totaling the declared masses. Retain the
-        # declared yields in the export, including smaller tracked totals.
-        if tracked_output - batch_size > ulp(batch_size):
+        # Charge and outlet totals are independently represented. Allow one
+        # representable increment for each, or the caller's larger allowance
+        # when the reference measurements or solve have known uncertainty.
+        roundoff = ulp(batch_size) + ulp(tracked_output)  # [kg]
+        allowance = max(roundoff, mass_balance_tolerance_kg)  # [kg]
+        if tracked_output - batch_size > allowance:
             raise ValueError(f'Task {name!r} outputs more mass [kg] than its '
                              'declared inputs supply.')
         for direction, amounts in (('minus', inputs), ('plus', outputs)):

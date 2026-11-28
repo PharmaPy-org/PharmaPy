@@ -237,3 +237,29 @@ def test_reject_unaccounted_mass_gain(connected_batch):
                                         {'feed': reduced_charge}, first.outputs_kg))
     with pytest.raises(ValueError, match='R01.*outputs more mass'):
         export_batch_stn(simulation, created, **scenario)
+
+
+def test_preserve_declared_mass_within_closure_uncertainty(connected_batch):
+    """Allow independent roundoff or a declared mass tolerance without clipping."""
+    from math import inf, nextafter
+
+    from PharmaPy.Scheduling import BatchTask, export_batch_stn
+
+    simulation, tasks, scenario = connected_batch
+    first = tasks['R01']
+    intermediate = first.outputs_kg['middle']  # [kg]
+    # Move up one representable mass on each side of the independent charge
+    # and outlet computations. This is a rounding probe on real solved data.
+    rounded = nextafter(nextafter(intermediate, inf), inf)  # [kg]
+    case_uncertainty = 0.001  # [kg], illustrative scale-resolved mass uncertainty
+    bounded = intermediate + case_uncertainty / 2  # [kg], below declared uncertainty
+    for output, options in (
+        (rounded, {}),
+        (bounded, {'mass_balance_tolerance_kg': case_uncertainty}),
+    ):
+        updated = dict(tasks, R01=BatchTask(first.resource, first.inputs_kg,
+                                            {'middle': output}))
+        stn = export_batch_stn(simulation, updated, **scenario, **options)
+        recorded = stn['rho_plus'][0]['value']  # [kg/kg], preserves supplied yield
+        assert recorded > 1.0
+        assert recorded == pytest.approx(output / first.inputs_kg['feed'])
