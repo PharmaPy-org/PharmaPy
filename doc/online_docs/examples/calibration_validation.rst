@@ -220,9 +220,9 @@ relative to the sensitivities, but only to a modest multiple of ``rtol``.
 Pass a bound established by ``check_derivatives`` as ``jacobian_rtol``, as
 the solver-backed modules below do.
 
-The report is also the hand-off to model-based experiment design (issue
-`#355 <https://github.com/PharmaPy-org/PharmaPy/issues/355>`__), which will
-consume ``information_matrix`` (``J @ J.T`` of the weighted Jacobian),
+The report is also the hand-off to :doc:`experiment_design` (issue
+`#355 <https://github.com/PharmaPy-org/PharmaPy/issues/355>`__).
+It includes ``information_matrix`` (``J @ J.T`` of the weighted Jacobian),
 ``fisher_information`` (the same divided by the estimated variance scale
 when ``include_mse=True``) and ``unresolved_directions`` (the parameter
 combinations the current data do not resolve):
