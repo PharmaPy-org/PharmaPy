@@ -67,3 +67,57 @@ starting kinetics of `runs.json` (they are not fitted values):
   minute. The timing of the seeding spike is consistent with them.
 - The assignment of the 1700 cm-1 band to caffeine rests on its growth when the
   caffeine dissolves. It was not checked against a reference spectrum.
+
+## December calibration and experiment design
+
+Run the recorded case through the shared WP1 estimation and design interfaces
+from a checkout with the caffeine dataset and the experiment-design API.
+Use the locked Assimulo environment and a clean source revision. The first
+command writes the fit record outside the checkout. The second reloads it,
+checks the pinned source files and reproduces the accepted parameters.
+
+```bash
+pixi run -e assimulo python -m examples.pat.caffeine_m6 \
+    --revision "$(git rev-parse HEAD)" --record /tmp/caffeine-fit.json
+pixi run -e assimulo python -m examples.pat.caffeine_m6 \
+    --revision "$(git rev-parse HEAD)" --replay /tmp/caffeine-fit.json
+```
+
+The fit uses the measured 1700 cm⁻¹ IR band heights and temperature logs for
+the high-seed slow-cooling and low-seed fast-cooling runs. It takes spectra
+after the recorded seeding time through the first logged temperature at or
+below the final 20 °C cooling target. That window excludes the long hold
+where aggregation or changes in probe contact can alter the spectra. The
+low-seed slow-cooling IR trace is retained for validation. The high-seed
+fast-cooling IR trace is excluded because of its documented probe issue.
+
+The legacy moment model predicts liquid caffeine mass per solvent mass
+[kg/kg]. The band equation in the
+[case-selection note](../../../doc/review_notes/crystallization_case_selection.md#7-measurement-equations)
+maps that ratio to absorbance. The fit estimates the growth prefactor
+[µm/s] and supersaturation order [dimensionless], holding the secondary
+nucleation rates and activation energies at the case starting values.
+Both predicted mass inventories are checked at every requested time.
+`--treatment common_baseline` repeats the study with the other documented
+band and solubility calibration.
+
+The two pre-seeding dissolved-plateau scatters define relative weights for
+each run. The analysis estimates a common residual variance scale. The
+reported covariance is conditional on this model, the fixed kinetics, the
+prescribed temperature histories and independent Gaussian residuals.
+Neither the known probe drift nor correlated model discrepancies are
+represented by that covariance. Review the printed residual errors,
+derivative comparison and parameter correlation before using the estimates.
+
+The design uses one repeat of the high-seed, slow-cooling recipe and two
+IR spectra. It compares the first and last recorded times of each third of
+the fitted spectrum sequence. The reported log determinant gains are local
+forecasts at the fitted parameters under the same relative noise model.
+The command produces a ranking when the sensitivity check supports
+practical identifiability and there are no active parameter bounds. No
+additional run was performed to verify the forecast.
+
+This initial IR-only result contributes to #351, #352, #355, #359 and #360.
+The full crystallization case still needs secondary-nucleation and FBRM
+analysis, seed-size and independent solubility sensitivity, and a domain
+review. Adoption by the bioreactor demonstrator is tracked separately.

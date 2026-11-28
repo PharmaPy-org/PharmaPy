@@ -5,9 +5,9 @@ demonstrator ([#358](https://github.com/PharmaPy-org/PharmaPy/issues/358),
 parent [#153](https://github.com/PharmaPy-org/PharmaPy/issues/153)): the
 process, the data, the property sources, the model path and its assumptions, the
 parameters to estimate, and one measurement equation per PAT channel. It was
-written against `master` at `7fe3045`. It fixes the equations before they are
-coded. **It does not claim a calibration: no model has been fitted to these
-data yet.**
+written against `master` at `7fe3045` to specify the full model and
+measurement equations. The [December IR-only fit and replay](../../examples/pat/caffeine/README.md#december-calibration-and-experiment-design)
+estimate the growth prefactor and order and record the remaining validation work.
 
 The selection stands for now. It may be replaced or joined by data from other
 compounds if those prove more useful; the readers and the measurement
@@ -261,6 +261,11 @@ Estimation runs through `BatchCryst.paramest_wrapper` and
 `ParameterEstimation` with `Experiment` and `Measurement` objects, one
 experiment per run, and is recorded with `CalibrationRecord`. The measurement
 equations wrap `paramest_wrapper` from outside.
+
+The initial IR-only workflow calls the existing `batch_cooling.simulate`
+example at each parameter evaluation. It creates a fresh legacy
+`BatchCryst` for every run and verifies the optimizer's finite-difference
+sensitivities at the accepted estimates.
 
 | Issue | Effect on this case | Handling |
 | --- | --- | --- |
